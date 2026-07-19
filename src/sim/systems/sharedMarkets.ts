@@ -491,6 +491,17 @@ export function submitLoanApplication(
   principal: number,
   termDays: number,
 ): SimState {
+  const hasPendingApplication = state.worldMarkets.loanApplications.some(
+    (application) => application.labId === labId && application.status === 'pending',
+  )
+  const hasActiveOffer = state.worldMarkets.loanOffers.some(
+    (offer) => offer.labId === labId && offer.expiresDay >= state.day,
+  )
+  if (hasPendingApplication || hasActiveOffer) {
+    return labId === state.playerLabId
+      ? addAlert(state, 'Resolve the current credit request before applying again.', 'warn')
+      : state
+  }
   const application: LoanApplication = {
     id: seededId('loan-app', state.seed, state.day, labId, principal, termDays),
     labId,
@@ -512,9 +523,14 @@ function resolveLoanApplications(state: SimState): SimState {
   let next = refreshCapitalConditions(state)
   const applications: LoanApplication[] = []
   const offers = [...next.worldMarkets.loanOffers].filter((offer) => offer.expiresDay >= next.day)
+  const labsWithOffer = new Set(offers.map((offer) => offer.labId))
   for (const application of next.worldMarkets.loanApplications) {
     if (application.status !== 'pending' || application.submittedDay >= next.day) {
       applications.push(application)
+      continue
+    }
+    if (labsWithOffer.has(application.labId)) {
+      applications.push({ ...application, status: 'rejected' })
       continue
     }
     const lab = getLab(next, application.labId)
@@ -553,6 +569,7 @@ function resolveLoanApplications(state: SimState): SimState {
       expiresDay: next.day + 7,
     }
     offers.push(offer)
+    labsWithOffer.add(application.labId)
     applications.push({ ...application, status: 'offered', offerId: offer.id })
     if (application.labId === next.playerLabId) {
       next = addAlert(
@@ -570,6 +587,12 @@ function resolveLoanApplications(state: SimState): SimState {
 export function acceptFirmLoanOffer(state: SimState, offerId: string): SimState {
   const offer = state.worldMarkets.loanOffers.find((candidate) => candidate.id === offerId)
   if (!offer || offer.expiresDay < state.day) return state
+  const borrowingLab = getLab(state, offer.labId)
+  if (borrowingLab.loans.length >= (ECONOMY.loans.maxActive ?? 4)) {
+    return offer.labId === state.playerLabId
+      ? addAlert(state, 'Credit facility limit reached. Repay an open facility before accepting.', 'warn')
+      : state
+  }
   const totalDue = offer.principal * (1 + offer.interestTotal)
   const loan: ActiveLoan = {
     id: seededId('loan', state.seed, state.day, offer.labId, offer.id),
@@ -597,13 +620,40 @@ export function acceptFirmLoanOffer(state: SimState, offerId: string): SimState 
     ...next,
     worldMarkets: {
       ...next.worldMarkets,
-      loanOffers: next.worldMarkets.loanOffers.filter((candidate) => candidate.id !== offerId),
+      loanOffers: next.worldMarkets.loanOffers.filter((candidate) => candidate.labId !== offer.labId),
       loanApplications: next.worldMarkets.loanApplications.map((application) =>
-        application.offerId === offerId ? { ...application, status: 'accepted' } : application,
+        application.offerId === offerId
+          ? { ...application, status: 'accepted' }
+          : application.labId === offer.labId && (application.status === 'pending' || application.status === 'offered')
+            ? { ...application, status: 'rejected' }
+            : application,
       ),
     },
   }
   return next
+}
+
+export function declineFirmLoanOffer(state: SimState, offerId: string): SimState {
+  const offer = state.worldMarkets.loanOffers.find((candidate) => candidate.id === offerId)
+  if (!offer) return state
+  const next = {
+    ...state,
+    worldMarkets: {
+      ...state.worldMarkets,
+      loanOffers: state.worldMarkets.loanOffers.filter(
+        (candidate) => candidate.labId !== offer.labId,
+      ),
+      loanApplications: state.worldMarkets.loanApplications.map((application) =>
+        application.labId === offer.labId &&
+        (application.status === 'pending' || application.status === 'offered')
+          ? { ...application, status: 'rejected' as const }
+          : application,
+      ),
+    },
+  }
+  return offer.labId === state.playerLabId
+    ? addAlert(next, 'Credit offer declined. You can submit a new request.', 'info')
+    : next
 }
 
 export function tickRivalDebt(state: SimState): SimState {

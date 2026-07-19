@@ -77,6 +77,7 @@ export type PanelId =
   | 'models'
   | 'plans'
   | 'market'
+  | 'marketing'
   | 'chips'
   | 'racks'
   | 'power'

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   buildGameConfig,
   DIFFICULTY_PRESETS,
@@ -22,29 +22,38 @@ import {
   Atom,
   ArrowLeft,
   Database,
+  DiceFive,
   GlobeHemisphereWest,
   Lock,
   Newspaper,
   Play,
   Plus,
+  Question,
   WarningCircle,
 } from '@phosphor-icons/react'
 
-const DIFFS: { id: DifficultyId; label: string; blurb: string }[] = [
+type ScenarioId = DifficultyId | 'custom'
+
+const SCENARIOS: { id: ScenarioId; label: string; blurb: string }[] = [
   {
     id: 'easy',
     label: 'Easy',
-    blurb: 'Same economy. Rival forecasts are noisier and decisions are slower.',
+    blurb: 'Noisier rival forecasts and slower decisions.',
   },
   {
     id: 'normal',
     label: 'Normal',
-    blurb: 'Default balance — large procedural world, full rival field.',
+    blurb: 'Balanced rivals on the 150×150 frontier.',
   },
   {
     id: 'hard',
     label: 'Hard',
-    blurb: 'Same economy. Rivals forecast better, decide faster, and take sharper risks.',
+    blurb: 'Sharper forecasts, faster decisions and riskier bets.',
+  },
+  {
+    id: 'custom',
+    label: 'Custom',
+    blurb: 'Tune world size, markets, costs, research and capital.',
   },
 ]
 
@@ -57,7 +66,36 @@ const COMPANY_MARKS: { id: CompanyMarkId; label: string }[] = [
   { id: 'hex', label: 'Hex' },
   { id: 'spire', label: 'Spire' },
   { id: 'grid', label: 'Grid' },
+  { id: 'nexus', label: 'Nexus' },
+  { id: 'wave', label: 'Wave' },
+  { id: 'core', label: 'Core' },
 ]
+
+const COMPANY_NAME_PREFIXES = [
+  'Arc',
+  'Beacon',
+  'Copper',
+  'Helix',
+  'Kestrel',
+  'Lattice',
+  'Morrow',
+  'Northstar',
+  'Parallax',
+  'Signal',
+  'Vector',
+] as const
+
+const COMPANY_NAME_SUFFIXES = [
+  'Compute',
+  'Dynamics',
+  'Foundry',
+  'Frontier',
+  'Intelligence',
+  'Labs',
+  'Research',
+  'Systems',
+  'Works',
+] as const
 
 // Save discovery can remount the menu in development and during storage
 // recovery. Keep explicit navigation authoritative for the whole page session,
@@ -84,6 +122,7 @@ export function NewGameMenu() {
   const [labName, setLabName] = useState('Labline')
   const [companyMark, setCompanyMark] = useState<CompanyMarkId>('orbit')
   const [difficulty, setDifficulty] = useState<DifficultyId>('normal')
+  const [scenario, setScenario] = useState<ScenarioId>('normal')
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [seed, setSeed] = useState(() => Math.floor(Math.random() * 99999))
   const [adv, setAdv] = useState<AdvancedOverrides>({})
@@ -126,21 +165,51 @@ export function NewGameMenu() {
         companyMark,
         difficulty,
         seed,
-        advanced: showAdvanced ? adv : undefined,
+        advanced: scenario === 'custom' ? adv : undefined,
       }),
-    [labName, companyMark, difficulty, seed, adv, showAdvanced],
+    [labName, companyMark, difficulty, seed, adv, scenario],
   )
 
   const setAdvField = <K extends keyof AdvancedOverrides>(k: K, v: AdvancedOverrides[K]) => {
+    setScenario('custom')
     setAdv((a) => ({ ...a, [k]: v }))
   }
 
-  const applyPresetFields = (d: DifficultyId) => {
-    setDifficulty(d)
-    const p = DIFFICULTY_PRESETS[d]
-    // City count remains automatic until the player explicitly edits it.
-    const { cityCount: _cityCount, ...rest } = p
-    setAdv(rest)
+  const applyScenario = (next: ScenarioId) => {
+    if (next === 'custom') {
+      setScenario('custom')
+      setAdv({
+        mapWidth: preview.mapWidth,
+        mapHeight: preview.mapHeight,
+        cityCount: preview.cityCount,
+        rivalCount: preview.rivalCount,
+        economyMult: preview.economyMult,
+        researchCostMult: preview.researchCostMult,
+        startingCashMult: preview.startingCashMult,
+        campaignRules: preview.campaignRules,
+      })
+      setShowAdvanced(true)
+      return
+    }
+    setScenario(next)
+    setDifficulty(next)
+    setAdv(DIFFICULTY_PRESETS[next])
+  }
+
+  const randomizeCompanyName = () => {
+    let next = labName
+    for (let attempt = 0; attempt < 4 && next === labName; attempt += 1) {
+      const prefix = COMPANY_NAME_PREFIXES[Math.floor(Math.random() * COMPANY_NAME_PREFIXES.length)]
+      const suffix = COMPANY_NAME_SUFFIXES[Math.floor(Math.random() * COMPANY_NAME_SUFFIXES.length)]
+      next = `${prefix} ${suffix}`
+    }
+    setLabName(next)
+  }
+
+  const randomizeCompanyMark = () => {
+    const candidates = COMPANY_MARKS.filter((mark) => mark.id !== companyMark)
+    const next = candidates[Math.floor(Math.random() * candidates.length)]
+    if (next) setCompanyMark(next.id)
   }
 
   const onContinue = async () => {
@@ -167,9 +236,15 @@ export function NewGameMenu() {
         decoding="async"
         className="main-menu-art absolute inset-0 h-full w-full object-cover"
       />
+      <img
+        src="/assets/labline-menu-campus.png"
+        alt=""
+        aria-hidden="true"
+        decoding="async"
+        className="main-menu-art main-menu-art--lights pointer-events-none absolute inset-0 h-full w-full object-cover"
+      />
       <div className="main-menu-shade absolute inset-0" />
       <div className="main-menu-grid absolute inset-0" />
-      <div className="main-menu-scan pointer-events-none absolute inset-0" />
 
       <header className="absolute inset-x-0 top-0 z-10 flex h-20 items-center px-6 sm:px-10 xl:px-14">
         <div className="flex items-center gap-3">
@@ -430,21 +505,51 @@ export function NewGameMenu() {
 
         {tab === 'new' && (
           <>
-            <label className="main-menu-identity mt-5 block text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted">
-              Company name
-              <input
-                value={labName}
-                onChange={(e) => setLabName(e.target.value.slice(0, 32))}
-                maxLength={32}
-                className="mt-2 w-full border border-line bg-void/85 px-3.5 py-3 font-sans text-[0.9375rem] font-medium normal-case tracking-normal text-bone outline-none transition-colors focus:border-mint/50"
-                placeholder="Labline"
-                autoFocus
-              />
-            </label>
+            <div className="main-menu-identity mt-5 block text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted">
+              <label htmlFor="new-game-company-name">Company name</label>
+              <span className="relative mt-2 block">
+                <input
+                  id="new-game-company-name"
+                  value={labName}
+                  onChange={(e) => setLabName(e.target.value.slice(0, 32))}
+                  maxLength={32}
+                  className="w-full border border-line bg-void/85 py-3 pl-3.5 pr-12 font-sans text-[0.9375rem] font-medium normal-case tracking-normal text-bone outline-none transition-colors focus:border-mint/50"
+                  placeholder="Labline"
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  onClick={randomizeCompanyName}
+                  aria-label="Generate a company name"
+                  title="Generate a company name"
+                  className="group absolute inset-y-1.5 right-1.5 grid aspect-square place-items-center border border-line bg-panel-2 text-muted transition-colors hover:border-mint/45 hover:text-mint"
+                >
+                  <DiceFive size="1.05rem" weight="duotone" />
+                  <span role="tooltip" className="pointer-events-none absolute bottom-[calc(100%+0.45rem)] right-0 z-30 w-max max-w-48 border border-line bg-void px-2 py-1.5 font-sans text-[0.6875rem] font-medium normal-case tracking-normal text-bone opacity-0 shadow-xl transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+                    Generate a company name
+                  </span>
+                </button>
+              </span>
+            </div>
 
             <fieldset className="mt-5">
-              <legend className="text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted">Choose a mark</legend>
-              <div className="mt-2 grid grid-cols-6 gap-2">
+              <legend className="sr-only">Logo maker</legend>
+              <div className="flex items-end justify-between gap-3">
+                <div>
+                  <p className="text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted">Logo maker</p>
+                  <p className="mt-1 text-[0.6875rem] text-muted">Curated presets · {COMPANY_MARKS.find((mark) => mark.id === companyMark)?.label}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={randomizeCompanyMark}
+                  title="Choose another curated logo preset"
+                  className="flex min-h-8 items-center gap-2 border border-line bg-void/65 px-2.5 font-mono text-[0.625rem] uppercase tracking-[0.1em] text-muted transition-colors hover:border-mint/40 hover:text-mint"
+                >
+                  <DiceFive size="0.95rem" weight="duotone" />
+                  Random preset
+                </button>
+              </div>
+              <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-9">
                 {COMPANY_MARKS.map((mark) => {
                   const selected = companyMark === mark.id
                   return (
@@ -471,18 +576,18 @@ export function NewGameMenu() {
             <div className="main-menu-difficulty-group mt-5">
               <div className="flex items-center justify-between gap-3">
                 <p className="text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted">Market pressure</p>
-                <span className="font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">Scenario preset</span>
+                <span className="font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">Scenario setup</span>
               </div>
-              <div className="mt-2 grid gap-2 sm:grid-cols-3">
-                {DIFFS.map((d, index) => {
-                  const on = difficulty === d.id
+              <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {SCENARIOS.map((d, index) => {
+                  const on = scenario === d.id
                   return (
                     <button
                       key={d.id}
                       type="button"
-                      onClick={() => applyPresetFields(d.id)}
+                      onClick={() => applyScenario(d.id)}
                       aria-pressed={on}
-                      className={`main-menu-difficulty group relative min-h-[7.25rem] border px-3 py-3 text-left transition ${
+                      className={`main-menu-difficulty group relative min-h-[8.25rem] border px-3 py-3 text-left transition ${
                         on
                           ? 'border-mint/55 bg-mint/10 shadow-[inset_0_0_24px_rgba(72,215,209,.045)]'
                           : 'border-line bg-panel-2/80 hover:border-mint/30 hover:bg-panel-2'
@@ -496,6 +601,9 @@ export function NewGameMenu() {
                       {d.id === 'normal' && (
                         <span className="absolute bottom-2.5 left-3 font-mono text-[0.5625rem] uppercase tracking-[0.14em] text-mint">Recommended</span>
                       )}
+                      {d.id === 'custom' && (
+                        <span className="absolute bottom-2.5 left-3 font-mono text-[0.5625rem] uppercase tracking-[0.14em] text-mint">Full control</span>
+                      )}
                     </button>
                   )
                 })}
@@ -505,9 +613,8 @@ export function NewGameMenu() {
             <button
               type="button"
               onClick={() => {
-                if (!showAdvanced) {
-                  const { cityCount: _cityCount, ...rest } = DIFFICULTY_PRESETS[difficulty]
-                  setAdv(rest)
+                if (!showAdvanced && scenario !== 'custom') {
+                  setAdv(DIFFICULTY_PRESETS[difficulty])
                 }
                 setShowAdvanced((v) => !v)
               }}
@@ -522,6 +629,7 @@ export function NewGameMenu() {
                 <div className="grid grid-cols-2 gap-3">
                   <NumField
                     label="Map width"
+                    hint="Horizontal tile count. Larger worlds offer more land but take longer to generate and render."
                     value={adv.mapWidth ?? preview.mapWidth}
                     min={MIN_MAP_DIMENSION}
                     max={MAX_MAP_DIMENSION}
@@ -529,6 +637,7 @@ export function NewGameMenu() {
                   />
                   <NumField
                     label="Map height"
+                    hint="Vertical tile count. Together with width, this determines the total territory size."
                     value={adv.mapHeight ?? preview.mapHeight}
                     min={MIN_MAP_DIMENSION}
                     max={MAX_MAP_DIMENSION}
@@ -536,6 +645,7 @@ export function NewGameMenu() {
                   />
                   <NumField
                     label="Cities"
+                    hint="Metro hubs that create regional markets, talent pools, land values and power demand."
                     value={adv.cityCount ?? preview.cityCount}
                     min={MIN_CITY_COUNT}
                     max={MAX_CITY_COUNT}
@@ -543,14 +653,16 @@ export function NewGameMenu() {
                   />
                   <NumField
                     label="Rivals"
+                    hint="Competing AI labs that build infrastructure, train models and contest the same markets."
                     value={adv.rivalCount ?? preview.rivalCount}
                     min={1}
                     max={5}
                     onChange={(v) => setAdvField('rivalCount', v)}
                   />
                 </div>
-                <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-line/70 bg-void/45 px-3 py-2.5 text-[0.75rem] text-muted">
+                <div className="flex items-start gap-3 rounded-lg border border-line/70 bg-void/45 px-3 py-2.5 text-[0.75rem] text-muted">
                   <input
+                    id="new-game-governance"
                     type="checkbox"
                     checked={adv.campaignRules?.externalityMode === 'advanced'}
                     onChange={(event) =>
@@ -564,14 +676,18 @@ export function NewGameMenu() {
                     className="mt-0.5 accent-mint"
                   />
                   <span>
-                    <strong className="block text-bone">Advanced governance modules</strong>
+                    <span className="flex items-center gap-1.5">
+                      <label htmlFor="new-game-governance" className="cursor-pointer font-semibold text-bone">Advanced governance modules</label>
+                      <FieldHint text="Adds carbon, cooling-water, data-rights and deployment-audit systems for the player and every rival." />
+                    </span>
                     <span className="mt-0.5 block leading-relaxed">
                       Enables symmetric carbon, cooling-water, data-rights, and deployment-audit costs and incidents for every lab.
                     </span>
                   </span>
-                </label>
+                </div>
                 <SliderField
                   label="Economy cost mult"
+                  hint="Scales construction and infrastructure upgrade costs. Lower values make expansion cheaper."
                   value={adv.economyMult ?? preview.economyMult}
                   min={0.4}
                   max={2.5}
@@ -581,6 +697,7 @@ export function NewGameMenu() {
                 />
                 <SliderField
                   label="Research cost mult"
+                  hint="Scales the compute-days required to complete research. Lower values accelerate progress."
                   value={adv.researchCostMult ?? preview.researchCostMult}
                   min={0.4}
                   max={2.5}
@@ -589,18 +706,23 @@ export function NewGameMenu() {
                   format={(v) => `×${v.toFixed(2)}`}
                 />
                 <SliderField
-                  label="Starting cash mult"
+                  label="Starting capital"
+                  hint="Sets the cash available on day one, from $6M to $60M."
                   value={adv.startingCashMult ?? preview.startingCashMult}
                   min={0.3}
                   max={3}
                   step={0.05}
                   onChange={(v) => setAdvField('startingCashMult', v)}
-                  format={(v) => `×${v.toFixed(2)}`}
+                  format={(v) => money(ECONOMY.startingCash * v)}
                 />
-                <label className="block text-[0.8125rem] text-muted">
-                  Seed
+                <div className="block text-[0.8125rem] text-muted">
+                  <span className="flex items-center gap-1.5">
+                    <label htmlFor="new-game-seed">Seed</label>
+                    <FieldHint text="Controls procedural world generation. Reusing a seed recreates the same terrain and city layout." />
+                  </span>
                   <div className="mt-1 flex gap-2">
                     <input
+                      id="new-game-seed"
                       type="number"
                       value={seed}
                       onChange={(e) => setSeed(Number(e.target.value) || 0)}
@@ -614,7 +736,7 @@ export function NewGameMenu() {
                       Roll
                     </button>
                   </div>
-                </label>
+                </div>
               </div>
             )}
 
@@ -641,7 +763,7 @@ export function NewGameMenu() {
                   companyMark,
                   difficulty,
                   seed,
-                  advanced: showAdvanced ? adv : undefined,
+                  advanced: scenario === 'custom' ? adv : undefined,
                 })
               }}
             >
@@ -696,6 +818,27 @@ function CompanyMark({ mark }: { mark: CompanyMarkId }) {
           <rect {...common} x="18" y="5" width="9" height="9" />
           <rect {...common} x="5" y="18" width="9" height="9" />
           <rect {...common} x="18" y="18" width="9" height="9" />
+        </>
+      )}
+      {mark === 'nexus' && (
+        <>
+          <circle {...common} cx="8" cy="16" r="3" />
+          <circle {...common} cx="24" cy="9" r="3" />
+          <circle {...common} cx="24" cy="23" r="3" />
+          <path {...common} d="m11 15 10-5M11 17l10 5M24 12v8" />
+        </>
+      )}
+      {mark === 'wave' && (
+        <>
+          <path {...common} d="M5 12c4-7 8 7 12 0s7 5 10 0" />
+          <path {...common} d="M5 20c4-7 8 7 12 0s7 5 10 0" />
+        </>
+      )}
+      {mark === 'core' && (
+        <>
+          <circle {...common} cx="16" cy="16" r="10" />
+          <circle {...common} cx="16" cy="16" r="4" />
+          <path {...common} d="M16 3v6M16 23v6M3 16h6M23 16h6" />
         </>
       )}
     </svg>
@@ -759,34 +902,44 @@ function TabChip({
 
 function NumField({
   label,
+  hint,
   value,
   min,
   max,
   onChange,
 }: {
   label: string
+  hint: string
   value: number
   min: number
   max: number
   onChange: (v: number) => void
 }) {
+  const inputId = useId()
+  const hintId = useId()
   return (
-    <label className="block text-[0.8125rem] text-muted">
-      {label}
+    <div className="block text-[0.8125rem] text-muted">
+      <span className="flex items-center gap-1.5">
+        <label htmlFor={inputId}>{label}</label>
+        <FieldHint id={hintId} text={hint} />
+      </span>
       <input
+        id={inputId}
         type="number"
         min={min}
         max={max}
         value={value}
+        aria-describedby={hintId}
         onChange={(e) => onChange(Math.max(min, Math.min(max, Number(e.target.value) || min)))}
         className="mt-1 w-full rounded-lg border border-line bg-void px-2 py-1.5 font-mono text-xs text-bone outline-none"
       />
-    </label>
+    </div>
   )
 }
 
 function SliderField({
   label,
+  hint,
   value,
   min,
   max,
@@ -795,6 +948,7 @@ function SliderField({
   format,
 }: {
   label: string
+  hint: string
   value: number
   min: number
   max: number
@@ -802,21 +956,48 @@ function SliderField({
   onChange: (v: number) => void
   format: (v: number) => string
 }) {
+  const inputId = useId()
+  const hintId = useId()
   return (
-    <label className="block text-[0.8125rem] text-muted">
+    <div className="block text-[0.8125rem] text-muted">
       <span className="flex justify-between">
-        <span>{label}</span>
+        <span className="flex items-center gap-1.5">
+          <label htmlFor={inputId}>{label}</label>
+          <FieldHint id={hintId} text={hint} />
+        </span>
         <span className="font-mono text-bone">{format(value)}</span>
       </span>
       <input
+        id={inputId}
         type="range"
         min={min}
         max={max}
         step={step}
         value={value}
+        aria-describedby={hintId}
         onChange={(e) => onChange(Number(e.target.value))}
         className="mt-1.5 w-full"
       />
-    </label>
+    </div>
+  )
+}
+
+function FieldHint({ id, text }: { id?: string; text: string }) {
+  return (
+    <span
+      className="group relative inline-grid size-4 shrink-0 place-items-center align-middle text-muted"
+      title={text}
+      tabIndex={0}
+      aria-label={text}
+    >
+      <Question size="0.75rem" weight="bold" aria-hidden="true" />
+      <span
+        id={id}
+        role="tooltip"
+        className="pointer-events-none absolute bottom-[calc(100%+0.4rem)] left-1/2 z-40 w-56 -translate-x-1/2 border border-line bg-void px-2.5 py-2 text-left font-sans text-[0.6875rem] font-normal leading-relaxed normal-case tracking-normal text-bone opacity-0 shadow-xl transition-opacity group-hover:opacity-100 group-focus:opacity-100"
+      >
+        {text}
+      </span>
+    </span>
   )
 }

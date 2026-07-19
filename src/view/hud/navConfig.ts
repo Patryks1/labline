@@ -7,6 +7,7 @@ export type NavGroupId =
   | 'infrastructure'
   | 'build'
   | 'market'
+  | 'marketing'
   | 'company'
 
 export interface NavItem {
@@ -34,7 +35,7 @@ export interface NavGroup {
   items: NavItem[]
 }
 
-/** Six job-based workspaces; individual simulation panels remain independently routable. */
+/** Seven job-based workspaces; individual simulation panels remain independently routable. */
 export const NAV_GROUPS: NavGroup[] = [
   {
     id: 'strategy',
@@ -101,12 +102,23 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    id: 'marketing',
+    label: 'Marketing',
+    short: 'Marketing',
+    description: 'Reach, acquisition channels, brand & competitive spend',
+    key: '6',
+    letter: 'Y',
+    items: [
+      { id: 'marketing', label: 'Marketing', hint: 'Budget, channels, reach & brand' },
+    ],
+  },
+  {
     id: 'company',
     label: 'Company',
     short: 'Company',
     description: 'People, capital, ownership & recovery',
-    key: '6',
-    letter: 'Y',
+    key: '7',
+    letter: 'U',
     items: [
       { id: 'org', label: 'Company', hint: 'Leads, staff, equity & debt', key: '1' },
     ],

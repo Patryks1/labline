@@ -74,7 +74,7 @@ export function TileInspector() {
 
   return (
     <div
-      className="tile-inspector hud-surface pointer-events-auto absolute top-3 z-40 rounded-xl p-3 transition-all"
+      className="tile-inspector hud-surface pointer-events-auto absolute z-40 rounded-xl p-3 transition-all"
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
     >

@@ -18,27 +18,6 @@ import { ObjectivesDock } from './view/hud/ObjectivesDock'
 import { HudFeedback } from './view/hud/HudFeedback'
 import { FULL_BLEED_MAP_STYLE } from './view/hud/layout'
 
-function MapHint() {
-  const buildMode = useGameStore((s) => s.buildMode)
-  const buildLabel =
-    buildMode === 'dc'
-      ? 'DC Small (1 tile)'
-      : buildMode === 'dc_m'
-        ? 'DC Medium (4 tiles)'
-        : buildMode === 'dc_l'
-          ? 'DC Large (6 tiles)'
-          : buildMode
-  return (
-    <div
-      className="map-hint pointer-events-none absolute bottom-[calc(var(--hud-ops)+0.625rem)] left-1/2 z-10 hidden -translate-x-1/2 rounded-md border border-line/50 bg-panel/82 px-3 py-1.5 text-[0.75rem] text-muted shadow-lg backdrop-blur-md sm:block"
-    >
-      {buildMode
-        ? `Build ${buildLabel}: hover preview · click to place · Esc cancel · place multiple`
-        : 'Click tile for info · WASD pan · scroll zoom · [ ] drawers · Space pause'}
-    </div>
-  )
-}
-
 function GameShell() {
   const paused = useGameStore((s) => s.state.paused)
   const speed = useGameStore((s) => s.state.speed)
@@ -75,7 +54,6 @@ function GameShell() {
         style={FULL_BLEED_MAP_STYLE}
       >
         <GameMap />
-        <MapHint />
         <TileInspector />
       </main>
       <CommandDock forceCollapsed={workbenchOpen} />

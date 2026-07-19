@@ -29,6 +29,11 @@ describe('workspace presentation', () => {
     expect(groupForPanel('map').items.some((item) => item.id === 'build')).toBe(false)
   })
 
+  it('promotes Marketing out of Company into its own workspace', () => {
+    expect(groupForPanel('marketing').id).toBe('marketing')
+    expect(groupForPanel('org').items.some((item) => item.id === 'marketing')).toBe(false)
+  })
+
   it('routes custom silicon through the combined Hardware workspace', () => {
     expect(groupForPanel('chips').id).toBe('infrastructure')
     expect(groupForPanel('chips').items.find((item) => item.id === 'racks')?.label).toBe('Hardware')

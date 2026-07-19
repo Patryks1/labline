@@ -4,7 +4,16 @@
  */
 
 export type DifficultyId = 'easy' | 'normal' | 'hard'
-export type CompanyMarkId = 'orbit' | 'delta' | 'prism' | 'hex' | 'spire' | 'grid'
+export type CompanyMarkId =
+  | 'orbit'
+  | 'delta'
+  | 'prism'
+  | 'hex'
+  | 'spire'
+  | 'grid'
+  | 'nexus'
+  | 'wave'
+  | 'core'
 
 export interface GameConfig {
   labName: string
@@ -15,7 +24,7 @@ export interface GameConfig {
   /** Map dimensions in tiles */
   mapWidth: number
   mapHeight: number
-  /** Target number of metro cores (clamped 2–3) */
+  /** Target number of metro cores (clamped 2–24) */
   cityCount: number
   rivalCount: number
   /** Multiplier on BUILD_DEFS cash & upgrades */
@@ -31,7 +40,7 @@ export interface GameConfig {
   campaignRules?: CampaignRules
 }
 
-/** Legacy map was 15×12 = 180 tiles. Normal ≈ 20× that. */
+/** Legacy map was 15×12 = 180 tiles. The 150×150 frontier default is 125× that. */
 export const LEGACY_TILE_COUNT = 15 * 12
 export const MIN_MAP_DIMENSION = 20
 export const MAX_MAP_DIMENSION = 1000
@@ -43,9 +52,9 @@ export const DIFFICULTY_PRESETS: Record<
   Omit<GameConfig, 'labName' | 'seed' | 'difficulty' | 'campaignRules'>
 > = {
   easy: {
-    mapWidth: 60,
-    mapHeight: 60,
-    cityCount: 3,
+    mapWidth: 150,
+    mapHeight: 150,
+    cityCount: 4,
     rivalCount: 5,
     economyMult: 1,
     researchCostMult: 1,
@@ -54,9 +63,9 @@ export const DIFFICULTY_PRESETS: Record<
     landValueCityPeak: 28_000_000,
   },
   normal: {
-    mapWidth: 60,
-    mapHeight: 60,
-    cityCount: 3,
+    mapWidth: 150,
+    mapHeight: 150,
+    cityCount: 4,
     rivalCount: 5,
     economyMult: 1,
     researchCostMult: 1,
@@ -65,9 +74,9 @@ export const DIFFICULTY_PRESETS: Record<
     landValueCityPeak: 28_000_000,
   },
   hard: {
-    mapWidth: 60,
-    mapHeight: 60,
-    cityCount: 3,
+    mapWidth: 150,
+    mapHeight: 150,
+    cityCount: 4,
     rivalCount: 5,
     economyMult: 1,
     researchCostMult: 1,
@@ -138,10 +147,10 @@ export function mapTileCount(cfg: Pick<GameConfig, 'mapWidth' | 'mapHeight'>): n
   return cfg.mapWidth * cfg.mapHeight
 }
 
-/** True when tile count is roughly 20× legacy (band for Normal default). */
+/** True when tile count is in the large compact-world band around the default. */
 export function isMegaMapScale(cfg: Pick<GameConfig, 'mapWidth' | 'mapHeight'>): boolean {
   const n = mapTileCount(cfg)
-  return n >= LEGACY_TILE_COUNT * 12 && n <= LEGACY_TILE_COUNT * 35
+  return n >= LEGACY_TILE_COUNT * 80 && n <= LEGACY_TILE_COUNT * 180
 }
 import { defaultCampaignRules } from '../campaign'
 import type { CampaignRules } from '../types'

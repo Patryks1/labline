@@ -25,8 +25,8 @@ function isTypingTarget(t: EventTarget | null): boolean {
  * Space — pause / play
  * 0–3  — speed (0 pause, 1=1×, 2=2×, 3=5×)
  * +/=  — step one day
- * Q E F R T Y — Strategy / Lab / Infra / Build / Market / Company
- * Shift+1–6 — same workspaces
+ * Q E F R T Y U — Strategy / Lab / Infra / Build / Market / Marketing / Company
+ * Shift+1–7 — same workspaces
  * [    — toggle left drawer
  * ]    — toggle command dock
  * Tab  — cycle command dock view (shift reverse)

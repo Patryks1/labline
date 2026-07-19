@@ -56,6 +56,7 @@ import {
 import { loanOffers, takeLoan, repayLoan } from '../sim/systems/loans'
 import {
   acceptFirmLoanOffer,
+  declineFirmLoanOffer,
   submitLoanApplication,
 } from '../sim/systems/sharedMarkets'
 import {
@@ -230,6 +231,7 @@ interface GameStore {
   takeLoan: (offerId: string) => void
   takeCustomLoan: (opts: { principal: number; termDays: number; label?: string }) => void
   acceptLoanOffer: (offerId: string) => void
+  declineLoanOffer: (offerId: string) => void
   repayLoan: (loanId: string, amount?: number) => void
   setCollectionRate: (n: number) => void
   setAutoProcess: (on: boolean) => void
@@ -771,6 +773,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
     })),
   acceptLoanOffer: (offerId) =>
     set((st) => ({ state: acceptFirmLoanOffer(st.state, offerId) })),
+  declineLoanOffer: (offerId) =>
+    set((st) => ({ state: declineFirmLoanOffer(st.state, offerId) })),
   repayLoan: (loanId, amount) => set((st) => ({ state: repayLoan(st.state, loanId, amount) })),
   setCollectionRate: (n) => set((st) => ({ state: setCollectionRate(st.state, n) })),
   setAutoProcess: (on) => set((st) => ({ state: setAutoProcess(st.state, on) })),

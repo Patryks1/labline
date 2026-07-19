@@ -54,10 +54,9 @@ import {
 } from '../../../sim/systems/worldAccess'
 
 /**
- * Company → People: HQ staffing from city talent pools + poach rivals.
- * Loans / marketing live below. Global "Hire talent" removed.
+ * Company operations plus the standalone Marketing workspace.
  */
-export function OrgPanel() {
+export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'marketing' }) {
   const state = useGameStore((s) => s.state)
   const setState = (next: typeof state) => useGameStore.setState({ state: next })
   const setMarketing = useGameStore((s) => s.setMarketing)
@@ -65,6 +64,7 @@ export function OrgPanel() {
   const takeLoan = useGameStore((s) => s.takeLoan)
   const takeCustomLoan = useGameStore((s) => s.takeCustomLoan)
   const acceptLoanOffer = useGameStore((s) => s.acceptLoanOffer)
+  const declineLoanOffer = useGameStore((s) => s.declineLoanOffer)
   const repayLoan = useGameStore((s) => s.repayLoan)
   const openSites = useGameStore((s) => s.openSites)
   const selected = useGameStore((s) => s.selectedTile)
@@ -85,6 +85,10 @@ export function OrgPanel() {
     (application) =>
       application.labId === state.playerLabId && application.status === 'pending',
   )
+  const pendingApplication = pendingApplications[0]
+  const firmOffer = firmOffers[0]
+  const creditRequestOpen = pendingApplication != null || firmOffer != null
+  const canAcceptFirmOffer = loans.length < (ECONOMY.loans.maxActive ?? 4)
   const minDraw = ECONOMY.loans.minDraw ?? 5_000_000
   const maxDraw = Math.max(0, Math.floor(credit.available))
   const drawCeil = Math.max(minDraw, maxDraw)
@@ -96,7 +100,7 @@ export function OrgPanel() {
   const [selectedHireRole, setSelectedHireRole] = useState<StaffRole>('researcher')
   const [companyTab, setCompanyTab] = useState<
     'staff' | 'funding' | 'marketing' | 'governance'
-  >('staff')
+  >(workspace === 'marketing' ? 'marketing' : 'staff')
   const [capitalView, setCapitalView] = useState<'ownership' | 'credit'>('ownership')
   const [buybackPct, setBuybackPct] = useState(1)
   const capital = useMemo(() => capitalSnapshot(state), [state])
@@ -118,6 +122,7 @@ export function OrgPanel() {
     Math.min(100, (staffTotal(staff) / Math.max(1, seats)) * 100) * 0.17 +
     Math.min(100, Math.max(0, 50 + p.finance.dayNet / Math.max(1, p.finance.dayRevenue) * 50)) * 0.3,
   )))
+  const marketingWorkspace = workspace === 'marketing'
 
   // Keep draw inside the bank’s current line as valuation / debt moves
   useEffect(() => {
@@ -170,16 +175,20 @@ export function OrgPanel() {
     <div className="space-y-3">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h2 className="hud-panel-title">Company command</h2>
-          <p className="hud-panel-sub">People, capital, growth, and operating control.</p>
+          <h2 className="hud-panel-title">{marketingWorkspace ? 'Marketing command' : 'Company command'}</h2>
+          <p className="hud-panel-sub">
+            {marketingWorkspace
+              ? 'Reach, acquisition channels, brand, and competitive spend.'
+              : 'People, capital, ownership, and operating control.'}
+          </p>
         </div>
         <div className="text-right">
-          <div className="font-mono text-lg text-mint">{companyHealth}</div>
-          <div className="text-[0.625rem] uppercase tracking-wider text-muted">health</div>
+          <div className="font-mono text-lg text-mint">{marketingWorkspace ? num(p.brandTrust, 0) : companyHealth}</div>
+          <div className="text-[0.625rem] uppercase tracking-wider text-muted">{marketingWorkspace ? 'brand' : 'health'}</div>
         </div>
       </div>
 
-      <CompanyPulse
+      {!marketingWorkspace && <CompanyPulse
         cash={p.cash}
         net={p.finance.dayNet}
         brand={p.brandTrust}
@@ -187,36 +196,10 @@ export function OrgPanel() {
         team={staffTotal(staff)}
         seats={seats}
         history={state.financeHistory}
-      />
+      />}
 
-      <div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-line bg-line" role="tablist" aria-label="Company areas">
-        {([
-          ['company', 'Company'],
-          ['growth', 'Growth'],
-        ] as const).map(([id, label]) => {
-          const selected = id === 'company'
-            ? companyTab === 'staff' || companyTab === 'funding'
-            : companyTab === 'marketing' || companyTab === 'governance'
-          return (
-          <button
-            key={id}
-            type="button"
-            role="tab"
-            aria-selected={selected}
-            onClick={() => setCompanyTab(id === 'company' ? 'staff' : 'marketing')}
-            className={`min-h-9 bg-void px-2 text-[0.6875rem] font-medium uppercase tracking-wide ${selected ? 'text-mint shadow-[inset_0_-2px_0_var(--color-mint)]' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}
-          >
-            {label}
-          </button>
-          )
-        })}
-      </div>
-
-      <div className="grid grid-cols-2 gap-1 rounded-lg bg-void/50 p-1" role="tablist" aria-label={companyTab === 'staff' || companyTab === 'funding' ? 'Company sections' : 'Growth sections'}>
-        {(companyTab === 'staff' || companyTab === 'funding'
-          ? ([['staff', 'Team'], ['funding', 'Capital']] as const)
-          : ([['marketing', 'Marketing'], ['governance', 'Policy']] as const)
-        ).map(([id, label]) => (
+      {!marketingWorkspace && <div className="grid grid-cols-3 gap-1 rounded-lg bg-void/50 p-1" role="tablist" aria-label="Company sections">
+        {([['staff', 'Team'], ['funding', 'Capital'], ['governance', 'Policy']] as const).map(([id, label]) => (
           <button
             key={id}
             type="button"
@@ -228,7 +211,7 @@ export function OrgPanel() {
             {label}
           </button>
         ))}
-      </div>
+      </div>}
 
       {companyTab === 'staff' ? <>
         <TeamBoard
@@ -478,33 +461,45 @@ export function OrgPanel() {
         </div>
         <p className="text-[0.6875rem] text-muted">Borrow against company value. Higher leverage raises rates.</p>
 
-        {pendingApplications.length > 0 && (
+        {pendingApplication && (
           <div className="rounded-xl border border-amber/30 bg-amber/10 px-2.5 py-2 text-[0.75rem] text-amber">
-            {pendingApplications.length} credit review{pendingApplications.length === 1 ? '' : 's'} pending · decision next day
+            <span className="block font-medium">Credit review pending</span>
+            <span className="mt-0.5 block font-mono text-[0.6875rem] text-muted">
+              {money(pendingApplication.principal)} · {pendingApplication.termDays}d requested · decision next day
+            </span>
           </div>
         )}
 
-        {firmOffers.length > 0 && (
-          <div className="space-y-1.5">
-            <h4 className="text-[0.75rem] font-medium uppercase tracking-wider text-muted">
-              Firm offers
-            </h4>
-            {firmOffers.map((offer) => (
+        {firmOffer && (
+          <div className="space-y-2 rounded-xl border border-mint/35 bg-mint/5 p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h4 className="text-[0.8125rem] font-medium text-bone">Credit offer ready</h4>
+                <p className="mt-1 font-mono text-[0.6875rem] text-muted">
+                  {firmOffer.termDays}d · {(firmOffer.interestTotal * 100).toFixed(1)}% total interest · {money((firmOffer.principal * (1 + firmOffer.interestTotal)) / firmOffer.termDays)}/d
+                </p>
+                <p className="mt-0.5 font-mono text-[0.6875rem] text-muted">Expires D{firmOffer.expiresDay}</p>
+              </div>
+              <span className="shrink-0 font-mono text-[0.875rem] text-mint">{money(firmOffer.principal)}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
               <button
-                key={offer.id}
                 type="button"
-                onClick={() => acceptLoanOffer(offer.id)}
-                className="flex w-full items-center justify-between gap-2 rounded-xl border border-mint/35 bg-mint/5 px-2.5 py-2 text-left hover:border-mint/60"
+                onClick={() => declineLoanOffer(firmOffer.id)}
+                className="rounded-lg border border-line px-2 py-1.5 text-[0.75rem] text-muted hover:border-danger/40 hover:text-danger"
               >
-                <span>
-                  <span className="block text-[0.8125rem] text-bone">Valuation facility</span>
-                  <span className="font-mono text-[0.6875rem] text-muted">
-                    {offer.termDays}d · {(offer.interestTotal * 100).toFixed(1)}% total interest · expires D{offer.expiresDay}
-                  </span>
-                </span>
-                <span className="font-mono text-[0.8125rem] text-mint">Accept {money(offer.principal)}</span>
+                Decline
               </button>
-            ))}
+              <button
+                type="button"
+                disabled={!canAcceptFirmOffer}
+                onClick={() => acceptLoanOffer(firmOffer.id)}
+                title={canAcceptFirmOffer ? 'Accept this credit offer' : 'Repay an open facility before accepting'}
+                className="rounded-lg border border-mint/45 bg-mint/15 px-2 py-1.5 text-[0.75rem] font-medium text-mint hover:bg-mint/25 disabled:cursor-not-allowed disabled:border-line disabled:bg-line/20 disabled:text-muted"
+              >
+                {canAcceptFirmOffer ? 'Accept offer' : 'Facility limit reached'}
+              </button>
+            </div>
           </div>
         )}
 
@@ -602,7 +597,7 @@ export function OrgPanel() {
           </div>
         )}
 
-        {offers.length > 0 && (
+        {!creditRequestOpen && offers.length > 0 && (
           <div className="space-y-1">
             <h4 className="text-[0.75rem] font-medium uppercase tracking-wider text-muted">
               Packaged facilities
@@ -640,7 +635,7 @@ export function OrgPanel() {
           </div>
         )}
 
-        <div className="space-y-2 rounded-xl border border-mint/20 bg-mint/5 p-3">
+        {!creditRequestOpen && <div className="space-y-2 rounded-xl border border-mint/20 bg-mint/5 p-3">
           <div className="flex items-baseline justify-between gap-2">
             <h4 className="text-[0.8125rem] font-medium text-bone">Custom draw</h4>
             <span className="font-mono text-[0.75rem] text-muted">
@@ -711,7 +706,7 @@ export function OrgPanel() {
               </button>
             </>
           )}
-        </div>
+        </div>}
         </>
         )}
       </div>

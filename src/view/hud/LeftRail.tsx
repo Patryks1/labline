@@ -4,6 +4,7 @@ import {
   ChartDonut,
   Flask,
   Hammer,
+  Megaphone,
   Storefront,
   UsersThree,
 } from '@phosphor-icons/react'
@@ -68,6 +69,7 @@ export function LeftRail() {
       company: alerts,
       strategy: state.player.finance.dayNet < 0 && state.day > 5,
       market: state.lastMarket.unservedRatio > 0.2,
+      marketing: false,
     } as Record<NavGroupId, boolean>
   }, [state])
 
@@ -209,6 +211,8 @@ function PanelBody({ id }: { id: PanelId }) {
       return <ResearchPanel />
     case 'market':
       return <MarketPanel />
+    case 'marketing':
+      return <OrgPanel key="marketing" workspace="marketing" />
     case 'racks':
       return <HardwarePanel view="racks" />
     case 'buildings':
@@ -224,7 +228,7 @@ function PanelBody({ id }: { id: PanelId }) {
     case 'map':
       return <MapPanel />
     case 'org':
-      return <OrgPanel />
+      return <OrgPanel key="company" />
     case 'events':
       return <EventsPanel />
     case 'benchmarks':
@@ -248,6 +252,8 @@ function NavIcon({ id }: { id: NavGroupId }) {
             ? Hammer
           : id === 'market'
             ? Storefront
+            : id === 'marketing'
+              ? Megaphone
             : UsersThree
   return <Icon size="1.25rem" weight="duotone" aria-hidden />
 }
