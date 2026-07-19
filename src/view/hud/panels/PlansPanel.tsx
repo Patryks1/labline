@@ -20,6 +20,7 @@ import {
   planApiEquivalentValue,
   planAllowanceExpectation,
   planComputePriority,
+  planOfferingBreadth,
   planPriceTooHighScore,
   premiumPlanScrutiny,
   planServeModifiers,
@@ -27,6 +28,7 @@ import {
   planSubsidyRatio,
   unlockedPlanPrecisions,
 } from '../../../sim/systems/plans'
+import type { PlanOfferingBreadth } from '../../../sim/systems/plans'
 import { BENCHMARK_DEFS } from '../../../sim/balance/benchmarks'
 import { useGameStore } from '../../../store/gameStore'
 import { money, num, people } from '../format'
@@ -40,6 +42,7 @@ import type {
 } from '../../../sim/types'
 import { computeSnapshot } from '../../../sim/tick'
 import { SliderField } from '../ui/SliderField'
+import { ResearchUnlockLink } from '../ui/ResearchUnlockLink'
 import {
   deriveProductPortfolio,
   PRODUCT_CHANNELS,
@@ -454,6 +457,9 @@ export function PlansPanel() {
                         </button>
                       ))}
                     </div>
+                    {apiPrecisionOptions.length === 1 ? (
+                      <ResearchUnlockLink className="mt-1.5" nodeId="sys_quant" label="Unlock API quantization" />
+                    ) : null}
                     <div className="mt-2 grid grid-cols-4 gap-1 font-mono text-[0.625rem]">
                       {(['mmlu', 'coding', 'math', 'agents'] as const).map((benchmarkId) => (
                         <div key={benchmarkId} className="rounded-md border border-line/40 px-1.5 py-1">
@@ -628,6 +634,7 @@ export function PlansPanel() {
                 40,
               )}
               peerPlans={rivalPlanPeers}
+              offeringBreadth={planOfferingBreadth(state, plan)}
               onChange={(patch) => updatePlan(plan.id, patch)}
               onDelete={() => {
                 deletePlan(plan.id)
@@ -1098,6 +1105,7 @@ function PlanCard({
   modelCap,
   frontierCap,
   peerPlans,
+  offeringBreadth,
   onChange,
   onDelete,
 }: {
@@ -1110,6 +1118,7 @@ function PlanCard({
   modelCap: number
   frontierCap: number
   peerPlans: { price: number; includedMTokPerMonth: number; capability: number; featureScore: number }[]
+  offeringBreadth: PlanOfferingBreadth
   onChange: (p: Partial<SubPlan>) => void
   onDelete: () => void
 }) {
@@ -1509,10 +1518,11 @@ function PlanCard({
                 })}
             </div>
           ) : (
-            <p className="mt-1 text-[0.75rem] text-muted">
-              Unlock <span className="text-bone">INT8 Quantization</span> (Inference tree) to run
-              free tiers cheap and keep paid seats full-precision.
-            </p>
+            <ResearchUnlockLink
+              className="mt-1"
+              nodeId="sys_quant"
+              label="Unlock INT8 Quantization for cheaper serving"
+            />
           )}
           {benchmarkModel ? (
             <div className="mt-2 overflow-x-auto rounded-lg border border-line/50">
@@ -1570,6 +1580,32 @@ function PlanCard({
         </div>
 
         <div>
+          <div className="rounded-xl border border-infer/25 bg-infer/5 px-2.5 py-2">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[0.75rem] font-medium text-bone">Offering breadth</div>
+                <p className="mt-0.5 text-[0.6875rem] text-muted">Best safe generation model per modality.</p>
+              </div>
+              <span className="font-mono text-sm text-infer">{offeringBreadth.score.toFixed(2)} / 18</span>
+            </div>
+            {offeringBreadth.contributors.length > 0 ? (
+              <div className="mt-2 grid gap-1 sm:grid-cols-3">
+                {offeringBreadth.contributors.map((contributor) => (
+                  <div key={contributor.modality} className="rounded-md border border-line/60 bg-void/45 px-2 py-1.5">
+                    <div className="flex justify-between font-mono text-[0.625rem] uppercase text-muted">
+                      <span>{contributor.modality}</span>
+                      <span className="text-mint">+{contributor.points.toFixed(2)}</span>
+                    </div>
+                    <div className="mt-0.5 truncate text-[0.6875rem] text-bone" title={contributor.modelName}>{contributor.modelName}</div>
+                    <div className="font-mono text-[0.625rem] text-muted">suite {contributor.composite.toFixed(2)}</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-1.5 text-[0.6875rem] text-amber">Add an image, video, or audio model scoring at least 35 with safety at least 30.</p>
+            )}
+          </div>
+
           <div className="text-[0.75rem] text-muted">Models on this plan</div>
           {models.length === 0 ? (
             <p className="mt-1 text-[0.75rem] text-amber">Ship a model first</p>

@@ -34,6 +34,7 @@ import type {
   Model,
   ProcessJob,
   SimState,
+  SyntheticFillRecord,
   SynthGenJob,
   TrainingDataPlan,
 } from '../types'
@@ -90,7 +91,8 @@ export function ensureLabData(state: SimState): LabData {
 export function researchPoolForTech(state: SimState): number {
   const data = ensureLabData(state)
   const share = dataResearchReservationShare(data)
-  return 1 - share
+  const safetyShare = state.player.safetyCampaign ? 0.4 : 0
+  return Math.max(0, 1 - share - safetyShare)
 }
 
 /** One physical research pool is shared by synthesis, pruning, and tech research. */
@@ -787,6 +789,8 @@ export interface ConsumeResult {
   trainMTok: number
   verifyMTok: number
   domainQuality?: Partial<Record<DataDomain, number>>
+  lowQualityShareByDomain?: Partial<Record<DataDomain, number>>
+  syntheticProvenance?: SyntheticFillRecord[]
   specialistBoosts?: Partial<Record<DataDomain, number>>
 }
 
@@ -898,6 +902,7 @@ export function consumeForLabData(
   let qualityAcc = 0
   let qualityW = 0
   const domainQuality: Partial<Record<DataDomain, number>> = {}
+  const lowQualityShareByDomain: Partial<Record<DataDomain, number>> = {}
   const specialistBoosts: Partial<Record<DataDomain, number>> = {}
   const hasSynthResearch = opts?.hasSynthResearch ?? false
   const useSynth = !!plan.allowSynthetic
@@ -939,6 +944,7 @@ export function consumeForLabData(
       const qBlend =
         (qReal * takeReal + qHQ * takeHQ + qLQ * takeLQ) / Math.max(0.01, take)
       domainQuality[d] = qBlend
+      lowQualityShareByDomain[d] = take > 0 ? takeLQ / take : 0
       qualityAcc += qBlend * take
       qualityW += take
       synthHqUnits += takeHQ
@@ -977,6 +983,7 @@ export function consumeForLabData(
     trainMTok: actualVolume * trainShare,
     verifyMTok: actualVolume * (1 - trainShare),
     domainQuality,
+    lowQualityShareByDomain,
     specialistBoosts,
   }
 }
@@ -1000,6 +1007,80 @@ export function consumeForTraining(
     hasSynthResearch: state.player.researchUnlocked.includes('data_synth'),
     legacyMix,
   })
+  const canAutoSynthesize =
+    !!planIn?.allowSynthetic &&
+    state.player.researchUnlocked.includes('data_synth') &&
+    state.player.models.length > 0
+  if (canAutoSynthesize) {
+    const weights = normalizeWeights(base.plan.weights)
+    const wanted = Math.max(1, planIn?.totalMTok ?? planIn?.totalUnits ?? base.plan.totalMTok)
+    const consumed = { ...base.consumed }
+    const domainQuality = { ...base.domainQuality }
+    const lowQualityShareByDomain = { ...base.lowQualityShareByDomain }
+    const syntheticProvenance: SyntheticFillRecord[] = []
+    let syntheticAdded = 0
+    let qualityAcc = 0
+    let qualityVolume = 0
+    const verifierBonus = hasCorpusSpecialists(state) ? 8 : 0
+    for (const domain of DATA_DOMAINS) {
+      const short = Math.max(0, wanted * weights[domain] - (consumed[domain] ?? 0))
+      if (short <= 0.01) continue
+      const teacher = state.player.models
+        .filter((model) => modelCanCurateDataDomain(model, domain))
+        .toSorted(
+          (a, b) => specialistDomainBoost(b, domain) - specialistDomainBoost(a, domain),
+        )[0]
+      if (!teacher) continue
+      const teacherSignal = specialistDomainBoost(teacher, domain)
+      const quality = Math.min(92, 48 + teacherSignal * 1.8 + verifierBonus)
+      const qualityTier = quality >= 58 ? 'hq' as const : 'lq' as const
+      const prior = consumed[domain] ?? 0
+      const priorQuality = domainQuality[domain] ?? base.qualityUsed
+      consumed[domain] = prior + short
+      domainQuality[domain] = (priorQuality * prior + quality * short) / Math.max(0.01, prior + short)
+      lowQualityShareByDomain[domain] = qualityTier === 'lq' ? short / Math.max(0.01, prior + short) : 0
+      syntheticAdded += short
+      syntheticProvenance.push({
+        domain,
+        teacherModelId: teacher.id,
+        teacherName: teacher.name,
+        volumeMTok: short,
+        quality,
+        qualityTier,
+      })
+    }
+    const actualVolume = Object.values(consumed).reduce((sum, value) => sum + (value ?? 0), 0)
+    for (const domain of DATA_DOMAINS) {
+      const volume = consumed[domain] ?? 0
+      if (volume <= 0) continue
+      qualityAcc += (domainQuality[domain] ?? base.qualityUsed) * volume
+      qualityVolume += volume
+    }
+    const trainShare = base.plan.trainShare
+    return {
+      ...base,
+      plan: { ...base.plan, totalMTok: actualVolume, totalUnits: actualVolume },
+      consumed,
+      coverage: Math.min(30, actualVolume / Math.max(1, minDataMTokForParams(paramsB))),
+      qualityUsed: qualityVolume > 0 ? qualityAcc / qualityVolume : base.qualityUsed,
+      syntheticUnits: base.syntheticUnits + syntheticAdded,
+      synthHqUnits:
+        (base.synthHqUnits ?? 0) + syntheticProvenance.filter((item) => item.qualityTier === 'hq').reduce((sum, item) => sum + item.volumeMTok, 0),
+      synthLqUnits:
+        (base.synthLqUnits ?? 0) + syntheticProvenance.filter((item) => item.qualityTier === 'lq').reduce((sum, item) => sum + item.volumeMTok, 0),
+      synthLqShare:
+        actualVolume > 0
+          ? ((base.synthLqUnits ?? 0) + syntheticProvenance.filter((item) => item.qualityTier === 'lq').reduce((sum, item) => sum + item.volumeMTok, 0)) / actualVolume
+          : 0,
+      cashCost: base.cashCost + syntheticAdded * 250,
+      trainMTok: actualVolume * trainShare,
+      verifyMTok: actualVolume * (1 - trainShare),
+      domainQuality,
+      lowQualityShareByDomain,
+      syntheticProvenance,
+      nextData: cloneLabData(ensureLabData(state)),
+    }
+  }
   // Re-apply specialist boosts when unlocked (player-only feature)
   if (!hasCorpusSpecialists(state) || !planIn?.domainModels) {
     return { ...base, nextData: cloneLabData(ensureLabData(state)) }

@@ -16,8 +16,7 @@ import {
   sellPlayerBuilding,
 } from '../../../sim/systems/facilities'
 import { useGameStore } from '../../../store/gameStore'
-import { money, mw, num } from '../format'
-import { computeSnapshot } from '../../../sim/tick'
+import { money, num } from '../format'
 import { BuildingNameField } from '../ui/BuildingNameField'
 import { useUiStore } from '../../../store/uiStore'
 import {
@@ -25,6 +24,7 @@ import {
   mapTileAtAny,
 } from '../../../sim/systems/worldAccess'
 import { ECONOMY } from '../../../sim/balance/economy'
+import { InfrastructureOverview } from './InfrastructureOverview'
 
 function dcSizeLabel(kind: string, size?: string): string {
   if (size === 'small' || kind === 'dc') return 'Small · 1 tile · 96 bays'
@@ -53,7 +53,6 @@ export function MapPanel() {
   const upgradeBuilding = useGameStore((s) => s.upgradeBuilding)
   const buildMode = useGameStore((s) => s.buildMode)
   const setPanel = useGameStore((s) => s.setPanel)
-  const snap = computeSnapshot(state)
 
   const tile = selected ? mapTileAtAny(state, selected.x, selected.y) : undefined
   const region = tile && state.map.regions.find((r) => r.id === tile.regionId)
@@ -79,31 +78,14 @@ export function MapPanel() {
   return (
     <div className="space-y-4">
       <div>
-        <h2 className="hud-panel-title">Sites</h2>
+        <h2 className="hud-panel-title">Overview</h2>
         <p className="hud-panel-sub">
-          Place halls &amp; power on the map. Racks &amp; silicon live in Infrastructure (F). Mint = you
-          · colored = rivals.
+          Fleet, construction, and every facility in one command view. Select the map for parcel
+          details or open a facility’s dedicated controls.
         </p>
       </div>
 
-      <div className="rounded-2xl border border-line bg-panel-2 p-3 font-mono text-[0.8125rem]">
-        <div className="flex justify-between text-muted">
-          <span>Your power</span>
-          <span className={snap.throttled ? 'text-danger' : 'text-bone'}>
-            {mw(snap.mwDemand)} / {mw(snap.mwAvailable)}
-          </span>
-        </div>
-        <div className="mt-1 flex justify-between text-muted">
-          <span>Your racks</span>
-          <span className="text-bone">
-            {snap.racksUsed} / {snap.rackCap}
-          </span>
-        </div>
-        <div className="mt-1 flex justify-between text-muted">
-          <span>Facility opex</span>
-          <span className="text-bone">{money(state.player.finance.dayBuildingOpex)}/d</span>
-        </div>
-      </div>
+      <InfrastructureOverview />
 
       <div
         className={`rounded-2xl border p-3 text-xs ${
@@ -318,21 +300,6 @@ export function MapPanel() {
             {buildMode ? ', or click empty land to place.' : '.'}
           </span>
         )}
-      </div>
-
-      <div className="space-y-1.5">
-        <h3 className="text-[0.8125rem] font-medium uppercase tracking-wider text-muted">Regions</h3>
-        {state.map.regions.map((r) => (
-          <div
-            key={r.id}
-            className="flex items-center justify-between rounded-xl border border-line bg-panel-2 px-2.5 py-2 text-xs"
-          >
-            <span className="text-bone">{r.name}</span>
-            <span className="font-mono text-[0.75rem] text-muted">
-              ×{r.energyPriceMult.toFixed(2)} · lat {(r.latencyToMarket * 100).toFixed(0)}
-            </span>
-          </div>
-        ))}
       </div>
 
       <div className="grid grid-cols-2 gap-2">

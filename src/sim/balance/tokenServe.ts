@@ -95,9 +95,12 @@ export function tokensPerSecForSku(
   const size = sizeTokMult(model)
   const fam = familyServeMult(model.family)
   const tokMult = Math.max(0.15, model.tokPerSecMult ?? 1)
+  const infer = Math.max(0.35, model.inferCostMult ?? 1)
   // Family intensity reduces throughput (omni burns more per token)
   return (
-    (sku.tokPerSec * tokMult * se * size) / Math.max(0.35, fam) * SERVE_TOK_THROUGHPUT_MULT
+    (sku.tokPerSec * tokMult * se * size) /
+    (Math.max(0.35, fam) * infer) *
+    SERVE_TOK_THROUGHPUT_MULT
   )
 }
 
@@ -145,8 +148,9 @@ export function tokensPerDayCapacity(opts: TokenCapacityOpts): number {
   const size = sizeTokMult(opts.model)
   const fam = familyServeMult(opts.model.family)
   const tokMult = Math.max(0.15, opts.model.tokPerSecMult ?? 1)
+  const infer = Math.max(0.35, opts.model.inferCostMult ?? 1)
 
-  let tps = hw * tokMult * se * size / Math.max(0.35, fam)
+  let tps = hw * tokMult * se * size / (Math.max(0.35, fam) * infer)
 
   const util = Math.max(0.15, Math.min(0.98, opts.util ?? 1))
   const power = Math.max(0.2, Math.min(1, opts.powerDerate ?? 1))
@@ -154,11 +158,11 @@ export function tokensPerDayCapacity(opts: TokenCapacityOpts): number {
   const ram = Math.max(0.35, Math.min(1, opts.systemRamDerate ?? 1))
   const cpu = Math.max(0.35, Math.min(1, opts.cpuDerate ?? 1))
   const eng = 1 + Math.max(0, opts.engServe ?? 0)
-  const infer = Math.max(0.05, Math.min(1, opts.inferenceShare))
+  const inferShare = Math.max(0.05, Math.min(1, opts.inferenceShare))
 
   // Blend secondary derates lightly so VRAM/RAM don't double-kill vs pool path
   const secondary = 0.55 + 0.25 * ram + 0.2 * cpu
-  tps *= util * power * vram * secondary * eng * infer * SERVE_TOK_THROUGHPUT_MULT
+  tps *= util * power * vram * secondary * eng * inferShare * SERVE_TOK_THROUGHPUT_MULT
 
   return mtokPerDayFromTps(tps)
 }
@@ -304,10 +308,10 @@ export function suggestApiFromUnitCost(opts: {
 } {
   // costPerMTok already includes model intensity — do NOT multiply again
   const unit = Math.max(0.005, opts.costPerMTok)
-  const cap = opts.capability ?? 50
-  const qualityNudge = 0.9 + cap / 500
-  const costIn = Math.max(0.005, unit * 0.4 * qualityNudge)
-  const costOut = Math.max(0.01, unit * 1.15 * qualityNudge)
+  // Capability affects customer value, never the compute cost. The 30/70
+  // traffic mix blends these factors back to exactly one unit of cost.
+  const costIn = Math.max(0.005, unit * 0.65)
+  const costOut = Math.max(0.01, unit * 1.15)
   const markupPct = opts.markupPct ?? 100
   const m = 1 + Math.max(0, markupPct) / 100
   const priceIn = Math.round(costIn * m * 1000) / 1000

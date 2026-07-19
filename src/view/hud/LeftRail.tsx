@@ -3,6 +3,7 @@ import {
   Buildings,
   ChartDonut,
   Flask,
+  Hammer,
   Storefront,
   UsersThree,
 } from '@phosphor-icons/react'
@@ -14,8 +15,7 @@ import { ResearchPanel } from './panels/ResearchPanel'
 import { ModelsPanel } from './panels/ModelsPanel'
 import { PlansPanel } from './panels/PlansPanel'
 import { MarketPanel } from './panels/MarketPanel'
-import { ChipsPanel } from './panels/ChipsPanel'
-import { RacksPanel } from './panels/RacksPanel'
+import { HardwarePanel } from './panels/HardwarePanel'
 import { MapPanel } from './panels/MapPanel'
 import { OrgPanel } from './panels/OrgPanel'
 import { EventsPanel } from './panels/EventsPanel'
@@ -58,11 +58,13 @@ export function LeftRail() {
       (state.player.researchPrograms ?? []).some((program) => program.phase !== 'complete')
     const rackArriving = (state.player.rackFleet ?? []).some((r) => r.status === 'ordered')
     const fabActive = state.player.fab?.phase != null && state.player.fab.phase !== 'idle'
+    const constructionActive = facilityAnchorTiles(state, { ownerId: 'player' }).some(
+      (tile) => tile.buildingTarget > 0 && tile.buildingProgress < tile.buildingTarget,
+    )
     return {
       lab: training || rawData || research,
-      infrastructure: rackArriving || fabActive || facilityAnchorTiles(state, { ownerId: 'player' }).some(
-        (tile) => tile.buildingTarget > 0 && tile.buildingProgress < tile.buildingTarget,
-      ),
+      infrastructure: rackArriving || fabActive,
+      build: constructionActive,
       company: alerts,
       strategy: state.player.finance.dayNet < 0 && state.day > 5,
       market: state.lastMarket.unservedRatio > 0.2,
@@ -154,7 +156,7 @@ export function LeftRail() {
                 aria-label={`${group.label} panels`}
               >
                 {group.items.map((item) => {
-                  const on = active === item.id
+                  const on = active === item.id || (item.id === 'racks' && active === 'chips')
                   return (
                     <button
                       key={item.id}
@@ -208,7 +210,7 @@ function PanelBody({ id }: { id: PanelId }) {
     case 'market':
       return <MarketPanel />
     case 'racks':
-      return <RacksPanel />
+      return <HardwarePanel view="racks" />
     case 'buildings':
       return <FleetBuildingsPanel />
     case 'power':
@@ -218,7 +220,7 @@ function PanelBody({ id }: { id: PanelId }) {
     case 'build':
       return <BuildPanel />
     case 'chips':
-      return <ChipsPanel />
+      return <HardwarePanel view="silicon" />
     case 'map':
       return <MapPanel />
     case 'org':
@@ -242,6 +244,8 @@ function NavIcon({ id }: { id: NavGroupId }) {
         ? Flask
         : id === 'infrastructure'
           ? Buildings
+          : id === 'build'
+            ? Hammer
           : id === 'market'
             ? Storefront
             : UsersThree

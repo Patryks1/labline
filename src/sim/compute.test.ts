@@ -90,11 +90,11 @@ describe('compute fabric', () => {
     expect(g.map.tiles.some((t) => t.owner === 'player')).toBe(false)
   })
 
-  it('city power contracts add available MW (import works)', () => {
+  it('city power contracts deliver through commissioned interconnect MW', () => {
     let s = withCompute(createGame(2), 64)
     const city = s.map.cities?.[0]
     expect(city).toBeTruthy()
-    // Place campus near city so contract can be signed
+    // Place a grid connector near the city so contracted MW has a physical path.
     const near = s.map.tiles.find(
       (t) =>
         t.owner === 'player' ||
@@ -111,25 +111,31 @@ describe('compute fabric', () => {
             t.x === near.x && t.y === near.y
               ? {
                   ...t,
-                  kind: 'dc' as const,
+                  kind: 'substation' as const,
                   owner: 'player' as const,
                   buildingProgress: 1,
                   buildingTarget: 1,
-                  rackCapacity: 64,
-                  racksUsed: 32,
+                  mwCapacity: 25,
+                  mwGeneration: 0,
                 }
               : t,
           ),
         },
       }
     }
-    // Strip interconnect so only contracts can fill a large demand
+    // Strip every other interconnect so this connector is the exact ceiling.
     s = {
       ...s,
       map: {
         ...s.map,
         tiles: s.map.tiles.map((t) =>
-          t.owner === 'player' ? { ...t, mwCapacity: 0, mwGeneration: 2 } : t,
+          t.owner === 'player'
+            ? {
+                ...t,
+                mwCapacity: near && t.x === near.x && t.y === near.y ? 25 : 0,
+                mwGeneration: near && t.x === near.x && t.y === near.y ? 0 : 2,
+              }
+            : t,
         ),
       },
       cityPowerContracts: [
@@ -149,8 +155,9 @@ describe('compute fabric', () => {
       40,
     )
     const withContract = resolvePlayerPowerMw(s, 40)
-    expect(withContract.mwContractImport).toBeGreaterThan(20)
-    expect(withContract.mwAvailable).toBeGreaterThan(noContract.mwAvailable + 15)
+    expect(noContract.mwContractImport).toBe(0)
+    expect(withContract.mwContractImport).toBe(25)
+    expect(withContract.mwAvailable).toBe(noContract.mwAvailable)
   })
 
   it('commissioned site capacity powers the player resolver and invalidates the compute cache', () => {

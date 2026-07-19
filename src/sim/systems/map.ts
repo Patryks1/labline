@@ -1900,8 +1900,7 @@ export function mapEnergy(state: SimState): {
 
 /**
  * Authoritative available MW given actual fleet demand (PUE already applied).
- * Order: own generation → firm city power contracts → spot grid via interconnects.
- * City contracts deliver power even without a substation (metro offtake reverse).
+ * Order: own generation → firm contracts → spot grid, all through commissioned interconnects.
  */
 export function resolveLabPowerMw(
   state: SimState,
@@ -1935,20 +1934,22 @@ export function resolveLabPowerMw(
     gridFrac = Math.max(0.15, scarcity.gridCapMw / scarcity.gridDemandMw)
   }
   const needAfterGen = Math.max(0, mwDemand - mwGeneration)
-  // Legacy city contracts are firm and bypass the campus interconnect. New
-  // utility/PPAs are also firm, but flow through commissioned site capacity.
-  const mwCityContractImport = Math.min(mwCityContractCap, needAfterGen)
+  const mwCityContractImport = Math.min(mwCityContractCap, needAfterGen, mwInterconnect)
   const needAfterCityContract = Math.max(0, needAfterGen - mwCityContractImport)
+  const interconnectAfterCity = Math.max(0, mwInterconnect - mwCityContractImport)
   const mwEnergyContractImport = Math.min(
     mwEnergyContractCap,
     needAfterCityContract,
-    mwInterconnect,
+    interconnectAfterCity,
   )
   const needAfterContract = Math.max(
     0,
     needAfterCityContract - mwEnergyContractImport,
   )
-  const spotInterconnectMw = Math.max(0, mwInterconnect - mwEnergyContractImport)
+  const spotInterconnectMw = Math.max(
+    0,
+    interconnectAfterCity - mwEnergyContractImport,
+  )
   // Only the uncontracted remainder is exposed to grid curtailment.
   const mwSpotImport = Math.min(spotInterconnectMw, needAfterContract) * gridFrac
   const mwContractImport = mwCityContractImport + mwEnergyContractImport

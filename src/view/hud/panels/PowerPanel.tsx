@@ -1,416 +1,424 @@
 import { useState } from 'react'
-import { useGameStore } from '../../../store/gameStore'
-import { useUiStore } from '../../../store/uiStore'
 import {
   activeCityPowerContracts,
-  buyRivalDataCenter,
+  activePowerExportContracts,
   cancelCityPowerContract,
+  cancelPowerExportContract,
   cityDashboard,
-  estimateHallSaleValue,
-  nearestCity,
+  evaluatePowerExportOffer,
+  evaluatePowerImportOffer,
   powerBalance,
+  powerExportNegotiationQuote,
+  powerImportNegotiationQuote,
   powerImportBill,
-  rivalHallAskPrice,
-  sellPlayerBuilding,
-  setHallPowered,
-  setPowerExportEnabled,
   signCityPowerContract,
-  tileInCityPowerZone,
+  signPowerExportContract,
 } from '../../../sim/systems/facilities'
-import {
-  buildingDisplayName,
-  energyPriceForState,
-  gridScarcity,
-  isDcAnchor,
-  isDcKind,
-  resolvePlayerPowerMw,
-} from '../../../sim/systems/map'
+import type { SimState } from '../../../sim/types'
+import { energyPriceForState, gridScarcity, resolvePlayerPowerMw } from '../../../sim/systems/map'
+import { useGameStore } from '../../../store/gameStore'
+import { useUiStore } from '../../../store/uiStore'
 import { computeSnapshot } from '../../../sim/tick'
-import { money, mw, num } from '../format'
-import { BuildingNameField } from '../ui/BuildingNameField'
-import {
-  facilityAnchorTiles,
-  mapTileAtAny,
-} from '../../../sim/systems/worldAccess'
+import { money, mw } from '../format'
 
-/**
- * Fleet → Power: city stats, export surplus, power-down / sell halls, buy rivals.
- */
+type NegotiationState = {
+  mode: 'import' | 'export'
+  cityId: string
+  offerPrice: number
+  counterPrice?: number
+  message?: string
+}
+
 export function PowerPanel() {
-  const state = useGameStore((s) => s.state)
-  const selected = useGameStore((s) => s.selectedTile)
+  const state = useGameStore((store) => store.state)
+  const requestConfirm = useUiStore((store) => store.requestConfirm)
   const setState = (next: typeof state) => useGameStore.setState({ state: next })
-  const requestConfirm = useUiStore((s) => s.requestConfirm)
-  const bal = powerBalance(state)
-  const grid = gridScarcity(state)
-  const cities = cityDashboard(state)
+  const balance = powerBalance(state)
+  const scarcity = gridScarcity(state)
   const wholesale = energyPriceForState(state)
-  const exportOn = state.player.powerExportEnabled !== false
-  const contracts = activeCityPowerContracts(state)
   const snap = computeSnapshot(state)
-  const power = resolvePlayerPowerMw(state, snap.mwDemand)
-  const bill = powerImportBill(state, power.mwGridImport)
-
+  const resolved = resolvePlayerPowerMw(state, snap.mwDemand)
+  const bill = powerImportBill(state, resolved.mwGridImport)
+  const importContracts = activeCityPowerContracts(state)
+  const exportContracts = activePowerExportContracts(state)
+  const cities = cityDashboard(state)
   const [contractMw, setContractMw] = useState(8)
   const [contractTerm, setContractTerm] = useState(60)
-
-  const tile = selected ? mapTileAtAny(state, selected.x, selected.y) : undefined
-  const cityAtSel = tile ? tileInCityPowerZone(state, tile.x, tile.y) : null
-  const near = tile ? nearestCity(state, tile.x, tile.y) : null
-
-  const dcFacilities = [
-    ...facilityAnchorTiles(state, { kind: 'dc' }),
-    ...facilityAnchorTiles(state, { kind: 'dc_m' }),
-    ...facilityAnchorTiles(state, { kind: 'dc_l' }),
-  ]
-  const forSale = dcFacilities.filter(
-    (t) =>
-      isDcKind(t.kind) &&
-      isDcAnchor(t) &&
-      t.owner !== 'player' &&
-      t.owner !== 'neutral' &&
-      t.buildingProgress >= t.buildingTarget &&
-      (t.forSale || true),
-  )
+  const [negotiation, setNegotiation] = useState<NegotiationState | null>(null)
 
   return (
     <div className="space-y-3">
       <div>
-        <h2 className="hud-panel-title">Power & campuses</h2>
+        <h2 className="hud-panel-title">Power</h2>
         <p className="hud-panel-sub">
-          City power zones, export surplus, power-down halls, sell or buy data centers.
+          Trace every megawatt, lock utility supply, and contract owned surplus without manual export toggles.
         </p>
       </div>
 
-      {/* Balance */}
-      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-5">
-        <Mini label="Demand" value={mw(bal.demandMw)} />
-        <Mini label="Generation" value={mw(bal.genMw)} accent="text-mint" />
-        <Mini
-          label="Grid import"
-          value={mw(bal.gridImportMw)}
-          accent={bal.deficitMw > 0.1 ? 'text-amber' : 'text-bone'}
-        />
-        <Mini
-          label="Gen upkeep / day"
-          value={money(bal.generationCostDay)}
-          accent="text-amber"
-        />
-        <Mini
-          label="Export rev / day"
-          value={money(bal.exportRevenueDay)}
-          accent="text-mint"
-        />
+      <PowerFlow balance={balance} bill={bill} />
+
+      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+        <Mini label="Demand" value={mw(balance.demandMw)} />
+        <Mini label="Locked import" value={mw(bill.contractMw + bill.energyContractMw)} accent="text-mint" />
+        <Mini label="Spot import" value={mw(bill.spotMw)} accent={bill.spotMw > 0 ? 'text-amber' : 'text-muted'} />
+        <Mini label="Export revenue" value={`${money(balance.exportRevenueDay)}/d`} accent="text-mint" />
       </div>
 
-      <div className="rounded-xl border border-line bg-panel-2 p-2.5 space-y-2">
-        <div className="flex items-center justify-between gap-2">
+      <section className="rounded-2xl border border-line bg-panel-2 p-3">
+        <div className="flex items-start justify-between gap-3">
           <div>
-            <div className="text-[0.8125rem] font-medium text-bone">Sell surplus power</div>
-            <p className="text-[0.75rem] text-muted">
-              Over-gen sells first to cities in your power zone (
-              {money(bal.cityBuyPerMWh)}/MWh), rest to wholesale grid (
-              {money(bal.wholesalePerMWh * 0.55)}/MWh).
-            </p>
+            <h3 className="text-[0.8125rem] font-semibold text-bone">Active commitments</h3>
+            <p className="mt-0.5 text-[0.6875rem] text-muted">Firm imports are billed at the locked rate. Exports earn only on surplus delivered.</p>
           </div>
-          <button
-            type="button"
-            onClick={() => setState(setPowerExportEnabled(state, !exportOn))}
-            className={`shrink-0 rounded-full px-2.5 py-1 text-[0.75rem] font-medium ${
-              exportOn
-                ? 'bg-mint/20 text-mint ring-1 ring-mint/30'
-                : 'bg-void text-muted'
-            }`}
-          >
-            {exportOn ? 'Export ON' : 'Export OFF'}
-          </button>
+          <span className="font-mono text-[0.6875rem] text-muted">spot {money(wholesale)}/MWh</span>
         </div>
-        <div className="font-mono text-[0.75rem] text-muted">
-          Surplus {mw(bal.surplusMw)} · exporting {mw(bal.exportMw)} · wholesale{' '}
-          {money(wholesale)}/MWh · grid DCs {grid.industryDcCount}/{grid.softCap}
-        </div>
-        <div className="font-mono text-[0.75rem] text-muted">
-          Power in: gen {mw(bal.genMw)} · import {mw(bal.gridImportMw)} · demand {mw(bal.demandMw)}
-          {bal.deficitMw > 0.05 ? (
-            <span className="text-amber"> · short {mw(bal.deficitMw)} (brownout)</span>
-          ) : null}
-        </div>
-        <div className="font-mono text-[0.75rem] text-muted">
-          Import bill: contract {money(bill.contractCostDay)} ({mw(bill.contractMw)}) · spot{' '}
-          {money(bill.spotCostDay)} ({mw(bill.spotMw)})
-          {bill.energyContractMw > 0 ? (
-            <> · PPA/utility {mw(bill.energyContractMw)} (take-or-pay ledger)</>
-          ) : null}
-        </div>
-        <div className="font-mono text-[0.75rem] text-muted">
-          Owned generation upkeep: {money(bal.generationCostDay)} for {mw(bal.generationUsedMw)} ·{' '}
-          60% of grid $/MWh plus plant fixed operations
-        </div>
-      </div>
-
-      {/* City power offtake contracts */}
-      <div className="rounded-xl border border-line bg-panel-2 p-2.5 space-y-2">
-        <h3 className="text-[0.8125rem] font-semibold text-bone">City power contracts</h3>
-        <p className="text-[0.75rem] text-muted">
-          Lock firm MW from a metro at a discounted $/MWh for a fixed term. You stay locked until
-          expiry (early exit costs ~40% of remaining bill). Build in the city power zone first.
-        </p>
-        <div className="grid grid-cols-2 gap-2">
-          <label className="text-[0.6875rem] text-muted">
-            MW
-            <input
-              type="number"
-              min={1}
-              max={80}
-              step={1}
-              value={contractMw}
-              onChange={(e) => setContractMw(Math.max(1, Number(e.target.value) || 1))}
-              className="mt-0.5 w-full rounded border border-line bg-void px-1.5 py-1 font-mono text-[0.8125rem] text-bone"
-            />
-          </label>
-          <label className="text-[0.6875rem] text-muted">
-            Term (days)
-            <input
-              type="number"
-              min={30}
-              max={180}
-              step={15}
-              value={contractTerm}
-              onChange={(e) => setContractTerm(Math.max(30, Number(e.target.value) || 30))}
-              className="mt-0.5 w-full rounded border border-line bg-void px-1.5 py-1 font-mono text-[0.8125rem] text-bone"
-            />
-          </label>
-        </div>
-        {contracts.length > 0 && (
-          <div className="space-y-1">
-            {contracts.map((c) => (
-              <div
-                key={c.id}
-                className="flex items-center justify-between gap-2 rounded-lg border border-mint/25 bg-mint/5 px-2 py-1 font-mono text-[0.75rem]"
-              >
-                <span className="text-bone">
-                  {c.cityName} · {mw(c.mw)} @ {money(c.pricePerMWh)}/MWh · {c.daysLeft}d left
-                </span>
-                <button
-                  type="button"
-                  className="text-danger hover:underline"
-                  onClick={() => {
-                    requestConfirm({
-                      title: 'Break the city power contract?',
-                      body: `${c.cityName} will stop supplying ${mw(c.mw)} at the locked rate immediately.`,
-                      actionLabel: 'Break contract',
-                      tone: 'danger',
-                      onConfirm: () => setState(cancelCityPowerContract(state, c.id)),
-                    })
-                  }}
-                >
-                  Break
-                </button>
-              </div>
+        {importContracts.length === 0 && exportContracts.length === 0 ? (
+          <p className="mt-2 rounded-lg border border-dashed border-line px-2.5 py-2 text-[0.75rem] text-muted">No active power contracts.</p>
+        ) : (
+          <div className="mt-2 space-y-1.5">
+            {importContracts.map((contract) => (
+              <ContractRow
+                key={contract.id}
+                direction="Import"
+                name={contract.cityName}
+                mwValue={contract.mw}
+                price={contract.pricePerMWh}
+                days={contract.daysLeft}
+                onBreak={() => requestConfirm({
+                  title: 'Break the utility contract?',
+                  body: `${contract.cityName} will stop supplying ${mw(contract.mw)} immediately. The remaining-term fee applies.`,
+                  actionLabel: 'Break contract',
+                  tone: 'danger',
+                  onConfirm: () => setState(cancelCityPowerContract(state, contract.id)),
+                })}
+              />
+            ))}
+            {exportContracts.map((contract) => (
+              <ContractRow
+                key={contract.id}
+                direction="Export"
+                name={contract.cityName}
+                mwValue={contract.mw}
+                price={contract.pricePerMWh}
+                days={contract.daysLeft}
+                onBreak={() => requestConfirm({
+                  title: 'Break the export contract?',
+                  body: `${contract.cityName} will release the ${mw(contract.mw)} offtake commitment. The early-exit fee applies.`,
+                  actionLabel: 'Break contract',
+                  tone: 'danger',
+                  onConfirm: () => setState(cancelPowerExportContract(state, contract.id)),
+                })}
+              />
             ))}
           </div>
         )}
-      </div>
+      </section>
 
-      {/* Cities */}
-      <div>
-        <h3 className="mb-1.5 text-[0.8125rem] font-semibold text-bone">Cities</h3>
-        <div className="space-y-1.5">
-          {cities.length === 0 && (
-            <p className="text-[0.8125rem] text-muted">No metro anchors on this map.</p>
-          )}
-          {cities.map(({ city, distToPlayer, hallsInZone, rivalHallsInZone, genInZone }) => (
-            <div
-              key={city.id}
-              className="rounded-xl border border-line bg-panel-2 px-2.5 py-2"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="text-sm font-medium text-bone">{city.name}</div>
-                  <div className="font-mono text-[0.75rem] text-muted">
-                    {city.industry} · pop {num(city.population, 0)}
-                  </div>
-                </div>
-                <div className="text-right font-mono text-[0.75rem] text-muted">
-                  zone r{city.powerRadius}
-                  {distToPlayer != null && (
-                    <div className={distToPlayer <= city.powerRadius ? 'text-mint' : ''}>
-                      you @ {distToPlayer} tiles
-                    </div>
-                  )}
-                </div>
-              </div>
-              <div className="mt-1.5 grid grid-cols-3 gap-1 font-mono text-[0.6875rem] text-muted">
-                <span>
-                  Offtake {mw(city.powerBuyMw)} · lock ~
-                  {money(wholesale * city.powerBuyPriceMult * 0.88)}/MWh
-                </span>
-                <span className="text-center">
-                  Your halls {hallsInZone} · gen {mw(genInZone)}
-                </span>
-                <span className="text-right">Rival halls {rivalHallsInZone}</span>
-              </div>
-              <button
-                type="button"
-                className="mt-1.5 rounded-full bg-mint/15 px-2.5 py-0.5 text-[0.75rem] font-medium text-mint"
-                onClick={() =>
-                  setState(signCityPowerContract(state, city.id, contractMw, contractTerm))
-                }
-              >
-                Lock {contractMw} MW · {contractTerm}d
-              </button>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Selected tile actions */}
-      {tile && (
-        <div className="rounded-xl border border-mint/30 bg-mint/5 p-2.5 space-y-2">
-          <div className="text-[0.8125rem] font-medium text-bone">
-            <span className="text-muted">Selected · </span>
-            {tile.owner === 'player' && isDcKind(tile.kind) ? (
-              <span className="inline-block min-w-[8rem] align-middle">
-                <BuildingNameField tile={tile} compact />
-              </span>
-            ) : (
-              buildingDisplayName(tile, tile.kind)
-            )}
-            {tile.owner !== 'player' && tile.owner !== 'neutral'
-              ? ` · ${state.rivals.find((r) => r.id === tile.owner)?.name ?? tile.owner}`
-              : tile.owner === 'player'
-                ? ' · you'
-                : ''}
-          </div>
-          {cityAtSel ? (
-            <p className="text-[0.75rem] text-mint">
-              Inside {cityAtSel.name} power zone — good offtake for surplus gen.
-            </p>
-          ) : near ? (
-            <p className="text-[0.75rem] text-muted">
-              Nearest metro {near.city.name} is {near.dist} tiles (zone r{near.city.powerRadius}).
-            </p>
-          ) : null}
-
-          {tile.owner === 'player' &&
-            isDcKind(tile.kind) &&
-            isDcAnchor(tile) &&
-            tile.buildingProgress >= tile.buildingTarget && (
-            <div className="flex flex-wrap gap-1.5">
-              <button
-                type="button"
-                className="btn-ghost py-1 text-[0.75rem]"
-                onClick={() =>
-                  setState(setHallPowered(state, tile.x, tile.y, tile.powered === false))
-                }
-              >
-                {tile.powered === false ? 'Power on' : 'Power down'}
-              </button>
-              <button
-                type="button"
-                className="rounded-full bg-danger/15 px-2.5 py-1 text-[0.75rem] text-danger"
-                onClick={() => {
-                  const v = estimateHallSaleValue(state, tile.x, tile.y)
-                  requestConfirm({
-                    title: 'Sell this data hall?',
-                    body: `Estimated recovery is ${money(v)}. Installed racks are sold with the hall.`,
-                    actionLabel: 'Sell hall',
-                    tone: 'danger',
-                    onConfirm: () => setState(sellPlayerBuilding(state, tile.x, tile.y)),
-                  })
-                }}
-              >
-                Sell hall ~{money(estimateHallSaleValue(state, tile.x, tile.y))}
-              </button>
-            </div>
-          )}
-
-          {isDcKind(tile.kind) &&
-            isDcAnchor(tile) &&
-            tile.owner !== 'player' &&
-            tile.owner !== 'neutral' &&
-            tile.buildingProgress >= tile.buildingTarget && (
-              <button
-                type="button"
-                className="btn-primary py-1.5 text-[0.8125rem]"
-                onClick={() => {
-                  const ask = rivalHallAskPrice(state, tile)
-                  requestConfirm({
-                    title: `Acquire ${tile.name || 'this campus'}?`,
-                    body: `The acquisition costs ${money(ask)} and transfers installed racks to your fleet.`,
-                    actionLabel: 'Acquire campus',
-                    tone: 'neutral',
-                    onConfirm: () => setState(buyRivalDataCenter(state, tile.x, tile.y)),
-                  })
-                }}
-              >
-                Buy campus {money(rivalHallAskPrice(state, tile))}
-                {tile.forSale ? ' · listed' : ''}
-              </button>
-            )}
-        </div>
-      )}
-
-      {/* Rival campuses to buy */}
-      <div>
-        <h3 className="mb-1.5 text-[0.8125rem] font-semibold text-bone">Rival campuses</h3>
-        <p className="mb-1 text-[0.75rem] text-muted">
-          Select on map or buy from list. Cash-strapped rivals list halls; others still sell at a
-          premium.
-        </p>
-        <div className="max-h-40 space-y-1 overflow-y-auto">
-          {forSale.slice(0, 12).map((h) => {
-            const rival = state.rivals.find((r) => r.id === h.owner)
-            const ask = rivalHallAskPrice(state, h)
-            return (
-              <div
-                key={`${h.x}-${h.y}`}
-                className="flex items-center justify-between gap-2 rounded-lg border border-line bg-panel-2 px-2 py-1.5 font-mono text-[0.75rem]"
-              >
-                <span className="min-w-0 truncate text-bone">
-                  {buildingDisplayName(h, 'Hall')} · {rival?.name ?? h.owner} · {h.racksUsed} racks
-                  {h.forSale ? ' · LISTED' : ''}
-                </span>
-                <button
-                  type="button"
-                  className="shrink-0 text-mint hover:underline"
-                  onClick={() => {
-                    requestConfirm({
-                      title: `Acquire ${buildingDisplayName(h, 'Hall')}?`,
-                      body: `The listed acquisition price is ${money(ask)}. Installed racks transfer with the hall.`,
-                      actionLabel: 'Acquire hall',
-                      tone: 'neutral',
-                      onConfirm: () => setState(buyRivalDataCenter(state, h.x, h.y)),
-                    })
-                  }}
-                >
-                  {money(ask)}
-                </button>
-              </div>
-            )
-          })}
-          {forSale.length === 0 && (
-            <p className="text-[0.8125rem] text-muted">No rival halls on the map yet.</p>
-          )}
-        </div>
-      </div>
+      <ContractDesk
+        state={state}
+        setState={setState}
+        cities={cities}
+        contractMw={contractMw}
+        setContractMw={setContractMw}
+        contractTerm={contractTerm}
+        setContractTerm={setContractTerm}
+        negotiation={negotiation}
+        setNegotiation={setNegotiation}
+        gridStatus={`${scarcity.industryDcCount}/${scarcity.softCap}`}
+        gridConstrained={scarcity.gridDemandMw > scarcity.gridCapMw}
+      />
     </div>
   )
 }
 
-function Mini({
-  label,
-  value,
-  accent = 'text-bone',
-}: {
-  label: string
-  value: string
-  accent?: string
-}) {
+type Balance = ReturnType<typeof powerBalance>
+type Bill = ReturnType<typeof powerImportBill>
+
+function PowerFlow({ balance, bill }: { balance: Balance; bill: Bill }) {
+  const ownUsed = Math.min(balance.demandMw, balance.genMw)
+  const locked = bill.contractMw + bill.energyContractMw
+  const served = ownUsed + locked + bill.spotMw
+  const short = Math.max(0, balance.demandMw - served)
+  const parts = [
+    { id: 'owned', label: 'Owned → load', value: ownUsed, color: 'bg-mint', detail: 'On-site generation consumed by operations.' },
+    { id: 'locked', label: 'Locked → load', value: locked, color: 'bg-research', detail: 'Firm utility and PPA capacity serving operations.' },
+    { id: 'spot', label: 'Spot → load', value: bill.spotMw, color: 'bg-amber', detail: 'Uncontracted grid power purchased at today’s market rate.' },
+    { id: 'exported', label: 'Exported', value: balance.exportMw, color: 'bg-infer', detail: 'Owned surplus delivered under active city contracts.' },
+    { id: 'curtailed', label: 'Curtailed', value: balance.curtailedMw, color: 'bg-line', detail: 'Owned generation with no load or contracted buyer.' },
+    { id: 'short', label: 'Unserved', value: short, color: 'bg-danger', detail: 'Demand that cannot be reached through generation or connectors.' },
+  ]
+  const total = Math.max(0.001, parts.reduce((sum, part) => sum + part.value, 0))
+  const [selectedId, setSelectedId] = useState('owned')
+  const selected = parts.find((part) => part.id === selectedId) ?? parts[0]!
   return (
-    <div className="rounded-lg border border-line bg-panel-2 px-2 py-1.5">
-      <div className="text-[0.6875rem] uppercase text-muted">{label}</div>
-      <div className={`font-mono text-xs font-medium ${accent}`}>{value}</div>
+    <section aria-label="Power flow" className="rounded-2xl border border-line bg-panel-2 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-[0.8125rem] font-semibold text-bone">Power allocation</h3>
+          <p className="text-[0.625rem] text-muted">Select a segment to inspect the full system flow.</p>
+        </div>
+        <span className={`font-mono text-[0.6875rem] ${short > 0.05 ? 'text-danger' : 'text-mint'}`}>{short > 0.05 ? `${mw(short)} unserved` : 'fully powered'}</span>
+      </div>
+      <div className="mt-3 flex h-5 overflow-hidden rounded-md bg-void ring-1 ring-line/60">
+        {parts.filter((part) => part.value > 0).map((part) => (
+          <button
+            key={part.id}
+            type="button"
+            aria-label={`${part.label}: ${mw(part.value)}`}
+            aria-pressed={selected.id === part.id}
+            onClick={() => setSelectedId(part.id)}
+            className={`${part.color} min-w-1 transition hover:brightness-125 ${selected.id === part.id ? 'brightness-125 ring-2 ring-inset ring-bone/80' : ''}`}
+            style={{ width: `${(part.value / total) * 100}%` }}
+          />
+        ))}
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-1 sm:grid-cols-3">
+        {parts.map((part) => (
+          <button
+            key={part.id}
+            type="button"
+            aria-pressed={selected.id === part.id}
+            onClick={() => setSelectedId(part.id)}
+            className={`flex items-center justify-between gap-2 rounded-md border px-2 py-1 text-left font-mono text-[0.5625rem] transition ${selected.id === part.id ? 'border-bone/50 bg-bone/10 text-bone' : 'border-line/60 text-muted hover:text-bone'}`}
+          >
+            <span className="truncate">{part.label}</span>
+            <strong>{mw(part.value)}</strong>
+          </button>
+        ))}
+      </div>
+      <div className="mt-2 rounded-lg border border-line/70 bg-void/40 px-2.5 py-2">
+        <div className="flex items-center justify-between gap-2">
+          <strong className="text-[0.6875rem] text-bone">{selected.label}</strong>
+          <span className="font-mono text-[0.625rem] text-mint">{mw(selected.value)} · {Math.round((selected.value / total) * 100)}%</span>
+        </div>
+        <p className="mt-0.5 text-[0.625rem] leading-snug text-muted">{selected.detail}</p>
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-x-3 font-mono text-[0.625rem] text-muted">
+        <span>System flow</span><span className="text-right text-bone">{mw(total)}</span>
+        <span>Generation upkeep</span><span className="text-right text-bone">{money(balance.generationCostDay)}/d</span>
+      </div>
+    </section>
+  )
+}
+
+type CityRows = ReturnType<typeof cityDashboard>
+
+function ContractDesk({
+  state,
+  setState,
+  cities,
+  contractMw,
+  setContractMw,
+  contractTerm,
+  setContractTerm,
+  negotiation,
+  setNegotiation,
+  gridStatus,
+  gridConstrained,
+}: {
+  state: SimState
+  setState: (state: SimState) => void
+  cities: CityRows
+  contractMw: number
+  setContractMw: (mw: number) => void
+  contractTerm: number
+  setContractTerm: (days: number) => void
+  negotiation: NegotiationState | null
+  setNegotiation: (negotiation: NegotiationState | null) => void
+  gridStatus: string
+  gridConstrained: boolean
+}) {
+  const importQuote = negotiation?.mode === 'import'
+    ? powerImportNegotiationQuote(state, negotiation.cityId, contractMw, contractTerm)
+    : null
+  const exportQuote = negotiation?.mode === 'export'
+    ? powerExportNegotiationQuote(state, negotiation.cityId, contractMw, contractTerm)
+    : null
+  const activeQuote = importQuote ?? exportQuote
+
+  const startNegotiation = (mode: 'import' | 'export', cityId: string) => {
+    if (mode === 'import') {
+      const quote = powerImportNegotiationQuote(state, cityId, contractMw, contractTerm)
+      if (!quote || quote.contractMw < 1) return
+      setNegotiation({
+        mode,
+        cityId,
+        offerPrice: Math.round(quote.askPricePerMWh * 0.94),
+      })
+      return
+    }
+    const quote = powerExportNegotiationQuote(state, cityId, contractMw, contractTerm)
+    if (!quote || quote.contractMw < 1) return
+    setNegotiation({
+      mode,
+      cityId,
+      offerPrice: Math.round(quote.utilityOfferPerMWh * 1.05),
+    })
+  }
+
+  const commitNegotiation = (price: number) => {
+    if (!negotiation) return
+    const before = negotiation.mode === 'import'
+      ? state.cityPowerContracts.length
+      : state.powerExportContracts.length
+    const next = negotiation.mode === 'import'
+      ? signCityPowerContract(state, negotiation.cityId, contractMw, contractTerm, price)
+      : signPowerExportContract(state, negotiation.cityId, contractMw, contractTerm, price)
+    const after = negotiation.mode === 'import'
+      ? next.cityPowerContracts.length
+      : next.powerExportContracts.length
+    setState(next)
+    if (after > before) setNegotiation(null)
+    else setNegotiation({ ...negotiation, message: 'Could not sign. Check cash, generation, and connector headroom.' })
+  }
+
+  const submitOffer = () => {
+    if (!negotiation) return
+    if (importQuote) {
+      const result = evaluatePowerImportOffer(importQuote, negotiation.offerPrice)
+      if (result.accepted) commitNegotiation(result.agreedPricePerMWh)
+      else setNegotiation({ ...negotiation, counterPrice: result.agreedPricePerMWh, message: 'Utility declined and returned a firm counteroffer.' })
+      return
+    }
+    if (exportQuote) {
+      const result = evaluatePowerExportOffer(exportQuote, negotiation.offerPrice)
+      if (result.accepted) commitNegotiation(result.agreedPricePerMWh)
+      else setNegotiation({ ...negotiation, counterPrice: result.agreedPricePerMWh, message: 'Utility declined your ask and returned its ceiling.' })
+    }
+  }
+
+  const marketPrice = importQuote?.askPricePerMWh ?? exportQuote?.utilityOfferPerMWh ?? 0
+  const sliderMin = negotiation?.mode === 'import' ? marketPrice * 0.78 : marketPrice
+  const sliderMax = negotiation?.mode === 'import'
+    ? marketPrice
+    : (exportQuote?.ceilingPricePerMWh ?? marketPrice) * 1.18
+
+  return (
+    <section className="rounded-2xl border border-mint/25 bg-mint/5 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-[0.8125rem] font-semibold text-bone">Contract desk</h3>
+          <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">
+            Negotiate price and term. Imports require commissioned connector MW inside that city’s grid zone.
+          </p>
+        </div>
+        <span className={`font-mono text-[0.6875rem] ${gridConstrained ? 'text-danger' : 'text-mint'}`}>
+          grid {gridStatus}
+        </span>
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-2">
+        <label className="text-[0.6875rem] text-muted">
+          Requested capacity · {contractMw} MW
+          <input type="range" min={1} max={80} step={1} value={contractMw} onChange={(event) => { setContractMw(Number(event.target.value)); setNegotiation(null) }} className="mt-1 w-full" />
+        </label>
+        <label className="text-[0.6875rem] text-muted">
+          Term · {contractTerm} days
+          <input type="range" min={30} max={180} step={15} value={contractTerm} onChange={(event) => { setContractTerm(Number(event.target.value)); setNegotiation(null) }} className="mt-1 w-full" />
+        </label>
+      </div>
+
+      {negotiation && activeQuote ? (
+        <div className="mt-3 rounded-xl border border-bone/25 bg-void/55 p-3">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <span className={`text-[0.625rem] font-semibold uppercase tracking-wide ${negotiation.mode === 'import' ? 'text-research' : 'text-amber'}`}>
+                {negotiation.mode} negotiation
+              </span>
+              <h4 className="text-[0.8125rem] font-medium text-bone">{activeQuote.cityName}</h4>
+            </div>
+            <button type="button" onClick={() => setNegotiation(null)} className="text-[0.6875rem] text-muted hover:text-bone">Close</button>
+          </div>
+          <div className="mt-2 grid grid-cols-3 gap-1 font-mono text-[0.625rem]">
+            <NegotiationMetric label="Capacity" value={mw(activeQuote.contractMw)} />
+            <NegotiationMetric label="Utility position" value={`${money(marketPrice)}/MWh`} />
+            <NegotiationMetric label="Term" value={`${activeQuote.termDays}d`} />
+          </div>
+          <label className="mt-2 block text-[0.6875rem] text-muted">
+            {negotiation.mode === 'import' ? 'Your bid' : 'Your asking price'} · {money(negotiation.offerPrice)}/MWh
+            <input
+              type="range"
+              min={Math.floor(sliderMin)}
+              max={Math.ceil(sliderMax)}
+              step={1}
+              value={negotiation.offerPrice}
+              onChange={(event) => setNegotiation({ ...negotiation, offerPrice: Number(event.target.value), counterPrice: undefined, message: undefined })}
+              className="mt-1 w-full"
+            />
+          </label>
+          {negotiation.message ? <p className="mt-2 rounded-lg border border-amber/30 bg-amber/10 px-2 py-1.5 text-[0.6875rem] text-amber">{negotiation.message}</p> : null}
+          <div className="mt-2 flex gap-1.5">
+            {negotiation.counterPrice != null ? (
+              <button type="button" onClick={() => commitNegotiation(negotiation.counterPrice!)} className="btn-primary flex-1">
+                Accept {money(negotiation.counterPrice)}/MWh
+              </button>
+            ) : (
+              <button type="button" onClick={submitOffer} className="btn-primary flex-1">Submit offer</button>
+            )}
+            <button type="button" onClick={() => setNegotiation(null)} className="btn-ghost">Walk away</button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="mt-3 space-y-1.5">
+        {cities.map(({ city, distToPlayer, hallsInZone, rivalHallsInZone, genInZone, connectorCount, connectorMw, connectorAvailableMw }) => {
+          const importTerms = powerImportNegotiationQuote(state, city.id, contractMw, contractTerm)
+          const exportTerms = powerExportNegotiationQuote(state, city.id, contractMw, contractTerm)
+          const canImport = (importTerms?.contractMw ?? 0) >= 1
+          const canExport = (exportTerms?.contractMw ?? 0) >= 1
+          return (
+            <article key={city.id} className="rounded-xl border border-line/70 bg-panel-2 px-3 py-2">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <h4 className="text-[0.8125rem] font-medium text-bone">{city.name}</h4>
+                  <p className="font-mono text-[0.625rem] text-muted">{city.industry} · {hallsInZone} halls · {mw(genInZone)} gen · {rivalHallsInZone} rival halls</p>
+                </div>
+                <span className="font-mono text-[0.625rem] text-muted">{distToPlayer == null ? 'no campus' : `${distToPlayer} tiles`}</span>
+              </div>
+              <div className={`mt-1.5 rounded-md border px-2 py-1 font-mono text-[0.625rem] ${connectorCount > 0 ? 'border-mint/25 bg-mint/5 text-mint' : 'border-amber/25 bg-amber/5 text-amber'}`}>
+                {connectorCount > 0
+                  ? `${connectorCount} grid connector${connectorCount === 1 ? '' : 's'} · ${mw(connectorAvailableMw)} free / ${mw(connectorMw)}`
+                  : 'No grid connector in this city zone'}
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-1.5">
+                <button type="button" disabled={!canImport} onClick={() => startNegotiation('import', city.id)} className="rounded-lg border border-research/30 bg-research/10 px-2 py-1.5 text-left transition hover:bg-research/15 disabled:cursor-not-allowed disabled:opacity-40">
+                  <span className="block text-[0.6875rem] font-medium text-research">Negotiate import</span>
+                  <span className="font-mono text-[0.625rem] text-muted">{canImport ? `${mw(importTerms!.contractMw)} connector cap` : 'connector required'}</span>
+                </button>
+                <button type="button" disabled={!canExport} onClick={() => startNegotiation('export', city.id)} className="rounded-lg border border-amber/30 bg-amber/10 px-2 py-1.5 text-left transition hover:bg-amber/15 disabled:cursor-not-allowed disabled:opacity-40">
+                  <span className="block text-[0.6875rem] font-medium text-amber">Negotiate export</span>
+                  <span className="font-mono text-[0.625rem] text-muted">{canExport ? `${mw(exportTerms!.contractMw)} surplus` : 'generation required'}</span>
+                </button>
+              </div>
+            </article>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
+function NegotiationMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="rounded-md bg-panel-2 px-2 py-1.5 text-muted">
+      <span className="block text-[0.5625rem]">{label}</span>
+      <strong className="text-bone">{value}</strong>
+    </span>
+  )
+}
+
+function ContractRow({ direction, name, mwValue, price, days, onBreak }: { direction: 'Import' | 'Export'; name: string; mwValue: number; price: number; days: number; onBreak: () => void }) {
+  return (
+    <div className="flex items-center justify-between gap-2 rounded-lg border border-line/70 bg-void/40 px-2.5 py-2">
+      <div className="min-w-0">
+        <span className={`mr-2 text-[0.625rem] font-semibold uppercase ${direction === 'Import' ? 'text-research' : 'text-mint'}`}>{direction}</span>
+        <span className="text-[0.75rem] text-bone">{name}</span>
+        <p className="font-mono text-[0.625rem] text-muted">{mw(mwValue)} · {money(price)}/MWh · {days}d left</p>
+      </div>
+      <button type="button" onClick={onBreak} className="shrink-0 text-[0.6875rem] text-danger hover:underline">Break</button>
     </div>
   )
+}
+
+function Mini({ label, value, accent = 'text-bone' }: { label: string; value: string; accent?: string }) {
+  return <div className="rounded-lg border border-line bg-panel-2 px-2 py-1.5"><div className="text-[0.625rem] text-muted">{label}</div><div className={`mt-0.5 font-mono text-[0.75rem] font-medium ${accent}`}>{value}</div></div>
 }

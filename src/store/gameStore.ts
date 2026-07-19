@@ -21,11 +21,20 @@ import {
   applyModelApiMarkup,
 } from '../sim/systems/training'
 import {
+  cancelSafetyCampaign,
+  startSafetyCampaign,
+} from '../sim/systems/safetyCampaigns'
+import {
   cancelRackOrder,
   orderRacksIntoDc,
   sellRacksFromDc,
 } from '../sim/systems/dcRacks'
-import { autoBalanceHosting, fillAllAvailableRackBays } from '../sim/systems/hosting'
+import {
+  autoBalanceHosting,
+  deployRackBatchAcrossHalls,
+  fillAllAvailableRackBays,
+  type RackDeploymentTarget,
+} from '../sim/systems/hosting'
 import {
   placeBuilding,
   upgradeBuilding,
@@ -124,6 +133,7 @@ interface GameStore {
   activePanel: PanelId
   selectedTile: { x: number; y: number } | null
   mapFocusRequest: { x: number; y: number; sequence: number } | null
+  researchFocusRequest: { nodeId: string; sequence: number } | null
   buildMode: BuildKind | null
   /** Left workspace drawer open */
   leftRailOpen: boolean
@@ -135,8 +145,11 @@ interface GameStore {
   /** In-run pause / save-load menu */
   pauseMenuOpen: boolean
   setPanel: (p: PanelId) => void
-  /** Open Campus → Sites (map) and expand the left rail. */
+  /** Open Infrastructure → Overview (map) and expand the left rail. */
   openSites: () => void
+  openInfrastructureOverview: () => void
+  /** Open Research, select the requested method, and center it in the tree. */
+  openResearchNode: (nodeId: string) => void
   /** Open Fleet → Racks and expand the left rail (never switches to Sites). */
   openFleet: () => void
   selectTile: (x: number, y: number | null) => void
@@ -175,6 +188,12 @@ interface GameStore {
   setModelApiPrice: (id: string, price: number | null) => void
   setModelApiInOut: (id: string, priceIn: number | null, priceOut: number | null) => void
   applyModelApiMarkup: (id: string, markupPct: number) => void
+  startSafetyCampaign: (
+    modelId: string,
+    intensity: import('../sim/types').SafetyCampaignIntensity,
+    researchers: number,
+  ) => void
+  cancelSafetyCampaign: () => void
   /** Order complete racks into a data hall (x,y). */
   orderRacks: (x: number, y: number, skuId: string, count: number) => void
   /** Sell live racks from a hall to free bays / recoup cash. */
@@ -184,6 +203,7 @@ interface GameStore {
   autoBalanceHosting: () => void
   /** Queue racks to reserve every free bay in every completed data hall. */
   fillAllAvailableRackBays: () => void
+  deployRackBatch: (skuId: string, targets: RackDeploymentTarget[], count: number) => void
   setPricing: (p: Partial<ProductPricing>) => void
   setActiveModel: (id: string) => void
   createPlan: (input: {
@@ -359,6 +379,7 @@ function applyLoadedState(state: SimState) {
     activePanel: 'stats' as PanelId,
     selectedTile: null,
     mapFocusRequest: null,
+    researchFocusRequest: null,
     buildMode: null,
     leftRailOpen: false,
     commandDockOpen: false,
@@ -379,6 +400,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
   activePanel: 'stats',
   selectedTile: null,
   mapFocusRequest: null,
+  researchFocusRequest: null,
   buildMode: null,
   leftRailOpen: true,
   commandDockOpen: true,
@@ -400,6 +422,24 @@ export const useGameStore = create<GameStore>((set, get) => ({
       activePanel: 'map',
       leftRailOpen: true,
     }),
+
+  openInfrastructureOverview: () =>
+    set({
+      activePanel: 'map',
+      leftRailOpen: true,
+      buildMode: null,
+    }),
+
+  openResearchNode: (nodeId) =>
+    set((store) => ({
+      activePanel: 'research',
+      leftRailOpen: true,
+      buildMode: null,
+      researchFocusRequest: {
+        nodeId,
+        sequence: (store.researchFocusRequest?.sequence ?? 0) + 1,
+      },
+    })),
 
   openFleet: () =>
     set({
@@ -595,6 +635,10 @@ export const useGameStore = create<GameStore>((set, get) => ({
     set((st) => ({ state: setModelApiInOut(st.state, id, priceIn, priceOut) })),
   applyModelApiMarkup: (id, markupPct) =>
     set((st) => ({ state: applyModelApiMarkup(st.state, id, markupPct) })),
+  startSafetyCampaign: (modelId, intensity, researchers) =>
+    set((st) => ({ state: startSafetyCampaign(st.state, { modelId, intensity, researchers }) })),
+  cancelSafetyCampaign: () =>
+    set((st) => ({ state: cancelSafetyCampaign(st.state) })),
 
   orderRacks: (x, y, skuId, count) =>
     set((st) => ({ state: orderRacksIntoDc(st.state, x, y, skuId, count) })),
@@ -605,6 +649,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
   autoBalanceHosting: () => set((st) => ({ state: autoBalanceHosting(st.state) })),
   fillAllAvailableRackBays: () =>
     set((st) => ({ state: fillAllAvailableRackBays(st.state) })),
+  deployRackBatch: (skuId, targets, count) =>
+    set((st) => ({ state: deployRackBatchAcrossHalls(st.state, skuId, targets, count) })),
 
   setPricing: (p) =>
     set((st) => {
@@ -753,6 +799,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       lifecycleError: null,
       selectedTile: null,
       mapFocusRequest: null,
+      researchFocusRequest: null,
       buildMode: null,
       pauseMenuOpen: false,
     })
@@ -792,6 +839,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
         activePanel: 'stats',
         selectedTile: null,
         mapFocusRequest: null,
+        researchFocusRequest: null,
         buildMode: null,
         // Map-first: drawers start collapsed (icons only); Q / click opens workspace
         leftRailOpen: false,

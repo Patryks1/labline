@@ -60,6 +60,7 @@ import {
 import { lqSynthCapabilityMult, normalizeWeights } from '../balance/data'
 import { createDataManifest } from './dataAssets'
 import { modelStackModifiers, sanitizeModelStack } from '../balance/modelStack'
+import { normalizeModelEvaluations } from '../balance/evaluationSuites'
 
 const POST_TRAIN_ORDER: PostTrainStage[] = ['none', 'sft', 'rlhf', 'process', 'tools']
 
@@ -99,6 +100,9 @@ export function estimateTrainingCost(
 export function startTraining(state: SimState, opts: StartTrainingOpts): SimState {
   if (state.player.trainingJob) {
     return withAlert(state, 'warn', 'A training job is already running.')
+  }
+  if (state.player.safetyCampaign) {
+    return withAlert(state, 'warn', 'Finish or cancel the active safety campaign first.')
   }
 
   const mode = opts.mode ?? 'pretrain'
@@ -380,6 +384,9 @@ export function startTraining(state: SimState, opts: StartTrainingOpts): SimStat
     dataManifestId: manifestSnapshot.manifest.id,
     integratedMethods: [...state.player.researchUnlocked].sort(),
     modelStack,
+    dataQualityByDomain: consume.domainQuality,
+    lowQualityShareByDomain: consume.lowQualityShareByDomain,
+    syntheticProvenance: consume.syntheticProvenance,
   }
 
   void baseContinueCap
@@ -1060,6 +1067,12 @@ function buildModelFromJob(
     unlocked: state.player.researchUnlocked,
     postTrain: job.postTrain,
     extras,
+    reasoningEnabled: stackModifiers.reasoningEnabled,
+    toolsEnabled: jobIo.tools > 0,
+    imageDataQualityFactor: (job.dataQualityByDomain?.image ?? job.dataQualityUsed ?? 50) / 100,
+    healthLowQualityShare: job.lowQualityShareByDomain?.health ?? job.synthLqShare ?? 0,
+    scienceDataQuality: job.dataQualityByDomain?.science ?? job.dataQualityUsed,
+    chatDataQuality: job.dataQualityByDomain?.chat ?? job.dataQualityUsed,
   })
 
   // Keep capability consistent with scale (domain mix only mild nudge)
@@ -1218,7 +1231,7 @@ function buildModelFromJob(
     quality,
   })
 
-  return {
+  return normalizeModelEvaluations({
     id:
       job.mode === 'continue' && continueBase
         ? continueBase.id
@@ -1293,7 +1306,13 @@ function buildModelFromJob(
     dataManifestId: job.dataManifestId ?? continueBase?.dataManifestId,
     integratedMethods: job.integratedMethods ?? continueBase?.integratedMethods ?? [],
     modelStack: job.modelStack ?? continueBase?.modelStack ?? [],
-  }
+    reasoningEnabled: stackModifiers.reasoningEnabled,
+    revision: continueBase?.revision ?? 1,
+    safetyTraining: continueBase?.safetyTraining,
+    dataQualityByDomain: job.dataQualityByDomain ?? continueBase?.dataQualityByDomain,
+    lowQualityShareByDomain: job.lowQualityShareByDomain ?? continueBase?.lowQualityShareByDomain,
+    syntheticProvenance: job.syntheticProvenance ?? continueBase?.syntheticProvenance,
+  })
 }
 
 function clamp(n: number, lo = 0, hi = 100) {

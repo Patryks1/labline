@@ -36,6 +36,7 @@ import {
   repayDebt as repayTypedDebt,
   requestEquityOffers,
 } from '../../../sim/systems/capital'
+import type { BankingProduct } from '../../../sim/systems/capital'
 import { valuationDrivers } from '../../../sim/systems/victory'
 import {
   marketingBudgetCeiling,
@@ -97,7 +98,6 @@ export function OrgPanel() {
     'staff' | 'funding' | 'marketing' | 'governance'
   >('staff')
   const [capitalView, setCapitalView] = useState<'ownership' | 'credit'>('ownership')
-  const [typedDebtAmount, setTypedDebtAmount] = useState(2_000_000)
   const [buybackPct, setBuybackPct] = useState(1)
   const capital = useMemo(() => capitalSnapshot(state), [state])
   const equityOffers = useMemo(() => requestEquityOffers(state), [state])
@@ -431,44 +431,23 @@ export function OrgPanel() {
           </div>
 
           <div className="space-y-2 rounded-lg border border-amber/20 bg-amber/5 p-2">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex items-end justify-between gap-2">
               <div>
-                <h4 className="text-[0.6875rem] font-medium uppercase tracking-wider text-muted">Banking desk</h4>
-                <p className="mt-0.5 text-[0.625rem] text-muted">Limits scale with revenue, assets, and live company value.</p>
+                <h4 className="text-[0.6875rem] font-medium uppercase tracking-wider text-muted">Financing offers</h4>
+                <p className="mt-0.5 max-w-[34rem] text-[0.625rem] leading-snug text-muted">
+                  Lenders price each offer from current revenue, assets, and company value. Terms refresh as the business changes.
+                </p>
               </div>
-              <input
-                type="number"
-                min={100_000}
-                step={100_000}
-                value={typedDebtAmount}
-                onChange={(event) => setTypedDebtAmount(Math.max(100_000, Number(event.target.value) || 100_000))}
-                className="w-28 rounded border border-line bg-void px-1.5 py-1 font-mono text-[0.6875rem] text-bone"
-              />
+              <span className="shrink-0 font-mono text-[0.5625rem] uppercase tracking-wider text-amber">live desk</span>
             </div>
-            <div className="space-y-1">
-              {bankProducts.map((product) => (
-                <div key={product.kind} className="rounded-lg border border-line/70 bg-void/35 p-2">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="text-[0.75rem] text-bone">{product.label}</div>
-                      <div className="font-mono text-[0.625rem] text-muted">
-                        {(product.apr * 100).toFixed(1)}% APR · {(product.termDays / 365).toFixed(1)}y · line {money(product.available)}
-                      </div>
-                      <div className="mt-0.5 text-[0.625rem] leading-snug text-muted">{product.purpose}</div>
-                    </div>
-                    <button
-                      type="button"
-                      disabled={product.available < 100_000}
-                      onClick={() => setState(applyForDebt(state, product.kind, typedDebtAmount))}
-                      className="shrink-0 rounded border border-amber/30 px-2 py-1 font-mono text-[0.6875rem] text-amber hover:bg-amber/10 disabled:opacity-35"
-                    >
-                      Fund {money(Math.min(typedDebtAmount, product.available))}
-                    </button>
-                  </div>
-                  <div className="mt-1 border-t border-line/50 pt-1 font-mono text-[0.5625rem] text-muted">
-                    Covenant · {product.covenant}
-                  </div>
-                </div>
+            <div className="space-y-1.5">
+              {bankProducts.map((product, index) => (
+                <BankingOfferCard
+                  key={product.kind}
+                  product={product}
+                  sequence={index + 1}
+                  onAccept={(amount) => setState(applyForDebt(state, product.kind, amount))}
+                />
               ))}
             </div>
             {(state.player.capital?.debt ?? []).map((debt) => (
@@ -849,6 +828,90 @@ export function OrgPanel() {
   )
 }
 
+const BANKING_OFFER_PROFILE: Record<
+  BankingProduct['kind'],
+  { name: string; share: number }
+> = {
+  revolver: { name: 'Operating liquidity line', share: 0.35 },
+  equipment: { name: 'Fleet expansion facility', share: 0.6 },
+  project_finance: { name: 'Campus construction note', share: 0.5 },
+  venture_debt: { name: 'Frontier runway facility', share: 0.3 },
+  bond: { name: 'Institutional growth bond', share: 0.25 },
+}
+
+function bankingOfferAmount(product: BankingProduct): number {
+  if (product.available < 100_000) return 0
+  const proposed = Math.floor((product.available * BANKING_OFFER_PROFILE[product.kind].share) / 100_000) * 100_000
+  return Math.min(product.available, Math.max(100_000, proposed))
+}
+
+function BankingOfferCard({
+  product,
+  sequence,
+  onAccept,
+}: {
+  product: BankingProduct
+  sequence: number
+  onAccept: (amount: number) => void
+}) {
+  const profile = BANKING_OFFER_PROFILE[product.kind]
+  const principal = bankingOfferAmount(product)
+  const financingCost = principal * product.apr * (product.termDays / 365)
+  const dailyService = product.termDays > 0
+    ? (principal + financingCost) / product.termDays
+    : 0
+  const available = principal >= 100_000
+
+  return (
+    <article className={`overflow-hidden rounded-lg border bg-void/40 transition ${available ? 'border-line/80 hover:border-amber/40' : 'border-line/50 opacity-55'}`}>
+      <div className="flex items-start justify-between gap-2 px-2.5 py-2">
+        <div className="min-w-0">
+          <div className="font-mono text-[0.5625rem] uppercase tracking-wider text-amber">
+            Offer {String(sequence).padStart(2, '0')} · {product.label}
+          </div>
+          <h5 className="mt-0.5 text-[0.75rem] font-medium text-bone">{profile.name}</h5>
+          <p className="mt-0.5 text-[0.625rem] leading-snug text-muted">{product.purpose}</p>
+        </div>
+        <div className="shrink-0 text-right">
+          <div className="font-mono text-[0.8125rem] text-bone">{available ? money(principal) : 'Unavailable'}</div>
+          <div className="text-[0.5625rem] uppercase tracking-wide text-muted">offered principal</div>
+        </div>
+      </div>
+
+      <dl className="grid grid-cols-4 border-y border-line/60 bg-panel-2/45">
+        <OfferTerm label="Rate" value={`${(product.apr * 100).toFixed(1)}% APR`} />
+        <OfferTerm label="Term" value={`${(product.termDays / 365).toFixed(1)} years`} />
+        <OfferTerm label="Total cost" value={available ? money(financingCost) : '—'} />
+        <OfferTerm label="Daily service" value={available ? `${money(dailyService)}/d` : '—'} />
+      </dl>
+
+      <div className="grid grid-cols-[1fr_auto] items-center gap-2 px-2.5 py-2">
+        <div className="min-w-0 text-[0.5625rem] leading-snug text-muted">
+          <span className="block font-mono text-bone">Available line {money(product.available)}</span>
+          <span className="block truncate" title={product.covenant}>Covenant · {product.covenant}</span>
+        </div>
+        <button
+          type="button"
+          disabled={!available}
+          onClick={() => onAccept(principal)}
+          className="shrink-0 rounded border border-amber/35 bg-amber/10 px-2.5 py-1.5 font-mono text-[0.6875rem] text-amber transition hover:border-amber/60 hover:bg-amber/15 active:translate-y-px disabled:cursor-not-allowed disabled:border-line disabled:bg-line/20 disabled:text-muted"
+        >
+          {available ? `Accept ${money(principal)}` : 'Not eligible'}
+        </button>
+      </div>
+    </article>
+  )
+}
+
+function OfferTerm({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 border-r border-line/50 px-2 py-1.5 last:border-r-0">
+      <dt className="truncate text-[0.5rem] uppercase tracking-wider text-muted">{label}</dt>
+      <dd className="truncate font-mono text-[0.625rem] text-bone" title={value}>{value}</dd>
+    </div>
+  )
+}
+
 function TeamBoard({
   staff,
   seats,
@@ -863,6 +926,7 @@ function TeamBoard({
   onSelectRole: (role: StaffRole) => void
 }) {
   const total = staffTotal(staff)
+  const openSeats = Math.max(0, seats - total)
   const roles = [
     ['researcher', 'Research', 'bg-mint', 'text-mint'],
     ['data_processor', 'Data', 'bg-sky-400', 'text-sky-400'],
@@ -891,11 +955,19 @@ function TeamBoard({
             aria-pressed={selectedRole === role}
             onClick={() => onSelectRole(role)}
             className={`${color} min-w-1 transition hover:brightness-125 ${selectedRole === role ? 'ring-1 ring-inset ring-bone' : 'opacity-70'}`}
-            style={{ width: `${total > 0 ? staff[role] / total * 100 : 25}%` }}
+            style={{ width: `${seats > 0 ? staff[role] / seats * 100 : 0}%` }}
           />
         ))}
+        {openSeats > 0 && (
+          <div
+            title={`Empty seats: ${openSeats}`}
+            aria-label={`${openSeats} empty team seats`}
+            className="min-w-1 border-l border-bone/20 bg-line/30"
+            style={{ width: `${seats > 0 ? openSeats / seats * 100 : 100}%` }}
+          />
+        )}
       </div>
-      <div className="grid grid-cols-4 gap-1">
+      <div className="grid grid-cols-5 gap-1">
         {roles.map(([role, label, , dot]) => (
           <button key={role} type="button" onClick={() => onSelectRole(role)} className={`rounded px-1 py-1.5 text-left transition ${selectedRole === role ? 'bg-panel-2 text-bone' : 'text-muted hover:bg-panel-2/60'}`}>
             <span className={`mr-1 ${dot}`}>●</span>
@@ -903,6 +975,11 @@ function TeamBoard({
             <span className="block font-mono text-[0.75rem]">{staff[role]}</span>
           </button>
         ))}
+        <div className="rounded border border-dashed border-line px-1 py-1.5 text-left text-muted" aria-label={`${openSeats} empty seats`}>
+          <span className="mr-1 text-line">○</span>
+          <span className="text-[0.5625rem]">Empty</span>
+          <span className="block font-mono text-[0.75rem] text-bone">{openSeats}</span>
+        </div>
       </div>
     </section>
   )

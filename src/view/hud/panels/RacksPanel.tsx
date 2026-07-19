@@ -10,28 +10,21 @@ import {
   clearSlot,
   designToSku,
   emptyDesign,
-  fleetStats,
   placeModule,
   resolveRackSku,
   saveRackDesign,
 } from '../../../sim/systems/racks'
 import { useGameStore } from '../../../store/gameStore'
 import type { ModuleKind, RackDesign } from '../../../sim/types'
-import { money, num, mw, gb, pf } from '../format'
-import { fleetHostSnapshot } from '../../../sim/systems/hosting'
-import { computeSnapshot } from '../../../sim/tick'
+import { money, num, mw } from '../format'
 import { RackOrderBlock } from './RackOrderBlock'
 import { aggregateEffects } from '../../../sim/systems/research'
 import {
-  dataHallComputeMultiplier,
   isDcAnchor,
   isDcKind,
 } from '../../../sim/systems/map'
 import { BuildingNameField } from '../ui/BuildingNameField'
-import {
-  facilityAnchorTiles,
-  mapTileAtAny,
-} from '../../../sim/systems/worldAccess'
+import { mapTileAtAny } from '../../../sim/systems/worldAccess'
 
 const KIND_ORDER: ModuleKind[] = ['gpu', 'ram', 'cpu', 'cooling', 'psu', 'nic']
 
@@ -45,11 +38,7 @@ export function RacksPanel() {
   const orderRacks = useGameStore((s) => s.orderRacks)
   const sellRacks = useGameStore((s) => s.sellRacks)
   const cancelRackOrder = useGameStore((s) => s.cancelRackOrder)
-  const fillAllAvailableRackBays = useGameStore((s) => s.fillAllAvailableRackBays)
   const setState = (s: typeof state) => useGameStore.setState({ state: s })
-  const snap = computeSnapshot(state)
-  const fleet = fleetStats(state)
-  const host = fleetHostSnapshot(state)
   const discount = aggregateEffects(state.player.researchUnlocked).chipDiscount ?? 0
 
   const catalog = useMemo(() => fullOrderCatalog(state), [state])
@@ -63,31 +52,6 @@ export function RacksPanel() {
     tile.buildingProgress >= tile.buildingTarget
   const usage = isLiveDc ? dcBayUsage(state, tile.x, tile.y) : null
   const installs = isLiveDc ? racksOnDc(state, tile.x, tile.y) : []
-
-  const playerFacilities = facilityAnchorTiles(state, { ownerId: 'player' })
-  const halls = playerFacilities.filter(
-    (t) =>
-      t.owner === 'player' &&
-      isDcKind(t.kind) &&
-      isDcAnchor(t) &&
-      t.buildingProgress >= t.buildingTarget,
-  )
-  const underConstruction = playerFacilities.filter(
-    (t) =>
-      t.owner === 'player' &&
-      t.buildingTarget > 0 &&
-      t.buildingProgress < t.buildingTarget &&
-      // one row per multi-tile campus
-      t.campusRole !== 'pad',
-  )
-  const committedBays = halls.reduce(
-    (sum, hall) => sum + dcBayUsage(state, hall.x, hall.y).used,
-    0,
-  )
-  const availableBays = halls.reduce(
-    (sum, hall) => sum + dcBayUsage(state, hall.x, hall.y).free,
-    0,
-  )
 
   const [showDesigner, setShowDesigner] = useState(false)
   const [design, setDesign] = useState<RackDesign>(() => emptyDesign('case_8u', 'My Node'))
@@ -117,150 +81,9 @@ export function RacksPanel() {
       <div>
         <h2 className="hud-panel-title">Racks</h2>
         <p className="hud-panel-sub">
-          Order market or <span className="text-bone">custom blueprint</span> racks into a data
-          hall. Change quantity to see total price, power, and bay usage before you commit.
+          The data center selected on the map. Inspect its contents, order capacity, or manage a
+          custom rack blueprint.
         </p>
-      </div>
-
-      <div className="rounded-2xl border border-line bg-panel-2 p-3 font-mono text-[0.8125rem] space-y-1">
-        <div className="flex justify-between text-muted">
-          <span>Fleet</span>
-          <span className="text-bone">
-            {pf(fleet.flopsPf)} · {gb(fleet.vramGb)} VRAM
-          </span>
-        </div>
-        <div className="flex justify-between text-muted">
-          <span>Host need (admitted load)</span>
-          <span className={host.shortOn !== 'ok' ? 'text-amber' : 'text-bone'}>
-            {pf(host.pfNeed)} · {gb(host.vramNeed)}
-          </span>
-        </div>
-        <div className="flex justify-between text-muted">
-          <span>Bay usage (all halls)</span>
-          <span className="text-bone">
-            {num(committedBays, 0)}/{num(snap.rackCap, 0)}
-          </span>
-        </div>
-        <div className="flex justify-between text-muted">
-          <span>Fleet power draw</span>
-          <span className={snap.throttled ? 'text-danger' : 'text-bone'}>
-            {mw(fleet.mw)} · grid {mw(snap.mwDemand)} / {mw(snap.mwAvailable)}
-          </span>
-        </div>
-        <button
-          type="button"
-          className="mt-1 w-full rounded-full bg-mint/20 py-1.5 text-[0.8125rem] font-medium text-mint disabled:cursor-not-allowed disabled:opacity-40"
-          onClick={() => fillAllAvailableRackBays()}
-          disabled={availableBays <= 0}
-        >
-          Fill all available bays · {num(availableBays, 0)} free
-        </button>
-        <p className="text-[0.6875rem] leading-snug text-muted">{host.recommendedSkuReason}</p>
-      </div>
-
-      {underConstruction.length > 0 && (
-        <div>
-          <h3 className="mb-1.5 text-[0.8125rem] font-medium uppercase tracking-wider text-muted">
-            Under construction
-          </h3>
-          <div className="space-y-1.5">
-            {underConstruction.map((h) => {
-              const left = Math.max(0, h.buildingTarget - h.buildingProgress)
-              const pct =
-                (h.buildingProgress / Math.max(1, h.buildingTarget)) * 100
-              return (
-                <div
-                  key={`build-${h.x},${h.y}`}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => useGameStore.getState().selectTile(h.x, h.y)}
-                  onKeyDown={(event) => {
-                    if (event.target !== event.currentTarget) return
-                    if (event.key !== 'Enter' && event.key !== ' ') return
-                    event.preventDefault()
-                    useGameStore.getState().selectTile(h.x, h.y)
-                  }}
-                  className="w-full rounded-xl border border-amber/30 bg-amber/5 px-3 py-2 text-left transition hover:border-amber/50"
-                >
-                  <div className="flex items-start justify-between gap-2 text-sm">
-                    <div
-                      className="min-w-0 flex-1"
-                      onClick={(e) => e.stopPropagation()}
-                      onPointerDown={(e) => e.stopPropagation()}
-                    >
-                      <BuildingNameField tile={h} compact />
-                    </div>
-                    <span className="shrink-0 font-mono text-[0.75rem] text-amber">{left}d left</span>
-                  </div>
-                  <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-void">
-                    <div className="h-full bg-amber" style={{ width: `${pct}%` }} />
-                  </div>
-                  <div className="mt-0.5 font-mono text-[0.75rem] text-muted">
-                    Day {h.buildingProgress}/{h.buildingTarget}
-                    {h.rackCapacity > 0 ? ` · ${h.rackCapacity} bays when live` : ''}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
-
-      <div>
-        <h3 className="mb-1.5 text-[0.8125rem] font-medium uppercase tracking-wider text-muted">
-          Your data halls
-        </h3>
-        {halls.length === 0 && (
-          <p className="rounded-xl border border-line bg-panel-2 px-3 py-2 text-[0.8125rem] text-muted">
-            No live data halls — open{' '}
-            <button type="button" className="text-mint" onClick={() => useGameStore.getState().openSites()}>
-              Sites
-            </button>{' '}
-            and place a Data hall.
-          </p>
-        )}
-        <div className="space-y-1.5">
-          {halls.map((h) => {
-            const u = dcBayUsage(state, h.x, h.y)
-            const computeMultiplier = dataHallComputeMultiplier(h)
-            const active = isLiveDc && tile!.x === h.x && tile!.y === h.y
-            return (
-              <div
-                key={`${h.x},${h.y}`}
-                role="button"
-                tabIndex={0}
-                onClick={() => useGameStore.getState().selectTile(h.x, h.y)}
-                onKeyDown={(event) => {
-                  if (event.target !== event.currentTarget) return
-                  if (event.key !== 'Enter' && event.key !== ' ') return
-                  event.preventDefault()
-                  useGameStore.getState().selectTile(h.x, h.y)
-                }}
-                className={`w-full rounded-xl border px-3 py-2 text-left transition ${
-                  active ? 'border-mint/50 bg-mint/10' : 'border-line bg-panel-2 hover:border-mint/30'
-                }`}
-              >
-                <div className="flex items-start justify-between gap-2 text-sm">
-                  <div
-                    className="min-w-0 flex-1"
-                    onClick={(e) => e.stopPropagation()}
-                    onPointerDown={(e) => e.stopPropagation()}
-                  >
-                    <BuildingNameField tile={h} compact />
-                  </div>
-                  <span className="shrink-0 font-mono text-[0.75rem] text-muted">
-                    {u.used}/{u.capacity} bays
-                  </span>
-                </div>
-                <div className="mt-0.5 font-mono text-[0.75rem] text-muted">
-                  Live power {mw(u.mwLive)} · {num(u.flopsLive, 2)} PF · {num(u.vramLive, 0)} GB
-                  {computeMultiplier > 1 ? ' · ×2 campus fabric' : ''}
-                  {u.ordered > 0 ? ` · ${u.ordered} on order` : ''}
-                </div>
-              </div>
-            )
-          })}
-        </div>
       </div>
 
       {isLiveDc && usage && (

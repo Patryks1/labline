@@ -17,6 +17,7 @@ import {
   type ScaleInputs,
 } from './modelScaling'
 import { lqSynthCapabilityMult } from './data'
+import { normalizeModelEvaluations } from './evaluationSuites'
 import { suggestApiInOut } from './pricing'
 import {
   backboneFromFamily,
@@ -175,7 +176,7 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
     capability,
   })
 
-  return {
+  return normalizeModelEvaluations({
     id: opts.id,
     name: opts.name,
     family,
@@ -213,5 +214,5 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
     repeatedDataEpochs: opts.repeatedDataEpochs ?? 1,
     outcome,
     openWeights: opts.openWeights ?? false,
-  }
+  })
 }

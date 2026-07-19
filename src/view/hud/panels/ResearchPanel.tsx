@@ -52,6 +52,7 @@ import { money, num } from '../format'
 
 export function ResearchPanel() {
   const state = useGameStore((s) => s.state)
+  const focusRequest = useGameStore((s) => s.researchFocusRequest)
   const setState = useGameStore.setState
   const snap = computeSnapshot(state)
 
@@ -60,6 +61,7 @@ export function ResearchPanel() {
   const [selectedPodId, setSelectedPodId] = useState(
     () => state.player.researchPods?.[0]?.id ?? '',
   )
+  const [highlightedId, setHighlightedId] = useState<string | null>(null)
 
   const active = state.player.activeResearch
   const legacyQueue = state.player.researchQueue
@@ -103,6 +105,21 @@ export function ResearchPanel() {
     return layoutResearchTrunk(filter)
   }, [filter])
   const canvas = useResearchCanvas(layout)
+  const centerResearchNode = canvas.centerNode
+
+  useEffect(() => {
+    if (!focusRequest) return
+    const node = getResearchNode(focusRequest.nodeId)
+    setFilter(node.trunk as ResearchTrunkId)
+    setSelectedId(node.id)
+    setHighlightedId(node.id)
+    const frame = window.requestAnimationFrame(() => centerResearchNode(node.id))
+    const timeout = window.setTimeout(() => setHighlightedId(null), 1800)
+    return () => {
+      window.cancelAnimationFrame(frame)
+      window.clearTimeout(timeout)
+    }
+  }, [centerResearchNode, focusRequest])
 
   const startOrQueue = (id: string) => apply(startResearch(state, id))
 
@@ -470,13 +487,14 @@ export function ResearchPanel() {
                 ? ('queued' as const)
                 : nodeVisualStatus(state, n.id)
             const sel = selectedId === n.id
+            const highlighted = highlightedId === n.id
             return (
               <button
                 key={n.id}
                 type="button"
                 onClick={() => setSelectedId(n.id)}
                 onDoubleClick={() => usesPodPrograms ? apply(queueResearchProgram(state, n.id)) : startOrQueue(n.id)}
-                className={`absolute z-10 rounded-lg border px-2 py-1.5 text-left transition ${nodeClass(st, sel, def.riskLevel)}`}
+                className={`absolute z-10 rounded-lg border px-2 py-1.5 text-left transition ${nodeClass(st, sel, def.riskLevel)} ${highlighted ? 'ring-2 ring-research shadow-[0_0_1.5rem_rgba(147,116,255,0.45)]' : ''}`}
                 style={{
                   left: n.x,
                   top: n.y,
@@ -763,11 +781,28 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
 
   const zoomBy = useCallback((factor: number) => zoomAt(factor), [zoomAt])
 
+  const centerNode = useCallback(
+    (nodeId: string) => {
+      const viewport = viewportRef.current
+      const node = layout.nodes.find((candidate) => candidate.id === nodeId)
+      if (!viewport || !node) return
+      const bounds = viewport.getBoundingClientRect()
+      const scale = Math.max(0.8, Math.min(1.15, viewRef.current.scale))
+      applyView({
+        x: bounds.width / 2 - (node.x + node.w / 2) * scale,
+        y: bounds.height / 2 - (node.y + node.h / 2) * scale,
+        scale,
+      })
+    },
+    [applyView, layout.nodes],
+  )
+
   return {
     viewportRef,
     contentRef,
     zoom,
     fit,
+    centerNode,
     zoomBy,
     onPointerDown,
     onPointerMove,

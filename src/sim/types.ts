@@ -172,6 +172,18 @@ export interface CityPowerContract {
   daysTotal: number
 }
 
+/** Fixed-term sale of player-generated surplus to a metro utility. */
+export interface PowerExportContract {
+  id: string
+  cityId: string
+  cityName: string
+  mw: number
+  pricePerMWh: number
+  daysLeft: number
+  daysTotal: number
+  signedDay: number
+}
+
 /** Long-term utility/PPA instrument; CityPowerContract remains the legacy runtime view. */
 export interface EnergyContract extends CityPowerContract {
   labId: LabId
@@ -315,6 +327,67 @@ export type BenchmarkId =
   | 'safety'
 
 export type BenchmarkScores = Record<BenchmarkId, number>
+
+export type BenchmarkSuiteId =
+  | 'language'
+  | 'image_generation'
+  | 'video_generation'
+  | 'audio_generation'
+  | 'omni_overview'
+
+export type ImageGenerationMetricId =
+  | 'prompt_alignment'
+  | 'aesthetics'
+  | 'typography'
+  | 'subject_consistency'
+  | 'editing_control'
+  | 'image_safety'
+
+export type VideoGenerationMetricId =
+  | 'video_prompt_alignment'
+  | 'visual_quality'
+  | 'temporal_coherence'
+  | 'motion_physics'
+  | 'video_control'
+  | 'video_safety'
+
+export type AudioGenerationMetricId =
+  | 'intelligibility'
+  | 'naturalness'
+  | 'voice_consistency'
+  | 'music_quality'
+  | 'realtime_performance'
+  | 'audio_safety'
+
+export type OmniOverviewMetricId =
+  | 'omni_language'
+  | 'omni_reasoning'
+  | 'omni_tools'
+  | 'omni_image'
+  | 'omni_video'
+  | 'omni_audio'
+  | 'omni_safety'
+
+export type BenchmarkMetricId =
+  | BenchmarkId
+  | ImageGenerationMetricId
+  | VideoGenerationMetricId
+  | AudioGenerationMetricId
+  | OmniOverviewMetricId
+
+export type BenchmarkSuiteScores = Partial<
+  Record<BenchmarkSuiteId, Partial<Record<BenchmarkMetricId, number>>>
+>
+
+export interface EvaluationMetricDriver {
+  positive: string
+  penalty: string
+  ceiling: number
+}
+
+export type EvaluationProfile = Partial<
+  Record<BenchmarkMetricId, EvaluationMetricDriver>
+>
 
 export interface QualityAxes {
   reasoning: number
@@ -807,6 +880,12 @@ export interface Model {
   modalities: Modality[]
   quality: QualityAxes
   benchmarks: BenchmarkScores
+  /** Modality-aware evaluations; benchmarks remains the language compatibility view. */
+  benchmarkSuites?: BenchmarkSuiteScores
+  evaluationProfile?: EvaluationProfile
+  reasoningEnabled?: boolean
+  revision?: number
+  safetyTraining?: SafetyTrainingRecord
   postTrain: PostTrainStage
   trainComputeSpent: number
   releaseDay: number
@@ -868,6 +947,50 @@ export interface Model {
   integratedMethods?: string[]
   /** Research-backed runtime and architecture modules integrated into this build. */
   modelStack?: string[]
+  /** Quality and LQ share captured per corpus domain for reproducible evaluations. */
+  dataQualityByDomain?: Partial<Record<DataDomain, number>>
+  lowQualityShareByDomain?: Partial<Record<DataDomain, number>>
+  syntheticProvenance?: SyntheticFillRecord[]
+}
+
+export interface SyntheticFillRecord {
+  domain: DataDomain
+  teacherModelId?: string
+  teacherName?: string
+  volumeMTok: number
+  quality: number
+  qualityTier: 'hq' | 'lq'
+}
+
+export interface SafetyTrainingRecord {
+  campaigns: number
+  safetyDataMTok: number
+  safetyDataQuality: number
+  cashSpent: number
+  trainingPfSpent: number
+  researchPfSpent: number
+  lastCompletedDay?: number
+  revisions?: { revision: number; day: number; safety: number }[]
+}
+
+export type SafetyCampaignIntensity = 'targeted' | 'standard' | 'frontier'
+
+export interface SafetyCampaign {
+  id: string
+  modelId: string
+  modelName: string
+  intensity: SafetyCampaignIntensity
+  assignedResearchers: number
+  minimumResearchers: number
+  targetTrainingPfDays: number
+  targetResearchPfDays: number
+  progressTrainingPfDays: number
+  progressResearchPfDays: number
+  cashBudget: number
+  cashSpent: number
+  safetyDataMTok: number
+  safetyDataQuality: number
+  startDay: number
 }
 
 export type ResearchPodFocus =
@@ -1016,6 +1139,9 @@ export interface TrainingJob {
   integratedMethods?: string[]
   /** Player-selected model-specific research integrations. */
   modelStack?: string[]
+  dataQualityByDomain?: Partial<Record<DataDomain, number>>
+  lowQualityShareByDomain?: Partial<Record<DataDomain, number>>
+  syntheticProvenance?: SyntheticFillRecord[]
 }
 
 export interface StartTrainingOpts {
@@ -1585,8 +1711,16 @@ export interface ModelFinanceRow {
   capability: number
   apiPricePerMTok: number
   dayApiRevenue: number
+  /** Token-normalized energy, hardware amortization, lease, and bandwidth. */
+  dayApiDirectCogs: number
+  /** Campus and idle-capacity allocation retained for company accounting. */
+  dayApiAllocatedOps: number
   dayApiCogs: number
   dayApiMTok: number
+  /** Revenue less direct token COGS, before company overhead. */
+  dayApiContribution: number
+  /** Served tokens divided by normalized endpoint capacity. */
+  apiCapacityUtilization: number
   daySubRevenue: number
   daySubCogs: number
   dayEnterpriseShare: number
@@ -2054,6 +2188,7 @@ export interface PlayerState {
   researchProgramQueue?: string[]
   models: Model[]
   trainingJob: TrainingJob | null
+  safetyCampaign: SafetyCampaign | null
   pricing: ProductPricing
   finance: LabFinance
   wagesPerDay: number
@@ -2333,6 +2468,8 @@ export interface SimState {
   computeListing: ComputeListing | null
   /** Firm power offtake deals with metros */
   cityPowerContracts: CityPowerContract[]
+  /** Fixed-term contracts selling owned surplus generation to metros. */
+  powerExportContracts: PowerExportContract[]
   /** Lab-neutral physical campus projects and commissioned site shells. */
   siteProjects: SiteProject[]
   siteCapacities: SiteCapacity[]
@@ -2388,6 +2525,10 @@ export interface SimState {
     apiDemandMTok?: number
     apiDayMTok: number
     apiDayRevenue: number
+    /** Direct token cost used for pricing and contribution margin. */
+    apiDayDirectCogs: number
+    /** Serving overhead allocated for reporting, never a list-price floor. */
+    apiDayAllocatedOps: number
     apiDayCogs: number
     /** Per-model API tokens and PF for simultaneous public endpoints. */
     apiModelUsage?: PlanModelUsage[]

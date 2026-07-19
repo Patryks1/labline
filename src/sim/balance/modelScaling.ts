@@ -15,6 +15,7 @@ import type {
   ModelFamily,
   QualityAxes,
 } from '../types'
+import { applyBenchmarkPolicy, inferReasoningEnabled } from './evaluationSuites'
 
 function emptyBenchmarks(): BenchmarkScores {
   return {
@@ -331,6 +332,12 @@ export function scoresFromScale(opts: {
   postTrain?: string
   /** Extra absolute points from research/domain (capped) */
   extras?: Partial<Record<BenchmarkId, number>>
+  reasoningEnabled?: boolean
+  toolsEnabled?: boolean
+  imageDataQualityFactor?: number
+  healthLowQualityShare?: number
+  scienceDataQuality?: number
+  chatDataQuality?: number
 }): BenchmarkScores {
   const { scale, quality, family, unlocked = [], postTrain = 'none', extras = {} } = opts
   const has = (id: string) => unlocked.includes(id)
@@ -373,7 +380,28 @@ export function scoresFromScale(opts: {
     base[id] = clamp100(Math.min(ceil, base[id] + extra))
   }
 
-  return base
+  const reasoningEnabled = opts.reasoningEnabled ?? inferReasoningEnabled({ postTrain })
+  if (reasoningEnabled) {
+    base.math = clamp100(base.math + 8)
+    base.coding = clamp100(base.coding + 5)
+    base.science = clamp100(base.science + 4)
+    base.agents = clamp100(base.agents + 8)
+  }
+
+  return applyBenchmarkPolicy({
+    scores: base,
+    intelligence: scale.intelligence,
+    capability: scale.capability,
+    family,
+    quality,
+    postTrain,
+    reasoningEnabled,
+    toolsEnabled: opts.toolsEnabled ?? (postTrain === 'tools' || family === 'omni'),
+    imageDataQualityFactor: opts.imageDataQualityFactor,
+    healthLowQualityShare: opts.healthLowQualityShare,
+    scienceDataQuality: opts.scienceDataQuality,
+    chatDataQuality: opts.chatDataQuality,
+  })
 }
 
 /** Soft post-train strength 0–1 for scaling. */

@@ -25,8 +25,8 @@ function isTypingTarget(t: EventTarget | null): boolean {
  * Space — pause / play
  * 0–3  — speed (0 pause, 1=1×, 2=2×, 3=5×)
  * +/=  — step one day
- * Q F W E R T Y — Cmd / Fleet / Build / Lab / Tech / Sell / Co.
- * Shift+1–7 — same workspaces
+ * Q E F R T Y — Strategy / Lab / Infra / Build / Market / Company
+ * Shift+1–6 — same workspaces
  * [    — toggle left drawer
  * ]    — toggle command dock
  * Tab  — cycle command dock view (shift reverse)
@@ -73,7 +73,7 @@ export function useHotkeys() {
       if (k === '1' || k === '2' || k === '3') {
         // Digit alone without shift: speed if not held with workspace intent.
         // Workspace uses Digit with optional shift, or letter keys.
-        // Prefer: bare 1/2/3 = speed when not using Shift; Shift+1–5 = groups.
+        // Prefer: bare 1/2/3 = speed when not using Shift; Shift+1–6 = groups.
         if (!e.shiftKey) {
           e.preventDefault()
           const map: Record<string, Speed> = { '1': 1, '2': 2, '3': 5 }
@@ -129,7 +129,7 @@ export function useHotkeys() {
         return
       }
 
-      // Workspace letters from navConfig (Q F W E R T Y …)
+      // Workspace letters from navConfig (Q E F R T Y …)
       const letterHit = NAV_GROUPS.find(
         (g) => g.letter.toLowerCase() === k.toLowerCase(),
       )

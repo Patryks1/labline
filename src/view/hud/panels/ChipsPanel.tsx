@@ -9,6 +9,7 @@ import { getResearchNode } from '../../../sim/balance/research'
 import type { ChipDesignFocus } from '../../../sim/types'
 import { useGameStore } from '../../../store/gameStore'
 import { money, pct } from '../format'
+import { ResearchUnlockLink } from '../ui/ResearchUnlockLink'
 
 const CHIP_FOCUSES: { id: ChipDesignFocus; label: string; detail: string }[] = [
   { id: 'training', label: 'Training', detail: 'More PF, more power' },
@@ -118,6 +119,14 @@ export function ChipsPanel() {
           })}
         </div>
 
+        {CHIP_DESIGN_TECH.some((tech) => !state.player.researchUnlocked.includes(tech.requiredResearch)) ? (
+          <div className="mt-2 grid gap-1 sm:grid-cols-2">
+            {CHIP_DESIGN_TECH.filter((tech) => !state.player.researchUnlocked.includes(tech.requiredResearch)).map((tech) => (
+              <ResearchUnlockLink key={tech.id} nodeId={tech.requiredResearch} label={`Unlock ${tech.name}`} />
+            ))}
+          </div>
+        ) : null}
+
         <button
           type="button"
           className="mt-3 text-[0.75rem] font-medium text-mint hover:underline"
@@ -174,6 +183,9 @@ export function ChipsPanel() {
             ? 'Ready for tape-out. Multi-phase: architecture → tape-out → queue → yield → volume.'
             : startCheck.reason}
         </p>
+        {!state.player.researchUnlocked.includes('si_arch') ? (
+          <ResearchUnlockLink className="mt-2" nodeId="si_arch" label="Open Accelerator Architecture" />
+        ) : null}
       </div>
 
       {(state.player.chips?.length ?? 0) > 0 && (

@@ -1,9 +1,10 @@
 import { useMemo, useState } from 'react'
-import { quoteRackOrder } from '../../../sim/balance/rackSkus'
+import { quoteRackOrder, RACK_SKU_CATALOG } from '../../../sim/balance/rackSkus'
 import { mtokPerDayForSku } from '../../../sim/balance/tokenServe'
 import type { RackSku } from '../../../sim/types'
 import { useGameStore } from '../../../store/gameStore'
 import { money, mw, num } from '../format'
+import { ResearchUnlockLink } from '../ui/ResearchUnlockLink'
 
 type Usage = {
   free: number
@@ -89,6 +90,11 @@ export function RackOrderBlock({
   )
   const latestFill = state.worldMarkets.fills.find(
     (fill) => fill.kind === 'accelerator' && fill.resourceId === sku?.id,
+  )
+  const lockedSkus = RACK_SKU_CATALOG.filter(
+    (candidate) =>
+      candidate.requiresResearch &&
+      !state.player.researchUnlocked.includes(candidate.requiresResearch),
   )
 
   if (!sku || !quote) {
@@ -195,6 +201,19 @@ export function RackOrderBlock({
           )
         })}
       </div>
+
+      {lockedSkus.length > 0 ? (
+        <div className="flex flex-wrap gap-x-3 gap-y-1 rounded-lg border border-line/60 bg-void/35 px-2.5 py-2">
+          {lockedSkus.map((locked) => (
+            <ResearchUnlockLink
+              key={locked.id}
+              compact
+              nodeId={locked.requiresResearch!}
+              label={`Unlock ${locked.name}`}
+            />
+          ))}
+        </div>
+      ) : null}
 
       {/* Live quote — updates with qty */}
       <div className="rounded-xl border border-mint/30 bg-mint/5 p-2.5 font-mono text-[0.75rem]">

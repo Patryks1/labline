@@ -14,6 +14,7 @@ import {
   planApiEquivalentValue,
   planAttractiveness,
   planModelTrafficMix,
+  planOfferingBreadth,
   planPriceTooHighScore,
   planServeModifiers,
   modelForServePrecision,
@@ -851,5 +852,49 @@ describe('API vs sub balance iterations', () => {
 
     // Pre-serve demand must fall when list prices explode
     expect(a.lastMarket.apiDemandMTok ?? 0).toBeGreaterThan(b.lastMarket.apiDemandMTok ?? 0)
+  })
+
+  it('only rewards safe, capable generation models in plan breadth', () => {
+    const state = shipModel(createGame(233), 62)
+    const base = state.player.models[0]!
+    const imageModel: Model = {
+      ...base,
+      id: 'image-model',
+      name: 'Canvas',
+      family: 'diffusion',
+      productPreset: 'image_generation',
+      modalities: ['image'],
+      io: { inputs: { text: 70, image: 50 }, outputs: { image: 78 }, tools: 20 },
+      capability: 70,
+      quality: { ...base.quality, image: 82, reasoning: 55, safety: 70, reliability: 72 },
+      capabilities: base.capabilities
+        ? {
+            ...base.capabilities,
+            domains: { ...base.capabilities.domains, vision: 82 },
+            safety: 70,
+            reliability: 72,
+          }
+        : base.capabilities,
+      benchmarkSuites: undefined,
+    }
+    const plan = { ...state.player.pricing.plans[0]!, modelIds: [base.id, imageModel.id] }
+    const capable = planOfferingBreadth(
+      { ...state, player: { ...state.player, models: [base, imageModel] } },
+      plan,
+    )
+    const unsafeImage = {
+      ...imageModel,
+      quality: { ...imageModel.quality, safety: 10 },
+      capabilities: imageModel.capabilities
+        ? { ...imageModel.capabilities, safety: 10 }
+        : undefined,
+    }
+    const unsafe = planOfferingBreadth(
+      { ...state, player: { ...state.player, models: [base, unsafeImage] } },
+      plan,
+    )
+    expect(capable.score).toBeGreaterThan(0)
+    expect(capable.contributors[0]?.modelId).toBe(imageModel.id)
+    expect(unsafe.score).toBe(0)
   })
 })

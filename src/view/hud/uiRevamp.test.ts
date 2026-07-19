@@ -4,7 +4,7 @@ import { useGameStore } from '../../store/gameStore'
 import { resolveAutoScale } from '../../store/uiStore'
 import { buildObjectives } from './objectives'
 import { FULL_BLEED_MAP_STYLE } from './layout'
-import { panelPresentation } from './navConfig'
+import { groupForPanel, panelPresentation } from './navConfig'
 
 describe('interface scaling', () => {
   it('uses display height and keeps ultrawide 1080p at the base scale', () => {
@@ -22,6 +22,17 @@ describe('workspace presentation', () => {
     expect(panelPresentation('plans')).toBe('workbench')
     expect(panelPresentation('map')).toBe('drawer')
     expect(panelPresentation('power')).toBe('drawer')
+  })
+
+  it('promotes Build to its own top-level workspace', () => {
+    expect(groupForPanel('build').id).toBe('build')
+    expect(groupForPanel('map').items.some((item) => item.id === 'build')).toBe(false)
+  })
+
+  it('routes custom silicon through the combined Hardware workspace', () => {
+    expect(groupForPanel('chips').id).toBe('infrastructure')
+    expect(groupForPanel('chips').items.find((item) => item.id === 'racks')?.label).toBe('Hardware')
+    expect(panelPresentation('chips')).toBe('workbench')
   })
 
   it('keeps the map full-bleed while workspace tracks expand over it', () => {

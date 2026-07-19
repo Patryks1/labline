@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useGameStore } from '../../../store/gameStore'
+import { ResearchUnlockLink } from '../ui/ResearchUnlockLink'
 import {
   DATA_DOMAINS,
   DATA_DOMAIN_META,
@@ -463,6 +464,12 @@ export function DataPanel() {
                 ? `Diverts ${num(grossResearchPoolPf(state) * genShare, 2)} PF continuously · tech keeps ${pct(Math.max(0, techShare - genShare), 0)} · teacher freshness ${pct(teacherFreshness?.freshness ?? 0, 0)}`
                 : 'Locked — queue Mixture Engineering → Data Cleaning → Eval Harness → Synthetic Generators in Research.'}
             </p>
+            {!synthUnlocked ? (
+              <ResearchUnlockLink
+                nodeId="data_synth"
+                label="Open Synthetic Generators research"
+              />
+            ) : null}
             {teacherFreshness && teacherFreshness.capabilityGap > 0.5 && (
               <p className="rounded-lg border border-amber/30 bg-amber/10 px-2 py-1 text-[0.6875rem] text-amber">
                 Teacher trails {teacherFreshness.frontierName} by {teacherFreshness.capabilityGap.toFixed(1)} domain capability. Generated quality will decay until you switch models.

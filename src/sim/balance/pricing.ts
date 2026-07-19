@@ -1,6 +1,8 @@
-import type { Model, ModelFamily, SimState } from '../types'
+import type { BenchmarkSuiteId, Model, ModelFamily, SimState } from '../types'
 import type { ComputeSnapshot } from '../systems/compute'
 import { ECONOMY } from './economy'
+import { getChipDef } from './chips'
+import { normalizeModelEvaluations, suiteComposite } from './evaluationSuites'
 import {
   modelCostMult as tokenModelCostMult,
   suggestApiFromUnitCost,
@@ -36,15 +38,33 @@ export function fullyLoadedApiCostFloor(input: {
     (input.dayCogs ?? 0) > 0 &&
     (input.dayMTok ?? 0) > 0.001
   const live = hasLiveCost ? (input.dayCogs ?? 0) / Math.max(0.001, input.dayMTok ?? 0) : 0
-  const blended = Math.max(marginal, live)
-
-  // 30% input / 70% output mixes back to exactly the blended floor.
+  // Compatibility helper only. Live allocated cost is diagnostic and must not
+  // become a price floor: traffic-dependent overhead creates a feedback loop.
+  const blended = marginal
   return {
     blended,
     costIn: blended * 0.65,
     costOut: blended * 1.15,
-    source: hasLiveCost && live >= marginal ? 'live' : 'marginal',
+    source: 'marginal',
   }
+}
+
+export interface ApiUnitEconomics {
+  directBlended: number
+  directIn: number
+  directOut: number
+  observedAllocatedBlended: number | null
+  allocatedOverheadPerMTok: number
+  directOpsDay: number
+  capacityMTok: number
+  utilization: number
+  valueIndex: number
+  marketReference: number
+  costBand: { low: number; high: number }
+  valueBand: { low: number; high: number }
+  recommendedBand: { low: number; high: number }
+  recommendedPrice: number
+  state: 'efficiency_premium' | 'healthy' | 'uncompetitive_cost' | 'overbuilt_capacity'
 }
 
 export type PricingSignal =
@@ -72,6 +92,178 @@ export interface ApiPeerPrice {
   featureScore: number
   /** Effective endpoint throughput after serving precision. */
   tokPerSec?: number
+  valueIndex?: number
+  kind?: string
+}
+
+function clamp(n: number, lo = 0, hi = 100): number {
+  return Math.max(lo, Math.min(hi, n))
+}
+
+export function apiModelKind(model: Pick<Model, 'family' | 'productPreset' | 'io'>): string {
+  if (model.family === 'video' || (model.io?.outputs.video ?? 0) > 0) return 'video'
+  if (model.family === 'diffusion' || (model.io?.outputs.image ?? 0) > 0) return 'image'
+  if (model.productPreset === 'audio' || (model.io?.outputs.audio ?? 0) > 0) return 'audio'
+  if (model.family === 'omni' || model.productPreset === 'omni') return 'omni'
+  return 'language'
+}
+
+function primarySuiteId(model: Model): BenchmarkSuiteId {
+  if (model.family === 'omni' || model.productPreset === 'omni') return 'omni_overview'
+  if (model.family === 'video' || (model.io?.outputs.video ?? 0) > 0) return 'video_generation'
+  if (model.family === 'diffusion' || (model.io?.outputs.image ?? 0) > 0) return 'image_generation'
+  if (model.productPreset === 'audio' || (model.io?.outputs.audio ?? 0) > 0) return 'audio_generation'
+  return 'language'
+}
+
+/** Customer value, deliberately independent from compute cost. */
+export function apiModelValueIndex(source: Model): number {
+  const model = normalizeModelEvaluations(source)
+  const suite = suiteComposite(model.benchmarkSuites?.[primarySuiteId(model)])
+  const speed = model.serviceProfile?.interactiveTokPerSec ?? 52 * model.tokPerSecMult
+  const speedScore = clamp(Math.log10(Math.max(1, speed) + 9) * 28)
+  const toolsScore = clamp(
+    ((model.io?.tools ?? 0) > 0 || model.modalities.includes('tools') ? 72 : 20) +
+      Math.max(0, model.modalities.length - 1) * 6,
+  )
+  return clamp(
+    model.capability * 0.5 +
+      suite * 0.2 +
+      model.quality.reliability * 0.1 +
+      model.quality.safety * 0.1 +
+      speedScore * 0.05 +
+      toolsScore * 0.05,
+    5,
+    100,
+  )
+}
+
+export function apiMarketReference(valueIndex: number, peers: ApiPeerPrice[]): number {
+  const normalized = peers
+    .filter((peer) => peer.price > 0)
+    .map((peer) => {
+      const peerValue = peer.valueIndex ?? apiDemandQuality(peer)
+      return peer.price * (valueIndex / Math.max(5, peerValue))
+    })
+  return median(normalized) ?? 0.35 * Math.exp((valueIndex - 20) / 18)
+}
+
+export function apiPriceRecommendation(input: {
+  directCost: number
+  valueIndex: number
+  peers: ApiPeerPrice[]
+  allocatedOverheadPerMTok?: number
+}): Pick<
+  ApiUnitEconomics,
+  'marketReference' | 'costBand' | 'valueBand' | 'recommendedBand' | 'recommendedPrice' | 'state'
+> {
+  const direct = Math.max(0.005, input.directCost)
+  const marketReference = Math.max(0.005, apiMarketReference(input.valueIndex, input.peers))
+  const costBand = { low: direct * 1.4, high: direct * 1.8 }
+  const valueBand = { low: marketReference * 0.85, high: marketReference * 1.15 }
+  let recommendedBand: { low: number; high: number }
+  let state: ApiUnitEconomics['state']
+  if (costBand.low > valueBand.high) {
+    recommendedBand = { low: costBand.low, high: costBand.low }
+    state = 'uncompetitive_cost'
+  } else if (valueBand.low > costBand.high) {
+    recommendedBand = valueBand
+    state = 'efficiency_premium'
+  } else {
+    recommendedBand = {
+      low: Math.max(costBand.low, valueBand.low),
+      high: Math.min(costBand.high, valueBand.high),
+    }
+    state = 'healthy'
+  }
+  const overhead = Math.max(0, input.allocatedOverheadPerMTok ?? 0)
+  if (state !== 'uncompetitive_cost' && overhead > direct * 8) state = 'overbuilt_capacity'
+  return {
+    marketReference,
+    costBand,
+    valueBand,
+    recommendedBand,
+    recommendedPrice: (recommendedBand.low + recommendedBand.high) / 2,
+    state,
+  }
+}
+
+/**
+ * Authoritative player endpoint economics. Pricing uses normalized direct
+ * capacity cost; volatile allocated campus overhead remains diagnostic only.
+ */
+export function deriveApiUnitEconomics(input: {
+  state: SimState
+  snap: ComputeSnapshot
+  model: Model
+  serveModel?: Model
+  energyPricePerMWh: number
+  dayCogs?: number
+  dayMTok?: number
+  peers?: ApiPeerPrice[]
+}): ApiUnitEconomics {
+  const serveModel = input.serveModel ?? input.model
+  const allocation = input.state.player.allocation
+  const inferShare = Math.max(
+    0.05,
+    allocation.inference / Math.max(0.01, allocation.training + allocation.inference + allocation.research),
+  )
+  const energyDay = Math.max(0, input.snap.mwDemand) * 24 * input.energyPricePerMWh * inferShare
+  let capital = 0
+  for (const rack of input.state.player.rackFleet ?? []) {
+    if (rack.status === 'live') capital += Math.max(0, rack.paidEach) * Math.max(0, rack.count)
+  }
+  for (const inventory of input.state.player.chips ?? []) {
+    try {
+      capital += Math.max(0, inventory.count) * Math.max(0, getChipDef(inventory.defId).price)
+    } catch {
+      capital += Math.max(0, inventory.count) * 32_000
+    }
+  }
+  const amortDay = (capital / ECONOMY.chipAmortDays) * inferShare
+  const leaseDay = Math.max(0, input.state.player.computeLeaseCostToday ?? 0) * inferShare
+  const directOpsDay = energyDay + amortDay + leaseDay
+  const capacityMTok = Math.max(
+    0.25,
+    tokensPerDayFromSnapshotPrecise(
+      input.snap,
+      serveModel,
+      input.state.player.servingEfficiency,
+      inferShare,
+    ),
+  )
+  const directBlended = Math.max(0.005, directOpsDay / capacityMTok + ECONOMY.bandwidthPerMTok)
+  const directIn = directBlended * 0.65
+  const directOut = directBlended * 1.15
+  const hasObserved =
+    Number.isFinite(input.dayCogs) && Number.isFinite(input.dayMTok) &&
+    (input.dayCogs ?? 0) > 0 && (input.dayMTok ?? 0) > 0.001
+  const observedAllocatedBlended = hasObserved
+    ? (input.dayCogs ?? 0) / Math.max(0.001, input.dayMTok ?? 0)
+    : null
+  const allocatedOverheadPerMTok = Math.max(0, (observedAllocatedBlended ?? directBlended) - directBlended)
+  const utilization = Math.max(0, Math.min(1, (input.dayMTok ?? 0) / capacityMTok))
+  const valueIndex = apiModelValueIndex(serveModel)
+  const kind = apiModelKind(serveModel)
+  const peers = (input.peers ?? []).filter((peer) => !peer.kind || peer.kind === kind)
+  const recommendation = apiPriceRecommendation({
+    directCost: directBlended,
+    valueIndex,
+    peers,
+    allocatedOverheadPerMTok,
+  })
+  return {
+    directBlended,
+    directIn,
+    directOut,
+    observedAllocatedBlended,
+    allocatedOverheadPerMTok,
+    directOpsDay,
+    capacityMTok,
+    utilization,
+    valueIndex,
+    ...recommendation,
+  }
 }
 
 /**
@@ -82,7 +274,9 @@ export function apiDemandQuality(input: {
   capability: number
   featureScore: number
   tokPerSec?: number
+  valueIndex?: number
 }): number {
+  if (input.valueIndex != null) return Math.max(5, input.valueIndex)
   const speedBonus = Math.log10(Math.max(1, input.tokPerSec ?? 1) + 9) * 4
   return Math.max(10, input.capability + input.featureScore * 0.22 + speedBonus)
 }
@@ -271,7 +465,11 @@ export function serveInfraCost(
     if (r.status === 'live') capital += r.paidEach * r.count
   }
   for (const inv of state.player.chips) {
-    capital += inv.count * 32_000
+    try {
+      capital += inv.count * getChipDef(inv.defId).price
+    } catch {
+      capital += inv.count * 32_000
+    }
   }
   const amortDay = (capital / ECONOMY.chipAmortDays) * inferShare
   const fixedDay = energyDay + amortDay
@@ -358,7 +556,6 @@ export function suggestApiInOut(opts: {
   }
   const sug = suggestApiFromUnitCost({
     costPerMTok: unit,
-    capability: opts.capability,
     markupPct: opts.markupPct,
   })
   return {

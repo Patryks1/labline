@@ -10,6 +10,7 @@ export interface ModelStackModule {
   hostingMult: number
   speedMult: number
   capabilityBonus: number
+  reasoningEnabled?: boolean
 }
 
 export const MODEL_STACK_MODULES: readonly ModelStackModule[] = [
@@ -53,6 +54,13 @@ export const MODEL_STACK_MODULES: readonly ModelStackModule[] = [
     description: 'Route tokens evenly so sparse experts learn and serve well.', families: ['moe'],
     trainCostMult: 0.9, hostingMult: 0.88, speedMult: 1.08, capabilityBonus: 1,
   },
+  {
+    id: 'align_process', name: 'Reasoning Training', focus: 'Intelligence',
+    description: 'Process rewards teach the model to plan and verify intermediate steps.',
+    families: ['dense', 'moe', 'omni', 'embedding'],
+    trainCostMult: 1.15, hostingMult: 1.04, speedMult: 0.92, capabilityBonus: 0.8,
+    reasoningEnabled: true,
+  },
 ] as const
 
 export function modelStackModulesForFamily(family: ModelFamily): readonly ModelStackModule[] {
@@ -89,8 +97,9 @@ export function modelStackModifiers(selected: readonly string[], family: ModelFa
           hostingMult: result.hostingMult * module.hostingMult,
           speedMult: result.speedMult * module.speedMult,
           capabilityBonus: result.capabilityBonus + module.capabilityBonus,
+          reasoningEnabled: result.reasoningEnabled || module.reasoningEnabled === true,
         }
       : result,
-    { trainCostMult: 1, hostingMult: 1, speedMult: 1, capabilityBonus: 0 },
+    { trainCostMult: 1, hostingMult: 1, speedMult: 1, capabilityBonus: 0, reasoningEnabled: false },
   )
 }

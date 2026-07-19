@@ -5,7 +5,11 @@ import { tickTraining } from './systems/training'
 import { tickChipDeliveries } from './systems/chips'
 import { tickRackDeliveries } from './systems/dcRacks'
 import { tickMap } from './systems/map'
-import { maybeListRivalHalls, tickCityPowerContracts } from './systems/facilities'
+import {
+  maybeListRivalHalls,
+  tickCityPowerContracts,
+  tickPowerExportContracts,
+} from './systems/facilities'
 import { tickComputeMarket } from './systems/computeMarket'
 import { tickComputeContracts } from './systems/computeContracts'
 import { tickMarket } from './systems/market'
@@ -26,6 +30,7 @@ import { tickEvaluations } from './systems/evaluations'
 import { tickProgression } from './systems/progression'
 import { boundHistories } from './systems/history'
 import { tickResearchPrograms } from './systems/researchPrograms'
+import { tickSafetyCampaign } from './systems/safetyCampaigns'
 import { tickExternalities } from './systems/externalities'
 import { tickAutomation } from './systems/automation'
 import { tickEnergyContracts, tickSiteProjects } from './systems/siteEnergy'
@@ -96,6 +101,7 @@ export function tickDay(state: SimState): SimState {
   s = tickCityGrowth(s)
   s = maybeListRivalHalls(s)
   s = tickCityPowerContracts(s)
+  s = tickPowerExportContracts(s)
   s = tickSiteProjects(s)
 
   // 6. Both controller types advance data, research, and training from the
@@ -105,6 +111,7 @@ export function tickDay(state: SimState): SimState {
   s = tickResearch(s)
   s = tickResearchPrograms(s)
   s = tickTraining(s)
+  s = tickSafetyCampaign(s)
 
   // 7–8. Resolve unconstrained demand, capacity shortages, and settlement.
   s = tickMarket(s)

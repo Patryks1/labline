@@ -29,6 +29,88 @@ export interface ModelHostNeed {
   note: string
 }
 
+export interface RackDeploymentTarget {
+  x: number
+  y: number
+}
+
+export interface RackDeploymentQuote {
+  skuId: string
+  rackUnits: number
+  selectedHalls: number
+  freeBays: number
+  fillAllRacks: number
+  marketAvailable: number
+  affordableRacks: number
+  maxRacks: number
+  canFillAll: boolean
+  reservePerRack: number
+}
+
+/** Aggregate quote for a multi-hall order. Supply and cash are capped once for the whole batch. */
+export function quoteRackDeployment(
+  state: SimState,
+  skuId: string,
+  targets: RackDeploymentTarget[],
+): RackDeploymentQuote {
+  const sku = resolveRackSku(skuId, state.player.rackDesigns)
+  const rackUnits = Math.max(1, sku.rackUnits)
+  let freeBays = 0
+  let fillAllRacks = 0
+  let selectedHalls = 0
+  for (const target of targets) {
+    const hall = facilityAnchorTiles(state, { ownerId: 'player' }).find(
+      (tile) => tile.x === target.x && tile.y === target.y,
+    )
+    if (!hall || !isDcKind(hall.kind) || !isDcAnchor(hall) || hall.buildingProgress < hall.buildingTarget) continue
+    const free = dcBayUsage(state, hall.x, hall.y).free
+    selectedHalls += 1
+    freeBays += free
+    fillAllRacks += Math.floor(free / rackUnits)
+  }
+  const supply = state.worldMarkets.accelerators[skuId]
+  const marketAvailable = Math.max(0, Math.floor(supply?.available ?? fillAllRacks))
+  const reservePerRack = Math.max(1, (supply?.reserveUnitPrice ?? sku.price) * 1.08)
+  const affordableRacks = Math.max(0, Math.floor(state.player.cash / reservePerRack))
+  const maxRacks = Math.max(0, Math.min(fillAllRacks, marketAvailable, affordableRacks))
+  return {
+    skuId,
+    rackUnits,
+    selectedHalls,
+    freeBays,
+    fillAllRacks,
+    marketAvailable,
+    affordableRacks,
+    maxRacks,
+    canFillAll: fillAllRacks > 0 && maxRacks >= fillAllRacks,
+    reservePerRack,
+  }
+}
+
+/** Submit one supply-aware batch and distribute it across the selected halls. */
+export function deployRackBatchAcrossHalls(
+  state: SimState,
+  skuId: string,
+  targets: RackDeploymentTarget[],
+  requestedRacks: number,
+): SimState {
+  const quote = quoteRackDeployment(state, skuId, targets)
+  let remaining = Math.min(Math.max(0, Math.floor(requestedRacks)), quote.maxRacks)
+  if (remaining <= 0) return state
+  let next = state
+  for (const target of targets) {
+    if (remaining <= 0) break
+    const free = dcBayUsage(next, target.x, target.y).free
+    const count = Math.min(remaining, Math.floor(free / quote.rackUnits))
+    if (count <= 0) continue
+    const before = next.worldMarkets.orders.length
+    next = orderRacksIntoDc(next, target.x, target.y, skuId, count)
+    if (next.worldMarkets.orders.length <= before) break
+    remaining -= count
+  }
+  return next
+}
+
 /** Hosting shape from model size — used for UI + auto-balance. */
 export function modelHostNeed(m: Model): ModelHostNeed {
   const vramGb = modelVramGb(m.paramsB, m.activeParamsB, m.family)

@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useGameStore } from '../../../store/gameStore'
 import type {
+  BenchmarkSuiteId,
   DataDomain,
   Model,
   ModelBackbone,
   ModelFamily,
   ModelProductPreset,
+  SafetyCampaign,
+  SafetyCampaignIntensity,
   TrainMode,
 } from '../../../sim/types'
-import { BENCHMARK_DEFS } from '../../../sim/balance/benchmarks'
 import {
   PARAM_PRESETS,
   estimateTrainDays,
@@ -33,25 +35,16 @@ import {
 } from '../../../sim/balance/data'
 import {
   ensureLabData,
-  hasCorpusSpecialists,
   newDataSinceModel,
-  specialistDomainBoost,
   totalProcessed,
 } from '../../../sim/systems/data'
 import { modelCostMult, serveInfraCost, suggestApiInOut } from '../../../sim/balance/pricing'
-import {
-  familyServeMult,
-  sizeTokMult,
-} from '../../../sim/balance/tokenServe'
 import { energyPriceForState } from '../../../sim/systems/map'
 import { computeSnapshot } from '../../../sim/tick'
 import { money, num } from '../format'
 import { SizeSlider } from '../ui/SizeSlider'
+import { ResearchUnlockLink } from '../ui/ResearchUnlockLink'
 import { modelTrainVramGb } from '../../../sim/balance/racks'
-import {
-  isGenerationOnlyModel,
-  modelCanCurateDataDomain,
-} from '../../../sim/systems/modelEligibility'
 import { recentModelTemplates, resolveModelIteration } from '../modelNaming'
 import {
   defaultModelStack,
@@ -59,6 +52,13 @@ import {
   modelStackModulesForFamily,
   sanitizeModelStack,
 } from '../../../sim/balance/modelStack'
+import {
+  normalizeModelEvaluations,
+  suiteComposite,
+} from '../../../sim/balance/evaluationSuites'
+import { safetyCampaignEstimate } from '../../../sim/systems/safetyCampaigns'
+import { playerStaff } from '../../../sim/systems/staff'
+import { RadarChart } from '../ui/RadarChart'
 
 function parseSizeInput(value: string, unit: 'M' | 'B' | 'T'): number {
   const n = Number(value)
@@ -86,8 +86,10 @@ export function ModelsPanel() {
   const setModelApiPrice = useGameStore((s) => s.setModelApiPrice)
   const setModelApiInOut = useGameStore((s) => s.setModelApiInOut)
   const applyModelApiMarkup = useGameStore((s) => s.applyModelApiMarkup)
+  const startSafetyCampaign = useGameStore((s) => s.startSafetyCampaign)
+  const cancelSafetyCampaign = useGameStore((s) => s.cancelSafetyCampaign)
   const apiMarkupPct = useGameStore((s) => s.state.player.pricing.apiMarkupPct)
-  const setPanel = useGameStore((s) => s.setPanel)
+  const openResearchNode = useGameStore((s) => s.openResearchNode)
   const snap = computeSnapshot(state)
   const infra = serveInfraCost(state, snap, energyPriceForState(state))
 
@@ -113,11 +115,12 @@ export function ModelsPanel() {
   const [allowSynthetic, setAllowSynthetic] = useState(true)
   const [includeSynthHQ, setIncludeSynthHQ] = useState(true)
   const [includeSynthLQ, setIncludeSynthLQ] = useState(false)
-  /** Per-domain specialist model ids (research: Specialist Curators) */
-  const [domainModels, setDomainModels] = useState<Partial<Record<DataDomain, string>>>({})
   const [modelStack, setModelStack] = useState<string[]>(() =>
     defaultModelStack(state.player.researchUnlocked, 'dense'),
   )
+  const [benchmarkSuite, setBenchmarkSuite] = useState<BenchmarkSuiteId>('language')
+  const [safetyIntensity, setSafetyIntensity] = useState<SafetyCampaignIntensity>('standard')
+  const [safetyResearchers, setSafetyResearchers] = useState(1)
 
   const paramsB = parseSizeInput(sizeVal, sizeUnit)
   const family = familyFromSpec(backbone, productPreset)
@@ -152,24 +155,10 @@ export function ModelsPanel() {
   }
   const mixUnlocked = unlocked.includes('data_mix')
   const synthUnlocked = unlocked.includes('data_synth')
-  const specialistsUnlocked = hasCorpusSpecialists(state)
 
   const teachers = state.player.models
   const modelIteration = useMemo(() => resolveModelIteration(teachers, name), [teachers, name])
   const previousTemplates = useMemo(() => recentModelTemplates(teachers), [teachers])
-  const generalCuratorModels = useMemo(
-    () => teachers.filter((model) => !isGenerationOnlyModel(model)),
-    [teachers],
-  )
-  const curatorModelsByDomain = useMemo(
-    () => Object.fromEntries(
-      DATA_DOMAINS.map((domain) => [
-        domain,
-        teachers.filter((model) => modelCanCurateDataDomain(model, domain)),
-      ]),
-    ) as Record<DataDomain, Model[]>,
-    [teachers],
-  )
   const job = state.player.trainingJob
   const pricing = state.player.pricing
   const active = state.player.models.find((m) => m.id === pricing.activeModelId)
@@ -197,7 +186,6 @@ export function ModelsPanel() {
       allowSynthetic: allowSynthetic && synthUnlocked,
       includeSynthHQ: includeSynthHQ && allowSynthetic && synthUnlocked,
       includeSynthLQ: includeSynthLQ && allowSynthetic && synthUnlocked,
-      domainModels: specialistsUnlocked ? domainModels : undefined,
     }),
     [
       dataMTok,
@@ -209,8 +197,6 @@ export function ModelsPanel() {
       synthUnlocked,
       includeSynthHQ,
       includeSynthLQ,
-      specialistsUnlocked,
-      domainModels,
     ],
   )
   const trainingForecast = useMemo(
@@ -337,29 +323,42 @@ export function ModelsPanel() {
 
   const volMax = Math.max(processedAvail * 2, recData * 2.5, minMTok * 2, 100)
   const shortfall = Math.max(0, dataMTok - processedAvail)
+  const evaluatedActive = useMemo(() => active ? normalizeModelEvaluations(active) : null, [active])
+  const availableSuites = useMemo(
+    () => evaluatedActive
+      ? (Object.keys(evaluatedActive.benchmarkSuites ?? {}) as BenchmarkSuiteId[])
+      : [],
+    [evaluatedActive],
+  )
+  const activeSuite = availableSuites.includes(benchmarkSuite)
+    ? benchmarkSuite
+    : availableSuites[0] ?? 'language'
+  const allPublicModels = [
+    ...state.player.models.filter((model) => model.release === 'released' || model.shipped),
+    ...state.rivals.flatMap((rival) => rival.models.filter((model) => model.release === 'released' || model.shipped)),
+  ].map(normalizeModelEvaluations)
+  const frontierComparison = frontierForSuite(allPublicModels, activeSuite)
+  const researcherCount = playerStaff(state).researcher ?? 0
+  const safetyEstimate = useMemo(
+    () => evaluatedActive
+      ? safetyCampaignEstimate(state, evaluatedActive.id, safetyIntensity)
+      : null,
+    [state, evaluatedActive, safetyIntensity],
+  )
 
-  const setDomainModel = (d: DataDomain, id: string) => {
-    setDomainModels((m) => {
-      const next = { ...m }
-      if (!id) delete next[d]
-      else next[d] = id
-      return next
-    })
-  }
+  useEffect(() => {
+    if (availableSuites.length && !availableSuites.includes(benchmarkSuite)) {
+      setBenchmarkSuite(availableSuites[0]!)
+    }
+  }, [availableSuites, benchmarkSuite])
 
-  const applySameModelAll = (id: string) => {
-    if (!id) {
-      setDomainModels({})
-      return
+  useEffect(() => {
+    if (safetyEstimate) {
+      setSafetyResearchers((current) =>
+        Math.max(safetyEstimate.minimumResearchers, Math.min(Math.max(1, researcherCount), current)),
+      )
     }
-    const selected = teachers.find((model) => model.id === id)
-    if (!selected || isGenerationOnlyModel(selected)) return
-    const next: Partial<Record<DataDomain, string>> = {}
-    for (const d of DATA_DOMAINS) {
-      if (modelCanCurateDataDomain(selected, d)) next[d] = id
-    }
-    setDomainModels(next)
-  }
+  }, [safetyEstimate, researcherCount])
 
   return (
     <div className="space-y-3">
@@ -457,6 +456,12 @@ export function ModelsPanel() {
               Release public
             </button>
           </div>
+          {job.progressPfDays >= job.targetPfDays && job.postTrain === 'sft' && !unlocked.includes('align_rlhf') ? (
+            <ResearchUnlockLink className="mt-2" nodeId="align_rlhf" label="Unlock RLHF Pipeline for the next post-train stage" />
+          ) : null}
+          {job.progressPfDays >= job.targetPfDays && job.postTrain === 'rlhf' && !unlocked.includes('align_process') ? (
+            <ResearchUnlockLink className="mt-2" nodeId="align_process" label="Unlock Process Reward Models for the next stage" />
+          ) : null}
         </div>
       ) : (
         <div id="model-recipe" className="space-y-2.5 rounded-2xl border border-line bg-panel-2 p-3 scroll-mt-4">
@@ -620,11 +625,16 @@ export function ModelsPanel() {
                   speed +{Math.round((stackModifiers.speedMult - 1) * 100)}%
                 </span>
                 <span className="rounded-full bg-train/10 px-2 py-0.5 text-train">
-                  train −{Math.round((1 - stackModifiers.trainCostMult) * 100)}%
+                  train {stackModifiers.trainCostMult <= 1 ? '−' : '+'}{Math.abs(Math.round((1 - stackModifiers.trainCostMult) * 100))}%
                 </span>
                 <span className="rounded-full bg-research/10 px-2 py-0.5 text-research">
                   cap +{stackModifiers.capabilityBonus.toFixed(1)}
                 </span>
+                {stackModifiers.reasoningEnabled && (
+                  <span className="rounded-sm border border-research/30 bg-research/10 px-2 py-0.5 text-research">
+                    reasoning enabled
+                  </span>
+                )}
               </div>
             </div>
             <div className="grid grid-cols-2 gap-1.5">
@@ -640,10 +650,13 @@ export function ModelsPanel() {
                     : null,
                   module.trainCostMult < 1
                     ? `train −${Math.round((1 - module.trainCostMult) * 100)}%`
+                    : module.trainCostMult > 1
+                      ? `train +${Math.round((module.trainCostMult - 1) * 100)}%`
                     : null,
                   module.capabilityBonus > 0
                     ? `cap +${module.capabilityBonus.toFixed(1)}`
                     : null,
+                  module.reasoningEnabled ? 'reasoning caps unlocked' : null,
                 ]
                   .filter(Boolean)
                   .join(' · ')
@@ -654,7 +667,7 @@ export function ModelsPanel() {
                     aria-pressed={available ? selected : undefined}
                     onClick={() => {
                       if (!available) {
-                        setPanel('research')
+                        openResearchNode(module.id)
                         return
                       }
                       setModelStack((current) =>
@@ -694,18 +707,9 @@ export function ModelsPanel() {
           </section>
 
           <div id="model-data" className="scroll-mt-4 rounded-xl border border-mint/25 bg-mint/5 p-2.5">
-            <div className="flex items-center justify-between gap-2">
-              <h3 className="text-[0.8125rem] font-medium uppercase tracking-wider text-muted">
-                Training data
-              </h3>
-              <button
-                type="button"
-                className="text-[0.75rem] text-mint hover:underline"
-                onClick={() => setPanel('data')}
-              >
-                Corpus stocks →
-              </button>
-            </div>
+            <h3 className="text-[0.8125rem] font-medium uppercase tracking-wider text-muted">
+              Training data
+            </h3>
             <p className="mt-1 text-[0.75rem] leading-snug text-muted">
               {mode === 'continue' ? (
                 <>
@@ -750,9 +754,9 @@ export function ModelsPanel() {
                   · capped by new data (+ optional synth)
                 </span>
               )}
-              {mode !== 'continue' && shortfall > 1 && (
-                <span className="ml-1 text-amber">
-                  · +{formatTokens(shortfall)} synth fill for shortfall
+              {mode !== 'continue' && shortfall > 1 && allowSynthetic && synthUnlocked && (
+                <span className="ml-1 rounded-sm bg-amber/10 px-1.5 py-0.5 text-amber">
+                  Synthetic required: {formatTokens(shortfall)} · automatic verifier
                 </span>
               )}
               <input
@@ -805,19 +809,9 @@ export function ModelsPanel() {
                 More train → capability · more verify → safety / reliability
               </span>
             </label>
-            <div
-              className={`mt-2 space-y-1.5 ${!mixUnlocked ? 'pointer-events-none opacity-45' : ''}`}
-            >
+            <div className={`mt-2 space-y-1.5 ${!mixUnlocked ? 'opacity-65' : ''}`}>
               {!mixUnlocked && (
-                <button
-                  type="button"
-                  onClick={() => setPanel('research')}
-                  className="w-full rounded-lg border border-amber/40 bg-amber/10 px-2 py-1.5 text-left text-[0.75rem] text-amber hover:border-mint/40"
-                >
-                  Domain mix locked — research{' '}
-                  <strong className="text-bone">Mixture Engineering</strong> (Lab → Research → Data
-                  column, top). Click to open research.
-                </button>
+                <ResearchUnlockLink nodeId="data_mix" label="Unlock domain mix with Mixture Engineering" />
               )}
               {DATA_DOMAINS.map((d) => {
                 const pct = Math.round((weights[d] / weightSum) * 100)
@@ -845,101 +839,6 @@ export function ModelsPanel() {
                   </div>
                 )
               })}
-            </div>
-
-            {/* Specialist curators per corpus */}
-            <div
-              className={`mt-3 rounded-lg border border-line/80 bg-void/40 p-2 ${
-                !specialistsUnlocked ? 'opacity-50' : ''
-              }`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <h4 className="text-[0.75rem] font-medium uppercase tracking-wider text-muted">
-                  Specialist models
-                </h4>
-                {specialistsUnlocked && teachers.length > 0 && (
-                  <button
-                    type="button"
-                    className="text-[0.6875rem] text-mint hover:underline"
-                    onClick={() => {
-                      const first =
-                        domainModels.code ||
-                        domainModels.chat ||
-                        generalCuratorModels[0]?.id ||
-                        ''
-                      if (first) applySameModelAll(first)
-                    }}
-                  >
-                    Same model → all
-                  </button>
-                )}
-              </div>
-              {!specialistsUnlocked ? (
-                <button
-                  type="button"
-                  onClick={() => setPanel('research')}
-                  className="mt-1 w-full rounded-lg border border-amber/40 bg-amber/10 px-2 py-1.5 text-left text-[0.75rem] text-amber hover:border-mint/40"
-                >
-                  Locked — research <strong className="text-bone">Specialist Curators</strong>{' '}
-                  (Data column, under Mixture Engineering). Click to open research.
-                </button>
-              ) : teachers.length === 0 ? (
-                <p className="mt-1 text-[0.75rem] text-muted">
-                  Train a model first, then assign it as a curator for each domain.
-                </p>
-              ) : (
-                <div className="mt-1.5 space-y-1">
-                  <label className="block text-[0.75rem] text-muted">
-                    Apply one model to every domain
-                    <select
-                      className="mt-0.5 w-full rounded-md border border-line bg-void px-1.5 py-1 text-[0.8125rem] text-bone"
-                      value=""
-                      onChange={(e) => {
-                        const v = e.target.value
-                        if (v === '__clear') applySameModelAll('')
-                        else if (v) applySameModelAll(v)
-                      }}
-                    >
-                      <option value="">Choose…</option>
-                      <option value="__clear">Clear all</option>
-                      {generalCuratorModels.map((t) => (
-                        <option key={t.id} value={t.id}>
-                          {t.name} · cap {t.capability.toFixed(0)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  {DATA_DOMAINS.map((d) => {
-                    const mid = domainModels[d] ?? ''
-                    const m = curatorModelsByDomain[d].find((t) => t.id === mid)
-                    const boost = m ? specialistDomainBoost(m, d) : 0
-                    return (
-                      <div key={d} className="flex items-center gap-1.5">
-                        <span className="w-12 shrink-0 text-[0.75rem] text-bone">
-                          {DATA_DOMAIN_META[d].label}
-                        </span>
-                        <select
-                          className="min-w-0 flex-1 rounded-md border border-line bg-void px-1.5 py-0.5 text-[0.75rem] text-bone"
-                          value={mid}
-                          onChange={(e) => setDomainModel(d, e.target.value)}
-                        >
-                          <option value="">None</option>
-                          {curatorModelsByDomain[d].map((t) => (
-                            <option key={t.id} value={t.id}>
-                              {t.name}
-                            </option>
-                          ))}
-                        </select>
-                        {boost > 0.5 && (
-                          <span className="shrink-0 font-mono text-[0.6875rem] text-mint">
-                            +{boost.toFixed(0)}Q
-                          </span>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
             </div>
 
             <label
@@ -1117,103 +1016,29 @@ export function ModelsPanel() {
             </div>
           )}
 
-          <div className="rounded-xl border border-line/70 bg-void/60 p-2.5 font-mono text-[0.75rem]">
-            <div className="mb-2 flex items-center justify-between border-b border-line/60 pb-2">
-              <div>
-                <div className="text-[0.6875rem] uppercase tracking-wider text-muted">Baseline forecast</div>
-                <div className="mt-0.5 text-sm text-bone">
-                  cap ~{trainingForecast.expectedCapability.toFixed(0)} · {num(trainingForecast.interactiveTokPerSec, 0)} tok/s
-                </div>
-              </div>
-              <RiskPill risk={trainingForecast.risk} />
-            </div>
-            <div className="flex justify-between text-muted">
-              <span>Train cost</span>
-              <span className="text-bone">{num(costPf, 0)} PF-days</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted">Upfront + data</span>
-              <span className={state.player.cash < upfront ? 'text-danger' : 'text-bone'}>
-                {money(upfront)}
-              </span>
-            </div>
-            <div className="mt-0.5 flex justify-between text-muted">
-              <span>Est. calendar</span>
-              <span
-                className={
-                  daysEst === Infinity
-                    ? 'text-danger'
-                    : daysEst > 120
-                      ? 'text-amber'
-                      : 'text-bone'
-                }
-              >
-                {daysEst === Infinity
-                  ? '∞ (no train pool)'
-                  : `~${daysEst}d (${Math.max(1, Math.round(daysEst / 30))} mo) @ train pool`}
-              </span>
-            </div>
-            <div className="mt-0.5 flex justify-between text-muted">
-              <span>Accelerator equivalents</span>
-              <span className={underProvisioned ? 'text-amber' : 'text-bone'}>
-                ~{recChips.toLocaleString()} recommended · {Math.floor(snap.chipCount).toLocaleString()} available
-              </span>
-            </div>
-            <div className="mt-0.5 flex justify-between text-muted">
-              <span>Train pool</span>
-              <span className="text-bone">{num(snap.pools.training, 2)} PF</span>
-            </div>
-            <div className="mt-0.5 flex justify-between text-muted">
-              <span>Effective data / modality</span>
-              <span className="text-bone">
-                {trainingForecast.effectiveDataRatio.toFixed(2)}× · {trainingForecast.modalityComputeMult.toFixed(2)}× compute
-              </span>
-            </div>
-            <div className="mt-0.5 flex justify-between text-muted">
-              <span>VRAM required</span>
-              <span className={snap.vramGb < needVramGb ? 'text-danger' : 'text-bone'}>
-                {num(needVramGb, 0)} / {num(snap.vramGb, 0)} GB
-              </span>
-            </div>
-            <div className="mt-0.5 flex justify-between text-muted">
-              <span>Public frontier comparison</span>
-              <span className={trainingForecast.expectedCapability + 5 < publicFrontier ? 'text-amber' : 'text-mint'}>
-                {publicFrontier > 0
-                  ? `${trainingForecast.expectedCapability >= publicFrontier ? '+' : ''}${(trainingForecast.expectedCapability - publicFrontier).toFixed(0)} cap`
-                  : 'no public peer'}
-              </span>
-            </div>
-            <div className="mt-0.5 flex justify-between text-muted">
-              <span>Site power</span>
-              <span className={snap.throttled ? 'text-danger' : 'text-bone'}>
-                {num(snap.mwDemand, 2)} / {num(snap.mwAvailable, 2)} MW
-                {snap.throttled ? ' · THROTTLED' : ''}
-              </span>
-            </div>
-            {snap.throttled && (
-              <p className="mt-1.5 text-danger">
-                Power-throttled — expand interconnect/generation or train ETA balloons.
-              </p>
-            )}
-            {underProvisioned && (
-              <p className="mt-1.5 text-amber">
-                Light fleet for this size — order more racks into halls for a faster run.
-              </p>
-            )}
-            {trainingForecast.warnings.map((warning) => (
-              <p key={warning} className="mt-1.5 text-amber">
-                {warning}
-              </p>
-            ))}
-            {paramsB >= 300 && !snap.throttled && (
-              <p className="mt-1.5 text-muted">
-                Frontier scale: train time and serve load are the real limits.
-              </p>
-            )}
-            {state.alerts[0]?.severity === 'warn' && state.alerts[0].day === state.day && (
-              <p className="mt-1.5 text-amber">{state.alerts[0].message}</p>
-            )}
-          </div>
+          <ForecastBoard
+            capability={trainingForecast.expectedCapability}
+            speed={trainingForecast.interactiveTokPerSec}
+            risk={trainingForecast.risk}
+            frontier={publicFrontier}
+            pfDays={costPf}
+            upfront={upfront}
+            cash={state.player.cash}
+            days={daysEst}
+            dataRatio={trainingForecast.effectiveDataRatio}
+            modalityCompute={trainingForecast.modalityComputeMult}
+            vramNeed={needVramGb}
+            vramHave={snap.vramGb}
+            chipsNeed={recChips}
+            chipsHave={snap.chipCount}
+            powerNeed={snap.mwDemand}
+            powerHave={snap.mwAvailable}
+            warnings={[
+              ...(snap.throttled ? ['Site power is throttling the training pool.'] : []),
+              ...(underProvisioned ? ['Accelerator fleet is light for this scale.'] : []),
+              ...trainingForecast.warnings,
+            ]}
+          />
 
           <button
             type="button"
@@ -1262,6 +1087,7 @@ export function ModelsPanel() {
         onPriceInOut={setModelApiInOut}
         onApplyMarkup={applyModelApiMarkup}
         markupPct={apiMarkupPct}
+        frontierCapability={publicFrontier}
         privateList
       />
 
@@ -1277,41 +1103,63 @@ export function ModelsPanel() {
         onPriceInOut={setModelApiInOut}
         onApplyMarkup={applyModelApiMarkup}
         markupPct={apiMarkupPct}
+        frontierCapability={publicFrontier}
         showTokenEconomics
         unitCostActive={infra.costPerMTok}
         activeModelRef={active ?? released[0] ?? null}
       />
 
-      {active && (active.release === 'released' || active.shipped) && (
-        <div className="rounded-2xl border border-line bg-panel-2 p-3">
-          <h3 className="text-[0.8125rem] font-medium uppercase tracking-wider text-muted">
-            Benchmarks · {active.name}
-          </h3>
-          <div className="mt-2 space-y-1.5">
-            {BENCHMARK_DEFS.map((d) => {
-              const score = active.benchmarks[d.id] ?? 0
-              return (
-                <div key={d.id}>
-                  <div className="flex justify-between text-[0.75rem]">
-                    <span className="text-muted">{d.name}</span>
-                    <span className="font-mono text-bone">{score.toFixed(0)}</span>
-                  </div>
-                  <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-void">
-                    <div
-                      className={`h-full ${scoreColor(score)}`}
-                      style={{ width: `${score}%` }}
-                    />
-                  </div>
-                </div>
-              )
-            })}
+      {evaluatedActive && (
+        <section className="rounded-2xl border border-line bg-panel-2 p-3" aria-labelledby="model-evaluations-title">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <h3 id="model-evaluations-title" className="text-[0.8125rem] font-medium text-bone">
+                Evaluations · {evaluatedActive.name}
+              </h3>
+              <p className="font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">
+                revision {evaluatedActive.revision ?? 1} · {evaluatedActive.reasoningEnabled ? 'reasoning' : 'non-reasoning'}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-1" role="tablist" aria-label="Evaluation suites">
+              {availableSuites.map((suiteId) => (
+                <button
+                  key={suiteId}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeSuite === suiteId}
+                  onClick={() => setBenchmarkSuite(suiteId)}
+                  className={`rounded-sm px-2 py-1 text-[0.625rem] transition ${activeSuite === suiteId ? 'bg-mint text-void' : 'bg-void text-muted hover:text-bone'}`}
+                >
+                  {suiteId.replace('_generation', '').replace('omni_overview', 'overview').replaceAll('_', ' ')}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
+          <div className="mt-2">
+            <RadarChart
+              suiteId={activeSuite}
+              scores={evaluatedActive.benchmarkSuites?.[activeSuite] ?? {}}
+              profile={evaluatedActive.evaluationProfile}
+              comparison={frontierComparison}
+            />
+          </div>
+        </section>
       )}
 
-      <button type="button" className="btn-ghost w-full py-2" onClick={() => setPanel('plans')}>
-        Plans & product packaging →
-      </button>
+      {(evaluatedActive || state.player.safetyCampaign) && (
+        <SafetyCampaignCard
+          activeModel={evaluatedActive}
+          campaign={state.player.safetyCampaign}
+          intensity={safetyIntensity}
+          setIntensity={setSafetyIntensity}
+          researchers={safetyResearchers}
+          setResearchers={setSafetyResearchers}
+          researcherCount={researcherCount}
+          estimate={safetyEstimate}
+          onStart={() => evaluatedActive && startSafetyCampaign(evaluatedActive.id, safetyIntensity, safetyResearchers)}
+          onCancel={cancelSafetyCampaign}
+        />
+      )}
     </div>
   )
 }
@@ -1328,6 +1176,7 @@ function ModelList({
   onPriceInOut,
   onApplyMarkup,
   markupPct,
+  frontierCapability,
   privateList,
   showTokenEconomics,
   unitCostActive,
@@ -1344,6 +1193,7 @@ function ModelList({
   onPriceInOut: (id: string, priceIn: number | null, priceOut: number | null) => void
   onApplyMarkup: (id: string, markupPct: number) => void
   markupPct: number
+  frontierCapability: number
   privateList?: boolean
   showTokenEconomics?: boolean
   unitCostActive?: number
@@ -1351,220 +1201,398 @@ function ModelList({
 }) {
   void _onPrice
   return (
-    <div className="space-y-2">
-      <h3 className="text-[0.8125rem] font-medium uppercase tracking-wider text-muted">{title}</h3>
-      {models.length === 0 && <p className="text-xs text-muted">{empty}</p>}
-      {models.map((m) => {
+    <section className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <h3 className="text-[0.6875rem] font-medium uppercase tracking-[0.16em] text-muted">{title}</h3>
+        <span className="font-mono text-[0.625rem] text-muted">{models.length} weights</span>
+      </div>
+      {models.length === 0 && <p className="rounded-lg bg-void/35 px-2.5 py-2 text-xs text-muted">{empty}</p>}
+      {models.map((source) => {
+        const model = normalizeModelEvaluations(source)
+        const selected = pricingId === model.id
         const unit =
           showTokenEconomics && unitCostActive != null && activeModelRef
-            ? Math.max(
-                0.005,
-                unitCostActive *
-                  (modelCostMult(m) / Math.max(0.08, modelCostMult(activeModelRef))),
-              )
+            ? Math.max(0.005, unitCostActive * (modelCostMult(model) / Math.max(0.08, modelCostMult(activeModelRef))))
             : unitCostActive
-        const sug =
+        const suggested =
           showTokenEconomics && unit != null
             ? suggestApiInOut({
                 costPerMTokBase: unit,
-                paramsB: m.paramsB,
-                activeParamsB: m.activeParamsB,
-                family: m.family,
-                inferCostMult: m.inferCostMult,
-                capability: m.capability,
+                paramsB: model.paramsB,
+                activeParamsB: model.activeParamsB,
+                family: model.family,
+                inferCostMult: model.inferCostMult,
+                capability: model.capability,
                 markupPct,
                 applyModelMult: false,
               })
             : null
+        const primarySuite = model.benchmarkSuites?.omni_overview
+          ?? model.benchmarkSuites?.image_generation
+          ?? model.benchmarkSuites?.video_generation
+          ?? model.benchmarkSuites?.audio_generation
+          ?? model.benchmarkSuites?.language
+        const suiteScore = suiteComposite(primarySuite)
+        const tier = modelTier(model.capability)
+        const nextAt = tier.nextAt
+        const progress = nextAt == null
+          ? 100
+          : ((model.capability - tier.floor) / Math.max(1, nextAt - tier.floor)) * 100
+        const gap = model.capability - frontierCapability
+        const speed = model.serviceProfile?.interactiveTokPerSec ?? 52 * model.tokPerSecMult
         return (
-        <div
-          key={m.id}
-          className={`rounded-xl border px-2.5 py-2 ${
-            pricingId === m.id ? 'border-mint/50 bg-mint/10' : 'border-line bg-panel-2'
-          }`}
-        >
-          <button type="button" onClick={() => onSelect(m.id)} className="w-full text-left">
-            <div className="flex justify-between text-sm">
-              <span className="font-medium text-bone">{m.name}</span>
-              <span className="font-mono text-[0.8125rem] text-muted">cap {m.capability.toFixed(0)}</span>
-            </div>
-            <div className="mt-0.5 font-mono text-[0.75rem] text-muted">
-              {m.backbone ?? m.family} · {(m.productPreset ?? m.family).replaceAll('_', ' ')}
-              {m.family === 'moe'
-                ? ` · ${formatParams(m.paramsB)} / ${formatParams(m.activeParamsB ?? 0)} act`
-                : ` · ${formatParams(m.paramsB)}`}
-              {m.distilled ? ' · distilled' : ''}
-              {m.postTrain !== 'none' ? ` · ${m.postTrain}` : ''}
-            </div>
-            {showTokenEconomics && (
-              <div className="mt-1 font-mono text-[0.6875rem] text-muted">
-                {num(m.serviceProfile?.interactiveTokPerSec ?? 52 * m.tokPerSecMult, 0)} tok/s interactive
-                {' · '}tok ×{sizeTokMult(m).toFixed(2)} · fam {familyServeMult(m.family)} · burn cost ~
-                {unit != null ? money(unit) : '—'}/MTok
+          <article
+            key={model.id}
+            className={`overflow-hidden rounded-lg border transition ${selected ? 'border-mint/55 bg-mint/8' : 'border-line/75 bg-panel-2 hover:border-line'}`}
+          >
+            <button type="button" onClick={() => onSelect(model.id)} className="w-full p-2.5 text-left">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate text-[0.8125rem] font-semibold text-bone">{model.name}</span>
+                    <span className={`rounded-sm px-1.5 py-0.5 font-mono text-[0.5625rem] uppercase ${tier.tone}`}>{tier.label}</span>
+                  </div>
+                  <div className="mt-0.5 truncate font-mono text-[0.625rem] text-muted">
+                    {privateList ? 'internal' : 'released'} · {model.backbone ?? model.family} · {formatParams(model.paramsB)} · r{model.revision ?? 1}
+                  </div>
+                </div>
+                <span className="font-mono text-sm text-mint">{model.capability.toFixed(2)}</span>
               </div>
-            )}
-            <div className="mt-1 flex flex-wrap gap-1 font-mono text-[0.625rem] text-muted">
-              {m.modalities.map((modality) => (
-                <span key={modality} className="rounded-full border border-line/70 bg-void px-1.5 py-0.5">
-                  {modality.toUpperCase()}
-                </span>
-              ))}
-              {m.outcome && (
-                <span
-                  className={`rounded-full border px-1.5 py-0.5 ${
-                    m.outcome.kind === 'breakthrough'
-                      ? 'border-mint/35 text-mint'
-                      : m.outcome.kind === 'stumble'
-                        ? 'border-danger/35 text-danger'
-                        : 'border-line text-muted'
-                  }`}
-                >
-                  {m.outcome.kind.toUpperCase()} · {m.outcome.yieldMultiplier.toFixed(3)}× YIELD
-                </span>
-              )}
-            </div>
-            {m.capabilities && (
-              <div className="mt-1.5 grid grid-cols-3 gap-1 font-mono text-[0.625rem]">
-                {Object.entries(m.capabilities.domains)
-                  .toSorted((a, b) => b[1] - a[1])
-                  .slice(0, 3)
-                  .map(([domain, score]) => (
-                    <span key={domain} className="rounded border border-mint/15 bg-mint/5 px-1.5 py-1 text-muted">
-                      {domain.toUpperCase()} <strong className="text-mint">{score.toFixed(0)}</strong>
-                    </span>
-                  ))}
+              <div className="mt-2 grid grid-cols-4 gap-1 font-mono text-[0.625rem]">
+                <RosterStat label="suite" value={suiteScore.toFixed(2)} />
+                <RosterStat label="frontier" value={`${gap >= 0 ? '+' : ''}${gap.toFixed(2)}`} tone={gap >= 0 ? 'text-mint' : 'text-amber'} />
+                <RosterStat label="speed" value={`${speed.toFixed(2)} t/s`} />
+                <RosterStat label="serve" value={unit == null ? '—' : `${displayRate(unit)}/M`} />
               </div>
-            )}
-          </button>
-
-          {!privateList && (
-            <div className="mt-2 space-y-1.5">
-              <div className="text-[0.6875rem] text-muted">
-                API list (this model only)
-                {sug && (
-                  <span className="text-muted/80">
-                    {' '}
-                    · floor ${sug.costIn.toFixed(3)}/${sug.costOut.toFixed(3)} · markup list $
-                    {sug.priceIn.toFixed(3)}/${sug.priceOut.toFixed(3)}
-                  </span>
-                )}
+              <div className="mt-2 h-1 overflow-hidden rounded-sm bg-void">
+                <div className="h-full bg-mint transition-[width] duration-300" style={{ width: `${Math.max(0, Math.min(100, progress))}%` }} />
               </div>
-              <div className="grid grid-cols-2 gap-1.5">
-                <label className="text-[0.75rem] text-muted">
-                  In $/1M
-                  <input
-                    type="number"
-                    min={0}
-                    step={0.01}
-                    placeholder={String(m.suggestedApiPriceIn ?? m.costApiPriceIn)}
-                    value={m.apiPriceInPerMTok ?? ''}
-                    onChange={(e) => {
-                      const v = e.target.value
-                      if (v === '') onPriceInOut(m.id, null, m.apiPriceOutPerMTok)
-                      else
-                        onPriceInOut(
-                          m.id,
-                          Math.max(0, Number(v) || 0),
-                          m.apiPriceOutPerMTok ??
-                            m.suggestedApiPriceOut ??
-                            m.costApiPriceOut,
-                        )
-                    }}
-                    className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1 font-mono text-xs text-bone outline-none"
-                  />
-                </label>
-                <label className="text-[0.75rem] text-muted">
-                  Out $/1M
-                  <input
-                    type="number"
-                    min={0}
-                    step={0.01}
-                    placeholder={String(m.suggestedApiPriceOut ?? m.costApiPriceOut)}
-                    value={m.apiPriceOutPerMTok ?? ''}
-                    onChange={(e) => {
-                      const v = e.target.value
-                      if (v === '') onPriceInOut(m.id, m.apiPriceInPerMTok, null)
-                      else
-                        onPriceInOut(
-                          m.id,
-                          m.apiPriceInPerMTok ??
-                            m.suggestedApiPriceIn ??
-                            m.costApiPriceIn,
-                          Math.max(0, Number(v) || 0),
-                        )
-                    }}
-                    className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1 font-mono text-xs text-bone outline-none"
-                  />
-                </label>
-              </div>
-              <div className="flex flex-wrap items-center gap-1.5 font-mono text-[0.6875rem] text-muted">
-                <span>
-                  cost ${m.costApiPriceIn?.toFixed(3) ?? '—'}/${m.costApiPriceOut?.toFixed(3) ?? '—'}
-                </span>
-                <span>· sug ${m.suggestedApiPriceIn?.toFixed(3)}/${m.suggestedApiPriceOut?.toFixed(3)}</span>
-                <button
-                  type="button"
-                  className="rounded-full bg-void px-2 py-0.5 text-mint hover:bg-mint/10"
-                  onClick={() =>
-                    onPriceInOut(m.id, m.costApiPriceIn, m.costApiPriceOut)
-                  }
-                >
-                  At cost
-                </button>
-                <button
-                  type="button"
-                  className="rounded-full bg-mint/15 px-2 py-0.5 text-mint"
-                  onClick={() => onApplyMarkup(m.id, markupPct)}
-                >
-                  +{markupPct}% markup
-                </button>
-              </div>
-            </div>
-          )}
-
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {privateList && (
-              <button
-                type="button"
-                onClick={() => onRelease(m.id)}
-                className="rounded-full bg-mint/15 px-2.5 py-1 text-[0.75rem] text-mint"
-              >
-                Release publicly
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => onDelete(m.id)}
-              className="rounded-full border border-danger/30 px-2.5 py-1 text-[0.75rem] text-danger hover:bg-danger/10"
-            >
-              Delete
             </button>
-          </div>
 
-          {!privateList && (
-            <div className="mt-1.5 flex flex-wrap gap-1">
-              {BENCHMARK_DEFS.slice(0, 4).map((d) => (
-                <span
-                  key={d.id}
-                  className="rounded-full bg-void px-1.5 py-0.5 font-mono text-[0.6875rem] text-muted"
-                >
-                  {d.short} {(m.benchmarks[d.id] ?? 0).toFixed(0)}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
+            {selected && (
+              <div className="border-t border-line/65 bg-void/25 p-2.5">
+                <div className="flex flex-wrap gap-1 font-mono text-[0.625rem] text-muted">
+                  {model.modalities.map((modality) => (
+                    <span key={modality} className="rounded-sm border border-line/70 px-1.5 py-0.5">{modality.toUpperCase()}</span>
+                  ))}
+                  {model.reasoningEnabled && <span className="rounded-sm border border-research/30 px-1.5 py-0.5 text-research">REASONING</span>}
+                  {model.outcome && <span className={model.outcome.kind === 'stumble' ? 'text-danger' : model.outcome.kind === 'breakthrough' ? 'text-mint' : 'text-muted'}>{model.outcome.kind.toUpperCase()}</span>}
+                </div>
+
+                {!privateList && (
+                  <div className="mt-2 grid grid-cols-2 gap-1.5">
+                    <PriceInput
+                      label="Input $/1M"
+                      value={model.apiPriceInPerMTok}
+                      placeholder={model.suggestedApiPriceIn ?? model.costApiPriceIn}
+                      onChange={(value) => onPriceInOut(model.id, value, model.apiPriceOutPerMTok)}
+                    />
+                    <PriceInput
+                      label="Output $/1M"
+                      value={model.apiPriceOutPerMTok}
+                      placeholder={model.suggestedApiPriceOut ?? model.costApiPriceOut}
+                      onChange={(value) => onPriceInOut(model.id, model.apiPriceInPerMTok, value)}
+                    />
+                  </div>
+                )}
+
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  {!privateList && suggested && (
+                    <>
+                      <button type="button" className="rounded-sm bg-panel px-2 py-1 text-[0.6875rem] text-mint hover:bg-mint/10" onClick={() => onPriceInOut(model.id, model.costApiPriceIn, model.costApiPriceOut)}>At cost</button>
+                      <MarkupControl
+                        initialPercent={markupPct}
+                        onApply={(percent) => onApplyMarkup(model.id, percent)}
+                      />
+                    </>
+                  )}
+                  {privateList && (
+                    <button type="button" onClick={() => onRelease(model.id)} className="rounded-sm bg-mint px-2.5 py-1 text-[0.6875rem] font-medium text-void">Release publicly</button>
+                  )}
+                  <button type="button" onClick={() => onDelete(model.id)} className="ml-auto rounded-sm px-2 py-1 text-[0.6875rem] text-danger hover:bg-danger/10">Delete</button>
+                </div>
+              </div>
+            )}
+          </article>
         )
       })}
+    </section>
+  )
+}
+
+function RosterStat({ label, value, tone = 'text-bone' }: { label: string; value: string; tone?: string }) {
+  return (
+    <span className="rounded-sm bg-void/55 px-1.5 py-1">
+      <span className="block uppercase tracking-wider text-muted">{label}</span>
+      <strong className={`font-medium ${tone}`}>{value}</strong>
+    </span>
+  )
+}
+
+function PriceInput({ label, value, placeholder, onChange }: { label: string; value: number | null; placeholder: number; onChange: (value: number | null) => void }) {
+  const [draft, setDraft] = useState(() => value == null ? '' : value.toFixed(2))
+
+  useEffect(() => {
+    setDraft(value == null ? '' : value.toFixed(2))
+  }, [value])
+
+  const commit = () => {
+    if (draft.trim() === '') {
+      onChange(null)
+      return
+    }
+    const parsed = Number(draft)
+    const next = Number.isFinite(parsed) ? Math.max(0, parsed) : 0
+    const rounded = Math.round(next * 100) / 100
+    setDraft(rounded.toFixed(2))
+    onChange(rounded)
+  }
+
+  return (
+    <label className="text-[0.6875rem] text-muted">
+      {label}
+      <input
+        type="number"
+        min={0}
+        step={0.01}
+        inputMode="decimal"
+        placeholder={placeholder.toFixed(2)}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') event.currentTarget.blur()
+          if (event.key === 'Escape') {
+            setDraft(value == null ? '' : value.toFixed(2))
+          }
+        }}
+        className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1 font-mono text-xs text-bone outline-none focus:border-mint/50"
+      />
+    </label>
+  )
+}
+
+function MarkupControl({ initialPercent, onApply }: { initialPercent: number; onApply: (percent: number) => void }) {
+  const [draft, setDraft] = useState(() => String(initialPercent))
+  const parsed = Number(draft)
+  const valid = draft.trim() !== '' && Number.isFinite(parsed) && parsed >= 0 && parsed <= 10_000
+
+  useEffect(() => {
+    setDraft(String(initialPercent))
+  }, [initialPercent])
+
+  return (
+    <div className="flex items-stretch overflow-hidden rounded-sm border border-mint/25 bg-mint/10">
+      <label className="flex items-center gap-1 px-2 text-[0.6875rem] text-muted">
+        <span>Markup</span>
+        <input
+          type="number"
+          min={0}
+          max={10_000}
+          step={0.01}
+          inputMode="decimal"
+          aria-label="Custom API markup percentage"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && valid) onApply(parsed)
+          }}
+          className="w-16 border-0 bg-transparent py-1 text-right font-mono text-[0.6875rem] text-bone outline-none"
+        />
+        <span aria-hidden="true">%</span>
+      </label>
+      <button
+        type="button"
+        disabled={!valid}
+        onClick={() => valid && onApply(parsed)}
+        className="border-l border-mint/25 px-2 py-1 text-[0.6875rem] text-mint hover:bg-mint/15 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        Apply
+      </button>
     </div>
   )
 }
 
-function scoreColor(score: number) {
-  if (score >= 70) return 'bg-mint'
-  if (score >= 45) return 'bg-infer'
-  if (score >= 25) return 'bg-amber'
-  return 'bg-danger/70'
+function modelTier(capability: number) {
+  if (capability >= 80) return { label: 'Breakthrough', floor: 80, nextAt: null, tone: 'bg-mint/15 text-mint' }
+  if (capability >= 60) return { label: 'Frontier', floor: 60, nextAt: 80, tone: 'bg-serve/15 text-serve' }
+  if (capability >= 40) return { label: 'Competitive', floor: 40, nextAt: 60, tone: 'bg-amber/15 text-amber' }
+  return { label: 'Prototype', floor: 0, nextAt: 40, tone: 'bg-panel text-muted' }
+}
+
+function displayRate(value: number): string {
+  if (value > 0 && value < 0.01) return `$${value.toFixed(3)}`
+  return `$${value.toFixed(2)}`
+}
+
+function ForecastBoard({
+  capability,
+  speed,
+  risk,
+  frontier,
+  pfDays,
+  upfront,
+  cash,
+  days,
+  dataRatio,
+  modalityCompute,
+  vramNeed,
+  vramHave,
+  chipsNeed,
+  chipsHave,
+  powerNeed,
+  powerHave,
+  warnings,
+}: {
+  capability: number
+  speed: number
+  risk: 'low' | 'medium' | 'high'
+  frontier: number
+  pfDays: number
+  upfront: number
+  cash: number
+  days: number
+  dataRatio: number
+  modalityCompute: number
+  vramNeed: number
+  vramHave: number
+  chipsNeed: number
+  chipsHave: number
+  powerNeed: number
+  powerHave: number
+  warnings: string[]
+}) {
+  const gap = capability - frontier
+  return (
+    <section className="rounded-xl border border-line/70 bg-void/55 p-2.5" aria-labelledby="forecast-title">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <h3 id="forecast-title" className="text-[0.6875rem] uppercase tracking-[0.16em] text-muted">Training forecast</h3>
+          <div className="mt-1 flex items-baseline gap-2">
+            <strong className="font-mono text-lg font-medium text-bone">{capability.toFixed(2)}</strong>
+            <span className="font-mono text-[0.6875rem] text-muted">cap · {speed.toFixed(2)} tok/s</span>
+          </div>
+        </div>
+        <RiskPill risk={risk} />
+      </div>
+
+      <div className="mt-2 grid grid-cols-3 gap-1.5">
+        <ForecastMetric label="Frontier gap" value={frontier > 0 ? `${gap >= 0 ? '+' : ''}${gap.toFixed(2)}` : 'No peer'} ratio={frontier > 0 ? capability / Math.max(1, frontier) : 1} tone={gap >= 0 ? 'bg-mint' : 'bg-amber'} />
+        <ForecastMetric label="PF-days" value={pfDays.toFixed(2)} ratio={1 / Math.max(1, Math.log10(pfDays + 10))} tone="bg-train" />
+        <ForecastMetric label="Calendar" value={days === Infinity ? 'No pool' : `${days.toFixed(0)}d`} ratio={days === Infinity ? 0 : 90 / Math.max(90, days)} tone={days > 120 ? 'bg-amber' : 'bg-mint'} />
+      </div>
+
+      <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+        <div className="rounded-md bg-panel-2/70 p-2">
+          <div className="flex justify-between text-[0.6875rem]"><span className="text-muted">Resources</span><span className={cash < upfront ? 'text-danger' : 'text-bone'}>{money(upfront)}</span></div>
+          <ReadinessBar label="Cash" value={cash / Math.max(1, upfront)} detail={`${money(cash)} available`} />
+          <ReadinessBar label="Data" value={dataRatio} detail={`${dataRatio.toFixed(2)}× · modality ${modalityCompute.toFixed(2)}×`} />
+          <ReadinessBar label="Accelerators" value={chipsHave / Math.max(1, chipsNeed)} detail={`${Math.floor(chipsHave).toLocaleString()} / ${chipsNeed.toLocaleString()}`} />
+        </div>
+        <div className="rounded-md bg-panel-2/70 p-2">
+          <div className="text-[0.6875rem] text-muted">Physical readiness</div>
+          <ReadinessBar label="VRAM" value={vramHave / Math.max(1, vramNeed)} detail={`${vramHave.toFixed(0)} / ${vramNeed.toFixed(0)} GB`} />
+          <ReadinessBar label="Power" value={powerHave / Math.max(0.01, powerNeed)} detail={`${powerHave.toFixed(2)} / ${powerNeed.toFixed(2)} MW`} />
+        </div>
+      </div>
+      {warnings.length > 0 && (
+        <div className="mt-2 border-l-2 border-amber/60 pl-2 text-[0.6875rem] leading-snug text-amber">
+          {[...new Set(warnings)].slice(0, 3).map((warning) => <p key={warning}>{warning}</p>)}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function ForecastMetric({ label, value, ratio, tone }: { label: string; value: string; ratio: number; tone: string }) {
+  return (
+    <div className="rounded-md bg-panel-2/70 p-2">
+      <span className="block text-[0.625rem] uppercase tracking-wider text-muted">{label}</span>
+      <strong className="font-mono text-[0.75rem] font-medium text-bone">{value}</strong>
+      <div className="mt-1 h-1 overflow-hidden rounded-sm bg-void"><div className={`h-full ${tone}`} style={{ width: `${Math.max(0, Math.min(100, ratio * 100))}%` }} /></div>
+    </div>
+  )
+}
+
+function ReadinessBar({ label, value, detail }: { label: string; value: number; detail: string }) {
+  const ready = value >= 1
+  return (
+    <div className="mt-1.5">
+      <div className="flex justify-between gap-2 font-mono text-[0.625rem]"><span className="text-muted">{label}</span><span className={ready ? 'text-mint' : 'text-amber'}>{detail}</span></div>
+      <div className="mt-0.5 h-1 overflow-hidden rounded-sm bg-void"><div className={ready ? 'h-full bg-mint' : 'h-full bg-amber'} style={{ width: `${Math.max(3, Math.min(100, value * 100))}%` }} /></div>
+    </div>
+  )
+}
+
+function SafetyCampaignCard({
+  activeModel,
+  campaign,
+  intensity,
+  setIntensity,
+  researchers,
+  setResearchers,
+  researcherCount,
+  estimate,
+  onStart,
+  onCancel,
+}: {
+  activeModel: Model | null
+  campaign: SafetyCampaign | null
+  intensity: SafetyCampaignIntensity
+  setIntensity: (value: SafetyCampaignIntensity) => void
+  researchers: number
+  setResearchers: (value: number) => void
+  researcherCount: number
+  estimate: ReturnType<typeof safetyCampaignEstimate> | null
+  onStart: () => void
+  onCancel: () => void
+}) {
+  if (campaign) {
+    const trainingProgress = campaign.progressTrainingPfDays / Math.max(0.01, campaign.targetTrainingPfDays)
+    const researchProgress = campaign.progressResearchPfDays / Math.max(0.01, campaign.targetResearchPfDays)
+    return (
+      <section className="rounded-xl border border-research/35 bg-research/5 p-3">
+        <div className="flex items-start justify-between gap-2">
+          <div><h3 className="text-[0.8125rem] font-medium text-bone">Safety campaign · {campaign.modelName}</h3><p className="font-mono text-[0.625rem] uppercase text-research">{campaign.intensity} · deployed revision stays live</p></div>
+          <button type="button" onClick={onCancel} className="rounded-sm px-2 py-1 text-[0.6875rem] text-danger hover:bg-danger/10">Cancel</button>
+        </div>
+        <ReadinessBar label="Training compute" value={trainingProgress} detail={`${campaign.progressTrainingPfDays.toFixed(2)} / ${campaign.targetTrainingPfDays.toFixed(2)} PF-d`} />
+        <ReadinessBar label="Research compute" value={researchProgress} detail={`${campaign.progressResearchPfDays.toFixed(2)} / ${campaign.targetResearchPfDays.toFixed(2)} PF-d`} />
+        <p className="mt-2 font-mono text-[0.625rem] text-muted">{campaign.assignedResearchers} researchers · safety set {formatTokens(campaign.safetyDataMTok)} · Q{campaign.safetyDataQuality.toFixed(2)}</p>
+      </section>
+    )
+  }
+  if (!activeModel) return null
+  return (
+    <section className="rounded-xl border border-line/75 bg-panel-2 p-3">
+      <div className="flex items-start justify-between gap-2"><div><h3 className="text-[0.8125rem] font-medium text-bone">Safety post-training</h3><p className="text-[0.6875rem] text-muted">Build a safer revision without taking the deployed checkpoint offline.</p></div><span className="font-mono text-[0.625rem] text-muted">{activeModel.safetyTraining?.campaigns ?? 0} complete</span></div>
+      <div className="mt-2 grid grid-cols-3 gap-1">
+        {(['targeted', 'standard', 'frontier'] as SafetyCampaignIntensity[]).map((option) => (
+          <button key={option} type="button" onClick={() => setIntensity(option)} className={`rounded-sm px-2 py-1.5 text-[0.6875rem] capitalize transition ${intensity === option ? 'bg-research text-void' : 'bg-void text-muted hover:text-bone'}`}>{option}</button>
+        ))}
+      </div>
+      {estimate && (
+        <div className="mt-2 grid grid-cols-3 gap-1 font-mono text-[0.625rem]">
+          <RosterStat label="train" value={`${estimate.trainingPfDays.toFixed(2)} PF-d`} />
+          <RosterStat label="research" value={`${estimate.researchPfDays.toFixed(2)} PF-d`} />
+          <RosterStat label="cash" value={money(estimate.cashBudget)} />
+        </div>
+      )}
+      <label className="mt-2 block text-[0.6875rem] text-muted">Researchers {researchers} / {researcherCount}<input type="range" min={1} max={Math.max(1, researcherCount)} value={Math.min(Math.max(1, researcherCount), researchers)} onChange={(event) => setResearchers(Number(event.target.value))} className="mt-1 w-full" /></label>
+      {estimate?.reason && <p className="mt-1.5 text-[0.6875rem] text-amber">{estimate.reason}</p>}
+      <button type="button" disabled={!estimate?.ok} onClick={onStart} className="mt-2 w-full rounded-md bg-research px-3 py-2 text-xs font-medium text-void disabled:cursor-not-allowed disabled:opacity-40">Start {intensity} campaign</button>
+    </section>
+  )
+}
+
+function frontierForSuite(models: Model[], suiteId: BenchmarkSuiteId) {
+  const scores: Partial<Record<import('../../../sim/types').BenchmarkMetricId, number>> = {}
+  for (const model of models) {
+    for (const [id, score] of Object.entries(model.benchmarkSuites?.[suiteId] ?? {})) {
+      scores[id as import('../../../sim/types').BenchmarkMetricId] = Math.max(scores[id as import('../../../sim/types').BenchmarkMetricId] ?? 0, score ?? 0)
+    }
+  }
+  return scores
 }
 
 function RiskPill({ risk }: { risk: 'low' | 'medium' | 'high' }) {

@@ -1,13 +1,14 @@
 /**
- * Async save format v4.
+ * Async save format v5.
  *
  * Compact worlds persist only their deterministic descriptor and sparse
  * dynamic snapshot. Static typed layers, indexes, metrics, journals, and any
  * renderer state are regenerated after load.
  */
-import type { MapCity, MapRegion, MapTile, RackDesign, SimState } from './types'
+import type { MapCity, MapRegion, MapTile, Model, RackDesign, SimState } from './types'
 import { calendarForDay, formatCampaignDate } from './campaign'
 import { DEMAND_MODEL_VERSION, ECONOMY, WORLD_POPULATION } from './balance/economy'
+import { normalizeModelEvaluations } from './balance/evaluationSuites'
 import { scoreDesign } from './balance/racks'
 import {
   createWorldMarkets,
@@ -25,7 +26,7 @@ import {
 } from './world'
 
 export const SAVE_FORMAT = 'labline-save' as const
-export const SAVE_VERSION = 4 as const
+export const SAVE_VERSION = 5 as const
 export const V1_INCOMPATIBILITY_REASON =
   'Save format v1 is incompatible with the compact-world renderer. This campaign cannot be migrated; start a new operation.'
 export const V2_INCOMPATIBILITY_REASON =
@@ -476,19 +477,47 @@ function restoreState(stateRaw: unknown, snapshot: DynamicWorldSnapshotV2 | null
   }
   restored.player.rackFleet = ensureArray(restored.player.rackFleet)
   restored.player.loans = ensureArray(restored.player.loans)
-  restored.player.models = ensureArray(restored.player.models)
+  restored.player.models = ensureArray(restored.player.models).map((model) =>
+    normalizeModelEvaluations(model as Model),
+  )
+  restored.player.safetyCampaign = restored.player.safetyCampaign ?? null
   restored.player.researchUnlocked = ensureArray(restored.player.researchUnlocked)
   restored.player.researchQueue = ensureArray(restored.player.researchQueue)
   restored.player.chips = ensureArray(restored.player.chips)
-  restored.rivals = ensureArray(restored.rivals)
+  restored.rivals = (ensureArray(restored.rivals) as SimState['rivals']).map((rival) => ({
+    ...rival,
+    models: (ensureArray(rival.models) as Model[]).map((model) => normalizeModelEvaluations(model)),
+  }))
   restored.computeLeases = ensureArray(restored.computeLeases)
   restored.computeContracts = ensureArray(restored.computeContracts)
   restored.cityPowerContracts = ensureArray(restored.cityPowerContracts)
+  restored.powerExportContracts = ensureArray(restored.powerExportContracts)
   restored.siteProjects = ensureArray(restored.siteProjects)
   restored.siteCapacities = ensureArray(restored.siteCapacities)
   restored.energyContracts = ensureArray(restored.energyContracts)
   restored.regionInterconnections = ensureArray(restored.regionInterconnections)
   restored.segments = ensureArray(restored.segments)
+  if (restored.lastMarket) {
+    const legacyDirect = Math.max(0, restored.lastMarket.apiDayCogs ?? 0)
+    restored.lastMarket = {
+      ...restored.lastMarket,
+      apiDayDirectCogs: Math.max(
+        0,
+        restored.lastMarket.apiDayDirectCogs ?? legacyDirect,
+      ),
+      apiDayAllocatedOps: Math.max(0, restored.lastMarket.apiDayAllocatedOps ?? 0),
+      modelFinance: ensureArray(restored.lastMarket.modelFinance).map((row) => {
+        const direct = Math.max(0, row.dayApiDirectCogs ?? row.dayApiCogs ?? 0)
+        return {
+          ...row,
+          dayApiDirectCogs: direct,
+          dayApiAllocatedOps: Math.max(0, row.dayApiAllocatedOps ?? 0),
+          dayApiContribution: row.dayApiContribution ?? row.dayApiRevenue - direct,
+          apiCapacityUtilization: Math.max(0, row.apiCapacityUtilization ?? 0),
+        }
+      }),
+    }
+  }
   const restoredAudience = restored.segments.reduce(
     (sum, segment) => sum + Math.max(0, segment.size),
     0,
@@ -688,7 +717,7 @@ function validateSaveEnvelope(data: unknown): SaveFile {
       'newer-version',
     )
   }
-  if (candidate.version !== SAVE_VERSION) {
+  if (candidate.version !== SAVE_VERSION && candidate.version !== 4) {
     throw new SaveError(`Unsupported save version ${candidate.version}.`, 'incompatible-version')
   }
   const file = data as SaveFile

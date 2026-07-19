@@ -5,6 +5,7 @@ export type NavGroupId =
   | 'strategy'
   | 'lab'
   | 'infrastructure'
+  | 'build'
   | 'market'
   | 'company'
 
@@ -33,7 +34,7 @@ export interface NavGroup {
   items: NavItem[]
 }
 
-/** Five job-based workspaces; individual simulation panels remain independently routable. */
+/** Six job-based workspaces; individual simulation panels remain independently routable. */
 export const NAV_GROUPS: NavGroup[] = [
   {
     id: 'strategy',
@@ -70,13 +71,21 @@ export const NAV_GROUPS: NavGroup[] = [
     key: '3',
     letter: 'F',
     items: [
-      { id: 'map', label: 'Sites', hint: 'Place halls, plants, interconnect', key: '1' },
-      { id: 'build', label: 'Build', hint: 'Facilities, people, power & silicon', key: '2' },
-      { id: 'computeMarket', label: 'Compute', hint: 'Cloud, reserved, spot & rival PF', key: '3' },
-      { id: 'racks', label: 'Racks', hint: 'Design and order fleet batches', key: '4', presentation: 'workbench' },
-      { id: 'power', label: 'Power', hint: 'Grid MW, utility contracts & export', key: '5' },
-      { id: 'buildings', label: 'Buildings', hint: 'HQs, labs, halls & plants', key: '6' },
-      { id: 'chips', label: 'Silicon', hint: 'Custom fab campaigns', key: '7' },
+      { id: 'map', label: 'Overview', hint: 'Fleet, facilities, construction & map', key: '1' },
+      { id: 'computeMarket', label: 'Compute', hint: 'Cloud, reserved, spot & rival PF', key: '2' },
+      { id: 'racks', label: 'Hardware', hint: 'Racks, blueprints & custom silicon', key: '3', presentation: 'workbench' },
+      { id: 'power', label: 'Power', hint: 'Grid MW, utility contracts & export', key: '4' },
+    ],
+  },
+  {
+    id: 'build',
+    label: 'Build',
+    short: 'Build',
+    description: 'Place facilities and expand campus capacity',
+    key: '4',
+    letter: 'R',
+    items: [
+      { id: 'build', label: 'Build', hint: 'Facilities, people, power & silicon', key: '1' },
     ],
   },
   {
@@ -84,7 +93,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Market',
     short: 'Market',
     description: 'Products, pricing, demand & capacity',
-    key: '4',
+    key: '5',
     letter: 'T',
     items: [
       { id: 'plans', label: 'Plans', hint: 'Tiers & API list', key: '1', presentation: 'workbench' },
@@ -96,7 +105,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Company',
     short: 'Company',
     description: 'People, capital, ownership & recovery',
-    key: '5',
+    key: '6',
     letter: 'Y',
     items: [
       { id: 'org', label: 'Company', hint: 'Leads, staff, equity & debt', key: '1' },
@@ -114,6 +123,9 @@ export const COMMAND_VIEWS: { id: CommandViewId; label: string; key: string }[] 
 ]
 
 export function groupForPanel(panel: PanelId): NavGroup {
+  if (panel === 'chips') {
+    return NAV_GROUPS.find((group) => group.id === 'infrastructure') ?? NAV_GROUPS[0]!
+  }
   return (
     NAV_GROUPS.find((g) => g.items.some((i) => i.id === panel)) ?? NAV_GROUPS[0]!
   )
@@ -138,6 +150,7 @@ export function isWidePanel(panel: PanelId): boolean {
 
 export function panelPresentation(panel: PanelId): WorkspacePresentation {
   if (panel === 'allocate') return 'workbench'
+  if (panel === 'chips') return 'workbench'
   return groupForPanel(panel).items.find((item) => item.id === panel)?.presentation ?? 'drawer'
 }
 

@@ -2,7 +2,14 @@
  * Data-hall lifecycle: power down, sell halls, buy rival campuses,
  * and export surplus generation to cities / the grid.
  */
-import type { CityPowerContract, MapCity, MapTile, SimState, TileOwner } from '../types'
+import type {
+  CityPowerContract,
+  MapCity,
+  MapTile,
+  PowerExportContract,
+  SimState,
+  TileOwner,
+} from '../types'
 import { ECONOMY } from '../balance/economy'
 import { seededId } from '../rng'
 import {
@@ -131,6 +138,8 @@ export function powerBalance(state: SimState): {
   deficitMw: number
   gridImportMw: number
   exportMw: number
+  contractedExportMw: number
+  curtailedMw: number
   exportRevenueDay: number
   wholesalePerMWh: number
   cityBuyPerMWh: number
@@ -175,14 +184,19 @@ export function powerBalance(state: SimState): {
   if (n > 0) cityMult /= n
   else cityMult = 0.65
 
-  const exportEnabled = state.player.powerExportEnabled !== false
-  const exportMw = exportEnabled ? Math.min(surplusMw, Math.max(cityMwCap, surplusMw * 0.5)) : 0
-  // Prefer city offtake when in zone; remainder to wholesale grid at lower rate
-  const cityTake = Math.min(exportMw, cityMwCap > 0 ? cityMwCap : exportMw * 0.4)
-  const gridTake = Math.max(0, exportMw - cityTake)
   const cityPrice = wholesale * cityMult
-  const gridSell = wholesale * 0.55
-  const exportRevenueDay = cityTake * 24 * cityPrice + gridTake * 24 * gridSell
+  const exportContracts = activePowerExportContracts(state)
+  const contractedExportMw = exportContracts.reduce((sum, contract) => sum + contract.mw, 0)
+  const exportMw = Math.min(surplusMw, contractedExportMw)
+  let remainingExport = exportMw
+  let exportRevenueDay = 0
+  for (const contract of exportContracts) {
+    if (remainingExport <= 0) break
+    const delivered = Math.min(contract.mw, remainingExport)
+    exportRevenueDay += delivered * 24 * contract.pricePerMWh
+    remainingExport -= delivered
+  }
+  const curtailedMw = Math.max(0, surplusMw - exportMw)
 
   return {
     demandMw,
@@ -191,6 +205,8 @@ export function powerBalance(state: SimState): {
     deficitMw,
     gridImportMw: power.mwGridImport,
     exportMw,
+    contractedExportMw,
+    curtailedMw,
     exportRevenueDay,
     wholesalePerMWh: wholesale,
     cityBuyPerMWh: cityPrice,
@@ -220,6 +236,210 @@ export function powerExportDayRevenue(state: SimState): number {
 /** Active firm offtake contracts. */
 export function activeCityPowerContracts(state: SimState): CityPowerContract[] {
   return (state.cityPowerContracts ?? []).filter((c) => c.daysLeft > 0)
+}
+
+export function activePowerExportContracts(state: SimState): PowerExportContract[] {
+  return (state.powerExportContracts ?? []).filter((contract) => contract.daysLeft > 0)
+}
+
+export interface CityGridConnectorCapacity {
+  connectorCount: number
+  totalMw: number
+  committedMw: number
+  availableMw: number
+}
+
+/** Commissioned grid interconnects inside one city's utility zone. */
+export function cityGridConnectorCapacity(
+  state: SimState,
+  cityId: string,
+): CityGridConnectorCapacity {
+  const city = citiesOf(state).find((candidate) => candidate.id === cityId)
+  if (!city) return { connectorCount: 0, totalMw: 0, committedMw: 0, availableMw: 0 }
+  const connectors = facilityAnchorTiles(state, { ownerId: 'player' }).filter(
+    (tile) =>
+      tile.kind === 'substation' &&
+      tile.buildingProgress >= tile.buildingTarget &&
+      tile.mwCapacity > 0 &&
+      tileDist(tile.x, tile.y, city.cx, city.cy) <= city.powerRadius,
+  )
+  const totalMw = connectors.reduce((sum, connector) => sum + connector.mwCapacity, 0)
+  const committedMw = activeCityPowerContracts(state)
+    .filter((contract) => contract.cityId === cityId)
+    .reduce((sum, contract) => sum + contract.mw, 0)
+  const utilityRemainingMw = Math.max(0, city.powerBuyMw * 1.8 - committedMw)
+  return {
+    connectorCount: connectors.length,
+    totalMw,
+    committedMw,
+    availableMw: Math.max(0, Math.min(totalMw - committedMw, utilityRemainingMw)),
+  }
+}
+
+export interface PowerImportNegotiationQuote extends CityGridConnectorCapacity {
+  cityId: string
+  cityName: string
+  requestedMw: number
+  contractMw: number
+  termDays: number
+  askPricePerMWh: number
+  floorPricePerMWh: number
+}
+
+export function powerImportNegotiationQuote(
+  state: SimState,
+  cityId: string,
+  requestedMw: number,
+  termDays: number,
+): PowerImportNegotiationQuote | null {
+  const city = citiesOf(state).find((candidate) => candidate.id === cityId)
+  if (!city) return null
+  const connector = cityGridConnectorCapacity(state, cityId)
+  const term = Math.max(30, Math.min(180, Math.floor(termDays)))
+  const requested = Math.max(1, requestedMw)
+  const wholesale = energyPriceForState(state)
+  const termFactor = 0.92 - Math.min(0.18, ((term - 30) / 180) * 0.18)
+  const askPricePerMWh = Math.max(
+    wholesale * 0.42,
+    wholesale * city.powerBuyPriceMult * termFactor,
+  )
+  const floorPricePerMWh = askPricePerMWh * (0.9 - Math.min(0.04, (term - 30) / 1500))
+  return {
+    ...connector,
+    cityId: city.id,
+    cityName: city.name,
+    requestedMw: requested,
+    contractMw: Math.min(requested, connector.availableMw),
+    termDays: term,
+    askPricePerMWh,
+    floorPricePerMWh,
+  }
+}
+
+export function evaluatePowerImportOffer(
+  quote: PowerImportNegotiationQuote,
+  offeredPricePerMWh: number,
+): { accepted: boolean; agreedPricePerMWh: number } {
+  const offer = Math.max(0, offeredPricePerMWh)
+  if (offer >= quote.floorPricePerMWh) {
+    return { accepted: true, agreedPricePerMWh: Math.min(offer, quote.askPricePerMWh) }
+  }
+  return { accepted: false, agreedPricePerMWh: quote.floorPricePerMWh }
+}
+
+export interface PowerExportNegotiationQuote {
+  cityId: string
+  cityName: string
+  generationMw: number
+  availableMw: number
+  contractMw: number
+  termDays: number
+  utilityOfferPerMWh: number
+  ceilingPricePerMWh: number
+}
+
+export function powerExportNegotiationQuote(
+  state: SimState,
+  cityId: string,
+  requestedMw: number,
+  termDays: number,
+): PowerExportNegotiationQuote | null {
+  const city = citiesOf(state).find((candidate) => candidate.id === cityId)
+  if (!city) return null
+  const generationMw = facilityAnchorTiles(state, { ownerId: 'player' }).reduce(
+    (sum, tile) =>
+      tile.buildingProgress >= tile.buildingTarget &&
+      tile.mwGeneration > 0 &&
+      tileDist(tile.x, tile.y, city.cx, city.cy) <= city.powerRadius
+        ? sum + tile.mwGeneration
+        : sum,
+    0,
+  )
+  const committedMw = activePowerExportContracts(state)
+    .filter((contract) => contract.cityId === cityId)
+    .reduce((sum, contract) => sum + contract.mw, 0)
+  const availableMw = Math.max(0, Math.min(city.powerBuyMw, generationMw) - committedMw)
+  const term = Math.max(30, Math.min(180, Math.floor(termDays)))
+  const wholesale = energyPriceForState(state)
+  const termDiscount = 0.96 - Math.min(0.12, ((term - 30) / 150) * 0.12)
+  const utilityOfferPerMWh = wholesale * city.powerBuyPriceMult * termDiscount
+  return {
+    cityId: city.id,
+    cityName: city.name,
+    generationMw,
+    availableMw,
+    contractMw: Math.min(Math.max(1, requestedMw), availableMw),
+    termDays: term,
+    utilityOfferPerMWh,
+    ceilingPricePerMWh: utilityOfferPerMWh * (1.06 + Math.min(0.04, (term - 30) / 1500)),
+  }
+}
+
+export function evaluatePowerExportOffer(
+  quote: PowerExportNegotiationQuote,
+  requestedPricePerMWh: number,
+): { accepted: boolean; agreedPricePerMWh: number } {
+  const ask = Math.max(0, requestedPricePerMWh)
+  if (ask <= quote.ceilingPricePerMWh) {
+    return { accepted: true, agreedPricePerMWh: Math.max(ask, quote.utilityOfferPerMWh) }
+  }
+  return { accepted: false, agreedPricePerMWh: quote.ceilingPricePerMWh }
+}
+
+/** Sign a fixed-term sale of owned surplus generation to a city utility. */
+export function signPowerExportContract(
+  state: SimState,
+  cityId: string,
+  mwRequested: number,
+  termDays: number,
+  negotiatedPricePerMWh?: number,
+): SimState {
+  const quote = powerExportNegotiationQuote(state, cityId, mwRequested, termDays)
+  if (!quote) return alert(state, 'warn', 'Unknown city.')
+  if (quote.generationMw <= 0) {
+    return alert(state, 'warn', `Build generation inside ${quote.cityName}'s power zone first.`)
+  }
+  if (quote.availableMw < 1 || quote.contractMw < 1) {
+    return alert(state, 'warn', `${quote.cityName} has no remaining offtake capacity for your plants.`)
+  }
+  const pricePerMWh = negotiatedPricePerMWh == null
+    ? quote.utilityOfferPerMWh
+    : evaluatePowerExportOffer(quote, negotiatedPricePerMWh).agreedPricePerMWh
+  const contract: PowerExportContract = {
+    id: seededId('pwr-export', state.seed, state.day, quote.cityId, state.powerExportContracts.length),
+    cityId: quote.cityId,
+    cityName: quote.cityName,
+    mw: quote.contractMw,
+    pricePerMWh,
+    daysLeft: quote.termDays,
+    daysTotal: quote.termDays,
+    signedDay: state.day,
+  }
+  return {
+    ...state,
+    powerExportContracts: [...state.powerExportContracts, contract],
+    alerts: [
+      {
+        id: `pwr-export-${contract.id}`,
+        day: state.day,
+        severity: 'info' as const,
+        message: `Export contract: ${contract.mw.toFixed(1)} MW to ${quote.cityName} @ $${contract.pricePerMWh.toFixed(0)}/MWh for ${quote.termDays}d.`,
+      },
+      ...state.alerts,
+    ].slice(0, 40),
+  }
+}
+
+export function cancelPowerExportContract(state: SimState, contractId: string): SimState {
+  const contract = state.powerExportContracts.find((candidate) => candidate.id === contractId)
+  if (!contract) return alert(state, 'warn', 'Export contract not found.')
+  const fee = Math.floor(contract.mw * contract.pricePerMWh * 24 * contract.daysLeft * 0.15)
+  if (state.player.cash < fee) return alert(state, 'warn', `Break fee $${(fee / 1e3).toFixed(0)}k required.`)
+  return {
+    ...state,
+    powerExportContracts: state.powerExportContracts.filter((candidate) => candidate.id !== contractId),
+    player: { ...state.player, cash: state.player.cash - fee },
+  }
 }
 
 /** Locked MW still available today (sum of contracts). */
@@ -275,72 +495,55 @@ export function powerImportBill(
 
 /**
  * Negotiate a firm power offtake from a city (locked $/MWh, locked term).
- * Longer terms → slightly better discount. Must be in city's power zone
- * (or have interconnect) to qualify.
+ * Longer terms → slightly better discount. A commissioned grid interconnect
+ * inside the city's power zone is mandatory and caps contracted MW.
  */
 export function signCityPowerContract(
   state: SimState,
   cityId: string,
   mw: number,
   termDays: number,
+  negotiatedPricePerMWh?: number,
 ): SimState {
-  const city = citiesOf(state).find((c) => c.id === cityId)
-  if (!city) return alert(state, 'warn', 'Unknown city.')
-  const mwAsk = Math.max(1, Math.min(city.powerBuyMw * 1.5, mw))
-  const term = Math.max(30, Math.min(180, Math.floor(termDays)))
-
-  // Must have campus / gen / interconnect near the city
-  const near = facilityAnchorTiles(state, { ownerId: 'player' }).some((t) => {
-    if (t.buildingProgress < t.buildingTarget) return false
-    const d = tileDist(t.x, t.y, city.cx, city.cy)
-    return d <= city.powerRadius + 2
-  })
-  if (!near) {
+  const quote = powerImportNegotiationQuote(state, cityId, mw, termDays)
+  if (!quote) return alert(state, 'warn', 'Unknown city.')
+  if (quote.connectorCount === 0 || quote.totalMw <= 0) {
     return alert(
       state,
       'warn',
-      `Build a hall, interconnect, or generator within ${city.name}'s power zone first.`,
+      `Build a grid interconnect inside ${quote.cityName}'s power zone before importing power.`,
     )
   }
-
-  // Already contracted capacity from this city
-  const existing = activeCityPowerContracts(state)
-    .filter((c) => c.cityId === cityId)
-    .reduce((s, c) => s + c.mw, 0)
-  if (existing + mwAsk > city.powerBuyMw * 1.8) {
+  if (quote.availableMw < 1 || quote.contractMw < 1) {
     return alert(
       state,
       'warn',
-      `${city.name} will not lock more than ~${(city.powerBuyMw * 1.8).toFixed(0)} MW firm to you.`,
+      `${quote.cityName}'s grid connectors have no uncommitted import capacity.`,
     )
   }
-
   const wholesale = energyPriceForState(state)
-  // Discount vs spot: base city mult × term sweetener (longer → cheaper)
-  const termFactor = 0.92 - Math.min(0.18, (term - 30) / 180 * 0.18)
-  const pricePerMWh = Math.max(
-    wholesale * 0.42,
-    wholesale * city.powerBuyPriceMult * termFactor,
-  )
+  const pricePerMWh = negotiatedPricePerMWh == null
+    ? quote.askPricePerMWh
+    : evaluatePowerImportOffer(quote, negotiatedPricePerMWh).agreedPricePerMWh
 
   // Signing fee (legal / capacity reservation)
-  const signFee = Math.floor(mwAsk * pricePerMWh * 24 * 2.5)
+  const signFee = Math.floor(quote.contractMw * pricePerMWh * 24 * 2.5)
   if (state.player.cash < signFee) {
     return alert(
       state,
       'warn',
-      `Need $${(signFee / 1e3).toFixed(0)}k reservation fee to lock ${mwAsk.toFixed(0)} MW.`,
+      `Need $${(signFee / 1e3).toFixed(0)}k reservation fee to lock ${quote.contractMw.toFixed(0)} MW.`,
     )
   }
 
   const contract: CityPowerContract = {
     id: seededId('pwr', state.seed, state.day, cityId, state.cityPowerContracts.length),
-    cityId: city.id,
-    cityName: city.name,
-    mw: mwAsk,
+    cityId: quote.cityId,
+    cityName: quote.cityName,
+    mw: quote.contractMw,
     pricePerMWh,
-    daysLeft: term,
-    daysTotal: term,
+    daysLeft: quote.termDays,
+    daysTotal: quote.termDays,
   }
 
   return {
@@ -355,12 +558,12 @@ export function signCityPowerContract(
         id: `city-pwr-${contract.id}`,
         day: state.day,
         severity: 'info' as const,
-        message: `Power contract: ${mwAsk.toFixed(1)} MW from ${city.name} @ $${pricePerMWh.toFixed(0)}/MWh for ${term}d (spot $${wholesale.toFixed(0)}). Fee $${(signFee / 1e3).toFixed(0)}k.`,
+        message: `Power contract: ${quote.contractMw.toFixed(1)} MW from ${quote.cityName} @ $${pricePerMWh.toFixed(0)}/MWh for ${quote.termDays}d (spot $${wholesale.toFixed(0)}). Fee $${(signFee / 1e3).toFixed(0)}k.`,
       },
       ...state.alerts,
     ].slice(0, 40),
     news: [
-      `Day ${state.day}: ${state.player.name} locks ${mwAsk.toFixed(0)} MW from ${city.name} utility (${term}d @ $${pricePerMWh.toFixed(0)}/MWh).`,
+      `Day ${state.day}: ${state.player.name} locks ${quote.contractMw.toFixed(0)} MW from ${quote.cityName} utility (${quote.termDays}d @ $${pricePerMWh.toFixed(0)}/MWh).`,
       ...state.news,
     ].slice(0, 20),
   }
@@ -410,6 +613,21 @@ export function tickCityPowerContracts(state: SimState): SimState {
     ].slice(0, 20)
   }
   return { ...state, cityPowerContracts: contracts, news }
+}
+
+export function tickPowerExportContracts(state: SimState): SimState {
+  const contracts = state.powerExportContracts
+    .map((contract) => ({ ...contract, daysLeft: contract.daysLeft - 1 }))
+    .filter((contract) => contract.daysLeft > 0)
+  const expired = state.powerExportContracts.length - contracts.length
+  return {
+    ...state,
+    powerExportContracts: contracts,
+    news:
+      expired > 0
+        ? [`Day ${state.day}: ${expired} power export contract(s) expired.`, ...state.news].slice(0, 20)
+        : state.news,
+  }
 }
 
 export function setPowerExportEnabled(state: SimState, on: boolean): SimState {
@@ -1036,6 +1254,9 @@ export function cityDashboard(state: SimState): {
   hallsInZone: number
   rivalHallsInZone: number
   genInZone: number
+  connectorCount: number
+  connectorMw: number
+  connectorAvailableMw: number
 }[] {
   const cities = citiesOf(state)
   const facilities = facilityAnchorTiles(state)
@@ -1060,6 +1281,16 @@ export function cityDashboard(state: SimState): {
       }
       if (t.mwGeneration > 0 && t.owner === 'player') genInZone += t.mwGeneration
     }
-    return { city, distToPlayer, hallsInZone, rivalHallsInZone, genInZone }
+    const connector = cityGridConnectorCapacity(state, city.id)
+    return {
+      city,
+      distToPlayer,
+      hallsInZone,
+      rivalHallsInZone,
+      genInZone,
+      connectorCount: connector.connectorCount,
+      connectorMw: connector.totalMw,
+      connectorAvailableMw: connector.availableMw,
+    }
   })
 }

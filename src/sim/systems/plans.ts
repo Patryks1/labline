@@ -5,11 +5,16 @@ import type {
   Model,
   PlanDayStats,
   PlanServePrecision,
+  SegmentId,
   SimState,
   SubPlan,
 } from '../types'
 import { inferencePfDemand, planActualMTokPerUser } from '../balance/serveCompute'
 import { seededId } from '../rng'
+import {
+  normalizeModelEvaluations,
+  suiteComposite,
+} from '../balance/evaluationSuites'
 
 export function defaultPlans(): SubPlan[] {
   return [
@@ -638,6 +643,55 @@ export function bestModelOnPlan(state: SimState, plan: SubPlan) {
   return models.sort((a, b) => (b!.capability ?? 0) - (a!.capability ?? 0))[0] ?? null
 }
 
+export interface PlanOfferingBreadth {
+  score: number
+  contributors: { modality: 'image' | 'video' | 'audio'; modelId: string; modelName: string; composite: number; points: number }[]
+}
+
+export function offeringBreadthMultiplier(segmentId: SegmentId): number {
+  if (segmentId === 'creative') return 1
+  if (segmentId === 'consumer') return 0.8
+  if (segmentId === 'hobby') return 0.6
+  if (segmentId === 'indie_api' || segmentId === 'startup_api') return 0.4
+  if (segmentId === 'enterprise') return 0.2
+  return 0.1
+}
+
+/** Quality-gated portfolio value from generation models included in a plan. */
+export function planOfferingBreadth(state: SimState, plan: SubPlan): PlanOfferingBreadth {
+  const models = plan.modelIds
+    .map((id) => state.player.models.find((model) => model.id === id))
+    .filter((model): model is Model => !!model && (model.release === 'released' || model.shipped))
+    .map(normalizeModelEvaluations)
+  const definitions = [
+    { modality: 'image' as const, suite: 'image_generation' as const, max: 7 },
+    { modality: 'video' as const, suite: 'video_generation' as const, max: 6 },
+    { modality: 'audio' as const, suite: 'audio_generation' as const, max: 5 },
+  ]
+  const contributors: PlanOfferingBreadth['contributors'] = []
+  for (const definition of definitions) {
+    const candidates = models
+      .map((model) => ({
+        model,
+        composite: suiteComposite(model.benchmarkSuites?.[definition.suite]),
+        safety: model.capabilities?.safety ?? model.quality.safety,
+      }))
+      .filter((candidate) => candidate.composite >= 35 && candidate.safety >= 30)
+      .toSorted((a, b) => b.composite - a.composite)
+    const best = candidates[0]
+    if (!best) continue
+    const points = definition.max * Math.max(0, Math.min(1, (best.composite - 35) / 65))
+    contributors.push({
+      modality: definition.modality,
+      modelId: best.model.id,
+      modelName: best.model.name,
+      composite: best.composite,
+      points,
+    })
+  }
+  return { score: contributors.reduce((sum, item) => sum + item.points, 0), contributors }
+}
+
 function playerBlendedApi(state: SimState): number {
   const p = state.player.pricing
   if (p.apiPriceInPerMTok != null && p.apiPriceOutPerMTok != null) {
@@ -728,7 +782,11 @@ export function rivalBestCapability(state: SimState): number {
  * Softmax-friendly score for plan demand.
  * More tokens + smarter model at same price beats stingy rivals.
  */
-export function planAttractiveness(state: SimState, plan: SubPlan): number {
+export function planAttractiveness(
+  state: SimState,
+  plan: SubPlan,
+  segmentId: SegmentId = 'consumer',
+): number {
   if (!plan.enabled) return -50
   const baseModel = bestModelOnPlan(state, plan)
   if (!baseModel) return -40
@@ -800,6 +858,7 @@ export function planAttractiveness(state: SimState, plan: SubPlan): number {
   const priorDissatisfaction =
     state.lastMarket.planStats.find((stat) => stat.planId === plan.id)?.dissatisfaction ?? 0
   const instabilityPenalty = priorDissatisfaction * (isFreePlan(plan) ? 34 : 58)
+  const breadth = planOfferingBreadth(state, plan).score * offeringBreadthMultiplier(segmentId)
 
   return (
     quality * 0.34 +
@@ -808,6 +867,7 @@ export function planAttractiveness(state: SimState, plan: SubPlan): number {
     valueRatio * 0.1 +
     tokenVsRival * 0.12 +
     smarterAtPrice * 0.08 +
+    breadth +
     sotaPull -
     pricePenalty -
     premiumPenalty -
