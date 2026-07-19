@@ -1324,6 +1324,10 @@ export interface MarketOffer {
   apiReliability?: number
   apiTokPerSec?: number
   apiBenchmarks?: BenchmarkScores
+  /** Cost-independent customer value used by API pricing diagnostics. */
+  valueIndex?: number
+  apiValueIndex?: number
+  primaryOutputKind?: string
   /** True for image/video generators that may serve creative demand only. */
   generationOnly?: boolean
   /** False when this model is not currently listed as an API endpoint. */

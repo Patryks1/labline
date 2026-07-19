@@ -38,7 +38,13 @@ import {
   newDataSinceModel,
   totalProcessed,
 } from '../../../sim/systems/data'
-import { modelCostMult, serveInfraCost, suggestApiInOut } from '../../../sim/balance/pricing'
+import {
+  apiModelKind,
+  apiModelValueIndex,
+  deriveApiUnitEconomics,
+  serveInfraCost,
+  type ApiUnitEconomics,
+} from '../../../sim/balance/pricing'
 import { energyPriceForState } from '../../../sim/systems/map'
 import { computeSnapshot } from '../../../sim/tick'
 import { money, num } from '../format'
@@ -59,6 +65,9 @@ import {
 import { safetyCampaignEstimate } from '../../../sim/systems/safetyCampaigns'
 import { playerStaff } from '../../../sim/systems/staff'
 import { RadarChart } from '../ui/RadarChart'
+import { ApiEconomicsControl } from '../ui/ApiEconomicsControl'
+import { TrainingDataRadar } from '../ui/TrainingDataRadar'
+import { normalizedRadarWeights } from '../ui/trainingDataRadarMath'
 
 function parseSizeInput(value: string, unit: 'M' | 'B' | 'T'): number {
   const n = Number(value)
@@ -83,15 +92,40 @@ export function ModelsPanel() {
   const releaseModel = useGameStore((s) => s.releaseModel)
   const deleteModel = useGameStore((s) => s.deleteModel)
   const setActiveModel = useGameStore((s) => s.setActiveModel)
-  const setModelApiPrice = useGameStore((s) => s.setModelApiPrice)
   const setModelApiInOut = useGameStore((s) => s.setModelApiInOut)
-  const applyModelApiMarkup = useGameStore((s) => s.applyModelApiMarkup)
   const startSafetyCampaign = useGameStore((s) => s.startSafetyCampaign)
   const cancelSafetyCampaign = useGameStore((s) => s.cancelSafetyCampaign)
-  const apiMarkupPct = useGameStore((s) => s.state.player.pricing.apiMarkupPct)
   const openResearchNode = useGameStore((s) => s.openResearchNode)
   const snap = computeSnapshot(state)
-  const infra = serveInfraCost(state, snap, energyPriceForState(state))
+  const energyPrice = energyPriceForState(state)
+  const infra = serveInfraCost(state, snap, energyPrice)
+  const rivalApiPeers = state.rivals.flatMap((rival) =>
+    rival.models
+      .filter((model) => model.release === 'released' || model.shipped)
+      .map((model) => ({
+        price:
+          model.apiPriceInPerMTok != null && model.apiPriceOutPerMTok != null
+            ? model.apiPriceInPerMTok * 0.3 + model.apiPriceOutPerMTok * 0.7
+            : rival.pricing.apiPricePerMTok,
+        capability: model.capability,
+        featureScore: model.modalities.length * 18,
+        tokPerSec: model.serviceProfile?.interactiveTokPerSec ?? 52 * model.tokPerSecMult,
+        valueIndex: apiModelValueIndex(model),
+        kind: apiModelKind(model),
+      })),
+  )
+  const economicsForModel = (model: Model): ApiUnitEconomics => {
+    const finance = state.lastMarket.modelFinance?.find((row) => row.modelId === model.id)
+    return deriveApiUnitEconomics({
+      state,
+      snap,
+      model,
+      energyPricePerMWh: energyPrice,
+      dayCogs: finance?.dayApiCogs,
+      dayMTok: finance?.dayApiMTok,
+      peers: rivalApiPeers,
+    })
+  }
 
   const [name, setName] = useState('Spark')
   const [backbone, setBackbone] = useState<ModelBackbone>('dense')
@@ -315,11 +349,24 @@ export function ModelsPanel() {
   const internal = state.player.models.filter((m) => m.release === 'internal' || !m.shipped)
   const released = state.player.models.filter((m) => m.release === 'released' || m.shipped)
 
-  const weightSum = DATA_DOMAINS.reduce((s, d) => s + weights[d], 0) || 1
-
-  const setWeight = (d: DataDomain, v: number) => {
-    setWeights((w) => ({ ...w, [d]: Math.max(0, v) }))
-  }
+  const radarWeights = normalizedRadarWeights(recipePlan.weights)
+  const availableByDomain = Object.fromEntries(
+    DATA_DOMAINS.map((domain) => [domain, labData.stocks[domain].processed]),
+  ) as Record<DataDomain, number>
+  const corpusOutcome = Object.fromEntries(DATA_DOMAINS.map((domain) => {
+    const target = dataMTok * radarWeights[domain]
+    const real = Math.min(target, availableByDomain[domain])
+    const missing = Math.max(0, target - real)
+    const syntheticQuality = includeSynthHQ && includeSynthLQ ? 0.68 : includeSynthHQ ? 0.86 : includeSynthLQ ? 0.46 : 0
+    const synthetic = allowSynthetic && synthUnlocked ? missing : 0
+    const fulfilledSignal = target > 0
+      ? Math.min(1, (real + synthetic * syntheticQuality) / target)
+      : 0
+    const defaultShare = Math.max(0.01, defaultDataWeights(family)[domain])
+    const focusSignal = Math.min(1, radarWeights[domain] / (defaultShare * 1.35))
+    const score = trainingForecast.expectedCapability * 0.72 + fulfilledSignal * 18 + focusSignal * 10
+    return [domain, Math.max(0, Math.min(100, score))]
+  })) as Record<DataDomain, number>
 
   const volMax = Math.max(processedAvail * 2, recData * 2.5, minMTok * 2, 100)
   const shortfall = Math.max(0, dataMTok - processedAvail)
@@ -809,36 +856,21 @@ export function ModelsPanel() {
                 More train → capability · more verify → safety / reliability
               </span>
             </label>
-            <div className={`mt-2 space-y-1.5 ${!mixUnlocked ? 'opacity-65' : ''}`}>
+            <div className={`${!mixUnlocked ? 'opacity-75' : ''}`}>
               {!mixUnlocked && (
                 <ResearchUnlockLink nodeId="data_mix" label="Unlock domain mix with Mixture Engineering" />
               )}
-              {DATA_DOMAINS.map((d) => {
-                const pct = Math.round((weights[d] / weightSum) * 100)
-                const have = labData.stocks[d].processed
-                const need = dataMTok * (weights[d] / weightSum)
-                const short = need > have + 0.05
-                return (
-                  <div key={d}>
-                    <div className="flex justify-between text-[0.75rem]">
-                      <span className="text-bone">{DATA_DOMAIN_META[d].label}</span>
-                      <span className={short ? 'text-amber' : 'text-muted'}>
-                        {pct}% · need {formatTokens(need)} / have {formatTokens(have)}
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={100}
-                      step={1}
-                      disabled={!mixUnlocked}
-                      value={Math.round(weights[d] * 100)}
-                      onChange={(e) => setWeight(d, Number(e.target.value) / 100)}
-                      className="w-full disabled:cursor-not-allowed"
-                    />
-                  </div>
-                )
-              })}
+              <TrainingDataRadar
+                weights={recipePlan.weights}
+                dataMTok={dataMTok}
+                available={availableByDomain}
+                syntheticEnabled={allowSynthetic && synthUnlocked}
+                includeSynthHQ={includeSynthHQ}
+                includeSynthLQ={includeSynthLQ}
+                outcome={corpusOutcome}
+                disabled={!mixUnlocked}
+                onChange={setWeights}
+              />
             </div>
 
             <label
@@ -1083,10 +1115,7 @@ export function ModelsPanel() {
         onSelect={setActiveModel}
         onRelease={releaseModel}
         onDelete={deleteModel}
-        onPrice={setModelApiPrice}
         onPriceInOut={setModelApiInOut}
-        onApplyMarkup={applyModelApiMarkup}
-        markupPct={apiMarkupPct}
         frontierCapability={publicFrontier}
         privateList
       />
@@ -1099,14 +1128,11 @@ export function ModelsPanel() {
         onSelect={setActiveModel}
         onRelease={releaseModel}
         onDelete={deleteModel}
-        onPrice={setModelApiPrice}
         onPriceInOut={setModelApiInOut}
-        onApplyMarkup={applyModelApiMarkup}
-        markupPct={apiMarkupPct}
         frontierCapability={publicFrontier}
         showTokenEconomics
         unitCostActive={infra.costPerMTok}
-        activeModelRef={active ?? released[0] ?? null}
+        economicsForModel={economicsForModel}
       />
 
       {evaluatedActive && (
@@ -1172,15 +1198,12 @@ function ModelList({
   onSelect,
   onRelease,
   onDelete,
-  onPrice: _onPrice,
   onPriceInOut,
-  onApplyMarkup,
-  markupPct,
   frontierCapability,
   privateList,
   showTokenEconomics,
   unitCostActive,
-  activeModelRef,
+  economicsForModel,
 }: {
   title: string
   models: Model[]
@@ -1189,17 +1212,13 @@ function ModelList({
   onSelect: (id: string) => void
   onRelease: (id: string) => void
   onDelete: (id: string) => void
-  onPrice: (id: string, price: number | null) => void
   onPriceInOut: (id: string, priceIn: number | null, priceOut: number | null) => void
-  onApplyMarkup: (id: string, markupPct: number) => void
-  markupPct: number
   frontierCapability: number
   privateList?: boolean
   showTokenEconomics?: boolean
   unitCostActive?: number
-  activeModelRef?: Model | null
+  economicsForModel?: (model: Model) => ApiUnitEconomics
 }) {
-  void _onPrice
   return (
     <section className="space-y-1.5">
       <div className="flex items-center justify-between">
@@ -1210,23 +1229,8 @@ function ModelList({
       {models.map((source) => {
         const model = normalizeModelEvaluations(source)
         const selected = pricingId === model.id
-        const unit =
-          showTokenEconomics && unitCostActive != null && activeModelRef
-            ? Math.max(0.005, unitCostActive * (modelCostMult(model) / Math.max(0.08, modelCostMult(activeModelRef))))
-            : unitCostActive
-        const suggested =
-          showTokenEconomics && unit != null
-            ? suggestApiInOut({
-                costPerMTokBase: unit,
-                paramsB: model.paramsB,
-                activeParamsB: model.activeParamsB,
-                family: model.family,
-                inferCostMult: model.inferCostMult,
-                capability: model.capability,
-                markupPct,
-                applyModelMult: false,
-              })
-            : null
+        const economics = showTokenEconomics ? economicsForModel?.(model) : undefined
+        const unit = economics?.directBlended ?? unitCostActive
         const primarySuite = model.benchmarkSuites?.omni_overview
           ?? model.benchmarkSuites?.image_generation
           ?? model.benchmarkSuites?.video_generation
@@ -1240,6 +1244,16 @@ function ModelList({
           : ((model.capability - tier.floor) / Math.max(1, nextAt - tier.floor)) * 100
         const gap = model.capability - frontierCapability
         const speed = model.serviceProfile?.interactiveTokPerSec ?? 52 * model.tokPerSecMult
+        const priceIn = model.apiPriceInPerMTok
+          ?? model.suggestedApiPriceIn
+          ?? model.costApiPriceIn
+          ?? economics?.directIn
+          ?? 0
+        const priceOut = model.apiPriceOutPerMTok
+          ?? model.suggestedApiPriceOut
+          ?? model.costApiPriceOut
+          ?? economics?.directOut
+          ?? 0
         return (
           <article
             key={model.id}
@@ -1279,33 +1293,17 @@ function ModelList({
                   {model.outcome && <span className={model.outcome.kind === 'stumble' ? 'text-danger' : model.outcome.kind === 'breakthrough' ? 'text-mint' : 'text-muted'}>{model.outcome.kind.toUpperCase()}</span>}
                 </div>
 
-                {!privateList && (
-                  <div className="mt-2 grid grid-cols-2 gap-1.5">
-                    <PriceInput
-                      label="Input $/1M"
-                      value={model.apiPriceInPerMTok}
-                      placeholder={model.suggestedApiPriceIn ?? model.costApiPriceIn}
-                      onChange={(value) => onPriceInOut(model.id, value, model.apiPriceOutPerMTok)}
-                    />
-                    <PriceInput
-                      label="Output $/1M"
-                      value={model.apiPriceOutPerMTok}
-                      placeholder={model.suggestedApiPriceOut ?? model.costApiPriceOut}
-                      onChange={(value) => onPriceInOut(model.id, model.apiPriceInPerMTok, value)}
-                    />
-                  </div>
+                {!privateList && economics && (
+                  <ApiEconomicsControl
+                    modelName={model.name}
+                    priceIn={priceIn}
+                    priceOut={priceOut}
+                    economics={economics}
+                    onChange={(nextIn, nextOut) => onPriceInOut(model.id, nextIn, nextOut)}
+                  />
                 )}
 
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                  {!privateList && suggested && (
-                    <>
-                      <button type="button" className="rounded-sm bg-panel px-2 py-1 text-[0.6875rem] text-mint hover:bg-mint/10" onClick={() => onPriceInOut(model.id, model.costApiPriceIn, model.costApiPriceOut)}>At cost</button>
-                      <MarkupControl
-                        initialPercent={markupPct}
-                        onApply={(percent) => onApplyMarkup(model.id, percent)}
-                      />
-                    </>
-                  )}
                   {privateList && (
                     <button type="button" onClick={() => onRelease(model.id)} className="rounded-sm bg-mint px-2.5 py-1 text-[0.6875rem] font-medium text-void">Release publicly</button>
                   )}
@@ -1326,90 +1324,6 @@ function RosterStat({ label, value, tone = 'text-bone' }: { label: string; value
       <span className="block uppercase tracking-wider text-muted">{label}</span>
       <strong className={`font-medium ${tone}`}>{value}</strong>
     </span>
-  )
-}
-
-function PriceInput({ label, value, placeholder, onChange }: { label: string; value: number | null; placeholder: number; onChange: (value: number | null) => void }) {
-  const [draft, setDraft] = useState(() => value == null ? '' : value.toFixed(2))
-
-  useEffect(() => {
-    setDraft(value == null ? '' : value.toFixed(2))
-  }, [value])
-
-  const commit = () => {
-    if (draft.trim() === '') {
-      onChange(null)
-      return
-    }
-    const parsed = Number(draft)
-    const next = Number.isFinite(parsed) ? Math.max(0, parsed) : 0
-    const rounded = Math.round(next * 100) / 100
-    setDraft(rounded.toFixed(2))
-    onChange(rounded)
-  }
-
-  return (
-    <label className="text-[0.6875rem] text-muted">
-      {label}
-      <input
-        type="number"
-        min={0}
-        step={0.01}
-        inputMode="decimal"
-        placeholder={placeholder.toFixed(2)}
-        value={draft}
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={commit}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter') event.currentTarget.blur()
-          if (event.key === 'Escape') {
-            setDraft(value == null ? '' : value.toFixed(2))
-          }
-        }}
-        className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1 font-mono text-xs text-bone outline-none focus:border-mint/50"
-      />
-    </label>
-  )
-}
-
-function MarkupControl({ initialPercent, onApply }: { initialPercent: number; onApply: (percent: number) => void }) {
-  const [draft, setDraft] = useState(() => String(initialPercent))
-  const parsed = Number(draft)
-  const valid = draft.trim() !== '' && Number.isFinite(parsed) && parsed >= 0 && parsed <= 10_000
-
-  useEffect(() => {
-    setDraft(String(initialPercent))
-  }, [initialPercent])
-
-  return (
-    <div className="flex items-stretch overflow-hidden rounded-sm border border-mint/25 bg-mint/10">
-      <label className="flex items-center gap-1 px-2 text-[0.6875rem] text-muted">
-        <span>Markup</span>
-        <input
-          type="number"
-          min={0}
-          max={10_000}
-          step={0.01}
-          inputMode="decimal"
-          aria-label="Custom API markup percentage"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && valid) onApply(parsed)
-          }}
-          className="w-16 border-0 bg-transparent py-1 text-right font-mono text-[0.6875rem] text-bone outline-none"
-        />
-        <span aria-hidden="true">%</span>
-      </label>
-      <button
-        type="button"
-        disabled={!valid}
-        onClick={() => valid && onApply(parsed)}
-        className="border-l border-mint/25 px-2 py-1 text-[0.6875rem] text-mint hover:bg-mint/15 disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        Apply
-      </button>
-    </div>
   )
 }
 

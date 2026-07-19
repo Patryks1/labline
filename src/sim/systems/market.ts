@@ -1,4 +1,5 @@
 import { DEMAND_MODEL_VERSION, ECONOMY, SEGMENTS, WORLD_POPULATION } from '../balance/economy'
+import { getChipDef } from '../balance/chips'
 import { emptyBenchmarks, segmentBenchmarkFit } from '../balance/benchmarks'
 import type {
   FinanceDaySnapshot,
@@ -12,7 +13,14 @@ import type {
   SimState,
   SubPlan,
 } from '../types'
-import { analyzeApiPricing, apiRevenueFromMTok, blendApiPrice } from '../balance/pricing'
+import {
+  analyzeApiPricing,
+  apiModelKind,
+  apiModelValueIndex,
+  apiRevenueFromMTok,
+  blendApiPrice,
+  deriveApiUnitEconomics,
+} from '../balance/pricing'
 import {
   inferenceCapacityMTok,
   inferencePfAvailable,
@@ -387,6 +395,9 @@ export function collectOffers(state: SimState): MarketOffer[] {
       apiReliability: perceivedServiceReliability(apiModel.quality.reliability, pain),
       apiTokPerSec: tokPerSec,
       apiBenchmarks: apiModel.benchmarks,
+      valueIndex: apiModelValueIndex(playerModel),
+      apiValueIndex: apiModelValueIndex(apiModel),
+      primaryOutputKind: apiModelKind(apiModel),
       generationOnly: isGenerationOnlyModel(playerModel),
       apiListed,
       subscriptionListed,
@@ -417,6 +428,9 @@ export function collectOffers(state: SimState): MarketOffer[] {
         modalities: m.modalities,
         isOpenWeights: m.openWeights ?? r.archetype === 'open_weights',
         benchmarks: m.benchmarks ?? emptyBenchmarks(),
+        valueIndex: apiModelValueIndex(m),
+        apiValueIndex: apiModelValueIndex(m),
+        primaryOutputKind: apiModelKind(m),
         generationOnly: isGenerationOnlyModel(m),
         apiListed: true,
         subscriptionListed: true,
@@ -754,8 +768,12 @@ export function tickMarket(state: SimState): SimState {
         capability: scoredOffer.capability,
         featureScore: scoredOffer.modalities.length * 18,
         tokPerSec: scoredOffer.tokPerSec,
+        valueIndex: segDef.prefersSub ? undefined : (o.apiValueIndex ?? o.valueIndex),
         peers: segmentOffers
-          .filter((peer) => peer.labId !== o.labId)
+          .filter((peer) =>
+            peer.labId !== o.labId &&
+            (segDef.prefersSub || peer.primaryOutputKind === o.primaryOutputKind),
+          )
           .map((peer) => {
             const scoredPeer = effectiveOffer(peer)
             return {
@@ -763,6 +781,10 @@ export function tickMarket(state: SimState): SimState {
               capability: scoredPeer.capability,
               featureScore: scoredPeer.modalities.length * 18,
               tokPerSec: scoredPeer.tokPerSec,
+              valueIndex: segDef.prefersSub
+                ? undefined
+                : (peer.apiValueIndex ?? peer.valueIndex),
+              kind: peer.primaryOutputKind,
             }
           }),
       })
@@ -1195,8 +1217,14 @@ export function tickMarket(state: SimState): SimState {
   for (const r of state.player.rackFleet ?? []) {
     if (r.status === 'live') rackCapital += r.paidEach * r.count
   }
+  for (const inventory of state.player.chips ?? []) {
+    try {
+      rackCapital += inventory.count * getChipDef(inventory.defId).price
+    } catch {
+      rackCapital += inventory.count * 32_000
+    }
+  }
   const chipAmort = rackCapital / ECONOMY.chipAmortDays
-  const denomMTok = Math.max(servedMTok, 0.0001)
   const opsServeShare = Math.max(0.08, state.player.allocation.inference)
   const leaseIn = state.player.computeLeaseIncomeToday ?? 0
   const leaseOut = state.player.computeLeaseCostToday ?? 0
@@ -1207,8 +1235,6 @@ export function tickMarket(state: SimState): SimState {
     computeLeaseCostDay: leaseOut,
     inferenceShare: opsServeShare,
   })
-  const marginalPerMTok = attributedServeOps / denomMTok + ECONOMY.bandwidthPerMTok
-
   const apiKeep = Math.max(0.2, 1 - apiChurnFrac * 1.1)
   const apiModelSettlement = playerApiBuckets.map((bucket) => {
     const dayMTok = bucket.demandMTok * serveFracApi * apiKeep
@@ -1216,6 +1242,7 @@ export function tickMarket(state: SimState): SimState {
     const { priceIn, priceOut } = modelApiInOut(state, bucket.model.id)
     return {
       model: bucket.model,
+      serveModel: bucket.serveModel,
       precision: bucket.precision,
       dayMTok,
       dayInferPf,
@@ -1307,6 +1334,45 @@ export function tickMarket(state: SimState): SimState {
       costPerMTok: item.dayMTok > 1e-9 ? modelCost / item.dayMTok : 0,
     }
   })
+  const apiEconomicsByModel = new Map(
+    apiModelSettlement.map((item) => {
+      const allocatedCogs =
+        fixedCostForPf(item.dayInferPf) + item.dayMTok * ECONOMY.bandwidthPerMTok
+      const ownKind = apiModelKind(item.serveModel)
+      const peers = offers
+        .filter((offer) => offer.labId !== state.playerLabId && offer.primaryOutputKind === ownKind)
+        .map((offer) => ({
+          price: offer.apiPrice,
+          capability: offer.apiCapability ?? offer.capability,
+          featureScore: offer.modalities.length * 18,
+          tokPerSec: offer.apiTokPerSec ?? offer.tokPerSec,
+          valueIndex: offer.apiValueIndex ?? offer.valueIndex,
+          kind: offer.primaryOutputKind,
+        }))
+      return [
+        item.model.id,
+        deriveApiUnitEconomics({
+          state,
+          snap,
+          model: item.model,
+          serveModel: item.serveModel,
+          energyPricePerMWh: state.map.energyPricePerMWh,
+          energyCostDay,
+          dayCogs: allocatedCogs,
+          dayMTok: item.dayMTok,
+          peers,
+        }),
+      ] as const
+    }),
+  )
+  const apiDirectCogs = apiModelSettlement.reduce((sum, item) => {
+    const economics = apiEconomicsByModel.get(item.model.id)
+    return sum + item.dayMTok * (economics?.directBlended ?? ECONOMY.bandwidthPerMTok)
+  }, 0)
+  const apiAllocatedOps = Math.max(0, apiCogs - apiDirectCogs)
+  const marginalPerMTok = apiServed > 1e-9
+    ? apiDirectCogs / apiServed
+    : ECONOMY.bandwidthPerMTok
   const planStats: PlanDayStats[] = rawPlanStats.map((plan) => {
     const allocatedComputeCostDay = fixedCostForPf(plan.dayInferPf)
     const bandwidthCostDay = plan.dayMTok * ECONOMY.bandwidthPerMTok
@@ -1692,6 +1758,9 @@ export function tickMarket(state: SimState): SimState {
       const modelApiRevenue = apiSettlement?.dayRevenue ?? 0
       const modelApiCogs = (apiUsage?.dayMTok ?? 0) * (apiUsage?.costPerMTok ?? 0)
       const modelApiMTok = apiUsage?.dayMTok ?? 0
+      const economics = apiEconomicsByModel.get(m.id)
+      const modelDirectCogs = modelApiMTok * (economics?.directBlended ?? 0)
+      const modelAllocatedOps = Math.max(0, modelApiCogs - modelDirectCogs)
       return {
         modelId: m.id,
         name: m.name,
@@ -1702,8 +1771,12 @@ export function tickMarket(state: SimState): SimState {
         capability: m.capability,
         apiPricePerMTok: price,
         dayApiRevenue: modelApiRevenue,
+        dayApiDirectCogs: modelDirectCogs,
+        dayApiAllocatedOps: modelAllocatedOps,
         dayApiCogs: modelApiCogs,
         dayApiMTok: modelApiMTok,
+        dayApiContribution: modelApiRevenue - modelDirectCogs,
+        apiCapacityUtilization: economics?.utilization ?? 0,
         daySubRevenue: subscription.revenue,
         daySubCogs: subscription.cogs,
         dayEnterpriseShare: m.id === activeId ? enterpriseRevenue : 0,
@@ -1729,8 +1802,12 @@ export function tickMarket(state: SimState): SimState {
       capability: m.capability,
       apiPricePerMTok: price,
       dayApiRevenue: 0,
+      dayApiDirectCogs: 0,
+      dayApiAllocatedOps: 0,
       dayApiCogs: 0,
       dayApiMTok: 0,
+      dayApiContribution: 0,
+      apiCapacityUtilization: 0,
       daySubRevenue: 0,
       daySubCogs: 0,
       dayEnterpriseShare: 0,
@@ -1911,6 +1988,8 @@ export function tickMarket(state: SimState): SimState {
       apiDemandMTok: playerApiMTok,
       apiDayMTok: apiServed,
       apiDayRevenue: apiRevenue,
+      apiDayDirectCogs: apiDirectCogs,
+      apiDayAllocatedOps: apiAllocatedOps,
       apiDayCogs: apiCogs,
       apiModelUsage,
       capacityMTok,

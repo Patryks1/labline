@@ -20,24 +20,14 @@ export interface FullyLoadedApiCostFloor {
   source: 'live' | 'marginal'
 }
 
-/**
- * Returns the authoritative cost floor for an API model. Once a model has live
- * traffic the ledger already knows its complete serving burden (hardware,
- * facilities, energy and leases), so pricing must use that figure rather than
- * the cheaper marginal electricity estimate shown before launch.
- */
+/** Compatibility projection for older callers. Allocated live overhead is no
+ * longer promoted into a traffic-sensitive token floor. */
 export function fullyLoadedApiCostFloor(input: {
   dayCogs?: number
   dayMTok?: number
   marginalCostPerMTok: number
 }): FullyLoadedApiCostFloor {
   const marginal = Math.max(0.005, input.marginalCostPerMTok)
-  const hasLiveCost =
-    Number.isFinite(input.dayCogs) &&
-    Number.isFinite(input.dayMTok) &&
-    (input.dayCogs ?? 0) > 0 &&
-    (input.dayMTok ?? 0) > 0.001
-  const live = hasLiveCost ? (input.dayCogs ?? 0) / Math.max(0.001, input.dayMTok ?? 0) : 0
   // Compatibility helper only. Live allocated cost is diagnostic and must not
   // become a price floor: traffic-dependent overhead creates a feedback loop.
   const blended = marginal
@@ -198,6 +188,8 @@ export function deriveApiUnitEconomics(input: {
   model: Model
   serveModel?: Model
   energyPricePerMWh: number
+  /** Actual fleet energy bill when contracts and owned generation are known. */
+  energyCostDay?: number
   dayCogs?: number
   dayMTok?: number
   peers?: ApiPeerPrice[]
@@ -208,7 +200,9 @@ export function deriveApiUnitEconomics(input: {
     0.05,
     allocation.inference / Math.max(0.01, allocation.training + allocation.inference + allocation.research),
   )
-  const energyDay = Math.max(0, input.snap.mwDemand) * 24 * input.energyPricePerMWh * inferShare
+  const energyDay = (input.energyCostDay == null
+    ? Math.max(0, input.snap.mwDemand) * 24 * input.energyPricePerMWh
+    : Math.max(0, input.energyCostDay)) * inferShare
   let capital = 0
   for (const rack of input.state.player.rackFleet ?? []) {
     if (rack.status === 'live') capital += Math.max(0, rack.paidEach) * Math.max(0, rack.count)
@@ -300,6 +294,7 @@ export function analyzeApiPricing(input: {
   capability: number
   featureScore: number
   tokPerSec?: number
+  valueIndex?: number
   peers: ApiPeerPrice[]
 }): PricingDiagnostic {
   const ownQuality = apiDemandQuality(input)
@@ -582,6 +577,7 @@ export function suggestedApiPricePerMTok(opts: {
     inferCostMult: opts.inferCostMult,
     capability: opts.capability,
     markupPct: 120,
+    applyModelMult: true,
   })
   return Math.round(s.blendedPrice * 100) / 100
 }

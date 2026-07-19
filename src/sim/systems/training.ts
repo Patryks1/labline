@@ -39,7 +39,12 @@ import {
   serviceProfileForModel,
 } from '../balance/trainingV3'
 import { hashSeed, seededId } from '../rng'
-import { suggestApiInOut } from '../balance/pricing'
+import {
+  apiModelKind,
+  apiModelValueIndex,
+  deriveApiUnitEconomics,
+  suggestApiInOut,
+} from '../balance/pricing'
 import { DATA_DOMAIN_META, DATA_DOMAINS } from '../balance/data'
 import { ECONOMY } from '../balance/economy'
 import { modelTrainVramGb } from '../balance/racks'
@@ -1186,6 +1191,7 @@ function buildModelFromJob(
     inferCostMult,
     capability,
     markupPct: state.player.pricing.apiMarkupPct ?? 120,
+    applyModelMult: true,
   })
   const suggested = suggestedApiPricePerMTok({
     paramsB,
@@ -1231,7 +1237,7 @@ function buildModelFromJob(
     quality,
   })
 
-  return normalizeModelEvaluations({
+  const builtModel = normalizeModelEvaluations({
     id:
       job.mode === 'continue' && continueBase
         ? continueBase.id
@@ -1313,6 +1319,44 @@ function buildModelFromJob(
     lowQualityShareByDomain: job.lowQualityShareByDomain ?? continueBase?.lowQualityShareByDomain,
     syntheticProvenance: job.syntheticProvenance ?? continueBase?.syntheticProvenance,
   })
+  if (job.mode === 'continue' && continueBase) return builtModel
+
+  const peers = state.rivals.flatMap((rival) =>
+    rival.models
+      .filter((model) => model.release === 'released' || model.shipped)
+      .map((model) => ({
+        price:
+          model.apiPriceInPerMTok != null && model.apiPriceOutPerMTok != null
+            ? model.apiPriceInPerMTok * 0.3 + model.apiPriceOutPerMTok * 0.7
+            : rival.pricing.apiPricePerMTok,
+        capability: model.capability,
+        featureScore: model.modalities.length * 18,
+        tokPerSec: model.serviceProfile?.interactiveTokPerSec ?? 52 * model.tokPerSecMult,
+        valueIndex: apiModelValueIndex(model),
+        kind: apiModelKind(model),
+      })),
+  )
+  const economics = deriveApiUnitEconomics({
+    state,
+    snap: computeSnapshot(state),
+    model: builtModel,
+    energyPricePerMWh: state.map.energyPricePerMWh,
+    peers,
+  })
+  const priceMult = economics.recommendedPrice / Math.max(0.001, economics.directBlended)
+  const recommendedIn = economics.directIn * priceMult
+  const recommendedOut = economics.directOut * priceMult
+  return {
+    ...builtModel,
+    apiPriceInPerMTok: recommendedIn,
+    apiPriceOutPerMTok: recommendedOut,
+    apiPricePerMTok: recommendedIn * 0.3 + recommendedOut * 0.7,
+    suggestedApiPrice: economics.recommendedPrice,
+    suggestedApiPriceIn: recommendedIn,
+    suggestedApiPriceOut: recommendedOut,
+    costApiPriceIn: economics.directIn,
+    costApiPriceOut: economics.directOut,
+  }
 }
 
 function clamp(n: number, lo = 0, hi = 100) {

@@ -217,14 +217,14 @@ describe('simulation v3 shared rules', () => {
     expect(planStatus.primary).toBe('unsustainable_plan')
   })
 
-  it('uses the live fully loaded API cost floor when facilities dominate serving cost', () => {
+  it('keeps allocated campus overhead out of the direct API cost floor', () => {
     const floor = fullyLoadedApiCostFloor({
       dayCogs: 73_600_000,
       dayMTok: 375_860,
       marginalCostPerMTok: 0.038,
     })
-    expect(floor.source).toBe('live')
-    expect(floor.blended).toBeCloseTo(195.82, 1)
+    expect(floor.source).toBe('marginal')
+    expect(floor.blended).toBeCloseTo(0.038, 6)
     expect(0.3 * floor.costIn + 0.7 * floor.costOut).toBeCloseTo(floor.blended, 8)
   })
 

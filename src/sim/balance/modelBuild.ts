@@ -166,6 +166,7 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
     inferCostMult,
     capability,
     markupPct: 120,
+    applyModelMult: true,
   })
   const preset = presetFromFamily(family)
   const serviceProfile = serviceProfileForModel({

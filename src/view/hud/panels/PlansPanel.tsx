@@ -3,9 +3,10 @@ import { ECONOMY } from '../../../sim/balance/economy'
 import {
   analyzeApiPricing,
   analyzePlanPricing,
+  apiModelKind,
+  apiModelValueIndex,
   blendApiPrice,
-  fullyLoadedApiCostFloor,
-  modelCostMult,
+  deriveApiUnitEconomics,
   serveInfraCost,
   splitInOutMTok,
 } from '../../../sim/balance/pricing'
@@ -47,6 +48,7 @@ import {
   deriveProductPortfolio,
   PRODUCT_CHANNELS,
 } from '../../../sim/systems/productPortfolio'
+import { ApiEconomicsControl } from '../ui/ApiEconomicsControl'
 
 const PRODUCT_CHANNEL_LABELS: Record<ProductChannel, string> = {
   free_assistant: 'Free assistant',
@@ -165,6 +167,8 @@ export function PlansPanel() {
         capability: model.capability,
         featureScore: model.modalities.length * 18,
         tokPerSec: model.serviceProfile?.interactiveTokPerSec ?? 52 * model.tokPerSecMult,
+        valueIndex: apiModelValueIndex(model),
+        kind: apiModelKind(model),
       })),
   )
   const rivalPlanPeers = state.rivals.flatMap((rival) => {
@@ -283,8 +287,8 @@ export function PlansPanel() {
           <div>
             <h3 className="text-xs font-semibold text-bone">API models</h3>
             <p className="text-[0.75rem] text-muted">
-              List $/1M tokens · marginal baseline {money(infra.costPerMTok)}
-              /MTok · fully loaded floor shown per model
+              Direct token cost and market value are recomputed for each model and precision.
+              Campus overhead remains a company-level diagnostic.
             </p>
           </div>
         </div>
@@ -322,30 +326,27 @@ export function PlansPanel() {
               const blend = blendApiPrice(pin, pout)
               const dayMTok = fin?.dayApiMTok ?? 0
               const { inMTok, outMTok } = splitInOutMTok(dayMTok)
-              // Unit cost scales with model intensity vs active Cap (small models → cheap)
-              const modelUnit =
-                active != null
-                  ? Math.max(
-                      0.005,
-                      infra.costPerMTok *
-                        (modelCostMult(m) / Math.max(0.08, modelCostMult(active))),
-                    )
-                  : infra.costPerMTok
-              const liveCost = fullyLoadedApiCostFloor({
+              const economics = deriveApiUnitEconomics({
+                state,
+                snap,
+                model: m,
+                serveModel: apiServedModel,
+                energyPricePerMWh: energyPrice,
                 dayCogs: fin?.dayApiCogs,
                 dayMTok: fin?.dayApiMTok,
-                marginalCostPerMTok: modelUnit,
+                peers: rivalApiPeers,
               })
               const outCheap = pout < pin
               const pricingStatus = analyzeApiPricing({
                 price: blend,
-                marginalCost: liveCost.blended,
+                marginalCost: economics.directBlended,
                 capability: apiServedModel.capability,
                 featureScore: m.modalities.length * 18,
                 tokPerSec:
                   apiServedModel.serviceProfile?.interactiveTokPerSec ??
                   52 * apiServedModel.tokPerSecMult,
-                peers: rivalApiPeers,
+                valueIndex: economics.valueIndex,
+                peers: rivalApiPeers.filter((peer) => peer.kind === apiModelKind(apiServedModel)),
               })
 
               return (
@@ -373,9 +374,7 @@ export function PlansPanel() {
                         <PricingPill status={pricingStatus.primary} severity={pricingStatus.severity} />
                       </div>
                       <div className="mt-0.5 font-mono text-[0.75rem] text-muted">
-                        blended ${blend.toFixed(3)}/MTok · fully loaded floor $
-                        {liveCost.costIn.toFixed(3)} / ${liveCost.costOut.toFixed(3)}
-                        {' · '}{liveCost.source}
+                        blended ${blend.toFixed(3)}/MTok · direct ${economics.directBlended.toFixed(3)}/MTok
                       </div>
                       <div className="mt-0.5 font-mono text-[0.6875rem] text-muted">
                         peer median {pricingStatus.peerMedian == null ? '—' : `$${pricingStatus.peerMedian.toFixed(3)}`}
@@ -482,95 +481,18 @@ export function PlansPanel() {
                     ) : null}
                   </div>
 
-                  {/* Editable in / out */}
-                  <div className="mt-2 grid grid-cols-2 gap-2">
-                    <label className="text-[0.75rem] text-muted">
-                      Input $/1M tok
-                      <DraftNumberInput
-                        ariaLabel={`${m.name} input price per million tokens`}
-                        min={0}
-                        step={0.01}
-                        value={pin}
-                        decimals={2}
-                        onCommit={(nextIn) => {
-                          // Keep output at least as expensive as input
-                          const nextOut = Math.max(pout, nextIn)
-                          setModelApiInOut(m.id, nextIn, nextOut)
-                        }}
-                        className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 font-mono text-sm text-bone outline-none"
-                      />
-                    </label>
-                    <label className="text-[0.75rem] text-muted">
-                      Output $/1M tok
-                      <DraftNumberInput
-                        ariaLabel={`${m.name} output price per million tokens`}
-                        min={0}
-                        step={0.01}
-                        value={pout}
-                        decimals={2}
-                        onCommit={(committedOut) => {
-                          let nextOut = committedOut
-                          // Output should be ≥ input
-                          if (nextOut < pin) nextOut = pin
-                          setModelApiInOut(m.id, pin, nextOut)
-                        }}
-                        className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 font-mono text-sm text-bone outline-none"
-                      />
-                    </label>
-                  </div>
                   {outCheap && (
                     <p className="mt-1 text-[0.75rem] text-amber">
-                      Output raised to match input — generation costs more than prefill.
+                      Output is below input; editing either field will restore the generation premium.
                     </p>
                   )}
-
-                  <div className="mt-2 rounded-xl border border-line/60 bg-void/40 px-2.5 py-2">
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <div className="text-[0.75rem] font-medium text-bone">Price margin</div>
-                        <p className="mt-0.5 text-[0.6875rem] text-muted">
-                          -50% to +500% over this model's live cost floor.
-                        </p>
-                      </div>
-                      <label className="flex shrink-0 items-center gap-1.5 text-[0.75rem] text-muted">
-                        <DraftNumberInput
-                          ariaLabel={`${m.name} API margin percent`}
-                          min={-50}
-                          max={500}
-                          step={1}
-                          value={
-                            Math.max(
-                              -50,
-                              Math.min(
-                                500,
-                                (blend /
-                                  Math.max(
-                                    0.001,
-                                    blendApiPrice(
-                                      liveCost.costIn,
-                                      liveCost.costOut,
-                                    ),
-                                  ) -
-                                  1) *
-                                  100,
-                              ),
-                            )
-                          }
-                          decimals={1}
-                          onCommit={(marginPct) => {
-                            const priceMultiplier = Math.max(0.5, 1 + marginPct / 100)
-                            const costIn = liveCost.costIn
-                            const costOut = liveCost.costOut
-                            const nextIn = costIn * priceMultiplier
-                            const nextOut = Math.max(nextIn, costOut * priceMultiplier)
-                            setModelApiInOut(m.id, nextIn, nextOut)
-                          }}
-                          className="w-20 rounded-md border border-mint/35 bg-void px-2 py-1 font-mono text-sm text-bone outline-none focus:border-mint"
-                        />
-                        <span className="font-mono text-bone">%</span>
-                      </label>
-                    </div>
-                  </div>
+                  <ApiEconomicsControl
+                    modelName={m.name}
+                    priceIn={pin}
+                    priceOut={pout}
+                    economics={economics}
+                    onChange={(nextIn, nextOut) => setModelApiInOut(m.id, nextIn, nextOut)}
+                  />
                 </div>
               )
             })}
