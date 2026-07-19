@@ -1,0 +1,524 @@
+import { createRng, hashSeed, seededId } from '../rng'
+import type {
+  CloudProvider,
+  ComputeContract,
+  ComputeContractKind,
+  LabId,
+  SimState,
+} from '../types'
+import { computeLabSnapshot, updateLab } from './labEngine'
+
+const MIN_PF = 1
+const MAX_PF = 10_000
+
+export interface ComputeContractRequest {
+  providerId: string
+  buyerLabId: LabId
+  kind: ComputeContractKind
+  pf: number
+  termDays: number
+  sellerLabId?: LabId
+  regionId?: string
+}
+
+export interface ComputeContractQuote {
+  contract: ComputeContract
+  canSign: boolean
+  reason?: string
+  dailyCost: number
+  providerAvailablePf: number
+}
+
+export interface LabContractCapacity {
+  inboundPf: number
+  outboundPf: number
+  netPf: number
+}
+
+function isComputeContractQuote(
+  value: ComputeContractQuote | ComputeContract,
+): value is ComputeContractQuote {
+  return 'contract' in value
+}
+
+function clamp(min: number, max: number, value: number): number {
+  return Math.max(min, Math.min(max, value))
+}
+
+function providerReservesCapacity(kind: ComputeContractKind): boolean {
+  return kind !== 'emergency' && kind !== 'rival_resale'
+}
+
+function providerFor(state: SimState, providerId: string): CloudProvider | undefined {
+  return state.worldMarkets.cloudProviders.find((provider) => provider.id === providerId)
+}
+
+function labExists(state: SimState, labId: LabId | undefined): labId is LabId {
+  return (
+    labId != null &&
+    (labId === state.playerLabId || state.rivals.some((rival) => rival.id === labId))
+  )
+}
+
+function resaleSellerCapacityPf(state: SimState, sellerLabId: LabId | undefined): number {
+  if (!labExists(state, sellerLabId)) return 0
+  return computeLabSnapshot(state, sellerLabId).rawFlopsPf
+}
+
+function normalizedTerm(kind: ComputeContractKind, days: number): number {
+  const requested = Math.max(1, Math.floor(days) || 1)
+  switch (kind) {
+    case 'reserved':
+      return clamp(90, 720, requested)
+    case 'colocation':
+      return clamp(60, 720, requested)
+    case 'on_demand':
+      return clamp(1, 720, requested)
+    case 'spot':
+      return clamp(1, 90, requested)
+    case 'emergency':
+      return clamp(1, 30, requested)
+    case 'rival_resale':
+      return clamp(7, 180, requested)
+  }
+}
+
+function quotedPrice(
+  state: SimState,
+  provider: CloudProvider,
+  kind: ComputeContractKind,
+  requestedPf: number,
+): number {
+  const baseline = Math.max(1, provider.baselinePf)
+  const available = Math.max(0, provider.availablePf)
+  const committed = Math.max(0, baseline - available)
+  const demand = Math.max(1, committed + requestedPf)
+  const supply = Math.max(1, available)
+  const spotScarcity = clamp(0.65, 2.5, Math.pow(demand / supply, 1.6))
+  const multiplier =
+    kind === 'reserved'
+      ? 0.78
+      : kind === 'spot'
+        ? spotScarcity
+        : kind === 'colocation'
+          ? 0.66
+          : kind === 'emergency'
+            ? 1 + state.industryDataPack.compute.emergencyPremium
+            : kind === 'rival_resale'
+              ? 1.08
+              : 1
+  return Math.max(1, provider.basePricePerPfDay * multiplier)
+}
+
+function quotedInterruptionRisk(
+  provider: CloudProvider,
+  kind: ComputeContractKind,
+): number {
+  if (kind !== 'spot') return Math.max(0, 1 - provider.reliability)
+  const utilization = 1 - provider.availablePf / Math.max(1, provider.baselinePf)
+  return clamp(0.01, 0.75, provider.spotVolatility * (0.35 + Math.max(0, utilization) * 1.5))
+}
+
+function withAlert(
+  state: SimState,
+  severity: 'info' | 'warn' | 'danger',
+  message: string,
+): SimState {
+  return {
+    ...state,
+    alerts: [
+      {
+        id: seededId('compute-contract-alert', state.seed, state.day, severity, message),
+        day: state.day,
+        severity,
+        message,
+      },
+      ...state.alerts,
+    ].slice(0, 40),
+  }
+}
+
+/** Quote provider capacity without reserving it or mutating the simulation. */
+export function quoteComputeContract(
+  state: SimState,
+  request: ComputeContractRequest,
+): ComputeContractQuote {
+  const provider = providerFor(state, request.providerId)
+  const pf = clamp(MIN_PF, MAX_PF, Math.floor(request.pf) || MIN_PF)
+  const termDays = normalizedTerm(request.kind, request.termDays)
+  const fallbackProvider: CloudProvider = {
+    id: request.providerId,
+    name: 'Unknown provider',
+    regionId: request.regionId ?? 'global-cloud',
+    baselinePf: 0,
+    availablePf: 0,
+    basePricePerPfDay: 0,
+    reliability: 0,
+    spotVolatility: 0,
+  }
+  const source = provider ?? fallbackProvider
+  const pricePerPfDay = quotedPrice(state, source, request.kind, pf)
+  const dailyCost = pf * pricePerPfDay
+  const terminationFee =
+    request.kind === 'reserved'
+      ? dailyCost * termDays * 0.2
+      : request.kind === 'colocation'
+        ? dailyCost * termDays * 0.25
+        : 0
+  const capacityAvailable =
+    request.kind === 'emergency' ||
+    (request.kind === 'rival_resale'
+      ? resaleSellerCapacityPf(state, request.sellerLabId) + 1e-9 >= pf
+      : source.availablePf + 1e-9 >= pf)
+  const providerKnown = provider != null
+  const sellerKnown =
+    request.kind !== 'rival_resale' ||
+    (labExists(state, request.sellerLabId) && request.sellerLabId !== request.buyerLabId)
+  const canSign = providerKnown && capacityAvailable && sellerKnown
+  const reason = !providerKnown
+    ? 'Provider is no longer available.'
+    : !sellerKnown
+      ? 'Rival resale needs an existing, distinct seller lab.'
+      : !capacityAvailable
+        ? request.kind === 'rival_resale'
+          ? `The seller only has ${resaleSellerCapacityPf(state, request.sellerLabId).toFixed(0)} PF of uncommitted compute.`
+          : `${provider.name} only has ${provider.availablePf.toFixed(0)} PF available.`
+        : undefined
+  const contract: ComputeContract = {
+    id: seededId(
+      'compute-contract',
+      state.seed,
+      state.day,
+      request.providerId,
+      request.buyerLabId,
+      request.sellerLabId,
+      request.kind,
+      pf,
+      termDays,
+      state.computeContracts.length,
+    ),
+    providerId: source.id,
+    providerName: source.name,
+    buyerLabId: request.buyerLabId,
+    sellerLabId: request.sellerLabId,
+    kind: request.kind,
+    regionId: request.regionId ?? source.regionId,
+    pf,
+    pricePerPfDay,
+    daysLeft: termDays,
+    daysTotal: termDays,
+    interruptionRisk: quotedInterruptionRisk(source, request.kind),
+    terminationFee,
+    status: 'offered',
+    availableDay:
+      request.kind === 'colocation'
+        ? state.day + 90 + (Math.abs(hashSeed(state.seed, state.day, request.providerId, pf, 'colo-lead')) % 91)
+        : state.day,
+  }
+  return {
+    contract,
+    canSign,
+    reason,
+    dailyCost,
+    providerAvailablePf: source.availablePf,
+  }
+}
+
+/** Activate a still-valid quote and reserve finite provider capacity exactly once. */
+export function signComputeContract(
+  state: SimState,
+  quoteOrContract: ComputeContractQuote | ComputeContract,
+): SimState {
+  let quoted: ComputeContractQuote | undefined
+  let contract: ComputeContract
+  if (isComputeContractQuote(quoteOrContract)) {
+    quoted = quoteOrContract
+    contract = quoteOrContract.contract
+  } else {
+    contract = quoteOrContract
+  }
+  if (quoted && !quoted.canSign) {
+    return withAlert(state, 'warn', quoted.reason ?? 'This compute quote cannot be signed.')
+  }
+  if (state.computeContracts.some((entry) => entry.id === contract.id)) {
+    return withAlert(state, 'warn', 'That compute contract is already on the books.')
+  }
+  const provider = providerFor(state, contract.providerId)
+  if (!provider) return withAlert(state, 'warn', 'Compute provider no longer exists.')
+  if (contract.buyerLabId !== state.playerLabId && !state.rivals.some((r) => r.id === contract.buyerLabId)) {
+    return withAlert(state, 'warn', 'Compute buyer no longer exists.')
+  }
+  if (contract.kind === 'rival_resale') {
+    if (
+      !labExists(state, contract.sellerLabId) ||
+      contract.sellerLabId === contract.buyerLabId
+    ) {
+      return withAlert(
+        state,
+        'warn',
+        'Rival resale needs an existing, distinct seller lab.',
+      )
+    }
+    const availablePf = resaleSellerCapacityPf(state, contract.sellerLabId)
+    if (availablePf + 1e-9 < contract.pf) {
+      return withAlert(
+        state,
+        'warn',
+        `The seller only has ${availablePf.toFixed(0)} PF of uncommitted compute; request a fresh quote.`,
+      )
+    }
+  }
+  if (
+    providerReservesCapacity(contract.kind) &&
+    provider.availablePf + 1e-9 < contract.pf
+  ) {
+    return withAlert(
+      state,
+      'warn',
+      `${provider.name} only has ${provider.availablePf.toFixed(0)} PF left; request a fresh quote.`,
+    )
+  }
+  const providers = state.worldMarkets.cloudProviders.map((entry) =>
+    entry.id === provider.id && providerReservesCapacity(contract.kind)
+      ? { ...entry, availablePf: Math.max(0, entry.availablePf - contract.pf) }
+      : entry,
+  )
+  const active: ComputeContract = {
+    ...contract,
+    status: 'active',
+    signedDay: state.day,
+    daysLeft: contract.daysTotal,
+    interruptionDaysLeft: undefined,
+  }
+  return {
+    ...state,
+    computeContracts: [...state.computeContracts, active],
+    worldMarkets: { ...state.worldMarkets, cloudProviders: providers },
+    news: [
+      active.availableDay != null && active.availableDay > state.day
+        ? `Day ${state.day}: ${active.providerName} reserves ${active.pf.toFixed(0)} PF of ${active.kind.replace('_', ' ')} capacity for delivery on day ${active.availableDay}.`
+        : `Day ${state.day}: ${active.providerName} supplies ${active.pf.toFixed(0)} PF on ${active.kind.replace('_', ' ')} terms.`,
+      ...state.news,
+    ].slice(0, 48),
+  }
+}
+
+function releaseProviderCapacity(
+  providers: CloudProvider[],
+  contract: ComputeContract,
+): CloudProvider[] {
+  if (!providerReservesCapacity(contract.kind)) return providers
+  return providers.map((provider) =>
+    provider.id === contract.providerId
+      ? {
+          ...provider,
+          availablePf: Math.min(provider.baselinePf, provider.availablePf + contract.pf),
+        }
+      : provider,
+  )
+}
+
+function chargeLabCash(state: SimState, labId: LabId, amount: number): SimState {
+  if (amount <= 0) return state
+  return updateLab(state, labId, (lab) => ({
+    ...lab,
+    cash: lab.cash - amount,
+    finance: { ...lab.finance, cash: lab.cash - amount },
+  }))
+}
+
+function creditLabCash(state: SimState, labId: LabId, amount: number): SimState {
+  if (amount <= 0) return state
+  return updateLab(state, labId, (lab) => ({
+    ...lab,
+    cash: lab.cash + amount,
+    finance: { ...lab.finance, cash: lab.cash + amount },
+  }))
+}
+
+function accrueRivalContractCash(
+  state: SimState,
+  labId: LabId,
+  amount: number,
+  kind: 'income' | 'cost',
+): SimState {
+  if (amount <= 0 || labId === state.playerLabId) return state
+  const withCash =
+    kind === 'income'
+      ? creditLabCash(state, labId, amount)
+      : chargeLabCash(state, labId, amount)
+  return {
+    ...withCash,
+    rivals: withCash.rivals.map((rival) =>
+      rival.id === labId
+        ? {
+            ...rival,
+            computeLeaseIncomeToday:
+              (rival.computeLeaseIncomeToday ?? 0) + (kind === 'income' ? amount : 0),
+            computeLeaseCostToday:
+              (rival.computeLeaseCostToday ?? 0) + (kind === 'cost' ? amount : 0),
+          }
+        : rival,
+    ),
+  }
+}
+
+/** End an offered/active contract. Capacity is returned once and active break fees are cash-only. */
+export function terminateComputeContract(state: SimState, contractId: string): SimState {
+  const contract = state.computeContracts.find((entry) => entry.id === contractId)
+  if (!contract || contract.status === 'expired') return state
+  const active = contract.status === 'active' || contract.status === 'interrupted'
+  const fee = active ? Math.max(0, contract.terminationFee) : 0
+  let next = state
+  if (fee > 0) next = chargeLabCash(next, contract.buyerLabId, fee)
+  const providers = active
+    ? releaseProviderCapacity(next.worldMarkets.cloudProviders, contract)
+    : next.worldMarkets.cloudProviders
+  return {
+    ...next,
+    computeContracts: next.computeContracts.map((entry) =>
+      entry.id === contractId
+        ? { ...entry, status: 'expired' as const, daysLeft: 0, interruptionDaysLeft: undefined }
+        : entry,
+    ),
+    worldMarkets: { ...next.worldMarkets, cloudProviders: providers },
+    news: [
+      `Day ${state.day}: ${contract.providerName} contract ended${fee > 0 ? ` with a $${fee.toFixed(0)} break fee` : ''}.`,
+      ...next.news,
+    ].slice(0, 48),
+  }
+}
+
+/** Capacity visible to a lab today. Interrupted and expired contracts contribute zero PF. */
+export function labContractCapacityPf(state: SimState, labId: LabId): LabContractCapacity {
+  let inboundPf = 0
+  let outboundPf = 0
+  for (const contract of state.computeContracts) {
+    if (contract.status !== 'active') continue
+    if (contract.availableDay != null && state.day < contract.availableDay) continue
+    if (contract.buyerLabId === labId) inboundPf += contract.pf
+    if (contract.sellerLabId === labId) outboundPf += contract.pf
+  }
+  return { inboundPf, outboundPf, netPf: inboundPf - outboundPf }
+}
+
+function settleInvoice(
+  state: SimState,
+  contract: ComputeContract,
+  invoice: number,
+): SimState {
+  let next = state
+  if (contract.buyerLabId === state.playerLabId) {
+    const credits = Math.max(0, state.player.cloudCredits ?? 0)
+    const creditsUsed = Math.min(credits, invoice)
+    const cashCost = Math.max(0, invoice - creditsUsed)
+    next = {
+      ...next,
+      player: {
+        ...next.player,
+        cloudCredits: credits - creditsUsed,
+        computeLeaseCostToday: (next.player.computeLeaseCostToday ?? 0) + cashCost,
+      },
+    }
+  } else {
+    next = accrueRivalContractCash(next, contract.buyerLabId, invoice, 'cost')
+  }
+  if (contract.sellerLabId) {
+    if (contract.sellerLabId === state.playerLabId) {
+      next = {
+        ...next,
+        player: {
+          ...next.player,
+          computeLeaseIncomeToday:
+            (next.player.computeLeaseIncomeToday ?? 0) + invoice,
+        },
+      }
+    } else {
+      next = accrueRivalContractCash(next, contract.sellerLabId, invoice, 'income')
+    }
+  }
+  return next
+}
+
+/**
+ * Daily provider settlement and deterministic spot availability.
+ * Credits reduce the player's cash invoice; they never touch revenue fields.
+ */
+export function tickComputeContracts(state: SimState): SimState {
+  let next: SimState = {
+    ...state,
+    rivals: state.rivals.map((rival) => ({
+      ...rival,
+      computeLeaseIncomeToday: 0,
+      computeLeaseCostToday: 0,
+    })),
+  }
+  let providers = [...state.worldMarkets.cloudProviders]
+  const contracts: ComputeContract[] = []
+  const news: string[] = []
+
+  for (const original of state.computeContracts) {
+    if (original.status === 'offered' || original.status === 'expired') {
+      contracts.push(original)
+      continue
+    }
+
+    let contract = { ...original }
+    const provisioned = contract.availableDay == null || state.day >= contract.availableDay
+    let availableToday = provisioned
+
+    if (!provisioned) {
+      contracts.push(contract)
+      continue
+    }
+
+    if (contract.status === 'interrupted') {
+      const remaining = Math.max(0, (contract.interruptionDaysLeft ?? 1) - 1)
+      if (remaining > 0) {
+        contract.interruptionDaysLeft = remaining
+        availableToday = false
+      } else {
+        contract.status = 'active'
+        contract.interruptionDaysLeft = undefined
+      }
+    }
+
+    if (contract.status === 'active' && contract.kind === 'spot') {
+      const rng = createRng(hashSeed(state.seed, state.day, contract.id, 'spot-interruption'))
+      if (rng.next() < clamp(0, 1, contract.interruptionRisk)) {
+        contract.status = 'interrupted'
+        contract.interruptionDaysLeft = 1
+        availableToday = false
+        news.push(
+          `Day ${state.day}: ${contract.providerName} spot capacity interrupted (${contract.pf.toFixed(0)} PF).`,
+        )
+      }
+    }
+
+    if (availableToday && contract.status === 'active') {
+      next = settleInvoice(next, contract, contract.pf * contract.pricePerPfDay)
+    }
+
+    contract.daysLeft = Math.max(0, contract.daysLeft - 1)
+    if (contract.daysLeft <= 0) {
+      providers = releaseProviderCapacity(providers, contract)
+      contract = {
+        ...contract,
+        status: 'expired',
+        daysLeft: 0,
+        interruptionDaysLeft: undefined,
+      }
+      news.push(
+        `Day ${state.day}: ${contract.providerName} compute contract expired; ${contract.pf.toFixed(0)} PF returned.`,
+      )
+    }
+    contracts.push(contract)
+  }
+
+  return {
+    ...next,
+    computeContracts: contracts,
+    worldMarkets: { ...next.worldMarkets, cloudProviders: providers },
+    news: [...news, ...next.news].slice(0, 48),
+  }
+}

@@ -1,0 +1,2118 @@
+import type {
+  Allocation,
+  CapitalStack,
+  DataManifest,
+  DataDomain,
+  LabData,
+  MapTile,
+  Model,
+  ProductPricing,
+  ResearchDisclosure,
+  ResearchProgram,
+  RivalLab,
+  RivalTrainJob,
+  SegmentId,
+  SimState,
+  TrainingProgram,
+} from '../types'
+import { createRng, hashSeed } from '../rng'
+import { BENCHMARK_DEFS } from '../balance/benchmarks'
+import {
+  createEmptyLabData,
+  DATA_DOMAIN_META,
+  DATA_DOMAINS,
+  minDataMTokForParams,
+  normalizeDomainStock,
+  recommendedDataMTok,
+  totalProcessed,
+} from '../balance/data'
+import { buildScaledModel } from '../balance/modelBuild'
+import { trainCostPfDays } from '../balance/training'
+import { blendApiPrice } from '../balance/pricing'
+import { ECONOMY } from '../balance/economy'
+import { getResearchNode, RESEARCH_NODES } from '../balance/research'
+import { analyzeTrainingData } from '../balance/trainingV3'
+import {
+  deriveModelCapabilities,
+  estimateSyntheticQuality,
+  teacherCapabilityForDataDomain,
+} from '../balance/modelCapabilities'
+import { labInferCapacityPf, labResearchPf, labTrainPf } from './labCompute'
+import { rivalEffectiveFlops } from './computeMarket'
+import {
+  applyResearchEffectsToLab,
+  canLabResearchNode,
+  labResearchDayProgress,
+  aggregateEffects,
+  researchCashPerPf,
+  researchDaysTarget,
+  researchPfTargetForNode,
+} from './research'
+import { consumeForLabData } from './data'
+import { TERRAIN_KIND, tileCoords, tileId, type Facility, type TileId } from '../world'
+import { commitWorldBatch, usesCompactWorld } from './worldAccess'
+import { getBuildDef } from './map'
+import { scheduleReleaseEvaluations } from './evaluations'
+import {
+  appendDatasetAsset,
+  mergeSyntheticDatasetAsset,
+  syntheticDatasetAsset,
+} from './dataAssets'
+import {
+  collectTrafficData,
+  dataProcessingThroughput,
+  enqueueAutomaticProcessing,
+  processDataJobs,
+  syntheticGenerationMTokPerDay,
+  updateDataQualityIndex,
+} from './dataRuntime'
+import { competitiveCatchUpSnapshot } from './sharedMarkets'
+import { defaultMarketingChannels } from './org'
+
+/** Legacy compatibility marker; v3 never checks this as a release gate. */
+export const RIVAL_FIRST_RELEASE_DAY = 1
+
+/** Competitive, affordable daily demand-generation target for a rival lab. */
+export function rivalMarketingBudgetTarget(
+  rival: RivalLab,
+  playerSpendPerDay: number,
+): number {
+  const cash = Math.max(0, rival.cash)
+  const valuation = Math.max(rival.finance?.valuation ?? 0, cash * 8)
+  const revenue = Math.max(rival.dayRevenue ?? 0, rival.finance?.dayRevenue ?? 0)
+  const ceiling = Math.min(
+    ECONOMY.marketingMax,
+    Math.max(5_000_000, valuation * 0.0001, cash * 0.003),
+  )
+  const affordable = Math.max(35_000, revenue * 0.1, cash * 0.00035)
+  const competitive = Math.min(Math.max(0, playerSpendPerDay) * 0.7, affordable * 3)
+  return Math.min(ceiling, cash * 0.02, Math.max(affordable, competitive))
+}
+
+function initialRivalCapital(name: string): CapitalStack {
+  return {
+    capTable: [
+      {
+        holderId: `${name}-founders`,
+        holderName: 'Founders',
+        ownership: 0.75,
+        votingPower: 0.82,
+        kind: 'founder',
+      },
+      {
+        holderId: `${name}-investors`,
+        holderName: 'Seed investors',
+        ownership: 0.2,
+        votingPower: 0.16,
+        kind: 'investor',
+      },
+      {
+        holderId: `${name}-options`,
+        holderName: 'Team option pool',
+        ownership: 0.05,
+        votingPower: 0.02,
+        kind: 'option_pool',
+      },
+    ],
+    fundingRounds: [],
+    debt: [],
+    investorConfidence: 0.62,
+    boardPressure: 0.14,
+    founderControl: 0.82,
+    restructuring: { active: false, daysLeft: 0, stage: 'none' },
+  }
+}
+
+function ensureRivalData(r: RivalLab): LabData {
+  if (r.data?.stocks) {
+    const stocks = { ...r.data.stocks }
+    for (const d of DATA_DOMAINS) stocks[d] = normalizeDomainStock(stocks[d])
+    return {
+      ...r.data,
+      stocks,
+      processQueue: r.data.processQueue ?? [],
+      synthQueue: (r.data.synthQueue ?? []).map((j) => ({
+        ...j,
+        qualityTier: j.qualityTier ?? 'hq',
+      })),
+    }
+  }
+  // Legacy scalar → empty 500 MTok starter
+  return createEmptyLabData()
+}
+
+function rivalDataPriority(archetype: RivalLab['archetype']): DataDomain[] {
+  if (archetype === 'multimodal') return ['image', 'video', 'audio', 'chat']
+  if (archetype === 'open_weights') return ['code', 'math', 'science', 'chat']
+  if (archetype === 'efficiency') return ['code', 'math', 'chat']
+  if (archetype === 'safety') return ['law', 'health', 'science', 'chat']
+  return ['chat', 'code', 'math', 'science']
+}
+
+/**
+ * Strategy is expressed through corpus selection, not a hidden capability
+ * multiplier. These recipes are also frozen into each run's data manifest so
+ * evaluation can attribute specialist strengths to the evidence actually used.
+ */
+export function rivalTrainingWeights(
+  archetype: RivalLab['archetype'],
+): Partial<Record<DataDomain, number>> {
+  if (archetype === 'efficiency') {
+    return {
+      chat: 0.28,
+      code: 0.36,
+      math: 0.2,
+      science: 0.1,
+      image: 0.02,
+      audio: 0.02,
+      video: 0.02,
+    }
+  }
+  if (archetype === 'open_weights') {
+    return {
+      chat: 0.2,
+      code: 0.3,
+      math: 0.2,
+      science: 0.2,
+      image: 0.04,
+      audio: 0.03,
+      video: 0.03,
+    }
+  }
+  if (archetype === 'multimodal') {
+    return {
+      chat: 0.22,
+      code: 0.1,
+      math: 0.06,
+      science: 0.06,
+      image: 0.25,
+      video: 0.17,
+      audio: 0.14,
+    }
+  }
+  if (archetype === 'safety') {
+    return {
+      chat: 0.22,
+      code: 0.08,
+      math: 0.07,
+      science: 0.18,
+      law: 0.2,
+      health: 0.2,
+      image: 0.03,
+      audio: 0.01,
+      video: 0.01,
+    }
+  }
+  return {
+    chat: 0.24,
+    code: 0.18,
+    math: 0.13,
+    science: 0.13,
+    law: 0.06,
+    health: 0.06,
+    image: 0.09,
+    audio: 0.05,
+    video: 0.06,
+  }
+}
+
+/** Controller policy only: all pools still draw from the same physical PF. */
+export function rivalAllocationPolicy(
+  archetype: RivalLab['archetype'],
+  state: { training: boolean; hasModel: boolean; overload: boolean },
+): Allocation {
+  let training = 0.35
+  let inference = 0.35
+  let research = 0.3
+  if (!state.hasModel && !state.training) {
+    training = 0.2
+    research = 0.55
+    inference = 0.25
+  } else if (state.training) {
+    training = 0.55
+    research = 0.2
+    inference = 0.25
+  } else if (state.overload) {
+    training = 0.15
+    research = 0.15
+    inference = 0.7
+  } else if (state.hasModel) {
+    training = 0.28
+    research = 0.27
+    inference = 0.45
+  }
+  // These are planning preferences, not extra resource yields.
+  if (archetype === 'open_weights') research += 0.08
+  if (archetype === 'hyperscale') training += 0.08
+  if (archetype === 'efficiency') research += 0.05
+  const total = training + inference + research
+  return {
+    training: training / total,
+    inference: inference / total,
+    research: research / total,
+  }
+}
+
+/** Frontier controllers deliberately risk a larger dense pilot; others stay conservative. */
+export function rivalDenseScaleTarget(
+  archetype: RivalLab['archetype'],
+  comfortableParamsB: number,
+  forecastSignal: number,
+): number {
+  const signal = Math.max(0, Math.min(1, forecastSignal))
+  const multiplier =
+    archetype === 'hyperscale' ? 1.1 + signal * 0.4 : 0.55 + signal * 0.35
+  return Math.min(archetype === 'hyperscale' ? 2 : 1.5, comfortableParamsB * multiplier)
+}
+
+/** One financed challenger can make larger, data-bounded jumps toward SOTA. */
+export function rivalCatchUpScaleTarget(input: {
+  baselineTargetParamsB: number
+  currentParamsB: number
+  comfortableParamsB: number
+  capabilityGap: number
+}): number {
+  const gap = Math.max(0, Math.min(40, input.capabilityGap))
+  const gapGrowth = 1 + gap * 0.035
+  const capitalTarget = Math.max(0.05, input.currentParamsB) * gapGrowth
+  const dataBound = Math.max(
+    input.currentParamsB * 1.1,
+    Math.max(0.05, input.comfortableParamsB) * 2.5,
+  )
+  return Math.min(240, Math.max(input.baselineTargetParamsB, Math.min(capitalTarget, dataBound)))
+}
+
+/**
+ * A stale player frontier triggers one deterministic rival leapfrog. The
+ * challenger still completes a physical training run; this only calibrates the
+ * finished outcome so the public frontier does not remain uncontested forever.
+ */
+export function ensureRivalLeapfrog(
+  model: Model,
+  playerCapability: number,
+  seed: number,
+): Model {
+  if (playerCapability <= 0 || model.capability > playerCapability) return model
+  const edge = 0.5 + (hashSeed(seed, model.id, 'frontier-leapfrog-edge') % 11) / 10
+  const target = Math.min(100, playerCapability + edge)
+  const gain = Math.max(0, target - model.capability)
+  const benchmarks = { ...model.benchmarks }
+  for (const benchmark of BENCHMARK_DEFS) {
+    benchmarks[benchmark.id] = Math.min(
+      100,
+      (benchmarks[benchmark.id] ?? 0) + gain * 0.72,
+    )
+  }
+  return {
+    ...model,
+    capability: target,
+    benchmarks,
+    quality: {
+      ...model.quality,
+      reliability: Math.min(100, model.quality.reliability + gain * 0.25),
+    },
+  }
+}
+
+/** Exact research inputs used by the player scaling and train-cost paths. */
+export function rivalResearchTrainingModifiers(
+  unlocked: readonly string[],
+  family: Model['family'],
+): { trainEfficiency: number; researchMult: number } {
+  const effects = aggregateEffects([...unlocked])
+  return {
+    trainEfficiency: Math.min(
+      1.5,
+      ECONOMY.startingTrainEfficiency + 0.05 + (effects.trainEfficiency ?? 0),
+    ),
+    researchMult:
+      1 +
+      Math.min(0.12, (effects.capabilityBonus ?? 0) * 0.015) +
+      (family === 'moe' && unlocked.includes('moe_hier') ? 0.04 : 0),
+  }
+}
+
+function rivalTargetSegments(archetype: RivalLab['archetype']): SegmentId[] {
+  if (archetype === 'open_weights') return ['indie_api', 'science']
+  if (archetype === 'efficiency') return ['indie_api', 'startup_api']
+  if (archetype === 'multimodal') return ['creative', 'consumer']
+  if (archetype === 'safety') return ['enterprise', 'legal', 'healthcare']
+  return ['startup_api', 'enterprise']
+}
+
+function rivalResearchDisclosure(archetype: RivalLab['archetype']): ResearchDisclosure {
+  if (archetype === 'open_weights') return 'published'
+  if (archetype === 'efficiency') return 'licensed'
+  return 'secret'
+}
+
+/** Hosted-service positioning; free/local open-model usage is an outside option. */
+export function rivalHostedServicePriceMultiplier(
+  archetype: RivalLab['archetype'],
+  capabilityGap: number,
+): number {
+  if (archetype === 'efficiency') return 0.35
+  if (archetype === 'open_weights') return 0.55
+  if (capabilityGap > 4) return 1.25
+  if (capabilityGap > -2) return 1.05
+  if (capabilityGap > -10) return 0.82
+  return 0.65
+}
+
+function rivalLabSiteCount(state: SimState, labId: string): number {
+  if (usesCompactWorld(state)) {
+    return state.map.world!
+      .queryFacilities({ ownerId: labId, underConstruction: false })
+      .filter((facility) =>
+        facility.kind === 'lab' || facility.kind === 'lab_m' || facility.kind === 'lab_l',
+      ).length
+  }
+  return state.map.tiles.filter(
+    (tile) =>
+      tile.owner === labId &&
+      tile.kind === 'lab' &&
+      tile.buildingProgress >= tile.buildingTarget,
+  ).length
+}
+
+function rivalTrainPf(
+  r: RivalLab,
+  state?: SimState,
+  effectiveFlopsPf?: number,
+): number {
+  const flops =
+    effectiveFlopsPf ?? (state ? rivalEffectiveFlops(state, r) : r.flopsPf)
+  return labTrainPf({
+    flopsPf: flops,
+    utilCap: r.utilCap,
+    allocation: r.allocation,
+    servingEfficiency: r.servingEfficiency,
+    dataGenResearchShare: r.data?.dataGenResearchShare,
+  })
+}
+
+function rivalResearchPf(
+  r: RivalLab,
+  state?: SimState,
+  effectiveFlopsPf?: number,
+): number {
+  const flops =
+    effectiveFlopsPf ?? (state ? rivalEffectiveFlops(state, r) : r.flopsPf)
+  // Engineers raise effective util like the player
+  const eng = r.staff?.engineer ?? 0
+  const engUtil = Math.min(0.14, eng * 0.012)
+  return labResearchPf({
+    flopsPf: flops,
+    utilCap: Math.min(0.98, r.utilCap * (1 + engUtil)),
+    allocation: r.allocation,
+    servingEfficiency: r.servingEfficiency,
+    dataGenResearchShare: r.data?.dataGenResearchShare,
+  })
+}
+
+/** Exported for market — same abstract infer pool as train/research (+ leases). */
+export function rivalInferCapacityPfShared(r: RivalLab, state?: SimState): number {
+  const flops = state ? rivalEffectiveFlops(state, r) : r.flopsPf
+  return labInferCapacityPf({
+    flopsPf: flops,
+    utilCap: r.utilCap,
+    allocation: r.allocation,
+    servingEfficiency: r.servingEfficiency,
+    dataGenResearchShare: r.data?.dataGenResearchShare,
+  })
+}
+
+/** Difficulty → how hard rivals push (subtle, not instant). */
+function rivalDifficultyPace(difficulty: SimState['config']['difficulty']): {
+  researchSpeed: number
+  /** Days between possible "release" cadence checks */
+  releaseCadence: number
+  riskTolerance: number
+  forecastNoise: number
+} {
+  switch (difficulty) {
+    case 'easy':
+      return {
+        researchSpeed: 1,
+        releaseCadence: 21,
+        riskTolerance: 0.28,
+        forecastNoise: 0.2,
+      }
+    case 'hard':
+      return {
+        researchSpeed: 1,
+        releaseCadence: 9,
+        riskTolerance: 0.72,
+        forecastNoise: 0.1,
+      }
+    default:
+      return {
+        researchSpeed: 1,
+        releaseCadence: 14,
+        riskTolerance: 0.5,
+        forecastNoise: 0.15,
+      }
+  }
+}
+
+function avgBench(m: Model): number {
+  const vals = BENCHMARK_DEFS.map((d) => m.benchmarks[d.id] ?? 0)
+  return vals.reduce((a, b) => a + b, 0) / Math.max(1, vals.length)
+}
+
+function rivalPricing(api: number): ProductPricing {
+  const plusIncluded = ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth
+  const proIncluded = plusIncluded * 5
+  return {
+    apiPricePerMTok: api,
+    apiPriceInPerMTok: api * 0.35,
+    apiPriceOutPerMTok: api * 1.25,
+    apiMarkupPct: 100,
+    apiVsSubPriority: 0.62,
+    activeModelId: null,
+    enterpriseContractBonus: 0,
+    plans: [
+      {
+        id: 'rival-plus',
+        name: 'Plus',
+        pricePerMonth: 20,
+        usageMultiplier: 1,
+        includedMTokPerMonth: plusIncluded,
+        usageRate: null,
+        modelIds: [],
+        servePrecision: 'fp16',
+        enabled: true,
+      },
+      {
+        id: 'rival-pro',
+        name: 'Pro',
+        pricePerMonth: 45,
+        usageMultiplier: 5,
+        includedMTokPerMonth: proIncluded,
+        usageRate: null,
+        modelIds: [],
+        servePrecision: 'fp16',
+        enabled: true,
+      },
+    ],
+    subPlusPrice: 20,
+    subProPrice: 45,
+    plusIncludedMTok: plusIncluded,
+    proIncludedMTok: proIncluded,
+  }
+}
+
+export function createRivals(
+  seed: number,
+  count = 5,
+  regionIds: string[] = ['west', 'heartland', 'north'],
+  playerStartingValue = ECONOMY.startingCash,
+  difficulty: SimState['config']['difficulty'] = 'normal',
+): RivalLab[] {
+  const rng = createRng(seed + 99)
+  const regionAt = (i: number) => regionIds[i % regionIds.length] ?? regionIds[0] ?? 'west'
+  const all: Omit<RivalLab, 'dataMTok' | 'dataQuality' | 'domainMTok'>[] = [
+    {
+      id: 'rival_nova',
+      name: 'NovaScale',
+      archetype: 'hyperscale',
+      cash: 4_200_000_000,
+      chips: 2000,
+      flopsPf: 800,
+      utilCap: 0.55,
+      servingEfficiency: 0.45,
+      allocation: { training: 0.5, inference: 0.35, research: 0.15 },
+      researchUnlocked: ['dense_basics'],
+      models: [],
+      pricing: {
+        ...rivalPricing(12),
+        activeModelId: null,
+        subPlusPrice: 20,
+        subProPrice: 45,
+        enterpriseContractBonus: 0.2,
+      },
+      brandTrust: 62,
+      activeResearch: null,
+      researchProgress: 0,
+      marketShare: 0.28,
+      regionId: regionAt(0),
+      color: 0x4da3ff,
+    },
+    {
+      id: 'rival_open',
+      name: 'OpenLattice',
+      archetype: 'open_weights',
+      cash: 480_000_000,
+      chips: 400,
+      flopsPf: 160,
+      utilCap: 0.48,
+      servingEfficiency: 0.4,
+      allocation: { training: 0.4, inference: 0.2, research: 0.4 },
+      researchUnlocked: ['dense_basics'],
+      models: [],
+      pricing: {
+        ...rivalPricing(0.8),
+        activeModelId: null,
+        subPlusPrice: 0,
+        subProPrice: 0,
+        enterpriseContractBonus: 0,
+      },
+      brandTrust: 70,
+      activeResearch: null,
+      researchProgress: 0,
+      marketShare: 0.18,
+      regionId: regionAt(1),
+      color: 0xa0a8b8,
+    },
+    {
+      id: 'rival_sparse',
+      name: 'Sparseform',
+      archetype: 'efficiency',
+      cash: 1_100_000_000,
+      chips: 900,
+      flopsPf: 380,
+      utilCap: 0.5,
+      servingEfficiency: 0.42,
+      allocation: { training: 0.35, inference: 0.4, research: 0.25 },
+      researchUnlocked: ['dense_basics'],
+      models: [],
+      pricing: {
+        ...rivalPricing(5.5),
+        activeModelId: null,
+        subPlusPrice: 15,
+        subProPrice: 30,
+        enterpriseContractBonus: 0,
+      },
+      brandTrust: 52,
+      activeResearch: null,
+      researchProgress: 0,
+      marketShare: 0.15,
+      regionId: regionAt(2),
+      color: 0x3dffc0,
+    },
+    {
+      id: 'rival_chroma',
+      name: 'Chroma Studio',
+      archetype: 'multimodal',
+      cash: 720_000_000,
+      chips: 500,
+      flopsPf: 200,
+      utilCap: 0.46,
+      servingEfficiency: 0.38,
+      allocation: { training: 0.45, inference: 0.35, research: 0.2 },
+      researchUnlocked: ['dense_basics'],
+      models: [],
+      pricing: {
+        ...rivalPricing(9),
+        activeModelId: null,
+        subPlusPrice: 22,
+        subProPrice: 48,
+        enterpriseContractBonus: 0,
+      },
+      brandTrust: 58,
+      activeResearch: null,
+      researchProgress: 0,
+      marketShare: 0.12,
+      regionId: regionAt(0),
+      color: 0xff6b4a,
+    },
+    {
+      id: 'rival_aegis',
+      name: 'Aegis Labs',
+      archetype: 'safety',
+      cash: 980_000_000,
+      chips: 450,
+      flopsPf: 180,
+      utilCap: 0.5,
+      servingEfficiency: 0.4,
+      allocation: { training: 0.3, inference: 0.35, research: 0.35 },
+      researchUnlocked: ['dense_basics'],
+      models: [],
+      pricing: {
+        ...rivalPricing(14),
+        activeModelId: null,
+        subPlusPrice: 28,
+        subProPrice: 60,
+        enterpriseContractBonus: 0.5,
+      },
+      brandTrust: 78,
+      activeResearch: null,
+      researchProgress: 0,
+      marketShare: 0.12,
+      regionId: regionAt(1),
+      color: 0xb07cff,
+    },
+  ]
+  void rng
+  // Retained in the public constructor for save/API compatibility. Difficulty
+  // affects controller policy in tickRivals, never starting resource yields.
+  void difficulty
+  return all.slice(0, Math.max(1, Math.min(all.length, count))).map((r, index) => {
+    // Difficulty changes forecasting, planning cadence, and risk tolerance in
+    // rivalDifficultyPace; it never changes underlying starting resources.
+    const valueRng = createRng(hashSeed(seed, r.id, index, 'starting-value'))
+    const [lo, hi] = [0.8, 1.25]
+    const targetValue = playerStartingValue * valueRng.range(lo, hi)
+    const assetShare =
+      r.archetype === 'hyperscale'
+        ? 0.58
+        : r.archetype === 'efficiency'
+          ? 0.48
+          : r.archetype === 'open_weights'
+            ? 0.32
+            : 0.42
+    const chips = Math.max(24, Math.floor((targetValue * assetShare) / 313_500))
+    // Every lab buys the same accelerator generation from the shared market.
+    // Efficiency is earned through architecture, systems, and serving policy;
+    // it must not receive more raw PF per chip.
+    const flopsPf = chips * 0.7
+    const cash = Math.max(8_000_000, targetValue - chips * 313_500)
+    // Same 500 MTok starter corpus as the player — data-limited early game
+    const data = createEmptyLabData()
+    const dataMTok = totalProcessed(data)
+    const staff = {
+      researcher: r.archetype === 'hyperscale' ? 3 : r.archetype === 'safety' ? 2 : 1,
+      data_processor: 1,
+      engineer: r.archetype === 'hyperscale' ? 2 : 1,
+      ops: 1,
+    }
+    const leadProfiles = [
+      {
+        name: 'Dr. Sanaa Okafor',
+        focus: 'scaling' as const,
+        specialties: { reasoning: 0.84, science: 0.7 },
+        traits: ['frontier planner', 'decisive coordinator'],
+      },
+      {
+        name: 'Ilya Navarro',
+        focus: 'data' as const,
+        specialties: { code: 0.86, math: 0.75 },
+        traits: ['open methods', 'careful verifier'],
+      },
+      {
+        name: 'Dr. Meilin Park',
+        focus: 'systems' as const,
+        specialties: { code: 0.82, tools: 0.8 },
+        traits: ['efficiency hunter', 'systems pragmatist'],
+      },
+      {
+        name: 'Amara Bell',
+        focus: 'exploration' as const,
+        specialties: { vision: 0.88, video: 0.82, audio: 0.72 },
+        traits: ['multimodal intuition', 'creative director'],
+      },
+      {
+        name: 'Dr. Tomas Varga',
+        focus: 'evals' as const,
+        specialties: { science: 0.78, reasoning: 0.76 },
+        traits: ['trust specialist', 'methodical reviewer'],
+      },
+    ]
+    const leadProfile = leadProfiles[index] ?? leadProfiles[0]!
+    const leadId = `lead-${r.id}-founding`
+    return {
+      ...r,
+      cash,
+      chips,
+      flopsPf,
+      data,
+      dataMTok,
+      dataQuality: 0.95,
+      domainMTok: {
+        chat: data.stocks.chat.processed,
+        code: data.stocks.code.processed,
+      },
+      trainingJob: null,
+      researchQueue: [],
+      trainPreferSynthHQ: true,
+      trainAllowSynthLQ: false,
+      // Start lean — must hire like the player; hyperscalers a bit ahead
+      staff,
+      researchLeads: [
+        {
+          id: leadId,
+          name: leadProfile.name,
+          skills: {
+            algorithms: r.archetype === 'hyperscale' ? 0.86 : 0.76,
+            systems: r.archetype === 'efficiency' ? 0.9 : 0.72,
+            dataEvals: r.archetype === 'safety' || r.archetype === 'open_weights' ? 0.88 : 0.7,
+            leadership: 0.76,
+          },
+          specialties: leadProfile.specialties,
+          traits: leadProfile.traits,
+          reputation: 58 + index * 2,
+          morale: 78,
+          salaryPerDay: 3_000 + index * 150,
+        },
+      ],
+      researchPods: [
+        {
+          id: `pod-${r.id}-founding`,
+          name: `${r.name} Founding Pod`,
+          leadId,
+          focus: leadProfile.focus,
+          researchers: staff.researcher,
+          engineers: staff.engineer,
+          dataStaff: staff.data_processor,
+          assignmentId: null,
+        },
+      ],
+      researchPrograms: [],
+      trainingPrograms: [],
+      researchDaysSpent: 0,
+      capital: initialRivalCapital(r.id),
+    } satisfies RivalLab
+  })
+}
+
+export function tickRivals(state: SimState): SimState {
+  const news: string[] = []
+  const rivalBoost = state.activeEvents.reduce((m, e) => m + (e.effects.rivalBoost ?? 0), 0)
+  const pace = rivalDifficultyPace(state.config?.difficulty ?? 'normal')
+  const playerCap = state.player.models.reduce(
+    (best, model) => Math.max(best, model.release === 'released' || model.shipped ? model.capability : 0),
+    0,
+  )
+  const playerApi = state.player.pricing.apiPricePerMTok
+  const playerShare = state.player.finance.totalShare
+  const unserved = state.lastMarket.unservedRatio
+  const competitiveResponse = competitiveCatchUpSnapshot(state)
+
+  const rivals = state.rivals.map((unboundedRival, ri) => {
+    const r = boundRivalTrainingHistory(unboundedRival)
+    // Physical facilities/contracts do not change while this controller plans
+    // its day. Resolve that expensive compact-world snapshot once, while still
+    // applying the evolving allocation/staff fields from `next` below.
+    const effectiveFlopsPf = rivalEffectiveFlops(state, r)
+    // Per-rival stream keeps decisions and hidden outcomes deterministic.
+    const rrng = createRng(state.seed + state.day * 17 + ri * 913)
+    let next: RivalLab = {
+      ...r,
+      pricing: { ...r.pricing },
+      models: r.models.map((m) => ({
+        ...m,
+        quality: { ...m.quality },
+        benchmarks: { ...m.benchmarks },
+      })),
+      researchUnlocked: [...r.researchUnlocked],
+      researchQueue: [...(r.researchQueue ?? [])],
+      researchLeads: (r.researchLeads ?? []).map((lead) => ({
+        ...lead,
+        skills: { ...lead.skills },
+        specialties: { ...lead.specialties },
+        traits: [...lead.traits],
+      })),
+      researchPods: (r.researchPods ?? []).map((pod) => ({ ...pod })),
+      researchPrograms: (r.researchPrograms ?? []).map((program) => ({
+        ...program,
+        evidence: program.evidence.map((item) => ({ ...item })),
+      })),
+      trainingPrograms: (r.trainingPrograms ?? []).map((program) => ({
+        ...program,
+        targetSegments: [...program.targetSegments],
+        assignedPodIds: [...program.assignedPodIds],
+        pilots: program.pilots.map((pilot) => ({ ...pilot })),
+        checkpoints: program.checkpoints.map((checkpoint) => ({ ...checkpoint })),
+        domainForecasts: { ...program.domainForecasts },
+        integratedMethods: [...program.integratedMethods],
+      })),
+      data: ensureRivalData(r),
+      trainingJob: r.trainingJob ? { ...r.trainingJob } : null,
+      trainPreferSynthHQ: r.trainPreferSynthHQ ?? true,
+      trainAllowSynthLQ: r.trainAllowSynthLQ ?? false,
+    }
+    let data = next.data!
+    const isCatchUpChallenger =
+      competitiveResponse.active && competitiveResponse.rivalId === next.id
+
+    // ── Allocation AI (same three pools as player) ──
+    {
+      next.allocation = rivalAllocationPolicy(next.archetype, {
+        training: !!next.trainingJob,
+        hasModel: next.models.length > 0,
+        overload: (next.lastUnserved ?? 0) > 0.15,
+      })
+      if (isCatchUpChallenger && next.trainingJob) {
+        next.allocation = { training: 0.68, inference: 0.22, research: 0.1 }
+      }
+    }
+
+    // ── Shared data runtime; archetype changes priorities, never yields ──
+    const share = state.lastMarket.sharesByLab[r.id] ?? next.marketShare
+    const collection = collectTrafficData({
+      data,
+      servedMTok: (state.lastMarket.industryServedMTok ?? 0) * share,
+      demandMTok: (state.lastMarket.industryDemandMTok ?? 0) * share,
+      brandTrust: next.brandTrust,
+      dataFlywheel: aggregateEffects(next.researchUnlocked).dataFlywheel ?? 0,
+      segments: state.segments,
+    })
+    data = collection.data
+    data.dayProcessed = 0
+    data.daySynthMTok = 0
+    next.brandTrust = collection.brandTrust
+    data = enqueueAutomaticProcessing({
+      data,
+      day: state.day,
+      labId: next.id,
+      dataQuality: next.dataQuality,
+      staff: next.staff,
+      priorityDomains: rivalDataPriority(next.archetype),
+    })
+    const dataEffects = aggregateEffects(next.researchUnlocked)
+    const processing = processDataJobs({
+      data,
+      cash: next.cash,
+      throughputMTok: dataProcessingThroughput({
+        staff: next.staff,
+        researchPf: rivalResearchPf(next, state, effectiveFlopsPf),
+        labSites: rivalLabSiteCount(state, next.id),
+        dataFlywheel: dataEffects.dataFlywheel ?? 0,
+      }),
+      dataQuality: next.dataQuality,
+      staff: next.staff,
+      day: state.day,
+    })
+    data = processing.data
+    next.cash = processing.cash
+    next.dataMTok = totalProcessed(data)
+    next.domainMTok = {
+      chat: data.stocks.chat.processed,
+      code: data.stocks.code.processed,
+    }
+    next.data = data
+
+    // ── Research tree — same gates/cost/staff/compute rules as player ──
+    {
+      const staff = next.staff ?? {
+        researcher: 0,
+        data_processor: 0,
+        engineer: 0,
+        ops: 0,
+      }
+      const researchers = staff.researcher ?? 0
+      const engineers = staff.engineer ?? 0
+      const licensedPlayerMethods = new Set(
+        (state.player.researchPrograms ?? [])
+          .filter((program) => program.disclosure === 'licensed')
+          .map((program) => program.methodId),
+      )
+      const baseCostMult = state.config?.researchCostMult ?? 1
+      // Base research PF from allocation × util (engineers already in util)
+      const synthEligible =
+        next.researchUnlocked.includes('data_synth') &&
+        next.models[0] != null &&
+        next.models[0].capability >= 38 &&
+        state.day % 4 === ri % 4 &&
+        rrng.range(0, 1) < 0.4
+      const totalResearchPf =
+        rivalResearchPf(next, state, effectiveFlopsPf) *
+        pace.researchSpeed *
+        (1 + rivalBoost)
+      const synthShare = synthEligible ? 0.35 : 0
+      const baseRPf = totalResearchPf * (1 - synthShare)
+
+      // Pick / continue active research
+      if (!next.activeResearch) {
+        const candidates = RESEARCH_NODES.filter((n) =>
+          canLabResearchNode(next.researchUnlocked, researchers, n.id).ok,
+        )
+        const prefer =
+          next.archetype === 'efficiency'
+            ? 'moe'
+            : next.archetype === 'multimodal'
+              ? 'mm'
+              : next.archetype === 'safety'
+                ? 'align'
+                : next.archetype === 'open_weights'
+                  ? 'sys'
+                  : 'dense'
+        const ranked = [...candidates].sort((a, b) => {
+          const ap = a.trunk.startsWith(prefer) || a.id.startsWith(prefer) ? 0 : 1
+          const bp = b.trunk.startsWith(prefer) || b.id.startsWith(prefer) ? 0 : 1
+          return ap - bp || a.costPfDays - b.costPfDays
+        })
+        if (ranked[0] && baseRPf > 0.02) {
+          next.activeResearch = ranked[0].id
+          next.researchProgress = 0
+          next.researchDaysSpent = 0
+          const pod = (next.researchPods ?? []).find(
+            (candidate) => candidate.assignmentId == null,
+          )
+          if (pod) {
+            const program: ResearchProgram = {
+              id: `research-${next.id}-${ranked[0].id}-${state.day}`,
+              methodId: ranked[0].id,
+              podId: pod.id,
+              phase: 'hypothesis',
+              evidence: [],
+              insightProgress: 0,
+              engineeringProgress: 0,
+              computeShare: next.allocation.research,
+              disclosure: 'secret',
+            }
+            next.researchPrograms = [...(next.researchPrograms ?? []), program]
+            next.researchPods = (next.researchPods ?? []).map((candidate) =>
+              candidate.id === pod.id
+                ? { ...candidate, assignmentId: program.id }
+                : candidate,
+            )
+          }
+        }
+      }
+
+      if (next.activeResearch) {
+        const node = getResearchNode(next.activeResearch)
+        // Player-owned licenses remain learnable, but patent workarounds and
+        // negotiation add a meaningful research burden for every rival.
+        const costMult = baseCostMult * (licensedPlayerMethods.has(node.id) ? 1.45 : 1)
+        const gate = canLabResearchNode(
+          next.researchUnlocked,
+          researchers,
+          next.activeResearch,
+        )
+        // Same progress formula as player (researchers + engineers + PF)
+        const uncappedProgress = gate.ok
+          ? labResearchDayProgress({
+              researchers,
+              engineers,
+              researchPf: baseRPf,
+              nodeId: next.activeResearch,
+              labResearchMult: 1,
+            })
+          : 0
+        const cashRate = researchCashPerPf(node)
+        const dayProg = Math.min(
+          uncappedProgress,
+          cashRate > 0 ? Math.max(0, next.cash / cashRate) : uncappedProgress,
+        )
+        next.cash = Math.max(0, next.cash - dayProg * cashRate)
+        next.researchProgress = (next.researchProgress ?? 0) + dayProg
+        next.researchDaysSpent = (next.researchDaysSpent ?? 0) + 1
+
+        // Same completion rules as player: PF target + calendar floor
+        // (extra researchers compress calendar floor)
+        const pfTarget = researchPfTargetForNode(node, costMult)
+        const daysTarget = researchDaysTarget(node, researchers)
+        const activeProgram = (next.researchPrograms ?? []).find(
+          (program) =>
+            program.methodId === next.activeResearch && program.phase !== 'complete',
+        )
+        if (activeProgram) {
+          const progress = Math.min(
+            1,
+            (next.researchProgress ?? 0) / Math.max(0.001, pfTarget),
+          )
+          const phase: ResearchProgram['phase'] =
+            progress < 0.15
+              ? 'hypothesis'
+              : progress < 0.4
+                ? 'pilot'
+                : progress < 0.7
+                  ? 'validation'
+                  : 'integration'
+          next.researchPrograms = (next.researchPrograms ?? []).map((program) =>
+            program.id === activeProgram.id
+              ? {
+                  ...program,
+                  phase,
+                  insightProgress: Math.min(1, progress * 1.35),
+                  engineeringProgress: Math.max(0, (progress - 0.35) / 0.65),
+                  computeShare: next.allocation.research,
+                }
+              : program,
+          )
+        }
+        if (
+          gate.ok &&
+          next.researchProgress >= pfTarget &&
+          (next.researchDaysSpent ?? 0) >= daysTarget
+        ) {
+          if (!next.researchUnlocked.includes(node.id)) {
+            next.researchUnlocked = [...next.researchUnlocked, node.id]
+            news.push(
+              `Day ${state.day}: ${next.name} unlocks ${node.name.replace(/_/g, ' ')}.`,
+            )
+          }
+          // Full shared effect apply (util, serve, data quality, brand…)
+          const applied = applyResearchEffectsToLab(
+            {
+              utilCap: next.utilCap,
+              servingEfficiency: next.servingEfficiency,
+              brandTrust: next.brandTrust,
+              dataQuality: next.dataQuality,
+            },
+            node.effects,
+          )
+          next = {
+            ...next,
+            utilCap: applied.utilCap,
+            servingEfficiency: applied.servingEfficiency,
+            brandTrust: applied.brandTrust,
+            dataQuality: applied.dataQuality ?? next.dataQuality,
+          }
+          if (activeProgram) {
+            const disclosure = rivalResearchDisclosure(next.archetype)
+            next.researchPrograms = (next.researchPrograms ?? []).map((program) =>
+              program.id === activeProgram.id
+                ? {
+                    ...program,
+                    phase: 'complete',
+                    insightProgress: 1,
+                    engineeringProgress: 1,
+                    disclosure,
+                    evidence: [
+                      ...program.evidence,
+                      {
+                        id: `evidence-${program.id}-${state.day}`,
+                        strength: Math.min(1, 0.55 + researchers * 0.04),
+                        source: 'pilot',
+                        day: state.day,
+                      },
+                    ],
+                  }
+                : program,
+            )
+            next.researchPods = (next.researchPods ?? []).map((pod) =>
+              pod.assignmentId === activeProgram.id
+                ? { ...pod, assignmentId: null }
+                : pod,
+            )
+            if (disclosure !== 'secret') {
+              news.push(
+                `Day ${state.day}: ${next.name} ${disclosure === 'published' ? 'publishes' : 'licenses'} ${node.name}.`,
+              )
+            }
+          }
+          next.researchProgress = 0
+          next.researchDaysSpent = 0
+          next.activeResearch = null
+        }
+      }
+
+      // Optional synth gen once unlocked (same rules as player)
+      if (synthEligible && next.models[0]) {
+        const teacher = next.models[0]
+        const wantHQ = next.trainPreferSynthHQ !== false && teacher.capability >= 40
+        const tier: 'hq' | 'lq' = wantHQ ? 'hq' : 'lq'
+        // Rivals may risk LQ when desperate for volume
+        const useLq =
+          next.trainAllowSynthLQ ||
+          (totalProcessed(data) < minDataMTokForParams(3) && rrng.range(0, 1) < 0.35)
+        const finalTier = useLq && !wantHQ ? 'lq' : tier
+        const dom = rrng.pick(rivalDataPriority(next.archetype))
+        const step = syntheticGenerationMTokPerDay({
+          domain: dom,
+          teacherDomainCapability: teacherCapabilityForDataDomain(teacher, dom),
+          teacherReliability: teacher.quality.reliability,
+          researchPf:
+            rivalResearchPf(next, state, effectiveFlopsPf) * synthShare,
+          tier: finalTier,
+        })
+        if (step > 0.5) {
+          const st = normalizeDomainStock(data.stocks[dom])
+          // One canonical lineage per lab/domain/tier. Retired teacher models
+          // remain in bounded provenance instead of creating an unbounded
+          // asset and ever-larger manifest snapshot every generation.
+          const syntheticAssetId = `dataset-${next.id}-${dom}-${finalTier}`
+          const priorSynthetic = data.assets?.find((asset) => asset.id === syntheticAssetId)
+          const generationDepth =
+            1 +
+            (data.assets ?? []).filter(
+              (asset) =>
+                asset.id !== syntheticAssetId &&
+                asset.source === 'synthetic' &&
+                asset.synthetic?.teacherModelIds.includes(teacher.id) &&
+                (asset.domainWeights[dom] ?? 0) > 0,
+            ).length
+          const syntheticAsset = syntheticDatasetAsset({
+            id: syntheticAssetId,
+            name: `${next.name} ${DATA_DOMAIN_META[dom].label} synthetic lineage`,
+            domain: dom,
+            volumeMTok: step,
+            quality: 0,
+            teacherModelId: teacher.id,
+            tier: finalTier,
+            day: state.day,
+            provenance: { generationDepth },
+          })
+          const syntheticQuality = estimateSyntheticQuality({
+            domain: dom,
+            teacherDomainCapability: teacherCapabilityForDataDomain(teacher, dom),
+            provenance: syntheticAsset.synthetic!,
+          }).quality
+          const processedBefore = st.processed
+          st.processed += step
+          st.fromSynth += step
+          if (finalTier === 'hq') st.fromSynthHQ += step
+          else st.fromSynthLQ += step
+          st.quality =
+            st.processed > 0
+              ? (st.quality * processedBefore + syntheticQuality * step) / st.processed
+              : syntheticQuality
+          data.stocks[dom] = st
+          data = appendDatasetAsset(
+            data,
+            mergeSyntheticDatasetAsset(
+              priorSynthetic,
+              { ...syntheticAsset, quality: syntheticQuality },
+            ),
+          )
+          data.daySynthMTok += step
+          data.dayProcessed += step
+          data.lifetimeProcessed += step
+          data.lifetimeCollected += step
+        }
+      }
+      next.dataQuality = updateDataQualityIndex(next.dataQuality, data)
+      next.dataMTok = totalProcessed(data)
+      next.domainMTok = {
+        chat: data.stocks.chat.processed,
+        code: data.stocks.code.processed,
+      }
+      next.data = data
+    }
+
+    if (next.archetype === 'safety') {
+      const pm = state.player.models.find(
+        (m) =>
+          m.id === state.player.pricing.activeModelId &&
+          (m.release === 'released' || m.shipped),
+      )
+      if (pm && pm.quality.safety < 45) {
+        next.brandTrust = Math.min(100, next.brandTrust + 0.15)
+      }
+    }
+
+    // ── Pricing AI: react to own quality, player price, share, flops ──
+    {
+      const m =
+        next.models.find((model) => model.id === next.pricing.activeModelId) ??
+        next.models[0]
+      if (m) {
+        const costFloor = Math.max(
+          0.05,
+          (m.costApiPriceIn ?? 0.1) * 0.3 + (m.costApiPriceOut ?? 0.4) * 0.7,
+        )
+        const capGap = m.capability - (playerCap || m.capability * 0.9)
+        // Stronger than player → premium; weaker → discount; open weights stay cheap
+        let targetMult = rivalHostedServicePriceMultiplier(
+          next.archetype,
+          capGap,
+        )
+        if (unserved > 0.15 && playerShare > 0.08) targetMult *= 0.92 // undercut overloaded player
+        if (share < 0.06 && m.capability > 25) targetMult *= 0.9 // buy share
+        if (m.quality.reliability < 35 || m.capability < 22) targetMult *= 0.75 // flop discount
+        if (next.archetype === 'safety' && m.quality.safety > 60) targetMult *= 1.08
+
+        const anchor = Math.max(0.8, playerApi || next.pricing.apiPricePerMTok)
+        let target = Math.max(
+          costFloor,
+          anchor * targetMult * (1 + rrng.range(-pace.forecastNoise, pace.forecastNoise)),
+        )
+        if (next.archetype === 'open_weights') target = Math.min(target, 1.4)
+        // Smooth move toward target
+        const blended = next.pricing.apiPricePerMTok * 0.78 + target * 0.22
+        // The policy must reach the actual offer. Previously only the lab
+        // default moved while this model kept its launch suggestion, so every
+        // market and milestone ignored ten years of rival pricing decisions.
+        const listIn = Math.max(m.costApiPriceIn ?? 0, blended * 0.35)
+        const listOut = Math.max(m.costApiPriceOut ?? 0, blended * 1.25)
+        const listPrice = blendApiPrice(listIn, listOut)
+        const nextPlusPrice = Math.max(
+          0,
+          next.pricing.subPlusPrice * 0.9 +
+            Math.min(80, 8 + m.capability * 0.55) * 0.1,
+        )
+        const generosity =
+          next.archetype === 'hyperscale'
+            ? 1.35
+            : next.archetype === 'efficiency'
+              ? 1.2
+              : next.archetype === 'open_weights'
+                ? 1.5
+                : 1
+        const plusIncluded =
+          ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth * generosity
+        const nextProPrice = Math.max(nextPlusPrice, nextPlusPrice * 2.25)
+        // Rival offers face the same premium-tier scrutiny as the player:
+        // above $180/mo, customers expect at least 20× entry-tier usage.
+        const proIncluded = plusIncluded * (nextProPrice > 180 ? 20 : 5)
+        next.pricing = {
+          ...next.pricing,
+          apiPricePerMTok: listPrice,
+          apiPriceInPerMTok: listIn,
+          apiPriceOutPerMTok: listOut,
+          subPlusPrice: nextPlusPrice,
+          subProPrice: nextProPrice,
+          plusIncludedMTok: plusIncluded,
+          proIncludedMTok: proIncluded,
+          plans: [
+            {
+              ...(next.pricing.plans[0] ?? rivalPricing(blended).plans[0]!),
+              pricePerMonth: nextPlusPrice,
+              includedMTokPerMonth: plusIncluded,
+              usageMultiplier: plusIncluded /
+                (ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth),
+              modelIds: [m.id],
+            },
+            {
+              ...(next.pricing.plans[1] ?? rivalPricing(blended).plans[1]!),
+              pricePerMonth: nextProPrice,
+              includedMTokPerMonth: proIncluded,
+              usageMultiplier: proIncluded /
+                (ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth),
+              modelIds: [m.id],
+            },
+          ],
+        }
+        next.models = next.models.map((model) =>
+          model.id === m.id
+            ? {
+                ...model,
+                apiPricePerMTok: listPrice,
+                apiPriceInPerMTok: listIn,
+                apiPriceOutPerMTok: listOut,
+              }
+            : model,
+        )
+      }
+    }
+
+    // ── Multi-day training job (same scale formula + data coverage as player) ──
+    const cadence = pace.releaseCadence + (ri % 3)
+    const canStartTrain = rivalTrainPf(next, state, effectiveFlopsPf) > 0.02
+    const corpus = totalProcessed(next.data!)
+    next.dataMTok = corpus
+
+    // Progress active job with train PF
+    if (next.trainingJob) {
+      const job = { ...next.trainingJob }
+      const burn = job.cashBurnPerDay ?? 0
+      const canFund = next.cash >= burn
+      if (canFund) next.cash -= burn
+      const baseTrainPf = canFund
+        ? rivalTrainPf(next, state, effectiveFlopsPf) * pace.researchSpeed
+        : 0
+      const tPf =
+        canFund && isCatchUpChallenger && competitiveResponse.frontierStale
+          ? Math.max(baseTrainPf, job.targetPfDays / 14)
+          : baseTrainPf
+      job.progressPfDays += tPf
+      const program = (next.trainingPrograms ?? []).find(
+        (candidate) => candidate.id === job.id,
+      )
+      if (program) {
+        const completion = job.progressPfDays / Math.max(0.001, job.targetPfDays)
+        const existing = new Set(
+          program.checkpoints.map((checkpoint) => checkpoint.progress),
+        )
+        const reached = [0.25, 0.5, 0.75].filter(
+          (threshold) => completion >= threshold && !existing.has(threshold),
+        )
+        if (reached.length > 0) {
+          const stability =
+            job.outcomeRisk === 'high' ? 0.58 : job.outcomeRisk === 'medium' ? 0.72 : 0.84
+          next.trainingPrograms = (next.trainingPrograms ?? []).map((candidate) =>
+            candidate.id === job.id
+              ? {
+                  ...candidate,
+                  confidence: Math.min(0.92, candidate.confidence + reached.length * 0.07),
+                  checkpoints: [
+                    ...candidate.checkpoints,
+                    ...reached.map((threshold) => ({
+                      id: `checkpoint-${job.id}-${threshold}`,
+                      progress: threshold,
+                      day: state.day,
+                      stability,
+                      reusable: true,
+                    })),
+                  ],
+                }
+              : candidate,
+          )
+        }
+      }
+      if (job.progressPfDays >= job.targetPfDays) {
+        // Finalize via shared buildScaledModel (data shortfall / LQ → capability hit)
+        const gen =
+          1 +
+          Math.floor(
+            Math.max(0, state.day - RIVAL_FIRST_RELEASE_DAY) / Math.max(10, cadence),
+          )
+        const baseName = next.name.split(' ')[0] ?? next.name
+        const newName =
+          next.archetype === 'open_weights'
+            ? `Lattice-${Math.max(1, Math.round(job.paramsB))}B`
+            : next.archetype === 'efficiency'
+              ? `Sparse-${gen}`
+              : next.archetype === 'multimodal'
+                ? `Chroma-${gen}`
+                : next.archetype === 'safety'
+                  ? `Aegis-${gen}`
+                  : `${baseName}-${gen}.${rrng.int(0, 9)}`
+
+        const completedProgram = (next.trainingPrograms ?? []).find(
+          (candidate) => candidate.id === job.id,
+        )
+        const runManifest = completedProgram?.dataManifestId
+          ? next.data?.manifests?.find(
+              (manifest) => manifest.id === completedProgram.dataManifestId,
+            )
+          : undefined
+        const runWeights =
+          runManifest?.domainWeights ?? rivalTrainingWeights(next.archetype)
+        const trainingModifiers = rivalResearchTrainingModifiers(
+          next.researchUnlocked,
+          job.family,
+        )
+        let released = buildScaledModel({
+          id: `${next.id}-r${state.day}`,
+          name: newName,
+          paramsB: job.paramsB,
+          activeParamsB: job.activeParamsB,
+          family: job.family,
+          modalities: job.modalities,
+          day: state.day,
+          dataCoverage: job.dataCoverage,
+          dataQuality: job.dataQuality,
+          mixWeights: runWeights,
+          researchUnlocked: next.researchUnlocked,
+          researchMult: trainingModifiers.researchMult,
+          synthLqShare: job.synthLqShare,
+          outcomeSeed: job.outcomeSeed ?? hashSeed(state.seed, next.id, job.id, 'train-outcome'),
+          engineers: next.staff?.engineer ?? 0,
+          effectiveDataRatio: job.effectiveDataRatio ?? job.dataCoverage,
+          repeatedDataEpochs: job.repeatedDataEpochs ?? 1,
+          openWeights: next.archetype === 'open_weights',
+          shipped: true,
+          release: 'released',
+        })
+        released = {
+          ...released,
+          trainComputeSpent: job.progressPfDays,
+          capabilities: deriveModelCapabilities({
+            finalCapability: released.capability,
+            trainComputePfDays: job.progressPfDays,
+            effectiveDataRatio: job.effectiveDataRatio ?? job.dataCoverage,
+            dataQuality: job.dataQuality,
+            domainWeights: runWeights,
+            io: released.io!,
+            family: released.family,
+            postTrain: released.postTrain,
+            quality: released.quality,
+          }),
+        }
+        if (isCatchUpChallenger && competitiveResponse.frontierStale) {
+          released = ensureRivalLeapfrog(released, playerCap, state.seed)
+        }
+        if (completedProgram) {
+          released = {
+            ...released,
+            dataManifestId: completedProgram.dataManifestId ?? undefined,
+            integratedMethods: [...completedProgram.integratedMethods],
+          }
+          next.trainingPrograms = (next.trainingPrograms ?? []).map((candidate) =>
+            candidate.id === job.id
+              ? {
+                  ...candidate,
+                  confidence: 0.95,
+                  checkpoints: candidate.checkpoints.some(
+                    (checkpoint) => checkpoint.progress >= 1,
+                  )
+                    ? candidate.checkpoints
+                    : [
+                        ...candidate.checkpoints,
+                        {
+                          id: `checkpoint-${job.id}-final`,
+                          progress: 1,
+                          day: state.day,
+                          stability:
+                            job.outcomeRisk === 'high'
+                              ? 0.58
+                              : job.outcomeRisk === 'medium'
+                                ? 0.72
+                                : 0.84,
+                          reusable: true,
+                        },
+                      ],
+                }
+              : candidate,
+          )
+        }
+
+        const undertrained = job.dataCoverage < 0.75
+        const outcomeNote = released.outcome
+          ? ` · ${released.outcome.kind} ${(released.outcome.yieldMultiplier * 100).toFixed(1)}% yield`
+          : ''
+        if (undertrained) {
+          next.brandTrust = Math.max(15, next.brandTrust - 2 - rrng.range(0, 3))
+          news.push(
+            `Day ${state.day}: ${next.name} ships ${released.name} under-data (${Math.round(job.dataCoverage * 100)}% coverage) — cap ${released.capability.toFixed(0)}${outcomeNote}.`,
+          )
+        } else if (next.models.length === 0) {
+          news.push(
+            `Day ${state.day}: ${next.name} enters with ${released.name} (cap ${released.capability.toFixed(0)}, ${job.paramsB.toFixed(1)}B · ${Math.round(job.dataCoverage * 100)}% data${outcomeNote}).`,
+          )
+        } else {
+          news.push(
+            `Day ${state.day}: ${next.name} ships ${released.name} (cap ${released.capability.toFixed(0)}${outcomeNote}).`,
+          )
+        }
+
+        next.models = [released, ...next.models.slice(0, 3)]
+        next.pricing = { ...next.pricing, activeModelId: released.id }
+        next.trainingJob = null
+      } else {
+        next.trainingJob = job
+      }
+    } else if (
+      canStartTrain &&
+      !next.trainingJob &&
+      (next.models.length === 0
+        ? (isCatchUpChallenger && competitiveResponse.frontierStale) ||
+          rrng.range(0, 1) < 0.55
+        : (isCatchUpChallenger && competitiveResponse.frontierStale) ||
+          (state.day % cadence === 0 &&
+            (isCatchUpChallenger || rrng.range(0, 1) < 0.45)))
+    ) {
+      // Start a new job sized for available data (risk under-train like player)
+      const prev = next.models[0]
+      let family: Model['family'] = 'dense'
+      let modalities: Model['modalities'] = ['text']
+      let activeParamsB: number | undefined
+
+      // Comfortable size at 1:1 tokens:params given corpus
+      const comfortable = Math.max(0.05, corpus / 1000)
+      let paramsB: number
+      if (!prev) {
+        // First model: small (≤~0.5B with 500 MTok) unless they risk
+        if (next.archetype === 'open_weights') paramsB = Math.min(1.2, comfortable * 0.9)
+        else if (
+          next.archetype === 'efficiency' &&
+          next.researchUnlocked.includes('moe_basics')
+        ) {
+          family = 'moe'
+          paramsB = Math.min(4, comfortable * 2.5)
+          activeParamsB = Math.max(0.1, paramsB * 0.08)
+        } else if (next.archetype === 'multimodal') {
+          family = 'diffusion'
+          modalities = ['text', 'image']
+          paramsB = Math.min(1.5, comfortable * 0.85)
+        } else {
+          paramsB = rivalDenseScaleTarget(
+            next.archetype,
+            comfortable,
+            rrng.range(0, 1),
+          )
+        }
+        // Risk: try bigger than data supports (~1B with thin data)
+        if (rrng.range(0, 1) < 0.22 + pace.riskTolerance * 0.16) {
+          paramsB = Math.min(3, Math.max(paramsB, comfortable * (1.2 + rrng.range(0, 0.8))))
+        }
+      } else {
+        family =
+          next.archetype === 'efficiency' &&
+          next.researchUnlocked.includes('moe_basics')
+            ? 'moe'
+            : prev.family
+        modalities = prev.modalities
+        const growth =
+          next.archetype === 'hyperscale'
+            ? 1.16 + rrng.range(0, 0.16) * pace.researchSpeed
+            : 1.08 + rrng.range(0, 0.12) * pace.researchSpeed
+        paramsB = Math.min(120, prev.paramsB * growth)
+        if (isCatchUpChallenger) {
+          paramsB = rivalCatchUpScaleTarget({
+            baselineTargetParamsB: paramsB,
+            currentParamsB: prev.paramsB,
+            comfortableParamsB: comfortable,
+            capabilityGap: competitiveResponse.capabilityGap,
+          })
+        }
+        // Don't leap to multi-10B without data
+        paramsB = Math.min(
+          paramsB,
+          Math.max(
+            prev.paramsB * 1.05,
+            comfortable * (isCatchUpChallenger ? 2.5 : 1.15),
+          ),
+        )
+        if (family === 'moe') {
+          activeParamsB =
+            prev.family === 'moe'
+              ? Math.min(paramsB * 0.15, (prev.activeParamsB ?? 1) * 1.1)
+              : Math.max(0.1, paramsB * 0.08)
+        }
+      }
+
+      const dataNeed = minDataMTokForParams(paramsB)
+      const useHQ =
+        next.trainPreferSynthHQ !== false && next.researchUnlocked.includes('data_synth')
+      const useLQ =
+        !!next.trainAllowSynthLQ ||
+        (corpus < dataNeed * 0.55 && rrng.range(0, 1) < 0.4)
+
+      // Shared recipe path with player (consumeForLabData)
+      const recipe = consumeForLabData(
+        next.data!,
+        {
+          totalMTok: recommendedDataMTok(paramsB, family),
+          totalUnits: recommendedDataMTok(paramsB, family),
+          trainShare: 0.82,
+          weights: rivalTrainingWeights(next.archetype),
+          allowSynthetic: useHQ || useLQ,
+          includeSynthHQ: useHQ,
+          includeSynthLQ: useLQ,
+        },
+        paramsB,
+        family,
+        {
+          hasSynthResearch: next.researchUnlocked.includes('data_synth'),
+        },
+      )
+      const usable = Object.values(recipe.consumed).reduce((s, v) => s + (v ?? 0), 0)
+      const dataAnalysis = analyzeTrainingData({
+        paramsB,
+        family,
+        plan: recipe.plan,
+        data: next.data!,
+        actualMTok: usable,
+        quality: recipe.qualityUsed,
+        lqShare: recipe.synthLqShare,
+      })
+      // Risk under-train: may start even if usable < need
+      if (usable < dataNeed * 0.25 && paramsB > 0.3) {
+        if (state.day % 7 === ri % 7) {
+          news.push(
+            `Day ${state.day}: ${next.name} holds training — only ${Math.round(usable)}/${Math.round(dataNeed)} MTok.`,
+          )
+        }
+      } else {
+        const trainingModifiers = rivalResearchTrainingModifiers(
+          next.researchUnlocked,
+          family,
+        )
+        const targetPf = trainCostPfDays({
+          paramsB,
+          activeParamsB,
+          family,
+          trainEfficiency: trainingModifiers.trainEfficiency,
+          dataRatio: dataAnalysis.effectiveDataRatio,
+          modalityComputeMult: dataAnalysis.modalityComputeMult,
+        })
+
+        const cashSunk = Math.floor(targetPf * ECONOMY.trainUpfrontPerPfDay)
+        const cashBurnPerDay = Math.floor(
+          ECONOMY.trainCashBurnPerPfDay * Math.sqrt(Math.max(1, paramsB)),
+        )
+        if (next.cash < cashSunk) {
+          if (state.day % 7 === ri % 7) {
+            news.push(`Day ${state.day}: ${next.name} delays training — insufficient cash.`)
+          }
+          return next
+        }
+        next.cash -= cashSunk
+
+        const job: RivalTrainJob = {
+          id: `rt-${next.id}-${state.day}`,
+          name: `${next.name.split(' ')[0]}-train`,
+          family,
+          paramsB,
+          activeParamsB,
+          targetPfDays: Math.max(3, targetPf),
+          progressPfDays: 0,
+          modalities,
+          dataCoverage: recipe.coverage,
+          dataQuality: recipe.qualityUsed,
+          includeSynthHQ: useHQ,
+          includeSynthLQ: useLQ,
+          synthLqShare: recipe.synthLqShare ?? 0,
+          trainShare: recipe.plan.trainShare,
+          totalMTok: recipe.plan.totalMTok,
+          outcomeSeed: hashSeed(state.seed, next.id, state.day, paramsB, family, 'train-outcome'),
+          outcomeRisk: dataAnalysis.risk,
+          effectiveDataRatio: dataAnalysis.effectiveDataRatio,
+          repeatedDataEpochs: dataAnalysis.repeatedEpochs,
+          modalityComputeMult: dataAnalysis.modalityComputeMult,
+          cashSunk,
+          cashBurnPerDay,
+        }
+        const manifestId = `manifest-${job.id}`
+        const assetVolume = (data.assets ?? []).reduce(
+          (sum, asset) => sum + Math.max(0, asset.volumeMTok),
+          0,
+        )
+        const manifest: DataManifest = {
+          id: manifestId,
+          assetIds: (data.assets ?? []).map((asset) => asset.id),
+          domainWeights: { ...recipe.plan.weights },
+          uniqueMTok: usable,
+          repeatedMTok: Math.max(
+            0,
+            usable * Math.max(0, dataAnalysis.repeatedEpochs - 1),
+          ),
+          effectiveQuality: recipe.qualityUsed,
+          contaminationRisk:
+            assetVolume > 0
+              ? (data.assets ?? []).reduce(
+                  (sum, asset) =>
+                    sum + asset.contaminationRisk * Math.max(0, asset.volumeMTok),
+                  0,
+                ) / assetVolume
+              : 0,
+          createdDay: state.day,
+        }
+        data = {
+          ...data,
+          manifests: [...(data.manifests ?? []), manifest],
+        }
+        next.data = data
+        const trainingProgram: TrainingProgram = {
+          id: job.id,
+          objective: `${next.archetype.replace('_', ' ')} model generation`,
+          targetSegments: rivalTargetSegments(next.archetype),
+          assignedPodIds: [],
+          pilots: [],
+          checkpoints: [],
+          domainForecasts: {},
+          confidence: 0.38,
+          integratedMethods: [...next.researchUnlocked],
+          dataManifestId: manifestId,
+        }
+        next.trainingPrograms = [
+          ...(next.trainingPrograms ?? []),
+          trainingProgram,
+        ]
+        next.trainingJob = job
+        next.allocation = {
+          training: 0.55,
+          inference: next.models.length ? 0.3 : 0.2,
+          research: next.models.length ? 0.15 : 0.25,
+        }
+        if (recipe.coverage < 0.7) {
+          news.push(
+            `Day ${state.day}: ${next.name} starts a risky ${paramsB.toFixed(1)}B train at ${Math.round(recipe.coverage * 100)}% data coverage.`,
+          )
+        }
+      }
+    }
+
+    // Rivals run the same growth loop as the player. Budgets scale with their
+    // value and cash, react to the player's spend, and adjust gradually.
+    const marketingTarget = rivalMarketingBudgetTarget(
+      next,
+      state.player.marketingSpendPerDay,
+    )
+    const marketingSpendPerDay = Math.max(
+      0,
+      (next.marketingSpendPerDay ?? marketingTarget) * 0.7 + marketingTarget * 0.3,
+    )
+    next.marketingSpendPerDay = marketingSpendPerDay
+    next.marketingChannels = defaultMarketingChannels(marketingSpendPerDay)
+
+    return next
+  })
+
+  // Grow rival campuses on the shared map (visible DCs + gen + grid draws)
+  let s: SimState = { ...state, rivals, news: [...news, ...state.news].slice(0, 48) }
+  s = expandRivalCampuses(s)
+  const priorModels = new Set(
+    state.rivals.flatMap((rival) => rival.models.map((model) => `${rival.id}:${model.id}`)),
+  )
+  for (const rival of s.rivals) {
+    for (const model of rival.models) {
+      if (
+        (model.release === 'released' || model.shipped) &&
+        !priorModels.has(`${rival.id}:${model.id}`)
+      ) {
+        s = scheduleReleaseEvaluations(s, model.id, rival.id)
+      }
+    }
+  }
+  return s
+}
+
+/**
+ * Rival portfolios retain four public models, so keeping every superseded run
+ * and manifest makes immutable snapshots grow quadratically: each new
+ * manifest names every dataset asset accumulated so far. Keep the recent
+ * evidence trail plus every manifest still referenced by a surviving model or
+ * the active run. Aggregate corpus stocks/assets remain authoritative, so this
+ * removes reporting history rather than data inventory.
+ */
+export const RIVAL_TRAINING_HISTORY_LIMIT = 12
+
+export function boundRivalTrainingHistory(rival: RivalLab): RivalLab {
+  const programs = rival.trainingPrograms ?? []
+  const manifests = rival.data?.manifests ?? []
+  if (
+    programs.length <= RIVAL_TRAINING_HISTORY_LIMIT &&
+    manifests.length <= RIVAL_TRAINING_HISTORY_LIMIT
+  ) {
+    return rival
+  }
+
+  const requiredProgramIds = new Set<string>()
+  if (rival.trainingJob?.id) requiredProgramIds.add(rival.trainingJob.id)
+  const requiredManifestIds = new Set(
+    rival.models
+      .map((model) => model.dataManifestId)
+      .filter((id): id is string => Boolean(id)),
+  )
+  for (const program of programs) {
+    if (program.dataManifestId && requiredManifestIds.has(program.dataManifestId)) {
+      requiredProgramIds.add(program.id)
+    }
+  }
+
+  const recentIds = new Set(
+    programs.slice(-RIVAL_TRAINING_HISTORY_LIMIT).map((program) => program.id),
+  )
+  const keptPrograms = programs.filter(
+    (program) => recentIds.has(program.id) || requiredProgramIds.has(program.id),
+  )
+  for (const program of keptPrograms) {
+    if (program.dataManifestId) requiredManifestIds.add(program.dataManifestId)
+  }
+  const keptManifests = manifests.filter((manifest) => requiredManifestIds.has(manifest.id))
+
+  if (keptPrograms.length === programs.length && keptManifests.length === manifests.length) {
+    return rival
+  }
+  return {
+    ...rival,
+    trainingPrograms: keptPrograms,
+    data: rival.data ? { ...rival.data, manifests: keptManifests } : rival.data,
+  }
+}
+
+/**
+ * Rivals claim empty land, densify halls, and add substations / generation so
+ * they pull more shared-grid MW as the game progresses (and show on the map).
+ */
+export function expandRivalCampuses(state: SimState): SimState {
+  if (usesCompactWorld(state)) return expandCompactRivalCampuses(state)
+  const rng = createRng(state.seed + state.day * 41 + 17)
+  // Copy the row-major container once, then copy only records that change.
+  // Rival AI and player systems continue to operate on the same MapTile
+  // semantics without allocating a second million-object world every day.
+  const tiles = state.map.tiles.slice()
+  let rivals = state.rivals.map((r) => ({ ...r }))
+  const news: string[] = []
+  const ownedByRival = new Map<string, MapTile[]>()
+  const emptyByRegion = new Map<string, MapTile[]>()
+  for (const tile of tiles) {
+    if (tile.owner !== 'neutral' && tile.owner !== 'player') {
+      // Pending projects still occupy a campus and satisfy the corresponding
+      // capacity plan. Counting only commissioned sites made rivals queue
+      // duplicate HQs and halls while the first one was visibly being built.
+      const owned = ownedByRival.get(tile.owner)
+      if (owned) owned.push(tile)
+      else ownedByRival.set(tile.owner, [tile])
+    } else if (tile.owner === 'neutral' && tile.kind === 'empty') {
+      const empty = emptyByRegion.get(tile.regionId)
+      if (empty) empty.push(tile)
+      else emptyByRegion.set(tile.regionId, [tile])
+    }
+  }
+
+  const tileIndexAt = (x: number, y: number): number => {
+    if (x < 0 || y < 0 || x >= state.map.width || y >= state.map.height) return -1
+    const index = y * state.map.width + x
+    const tile = tiles[index]
+    return tile?.x === x && tile.y === y ? index : -1
+  }
+
+  for (let ri = 0; ri < rivals.length; ri++) {
+    const r = rivals[ri]!
+    // Capital projects are weekly policy decisions. Difficulty affects policy
+    // quality elsewhere, never the construction cost or completion time.
+    if (state.day % 7 !== hashSeed(state.seed, r.id, 'capex-day') % 7) continue
+    const owned = ownedByRival.get(r.id) ?? []
+    const dcs = owned.filter((t) => t.kind === 'dc' || t.kind === 'dc_m' || t.kind === 'dc_l')
+    const hqs = owned.filter((t) => t.kind === 'hq' || t.kind === 'hq_m' || t.kind === 'hq_l')
+    const hunger = hqs.length === 0 ? 1 : 0.15 + Math.min(0.6, (r.lastUnserved ?? 0) * 1.8)
+    if (rng.range(0, 1) > hunger) continue
+    const gens = owned.filter(
+      (t) => t.kind === 'solar' || t.kind === 'gas' || t.kind === 'nuclear',
+    )
+    const feeds = owned.filter((t) => t.kind === 'substation' || t.kind === 'battery')
+
+    // New building near an existing campus or in the rival's home region.
+    // Racks are deliberately left empty: accelerators must clear the shared market.
+    const anchors =
+      owned.length > 0
+        ? owned
+        : (emptyByRegion.get(r.regionId) ?? []).filter((t) => {
+            const index = tileIndexAt(t.x, t.y)
+            const live = index >= 0 ? tiles[index] : undefined
+            return live?.kind === 'empty' && live.owner === 'neutral'
+          })
+    if (anchors.length === 0) continue
+    const anchor = anchors[rng.int(0, anchors.length - 1)]!
+    const candidates: { x: number; y: number }[] = []
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        if (dx === 0 && dy === 0) continue
+        const x = anchor.x + dx
+        const y = anchor.y + dy
+        const index = tileIndexAt(x, y)
+        const t = index >= 0 ? tiles[index] : undefined
+        if (t && t.kind === 'empty' && t.owner === 'neutral') candidates.push({ x, y })
+      }
+    }
+    if (candidates.length === 0) continue
+    const spot = candidates[rng.int(0, candidates.length - 1)]!
+    const si = tileIndexAt(spot.x, spot.y)
+    if (si < 0) continue
+
+    const needPower = dcs.length > feeds.length + gens.length
+    const needGen = dcs.length > 0 && gens.length < Math.ceil(dcs.length / 2)
+    let kind: 'dc' | 'substation' | 'solar' | 'gas' | 'hq' = 'dc'
+    if (hqs.length === 0) kind = 'hq'
+    else if (needGen && rng.range(0, 1) < 0.45) kind = rng.range(0, 1) < 0.55 ? 'solar' : 'gas'
+    else if (needPower && rng.range(0, 1) < 0.5) kind = 'substation'
+    else if (dcs.length === 0) kind = 'dc'
+    else kind = rng.range(0, 1) < 0.65 ? 'dc' : rng.range(0, 1) < 0.5 ? 'substation' : 'solar'
+
+    const t = { ...tiles[si]! }
+    const def = getBuildDef(kind)
+    const totalCash = Math.floor(def.cash * (state.config.economyMult ?? 1)) + Math.max(0, t.landValue)
+    if (r.cash < totalCash) continue
+    rivals[ri] = { ...r, cash: r.cash - totalCash }
+    t.owner = r.id
+    t.kind = kind
+    t.buildingProgress = 0
+    t.buildingTarget = def.days
+    t.name =
+      kind === 'dc'
+        ? `${r.name} Hall`
+        : kind === 'hq'
+          ? `${r.name} HQ`
+        : kind === 'substation'
+          ? `${r.name} Grid`
+          : kind === 'solar'
+            ? `${r.name} Solar`
+            : `${r.name} Peaker`
+    if (kind === 'hq') {
+      t.opexPerDay = def.opexPerDay
+      t.note = 'Rival headquarters under construction; desks gate future hiring.'
+    } else if (kind === 'dc') {
+      t.rackCapacity = def.rack ?? 0
+      t.racksUsed = 0
+      t.opexPerDay = def.opexPerDay
+      t.note = 'Rival data hall under construction; racks are purchased separately.'
+    } else if (kind === 'substation') {
+      t.mwCapacity = def.mw ?? 0
+      t.opexPerDay = def.opexPerDay
+      t.note = 'Rival interconnect under construction on the regional grid.'
+    } else if (kind === 'solar') {
+      t.mwGeneration = def.gen ?? 0
+      t.opexPerDay = def.opexPerDay
+      t.note = 'Rival on-site generation under construction.'
+    } else {
+      t.mwGeneration = def.gen ?? 0
+      t.opexPerDay = def.opexPerDay
+      t.note = 'Rival peaker under construction for firm power.'
+    }
+    tiles[si] = t
+    if (state.day % 11 === ri % 11) {
+      news.push(`Day ${state.day}: ${r.name} starts construction on ${t.name}.`)
+    }
+  }
+
+  return {
+    ...state,
+    rivals,
+    map: { ...state.map, tiles },
+    news: [...news, ...state.news].slice(0, 48),
+  }
+}
+
+function expandCompactRivalCampuses(state: SimState): SimState {
+  const world = state.map.world!
+  const rng = createRng(state.seed + state.day * 41 + 17)
+  const batch = world.beginBatch()
+  const claimed = new Set<TileId>()
+  let rivals = state.rivals.map((rival) => ({ ...rival }))
+  const news: string[] = []
+  let changed = false
+
+  const available = (id: TileId): boolean =>
+    !claimed.has(id) &&
+    world.getFacilityAt(id) === undefined &&
+    world.getOwner(id) === 'neutral' &&
+    world.getKind(id) === TERRAIN_KIND.empty
+
+  const nearbySite = (anchor: TileId): TileId | undefined => {
+    const { x: ax, y: ay } = tileCoords(anchor, world.descriptor.width)
+    const candidates: TileId[] = []
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        if (dx === 0 && dy === 0) continue
+        const x = ax + dx
+        const y = ay + dy
+        if (x < 0 || y < 0 || x >= world.descriptor.width || y >= world.descriptor.height) continue
+        const id = tileId(x, y, world.descriptor.width, world.descriptor.height)
+        if (available(id)) candidates.push(id)
+      }
+    }
+    return candidates.length > 0 ? candidates[rng.int(0, candidates.length - 1)] : undefined
+  }
+
+  const regionalSite = (regionId: string): TileId | undefined => {
+    const region = world.staticWorld.regions.find((entry) => entry.id === regionId)
+    const minX = region?.originX ?? 0
+    const minY = region?.originY ?? 0
+    const maxX = Math.min(world.descriptor.width, minX + (region?.width ?? world.descriptor.width))
+    const maxY = Math.min(world.descriptor.height, minY + (region?.height ?? world.descriptor.height))
+    for (let attempt = 0; attempt < 256; attempt++) {
+      const x = rng.int(minX, Math.max(minX, maxX - 1))
+      const y = rng.int(minY, Math.max(minY, maxY - 1))
+      const id = tileId(x, y, world.descriptor.width, world.descriptor.height)
+      if (available(id)) return id
+    }
+    return undefined
+  }
+
+  for (let ri = 0; ri < rivals.length; ri++) {
+    const rival = rivals[ri]!
+    if (state.day % 7 !== hashSeed(state.seed, rival.id, 'capex-day') % 7) continue
+    // Include active builds so a weekly planning tick does not start duplicate
+    // HQ or compute projects before the existing one completes.
+    const owned = world.queryFacilities({ ownerId: rival.id })
+    const dcs = owned.filter((facility) =>
+      facility.kind === 'dc' || facility.kind === 'dc_m' || facility.kind === 'dc_l',
+    )
+    const hqs = owned.filter((facility) =>
+      facility.kind === 'hq' || facility.kind === 'hq_m' || facility.kind === 'hq_l',
+    )
+    const hunger = hqs.length === 0 ? 1 : 0.15 + Math.min(0.6, (rival.lastUnserved ?? 0) * 1.8)
+    if (rng.range(0, 1) > hunger) continue
+    const gens = owned.filter((facility) =>
+      facility.kind === 'solar' || facility.kind === 'gas' || facility.kind === 'nuclear',
+    )
+    const feeds = owned.filter((facility) =>
+      facility.kind === 'substation' || facility.kind === 'battery',
+    )
+
+    const anchor = owned.length > 0 ? owned[rng.int(0, owned.length - 1)]!.anchor : undefined
+    const spot = anchor === undefined ? regionalSite(rival.regionId) : nearbySite(anchor)
+    if (spot === undefined) continue
+
+    const needPower = dcs.length > feeds.length + gens.length
+    const needGen = dcs.length > 0 && gens.length < Math.ceil(dcs.length / 2)
+    let kind: 'dc' | 'substation' | 'solar' | 'gas' | 'hq' = 'dc'
+    if (hqs.length === 0) kind = 'hq'
+    else if (needGen && rng.range(0, 1) < 0.45) kind = rng.range(0, 1) < 0.55 ? 'solar' : 'gas'
+    else if (needPower && rng.range(0, 1) < 0.5) kind = 'substation'
+    else if (dcs.length > 0) kind = rng.range(0, 1) < 0.65 ? 'dc' : rng.range(0, 1) < 0.5 ? 'substation' : 'solar'
+
+    const def = getBuildDef(kind)
+    const totalCash = Math.floor(def.cash * (state.config.economyMult ?? 1))
+    if (rival.cash < totalCash) continue
+    rivals[ri] = { ...rival, cash: rival.cash - totalCash }
+
+    let stats: NonNullable<Facility['stats']>
+    let note: string
+    if (kind === 'hq') {
+      stats = { opexPerDay: def.opexPerDay }
+      note = 'Rival headquarters under construction; desks gate future hiring.'
+    } else if (kind === 'dc') {
+      stats = { rackCapacity: def.rack ?? 0, racksUsed: 0, opexPerDay: def.opexPerDay }
+      note = 'Rival data hall under construction; racks are purchased separately.'
+    } else if (kind === 'substation') {
+      stats = { mwCapacity: def.mw ?? 0, opexPerDay: def.opexPerDay }
+      note = 'Rival interconnect under construction on the regional grid.'
+    } else if (kind === 'solar') {
+      stats = { mwGeneration: def.gen ?? 0, opexPerDay: def.opexPerDay }
+      note = 'Rival on-site generation under construction.'
+    } else {
+      stats = { mwGeneration: def.gen ?? 0, opexPerDay: def.opexPerDay }
+      note = 'Rival peaker under construction for firm power.'
+    }
+    const name =
+      kind === 'dc'
+        ? `${rival.name} Hall`
+        : kind === 'hq'
+          ? `${rival.name} HQ`
+        : kind === 'substation'
+          ? `${rival.name} Grid`
+          : kind === 'solar'
+            ? `${rival.name} Solar`
+            : `${rival.name} Peaker`
+    batch.addFacility({
+      id: `rival-${rival.id}-${state.day}-${spot}`,
+      kind,
+      ownerId: rival.id,
+      anchor: spot,
+      footprint: [spot],
+      level: 1,
+      constructionProgress: 0,
+      constructionTarget: def.days,
+      powered: kind === 'dc' ? false : undefined,
+      stats,
+      data: { name, note, dcSize: kind === 'dc' ? 'small' : undefined },
+    })
+    claimed.add(spot)
+    changed = true
+    if (state.day % 11 === ri % 11) {
+      news.push(`Day ${state.day}: ${rival.name} starts construction on ${name}.`)
+    }
+  }
+
+  if (!changed) {
+    batch.rollback()
+    return state
+  }
+  const committed = commitWorldBatch(state, batch)
+  return {
+    ...committed,
+    rivals,
+    news: [...news, ...state.news].slice(0, 48),
+  }
+}
+
+/** Flatten player + rival models for leaderboard UI. */
+export function collectLeaderboardModels(state: SimState): {
+  labId: string
+  labName: string
+  color: number
+  model: Model
+  isPlayer: boolean
+}[] {
+  const rows: {
+    labId: string
+    labName: string
+    color: number
+    model: Model
+    isPlayer: boolean
+  }[] = []
+  for (const m of state.player.models) {
+    if (!(m.release === 'released' || m.shipped || m.release === 'internal')) continue
+    rows.push({
+      labId: 'player',
+      labName: state.player.name,
+      color: 0x3dffc0,
+      model: m,
+      isPlayer: true,
+    })
+  }
+  for (const r of state.rivals) {
+    for (const m of r.models) {
+      rows.push({
+        labId: r.id,
+        labName: r.name,
+        color: r.color,
+        model: m,
+        isPlayer: false,
+      })
+    }
+  }
+  return rows.sort((a, b) => {
+    const ca = a.model.capability + avgBench(a.model) * 0.15
+    const cb = b.model.capability + avgBench(b.model) * 0.15
+    return cb - ca
+  })
+}

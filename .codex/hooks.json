@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/patryk/.local/bin/headroom init hook ensure --profile init-test-6b49b7df --marker headroom-init-codex",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/patryk/.local/bin/headroom init hook ensure --profile init-test-6b49b7df --marker headroom-init-codex",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

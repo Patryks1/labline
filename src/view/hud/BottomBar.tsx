@@ -1,0 +1,292 @@
+import { useMemo, useState, type ReactNode } from 'react'
+import { CaretDown, CaretUp } from '@phosphor-icons/react'
+import { gridScarcity } from '../../sim/systems/map'
+import {
+  buildComputeBreakdown,
+  type PoolBreakdown,
+} from '../../sim/systems/computeBreakdown'
+import { useGameStore } from '../../store/gameStore'
+import { computeSnapshot, inferenceTokensPerDay } from '../../sim/tick'
+import { mw, num, pct } from './format'
+import { SliderField } from './ui/SliderField'
+
+/**
+ * Floating ops strip over the map — allocation + live capacity.
+ * Hover Train / Serve / Research for PF breakdown + utilization.
+ */
+export function BottomBar() {
+  const state = useGameStore((s) => s.state)
+  const setAllocation = useGameStore((s) => s.setAllocation)
+  const autoBalanceHosting = useGameStore((s) => s.autoBalanceHosting)
+  const setPanel = useGameStore((s) => s.setPanel)
+  const snap = computeSnapshot(state)
+  const cap = inferenceTokensPerDay(state, snap)
+  const a = state.player.allocation
+  const unserved = state.lastMarket.unservedRatio ?? 0
+  const grid = gridScarcity(state)
+  const [expanded, setExpanded] = useState(false)
+
+  const breakdown = useMemo(() => buildComputeBreakdown(state), [state])
+
+  const setSplit = (key: 'training' | 'inference' | 'research', v: number) => {
+    const next = { ...a, [key]: Math.max(0.05, v) }
+    const sum = next.training + next.inference + next.research
+    setAllocation({
+      training: next.training / sum,
+      inference: next.inference / sum,
+      research: next.research / sum,
+    })
+  }
+
+  const poolSub = (p: PoolBreakdown) =>
+    `${num(p.poolPf, 1)} PF · ${p.utilizationLabel} ${pct(Math.min(1, p.utilization), 0)}`
+
+  const servedRatio = state.lastMarket.playerDemandMTok > 0
+    ? Math.min(1, state.lastMarket.servedMTok / state.lastMarket.playerDemandMTok)
+    : 1
+  const racksTight = snap.rackCap > 0 && snap.racksUsed / snap.rackCap >= 0.95
+  const powerTight = snap.mwAvailable > 0 && snap.mwDemand / snap.mwAvailable >= 0.9
+
+  return (
+    <footer className="operations-shell pointer-events-none">
+      <div className="hud-surface pointer-events-auto absolute inset-x-2 bottom-2 rounded-xl px-3 py-2">
+        {/* Only the three signals needed to make the next operating decision. */}
+        <div className="relative z-10 mb-1.5 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap font-mono text-[0.75rem]">
+          <Stat
+            label="Compute"
+            value={`${num(snap.effectiveFlopsPf, 1)} PF`}
+            className="hidden sm:inline-flex"
+            title={`Effective ${num(snap.effectiveFlopsPf, 2)} PF across pools · raw fleet ${num(snap.rawFlopsPf, 2)} PF · yield ${pct(breakdown.fleetYield, 0)}`}
+          />
+          <Stat
+            label="Power"
+            value={`${mw(snap.mwDemand)}`}
+            sub={`/ ${mw(snap.mwAvailable)}`}
+            danger={snap.throttled || powerTight}
+            className="hidden md:inline-flex"
+          />
+          <Stat
+            label="Demand served"
+            value={pct(servedRatio, 0)}
+            danger={unserved > 0.08}
+            title={`${num(state.lastMarket.servedMTok, 1)} of ${num(state.lastMarket.playerDemandMTok, 1)} MTok served today · ${num(cap, 1)} MTok/day maximum`}
+          />
+          {snap.throttled && (
+            <StatusChip tone="danger">Power throttled</StatusChip>
+          )}
+          {unserved > 0.08 && (
+            <StatusChip tone="warning">Plans/API short {pct(unserved, 0)}</StatusChip>
+          )}
+          {!snap.throttled && powerTight && (
+            <StatusChip tone="warning">Power headroom low</StatusChip>
+          )}
+          {racksTight && (
+            <StatusChip tone="warning">Racks nearly full</StatusChip>
+          )}
+          <div className="ml-auto flex items-center gap-1">
+            <button
+              type="button"
+              title="Auto-balance hosting ~80%"
+              onClick={() => autoBalanceHosting()}
+              className="min-h-7 rounded-md bg-mint/15 px-2 text-[0.6875rem] font-medium text-mint hover:bg-mint/25"
+            >
+              Auto-bal
+            </button>
+            <button
+              type="button"
+              onClick={() => setPanel('stats')}
+              className="hidden min-h-7 rounded-md px-2 text-[0.6875rem] text-muted hover:bg-panel-2 hover:text-bone sm:inline-flex sm:items-center"
+            >
+              Intel
+            </button>
+            <button
+              type="button"
+              aria-expanded={expanded}
+              title={expanded ? 'Collapse operations details' : 'Expand operations details'}
+              onClick={() => setExpanded((value) => !value)}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-bone"
+            >
+              {expanded ? <CaretDown size="0.9rem" /> : <CaretUp size="0.9rem" />}
+            </button>
+          </div>
+        </div>
+
+        {/* Pool split — hover for where PF goes */}
+        <div className="relative z-10 grid grid-cols-3 gap-3">
+          <SliderField
+            label="Train"
+            value={a.training}
+            onChange={(v) => setSplit('training', v)}
+            min={0.05}
+            max={0.9}
+            colorClass="bg-train"
+            accentClass="text-train"
+            format={(v) => pct(v, 0)}
+            sublabel={poolSub(breakdown.train)}
+            hoverContent={<PoolTooltip pool={breakdown.train} accent="text-train" />}
+          />
+          <SliderField
+            label="Serve"
+            value={a.inference}
+            onChange={(v) => setSplit('inference', v)}
+            min={0.05}
+            max={0.9}
+            colorClass="bg-infer"
+            accentClass="text-infer"
+            format={(v) => pct(v, 0)}
+            sublabel={poolSub(breakdown.serve)}
+            hoverContent={<PoolTooltip pool={breakdown.serve} accent="text-infer" />}
+          />
+          <SliderField
+            label="Research"
+            value={a.research}
+            onChange={(v) => setSplit('research', v)}
+            min={0.05}
+            max={0.9}
+            colorClass="bg-research"
+            accentClass="text-research"
+            format={(v) => pct(v, 0)}
+            sublabel={poolSub(breakdown.research)}
+            hoverContent={<PoolTooltip pool={breakdown.research} accent="text-research" />}
+          />
+        </div>
+
+        {/* Efficiency + shared grid strip */}
+        {expanded ? <div className="relative z-10 mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line/50 pt-2 font-mono text-[0.6875rem] text-muted">
+          <span>
+            Util cap{' '}
+            <strong className="text-bone">{pct(state.player.utilCap, 0)}</strong>
+          </span>
+          <span>
+            Serve{' '}
+            <strong className="text-infer">
+              {pct(state.player.servingEfficiency, 0)}
+            </strong>
+          </span>
+          <span>
+            Train{' '}
+            <strong className="text-train">
+              {pct(state.player.trainEfficiency, 0)}
+            </strong>
+          </span>
+          <span>
+            Fleet yield{' '}
+            <strong className="text-mint">
+              {pct(snap.rawFlopsPf > 0 ? snap.effectiveFlopsPf / snap.rawFlopsPf : 0, 0)}
+            </strong>{' '}
+            of raw PF
+          </span>
+          <span>
+            Shared grid{' '}
+            <strong className={grid.priceMult > 1.35 ? 'text-amber' : 'text-bone'}>
+              {num(grid.gridDemandMw, 0)}/{num(grid.gridCapMw, 0)} MW
+            </strong>
+            {' · '}
+            <strong className={grid.industryDcCount > grid.softCap ? 'text-amber' : 'text-bone'}>
+              {grid.industryDcCount}
+            </strong>{' '}
+            live DCs (soft cap {grid.softCap})
+          </span>
+          <span className="text-muted/80">
+            Hover Train / Serve / Research for PF destinations · own gen offsets grid
+          </span>
+        </div> : null}
+      </div>
+    </footer>
+  )
+}
+
+function PoolTooltip({ pool, accent }: { pool: PoolBreakdown; accent: string }) {
+  const utilShow = Math.min(1.5, Math.max(0, pool.utilization))
+  const utilBar = Math.min(1, utilShow)
+  const utilWarn = pool.utilization > 1.02 || pool.utilizationLabel === 'Stalled'
+  return (
+    <div className="space-y-1.5 text-left">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <div className={`text-[0.8125rem] font-semibold ${accent}`}>{pool.title}</div>
+          <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">{pool.summary}</p>
+        </div>
+        <div className="shrink-0 text-right font-mono text-[0.6875rem]">
+          <div className={utilWarn ? 'text-amber' : 'text-bone'}>{pool.utilizationLabel}</div>
+          <div className="text-muted">{pct(Math.min(1, pool.utilization), 0)}</div>
+        </div>
+      </div>
+      <div className="h-1 overflow-hidden rounded-full bg-void">
+        <div
+          className={`h-full ${utilWarn ? 'bg-amber' : accent.replace('text-', 'bg-')}`}
+          style={{ width: `${utilBar * 100}%` }}
+        />
+      </div>
+      <div className="space-y-1">
+        {pool.lines.map((line) => (
+          <div key={line.label} className="min-w-0">
+            <div className="flex items-baseline justify-between gap-2 font-mono text-[0.6875rem]">
+              <span className="shrink-0 text-muted">{line.label}</span>
+              <span
+                className={`min-w-0 truncate text-right ${
+                  line.warn ? 'text-amber' : line.muted ? 'text-muted' : 'text-bone'
+                }`}
+              >
+                {line.value}
+              </span>
+            </div>
+            {typeof line.bar === 'number' && (
+              <div className="mt-0.5 h-0.5 overflow-hidden rounded-full bg-void">
+                <div
+                  className={`h-full ${line.warn ? 'bg-amber/80' : 'bg-line'}`}
+                  style={{ width: `${Math.max(0, Math.min(1, line.bar)) * 100}%` }}
+                />
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function Stat({
+  label,
+  value,
+  sub,
+  danger,
+  className = '',
+  title,
+}: {
+  label: string
+  value: string
+  sub?: string
+  danger?: boolean
+  className?: string
+  title?: string
+}) {
+  return (
+    <span
+      className={`inline-flex items-baseline gap-1 text-muted ${className}`}
+      title={title}
+    >
+      <span className="text-[0.625rem] uppercase tracking-wide opacity-80">{label}</span>
+      <strong className={`text-bone ${danger ? 'text-danger' : ''}`}>{value}</strong>
+      {sub && <span className="text-muted/80">{sub}</span>}
+    </span>
+  )
+}
+
+function StatusChip({
+  children,
+  tone,
+}: {
+  children: ReactNode
+  tone: 'danger' | 'warning'
+}) {
+  return (
+    <span
+      className={`hidden shrink-0 rounded-full px-2 py-0.5 text-[0.6875rem] font-medium sm:inline-flex ${
+        tone === 'danger' ? 'bg-danger/15 text-danger' : 'bg-amber/15 text-amber'
+      }`}
+    >
+      {children}
+    </span>
+  )
+}
