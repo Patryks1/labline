@@ -47,7 +47,6 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'stats', label: 'Command', hint: 'P&L · compute · trends', key: '1', presentation: 'workbench' },
       { id: 'rivals', label: 'Rivals', hint: 'Intentions, capacity & launches', key: '2' },
-      { id: 'events', label: 'World', hint: 'Events, reports & industry wire', key: '3' },
     ],
   },
   {
@@ -125,13 +124,12 @@ export const NAV_GROUPS: NavGroup[] = [
   },
 ]
 
-export type CommandViewId = 'pnl' | 'trends' | 'rivals' | 'feed'
+export type CommandViewId = 'pnl' | 'rivals' | 'feed'
 
 export const COMMAND_VIEWS: { id: CommandViewId; label: string; key: string }[] = [
   { id: 'pnl', label: 'P&L', key: 'F1' },
-  { id: 'trends', label: 'Trends', key: 'F2' },
-  { id: 'rivals', label: 'Rivals', key: 'F3' },
-  { id: 'feed', label: 'Feed', key: 'F4' },
+  { id: 'rivals', label: 'Rivals', key: 'F2' },
+  { id: 'feed', label: 'World', key: 'F3' },
 ]
 
 export function groupForPanel(panel: PanelId): NavGroup {

@@ -70,9 +70,7 @@ export function safetyCampaignEstimate(
   const reason =
     !state.player.researchUnlocked.includes('align_rlhf')
       ? 'Unlock RLHF Pipeline first.'
-      : state.player.trainingJob
-        ? 'Finish the active model training job first.'
-        : state.player.safetyCampaign
+      : state.player.safetyCampaign
           ? 'A safety campaign is already running.'
           : researchers < minimumResearchers
             ? `Needs ${minimumResearchers} researchers (have ${researchers}).`
@@ -176,11 +174,13 @@ export function tickSafetyCampaign(state: SimState): SimState {
   }
   const surplus = Math.max(0, Math.min(staff, campaign.assignedResearchers) - campaign.minimumResearchers)
   const staffMult = 1 + Math.min(0.5, surplus * 0.06)
+  const activeTrainingJobs = state.player.trainingJobs?.length ?? (state.player.trainingJob ? 1 : 0)
+  const sharedTrainingPool = snap.pools.training / Math.max(1, activeTrainingJobs + 1)
   const nextCampaign = {
     ...campaign,
     progressTrainingPfDays: Math.min(
       campaign.targetTrainingPfDays,
-      campaign.progressTrainingPfDays + snap.pools.training * 0.6 * staffMult,
+      campaign.progressTrainingPfDays + sharedTrainingPool * 0.6 * staffMult,
     ),
     progressResearchPfDays: Math.min(
       campaign.targetResearchPfDays,

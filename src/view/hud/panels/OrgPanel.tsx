@@ -42,6 +42,9 @@ import {
   marketingBudgetCeiling,
   marketingChannels,
   marketingReach,
+  marketingRevenueBasis,
+  marketingRevenueMultiple,
+  MARKETING_MAX_REVENUE_MULTIPLE,
 } from '../../../sim/systems/org'
 import { sparkPath } from '../../../sim/systems/stats'
 import { setAutomationPolicies } from '../../../sim/systems/automation'
@@ -106,10 +109,15 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
   const capital = useMemo(() => capitalSnapshot(state), [state])
   const equityOffers = useMemo(() => requestEquityOffers(state), [state])
   const bankProducts = useMemo(() => bankingProducts(state), [state])
+  const featuredBankProducts = bankProducts.filter((product) =>
+    FEATURED_BANK_KINDS.includes(product.kind as FeaturedBankKind),
+  )
   const valueDrivers = useMemo(() => valuationDrivers(state), [state])
   const channelSpend = useMemo(() => marketingChannels(state), [state])
   const reach = useMemo(() => marketingReach(state), [state])
-  const marketingMax = useMemo(() => marketingBudgetCeiling(state), [state])
+  const marketingMax = marketingBudgetCeiling(state)
+  const marketingBasis = marketingRevenueBasis(state)
+  const marketingMultiple = marketingRevenueMultiple(state)
   const rivalMarketing = useMemo(
     () => [...state.rivals]
       .sort((a, b) => (b.marketingSpendPerDay ?? 0) - (a.marketingSpendPerDay ?? 0))
@@ -414,21 +422,20 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
           </div>
 
           <div className="space-y-2 rounded-lg border border-amber/20 bg-amber/5 p-2">
-            <div className="flex items-end justify-between gap-2">
+            <div className="flex items-center justify-between gap-2">
               <div>
-                <h4 className="text-[0.6875rem] font-medium uppercase tracking-wider text-muted">Financing offers</h4>
-                <p className="mt-0.5 max-w-[34rem] text-[0.625rem] leading-snug text-muted">
-                  Lenders price each offer from current revenue, assets, and company value. Terms refresh as the business changes.
+                <h4 className="text-[0.75rem] font-medium text-bone">Bank offers</h4>
+                <p className="mt-0.5 text-[0.625rem] text-muted">
+                  Three lenders. Choose the fit for your next move.
                 </p>
               </div>
-              <span className="shrink-0 font-mono text-[0.5625rem] uppercase tracking-wider text-amber">live desk</span>
+              <span className="shrink-0 font-mono text-[0.625rem] text-amber">Updates daily</span>
             </div>
             <div className="space-y-1.5">
-              {bankProducts.map((product, index) => (
+              {featuredBankProducts.map((product) => (
                 <BankingOfferCard
                   key={product.kind}
                   product={product}
-                  sequence={index + 1}
                   onAccept={(amount) => setState(applyForDebt(state, product.kind, amount))}
                 />
               ))}
@@ -437,7 +444,7 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
               <div key={debt.id} className="flex items-center justify-between gap-2 border-t border-line/60 pt-1.5">
                 <div className="min-w-0 font-mono text-[0.625rem] text-muted">
                   <span className="block truncate text-bone">{debt.label}</span>
-                  {money(debt.remaining)} · {(debt.apr * 100).toFixed(1)}% APR · {debt.daysLeft}d · {debt.covenant}
+                  {money(debt.remaining)} · {(debt.apr * 100).toFixed(1)}% · {debt.daysLeft}d left
                 </div>
                 <button
                   type="button"
@@ -724,39 +731,23 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
             <span className="text-[0.5625rem] uppercase text-muted">brand</span>
           </div>
         </div>
-        <div className="grid grid-cols-5 gap-1">
-          {[
-            ['Pause', 0],
-            ['$1M', 1_000_000],
-            ['$5M', 5_000_000],
-            ['$25M', 25_000_000],
-            ['Max', marketingMax],
-          ].map(([label, raw]) => {
-            const value = Math.min(marketingMax, Number(raw))
-            const active = Math.abs(p.marketingSpendPerDay - value) < 1
-            return (
-              <button
-                key={String(label)}
-                type="button"
-                onClick={() => setMarketing(value)}
-                className={`rounded border px-1 py-1.5 font-mono text-[0.625rem] ${active ? 'border-mint/60 bg-mint/15 text-mint' : 'border-line bg-void/35 text-muted hover:text-bone'}`}
-              >
-                {label}
-              </button>
-            )
-          })}
-        </div>
         <SliderField
-          label="Total daily budget"
-          value={p.marketingSpendPerDay}
+          label="Revenue allocated"
+          value={marketingMultiple}
           min={0}
-          max={marketingMax}
-          step={Math.max(25_000, Math.round(marketingMax / 500))}
-          format={(value) => `${money(value)}/d`}
+          max={MARKETING_MAX_REVENUE_MULTIPLE}
+          step={0.01}
+          format={(value) => value <= 0
+            ? 'Off'
+            : `${pct(value, 0)} · ${money(marketingBasis * value)}/d`}
           colorClass="bg-mint"
           accentClass="text-mint"
-          onChange={setMarketing}
+          onChange={(value) => setMarketing(marketingBasis * value)}
         />
+        <p className="-mt-1 text-[0.625rem] leading-snug text-muted">
+          Your allocation stays fixed as revenue changes. The range runs from off to 5× daily
+          revenue, with no fixed dollar ceiling.
+        </p>
 
         <ChannelMixBar channels={channelSpend} total={p.marketingSpendPerDay} />
 
@@ -811,7 +802,10 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
             <span>Effective demand spend</span>
             <strong className="font-mono text-mint">{money(reach.demandEquivalentSpend)}/d</strong>
           </div>
-          <p className="mt-1 text-[0.625rem]">Ceiling {money(marketingMax)}/d scales with cash and valuation. Returns diminish, and reach still churns when price or serving capacity disappoints.</p>
+          <p className="mt-1 text-[0.625rem]">
+            {pct(marketingMultiple, 0)} of a {money(marketingBasis)}/d revenue basis. Returns
+            diminish, and overspending can turn growth into a severe daily loss.
+          </p>
         </div>
       </div>
       ) : null}
@@ -823,33 +817,50 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
   )
 }
 
+const FEATURED_BANK_KINDS = ['revolver', 'equipment', 'venture_debt'] as const
+type FeaturedBankKind = (typeof FEATURED_BANK_KINDS)[number]
+
 const BANKING_OFFER_PROFILE: Record<
-  BankingProduct['kind'],
-  { name: string; share: number }
+  FeaturedBankKind,
+  { bank: string; name: string; share: number; locked: string }
 > = {
-  revolver: { name: 'Operating liquidity line', share: 0.35 },
-  equipment: { name: 'Fleet expansion facility', share: 0.6 },
-  project_finance: { name: 'Campus construction note', share: 0.5 },
-  venture_debt: { name: 'Frontier runway facility', share: 0.3 },
-  bond: { name: 'Institutional growth bond', share: 0.25 },
+  revolver: {
+    bank: 'Harbor Bank',
+    name: 'Cashflow credit',
+    share: 0.35,
+    locked: 'Build recurring revenue to unlock',
+  },
+  equipment: {
+    bank: 'Foundry Finance',
+    name: 'Equipment loan',
+    share: 0.6,
+    locked: 'Own racks to unlock',
+  },
+  venture_debt: {
+    bank: 'Frontier Capital',
+    name: 'Growth loan',
+    share: 0.3,
+    locked: 'Raise company value to unlock',
+  },
 }
 
 function bankingOfferAmount(product: BankingProduct): number {
   if (product.available < 100_000) return 0
-  const proposed = Math.floor((product.available * BANKING_OFFER_PROFILE[product.kind].share) / 100_000) * 100_000
+  const profile = BANKING_OFFER_PROFILE[product.kind as FeaturedBankKind]
+  if (!profile) return 0
+  const proposed = Math.floor((product.available * profile.share) / 100_000) * 100_000
   return Math.min(product.available, Math.max(100_000, proposed))
 }
 
 function BankingOfferCard({
   product,
-  sequence,
   onAccept,
 }: {
   product: BankingProduct
-  sequence: number
   onAccept: (amount: number) => void
 }) {
-  const profile = BANKING_OFFER_PROFILE[product.kind]
+  const profile = BANKING_OFFER_PROFILE[product.kind as FeaturedBankKind]
+  if (!profile) return null
   const principal = bankingOfferAmount(product)
   const financingCost = principal * product.apr * (product.termDays / 365)
   const dailyService = product.termDays > 0
@@ -858,40 +869,39 @@ function BankingOfferCard({
   const available = principal >= 100_000
 
   return (
-    <article className={`overflow-hidden rounded-lg border bg-void/40 transition ${available ? 'border-line/80 hover:border-amber/40' : 'border-line/50 opacity-55'}`}>
-      <div className="flex items-start justify-between gap-2 px-2.5 py-2">
-        <div className="min-w-0">
-          <div className="font-mono text-[0.5625rem] uppercase tracking-wider text-amber">
-            Offer {String(sequence).padStart(2, '0')} · {product.label}
+    <article className={`rounded-lg border bg-void/40 p-2.5 transition ${available ? 'border-line/80 hover:border-amber/40' : 'border-line/50'}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-2">
+          <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md border font-mono text-[0.6875rem] ${available ? 'border-amber/35 bg-amber/10 text-amber' : 'border-line bg-panel-2 text-muted'}`}>
+            {profile.bank.charAt(0)}
+          </span>
+          <div className="min-w-0">
+            <h5 className="truncate text-[0.75rem] font-medium text-bone">{profile.bank}</h5>
+            <p className="truncate text-[0.625rem] text-muted">{profile.name} · {product.purpose}</p>
           </div>
-          <h5 className="mt-0.5 text-[0.75rem] font-medium text-bone">{profile.name}</h5>
-          <p className="mt-0.5 text-[0.625rem] leading-snug text-muted">{product.purpose}</p>
         </div>
-        <div className="shrink-0 text-right">
-          <div className="font-mono text-[0.8125rem] text-bone">{available ? money(principal) : 'Unavailable'}</div>
-          <div className="text-[0.5625rem] uppercase tracking-wide text-muted">offered principal</div>
-        </div>
+        <span className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[0.5625rem] uppercase ${available ? 'bg-mint/10 text-mint' : 'bg-line/40 text-muted'}`}>
+          {available ? 'Ready' : 'Locked'}
+        </span>
       </div>
 
-      <dl className="grid grid-cols-4 border-y border-line/60 bg-panel-2/45">
-        <OfferTerm label="Rate" value={`${(product.apr * 100).toFixed(1)}% APR`} />
-        <OfferTerm label="Term" value={`${(product.termDays / 365).toFixed(1)} years`} />
-        <OfferTerm label="Total cost" value={available ? money(financingCost) : '—'} />
-        <OfferTerm label="Daily service" value={available ? `${money(dailyService)}/d` : '—'} />
+      <dl className="mt-2 grid grid-cols-3 gap-1.5">
+        <OfferTerm label="Amount" value={available ? money(principal) : '—'} />
+        <OfferTerm label="Rate" value={`${(product.apr * 100).toFixed(1)}%`} />
+        <OfferTerm label="Payment" value={available ? `${money(dailyService)}/d` : '—'} />
       </dl>
 
-      <div className="grid grid-cols-[1fr_auto] items-center gap-2 px-2.5 py-2">
-        <div className="min-w-0 text-[0.5625rem] leading-snug text-muted">
-          <span className="block font-mono text-bone">Available line {money(product.available)}</span>
-          <span className="block truncate" title={product.covenant}>Covenant · {product.covenant}</span>
-        </div>
+      <div className="mt-2 flex items-center justify-between gap-2 border-t border-line/50 pt-2">
+        <span className="min-w-0 truncate text-[0.625rem] text-muted">
+          {available ? `${Math.round(product.termDays / 30)} months · ${money(financingCost)} interest` : profile.locked}
+        </span>
         <button
           type="button"
           disabled={!available}
           onClick={() => onAccept(principal)}
-          className="shrink-0 rounded border border-amber/35 bg-amber/10 px-2.5 py-1.5 font-mono text-[0.6875rem] text-amber transition hover:border-amber/60 hover:bg-amber/15 active:translate-y-px disabled:cursor-not-allowed disabled:border-line disabled:bg-line/20 disabled:text-muted"
+          className="shrink-0 rounded-md border border-amber/35 bg-amber/10 px-2.5 py-1 font-mono text-[0.6875rem] text-amber transition hover:border-amber/60 hover:bg-amber/15 active:translate-y-px disabled:cursor-not-allowed disabled:border-line disabled:bg-line/20 disabled:text-muted"
         >
-          {available ? `Accept ${money(principal)}` : 'Not eligible'}
+          {available ? 'Accept offer' : 'Unavailable'}
         </button>
       </div>
     </article>
@@ -900,7 +910,7 @@ function BankingOfferCard({
 
 function OfferTerm({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0 border-r border-line/50 px-2 py-1.5 last:border-r-0">
+    <div className="min-w-0 rounded-md bg-panel-2/55 px-2 py-1.5">
       <dt className="truncate text-[0.5rem] uppercase tracking-wider text-muted">{label}</dt>
       <dd className="truncate font-mono text-[0.625rem] text-bone" title={value}>{value}</dd>
     </div>

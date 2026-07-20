@@ -13,7 +13,8 @@ import type {
   TrainingJob,
   TrainingProgram,
 } from '../types'
-import { keepInternal, releaseFromJob, startTraining } from './training'
+import { keepInternal, playerTrainingJobs, releaseFromJob, startTraining } from './training'
+import { LEGACY_TRAINING_NUMERICS } from '../balance/trainingPrecision'
 
 const CHECKPOINT_THRESHOLDS = [0.25, 0.5, 0.75] as const
 
@@ -193,11 +194,11 @@ export function startTrainingProgram(state: SimState, opts: StartTrainingProgram
     return withAlert(state, 'warn', 'Selected data manifest was not found.')
   }
 
-  const previousJobId = state.player.trainingJob?.id
+  const previousJobIds = new Set(playerTrainingJobs(state).map((job) => job.id))
   const previousManifestIds = new Set((state.player.data.manifests ?? []).map((manifest) => manifest.id))
   let next = startTraining(state, opts)
-  const job = next.player.trainingJob
-  if (!job || job.id === previousJobId) return next
+  const job = playerTrainingJobs(next).find((candidate) => !previousJobIds.has(candidate.id))
+  if (!job) return next
 
   const generatedManifest = (next.player.data.manifests ?? []).find(
     (manifest) => !previousManifestIds.has(manifest.id),
@@ -250,8 +251,9 @@ export function startTrainingProgram(state: SimState, opts: StartTrainingProgram
  */
 export function runPilot(state: SimState, programId: string, opts: RunPilotOpts): SimState {
   const program = (state.player.trainingPrograms ?? []).find((candidate) => candidate.id === programId)
-  const job = state.player.trainingJob
-  if (!program || !job || job.id !== program.id) return withAlert(state, 'warn', 'Training program is not active.')
+  const jobs = playerTrainingJobs(state)
+  const job = jobs.find((candidate) => candidate.id === program?.id)
+  if (!program || !job) return withAlert(state, 'warn', 'Training program is not active.')
   if (!CAPABILITY_DOMAINS.includes(opts.domain)) return withAlert(state, 'warn', 'Unknown pilot domain.')
   if (job.progressPfDays / Math.max(1, job.targetPfDays) >= 0.5) {
     return withAlert(state, 'warn', 'Pilots must run before the halfway checkpoint.')
@@ -287,7 +289,10 @@ export function runPilot(state: SimState, programId: string, opts: RunPilotOpts)
     player: {
       ...state.player,
       cash: state.player.cash - cashCost,
-      trainingJob: { ...job, progressPfDays: Math.max(0, job.progressPfDays - computePfDays) },
+      trainingJob: jobs[0]?.id === job.id
+        ? { ...job, progressPfDays: Math.max(0, job.progressPfDays - computePfDays) }
+        : jobs[0] ?? null,
+      trainingJobs: jobs.map((candidate) => candidate.id === job.id ? { ...job, progressPfDays: Math.max(0, job.progressPfDays - computePfDays) } : candidate),
       trainingPrograms: (state.player.trainingPrograms ?? []).map((candidate) =>
         candidate.id === program.id
           ? {
@@ -320,8 +325,9 @@ export function resolveCheckpoint(
   intervention: CheckpointIntervention = 'continue',
 ): SimState {
   const program = (state.player.trainingPrograms ?? []).find((candidate) => candidate.id === programId)
-  const job = state.player.trainingJob
-  if (!program || !job || job.id !== program.id) return withAlert(state, 'warn', 'Training program is not active.')
+  const jobs = playerTrainingJobs(state)
+  const job = jobs.find((candidate) => candidate.id === program?.id)
+  if (!program || !job) return withAlert(state, 'warn', 'Training program is not active.')
   const resolvedCount = program.checkpoints.filter((checkpoint) => checkpoint.progress < 1).length
   const threshold = CHECKPOINT_THRESHOLDS[resolvedCount]
   if (threshold == null) return withAlert(state, 'warn', 'All intervention checkpoints are already resolved.')
@@ -340,6 +346,8 @@ export function resolveCheckpoint(
     day: state.day,
     stability: checkpointStability(state, job, threshold),
     reusable: true,
+    trainingNumerics:
+      job.trainingNumerics ?? job.numerics ?? LEGACY_TRAINING_NUMERICS,
   }
   const confidenceGain = 0.07
   const updatedPrograms = (state.player.trainingPrograms ?? []).map((candidate) =>
@@ -354,11 +362,13 @@ export function resolveCheckpoint(
   )
 
   if (intervention === 'abort') {
+    const remainingJobs = jobs.filter((candidate) => candidate.id !== job.id)
     return {
       ...state,
       player: {
         ...state.player,
-        trainingJob: null,
+        trainingJobs: remainingJobs,
+        trainingJob: remainingJobs[0] ?? null,
         trainingPrograms: updatedPrograms,
         researchPods: (state.player.researchPods ?? []).map((pod) =>
           program.assignedPodIds.includes(pod.id) && pod.assignmentId === program.id
@@ -391,7 +401,8 @@ export function resolveCheckpoint(
     player: {
       ...state.player,
       cash,
-      trainingJob: updatedJob,
+      trainingJobs: jobs.map((candidate) => candidate.id === updatedJob.id ? updatedJob : candidate),
+      trainingJob: jobs[0]?.id === updatedJob.id ? updatedJob : jobs[0] ?? null,
       trainingPrograms: updatedPrograms,
     },
     news: [
@@ -408,15 +419,15 @@ export function finalizeModel(
   finalization: ModelFinalization = 'internal',
 ): SimState {
   const program = (state.player.trainingPrograms ?? []).find((candidate) => candidate.id === programId)
-  const job = state.player.trainingJob
-  if (!program || !job || job.id !== program.id) return withAlert(state, 'warn', 'Training program is not active.')
+  const job = playerTrainingJobs(state).find((candidate) => candidate.id === program?.id)
+  if (!program || !job) return withAlert(state, 'warn', 'Training program is not active.')
   if (job.progressPfDays + 1e-9 < job.targetPfDays) return withAlert(state, 'warn', 'Pretraining is not complete.')
   if (job.postTrain !== 'none' && job.postTrainProgress + 1e-9 < job.postTrainTarget) {
     return withAlert(state, 'warn', 'The active post-training phase is not complete.')
   }
 
-  let next = finalization === 'released' ? releaseFromJob(state) : keepInternal(state)
-  if (next.player.trainingJob) return next
+  let next = finalization === 'released' ? releaseFromJob(state, job.id) : keepInternal(state, job.id)
+  if (playerTrainingJobs(next).some((candidate) => candidate.id === job.id)) return next
   const modelId = job.mode === 'continue' && job.continueFromId
     ? job.continueFromId
     : `model-${state.day}-${job.id}`
@@ -426,6 +437,8 @@ export function finalizeModel(
     day: state.day,
     stability: checkpointStability(state, job, 1),
     reusable: true,
+    trainingNumerics:
+      job.trainingNumerics ?? job.numerics ?? LEGACY_TRAINING_NUMERICS,
   }
 
   next = {

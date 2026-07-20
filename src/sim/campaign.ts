@@ -4,10 +4,10 @@ import type {
   CampaignRules,
   ProgressionState,
 } from './types'
-import { GROUNDED_2026_INDUSTRY_PACK } from './balance/industryDataPack'
+import { GROUNDED_2026_COMPUTE_V2_PACK } from './balance/industryDataPack'
 
 export const DEFAULT_CAMPAIGN_RULES: CampaignRules = {
-  contentPackId: GROUNDED_2026_INDUSTRY_PACK.id,
+  contentPackId: GROUNDED_2026_COMPUTE_V2_PACK.id,
   startYear: 2026,
   reportYear: 2036,
   endless: true,

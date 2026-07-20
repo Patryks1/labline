@@ -17,6 +17,10 @@ export const GROUNDED_2026_INDUSTRY_PACK: IndustryDataPack = {
     cloudOwnedPremiumMin: 0.3,
     cloudOwnedPremiumMax: 0.6,
     emergencyPremium: 1.5,
+    modelVersion: 1,
+    trainingTimeCompression: 1,
+    onlineHeadroom: 0.2,
+    baselineTrainingMfu: 0.35,
   },
   infrastructure: {
     colocationLeadDays: [90, 180],
@@ -41,8 +45,23 @@ export const GROUNDED_2026_INDUSTRY_PACK: IndustryDataPack = {
   speculativeAfterYear: 2026,
 }
 
+/** Default for new campaigns. Existing saves retain their embedded v1 pack. */
+export const GROUNDED_2026_COMPUTE_V2_PACK: IndustryDataPack = {
+  ...GROUNDED_2026_INDUSTRY_PACK,
+  id: 'grounded-2026-compute-v2',
+  version: 2,
+  compute: {
+    ...GROUNDED_2026_INDUSTRY_PACK.compute,
+    modelVersion: 2,
+    trainingTimeCompression: 4,
+    onlineHeadroom: 0.25,
+    baselineTrainingMfu: 0.35,
+  },
+}
+
 export const INDUSTRY_DATA_PACKS: Readonly<Record<string, IndustryDataPack>> = {
   [GROUNDED_2026_INDUSTRY_PACK.id]: GROUNDED_2026_INDUSTRY_PACK,
+  [GROUNDED_2026_COMPUTE_V2_PACK.id]: GROUNDED_2026_COMPUTE_V2_PACK,
 }
 
 export function getIndustryDataPack(id: string): IndustryDataPack | null {

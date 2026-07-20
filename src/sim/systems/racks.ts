@@ -9,6 +9,10 @@ import {
   MODULE_CATALOG,
   scoreDesign,
 } from '../balance/racks'
+import {
+  estimateTrainingMemoryGb,
+  LEGACY_TRAINING_NUMERICS,
+} from '../balance/trainingPrecision'
 import type { PlacedModule, RackDesign, RackSku, SimState } from '../types'
 import {
   dataHallComputeMultiplier,
@@ -34,6 +38,22 @@ export function designToSku(design: RackDesign): RackSku | null {
     vramGb: st.vramGb,
     mw: st.mw,
     tokPerSec: st.tokPerSec,
+    accelerator: {
+      deviceCount: Math.max(1, st.gpuCount),
+      generation: 2,
+      fp32TfPerDevice: (st.flopsPf * 1_000) / Math.max(1, st.gpuCount) / 16,
+      fp16Bf16TfPerDevice: (st.flopsPf * 1_000) / Math.max(1, st.gpuCount),
+      fp8TfPerDevice: (st.flopsPf * 2_000) / Math.max(1, st.gpuCount),
+      fp4TfPerDevice: 0,
+      hbmGbPerDevice: st.vramGb / Math.max(1, st.gpuCount),
+      hbmBandwidthTbPerSecPerDevice: 3,
+      interconnectGbps: 400,
+      idleMw: st.mw * 0.3,
+      maxMw: st.mw,
+      hostOverheadMw: st.mw * 0.08,
+      supportedTrainingFormats: ['fp32', 'fp16_mixed', 'bf16_mixed', 'fp8_hybrid'],
+      supportedServePrecisions: ['fp16', 'bf16', 'fp8', 'int8', 'int4', 'ternary_1_58'],
+    },
     price: Math.max(chassis.baseCost, Math.round(st.buildCost)),
     leadTimeDays: 5,
     sellBackRate: 0.35,
@@ -239,6 +259,7 @@ export interface FleetStats {
   /** Host CPU score (SKU/cpu modules) — research + prefill */
   cpuScore: number
   mw: number
+  idleMw: number
   tokPerSec: number
   gpuCount: number
   rackUnitsUsed: number
@@ -256,6 +277,7 @@ export function fleetStats(state: SimState): FleetStats {
   let systemRamGb = 0
   let cpuScore = 0
   let mw = 0
+  let idleMw = 0
   let tokPerSec = 0
   let gpuCount = 0
   let rackUnitsUsed = 0
@@ -277,8 +299,9 @@ export function fleetStats(state: SimState): FleetStats {
     systemRamGb += ram * r.count
     cpuScore += cpu * r.count
     mw += sku.mw * r.count
+    idleMw += (sku.accelerator?.idleMw ?? sku.mw * 0.3) * r.count
     tokPerSec += sku.tokPerSec * r.count * hallCompute
-    gpuCount += r.count // 1 “GPU-equivalent” row per rack for UI
+    gpuCount += (sku.accelerator?.deviceCount ?? 1) * r.count
     rackUnitsUsed += (r.rackUnits || sku.rackUnits) * r.count
     const existing = designRows.find((d) => d.designId === r.skuId)
     if (existing) {
@@ -296,7 +319,7 @@ export function fleetStats(state: SimState): FleetStats {
           coolingMw: sku.mw * 0.3,
           psuMw: sku.mw * 1.1,
           tokPerSec: sku.tokPerSec,
-          gpuCount: 1,
+          gpuCount: sku.accelerator?.deviceCount ?? 1,
           buildCost: sku.price,
           valid: true,
           errors: [],
@@ -316,6 +339,7 @@ export function fleetStats(state: SimState): FleetStats {
     systemRamGb += st.systemRamGb * dep.count
     cpuScore += Math.max(4, st.gpuCount * 8) * dep.count
     mw += st.mw * dep.count
+    idleMw += st.mw * 0.3 * dep.count
     tokPerSec += st.tokPerSec * dep.count
     gpuCount += st.gpuCount * dep.count
     rackUnitsUsed += chassis.rackUnits * dep.count
@@ -330,6 +354,7 @@ export function fleetStats(state: SimState): FleetStats {
     systemRamGb += inv.count * 128
     cpuScore += inv.count * 12
     mw += inv.count * def.mwPerChip
+    idleMw += inv.count * def.mwPerChip * 0.3
     tokPerSec += inv.count * def.tokPerSec
     gpuCount += inv.count
     rackUnitsUsed += inv.count
@@ -348,6 +373,7 @@ export function fleetStats(state: SimState): FleetStats {
     systemRamGb,
     cpuScore,
     mw,
+    idleMw,
     tokPerSec,
     gpuCount,
     rackUnitsUsed,
@@ -393,15 +419,61 @@ export function vramPressure(
   mode: 'train' | 'serve',
 ): { needGb: number; haveGb: number; derate: number; modelName?: string } {
   const fleet = fleetStats(state)
+  if (mode === 'train') {
+    const listed = state.player.trainingJobs ?? []
+    const legacy = state.player.trainingJob
+    const jobs = legacy
+      ? [legacy, ...listed.filter((job) => job.id !== legacy.id)]
+      : listed
+    const activeJobs = jobs.filter((job) => !job.paused)
+    const safetyModel = state.player.safetyCampaign
+      ? state.player.models.find(
+          (model) => model.id === state.player.safetyCampaign!.modelId,
+        )
+      : undefined
+    if (activeJobs.length === 0 && !safetyModel) {
+      return { needGb: 0, haveGb: fleet.vramGb, derate: 1 }
+    }
+    const activationCheckpointing = state.player.researchUnlocked.includes('opt_checkpoint')
+    let need = activeJobs.reduce(
+      (sum, job) =>
+        sum +
+        estimateTrainingMemoryGb({
+          paramsB: job.targetParamsB,
+          activeParamsB: job.activeParamsB,
+          family: job.family,
+          numerics:
+            job.trainingNumerics ?? job.numerics ?? LEGACY_TRAINING_NUMERICS,
+          activationCheckpointing,
+        }).totalGb,
+      0,
+    )
+    if (safetyModel) {
+      need += estimateTrainingMemoryGb({
+        paramsB: safetyModel.paramsB,
+        activeParamsB: safetyModel.activeParamsB,
+        family: safetyModel.family,
+        numerics: safetyModel.trainingNumerics ?? LEGACY_TRAINING_NUMERICS,
+        activationCheckpointing,
+      }).totalGb
+    }
+    const residentNames = [
+      ...activeJobs.map((job) => job.name),
+      ...(safetyModel ? [`${safetyModel.name} safety`] : []),
+    ]
+    const have = fleet.vramGb
+    return {
+      needGb: need,
+      haveGb: have,
+      derate: need <= 0 ? 1 : Math.min(1, have / need),
+      modelName:
+        residentNames.length === 1
+          ? residentNames[0]
+          : `${residentNames[0]} + ${residentNames.length - 1} more`,
+    }
+  }
   const model =
-    state.player.trainingJob && mode === 'train'
-      ? {
-          name: state.player.trainingJob.name,
-          paramsB: state.player.trainingJob.targetParamsB,
-          activeParamsB: state.player.trainingJob.activeParamsB,
-          family: state.player.trainingJob.family,
-        }
-      : (() => {
+    (() => {
           const m = state.player.models.find(
             (x) =>
               x.id === state.player.pricing.activeModelId &&
@@ -420,10 +492,7 @@ export function vramPressure(
   if (!model) {
     return { needGb: 0, haveGb: fleet.vramGb, derate: 1 }
   }
-  const need =
-    mode === 'train'
-      ? modelTrainVramGb(model.paramsB, model.activeParamsB, model.family)
-      : modelVramGb(model.paramsB, model.activeParamsB, model.family)
+  const need = modelVramGb(model.paramsB, model.activeParamsB, model.family)
   const have = fleet.vramGb
   const derate = need <= 0 ? 1 : Math.min(1, have / need)
   return { needGb: need, haveGb: have, derate, modelName: model.name }

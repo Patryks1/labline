@@ -22,6 +22,11 @@ describe('research tree layout', () => {
     expect(layoutHasOverlaps(layout)).toBe(false)
   })
 
+  it('keeps breathing room between full-tree nodes', () => {
+    const layout = layoutResearchTree()
+    expect(layoutHasOverlaps(layout, 24)).toBe(false)
+  })
+
   it('never overlaps within each trunk filter', () => {
     for (const t of RESEARCH_TRUNKS) {
       const layout = layoutResearchTrunk(t)

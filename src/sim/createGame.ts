@@ -28,7 +28,7 @@ import type {
 import { cityTalentCapacity, cityTalentInitial } from './balance/staff'
 import {
   getIndustryDataPack,
-  GROUNDED_2026_INDUSTRY_PACK,
+  GROUNDED_2026_COMPUTE_V2_PACK,
 } from './balance/industryDataPack'
 import {
   TERRAIN_KIND,
@@ -229,7 +229,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
 
   const campaignRules = cfg.campaignRules ?? defaultCampaignRules()
   const industryDataPack =
-    getIndustryDataPack(campaignRules.contentPackId) ?? GROUNDED_2026_INDUSTRY_PACK
+    getIndustryDataPack(campaignRules.contentPackId) ?? GROUNDED_2026_COMPUTE_V2_PACK
   const calendar = calendarForDay(1, campaignRules)
   const initialSiteCapacities: SiteCapacity[] = rivals.map((rival) => {
     const firmMw = Math.max(0.25, rival.flopsPf * 0.011 * (rival.pue ?? 1.42) * 1.12)
@@ -341,6 +341,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       activeResearch: null,
       researchQueue: [],
       models: [],
+      trainingJobs: [],
       trainingJob: null,
       safetyCampaign: null,
       pricing: {
@@ -403,6 +404,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
         designTechIds: [],
       },
       marketingSpendPerDay: 0,
+      marketingRevenueMultiple: 0,
       enterpriseContracts: 0,
       loans: [],
       capital: {
@@ -440,6 +442,9 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
         terminationFee: 0,
         status: 'active',
         signedDay: 1,
+        acceleratorGeneration: 2,
+        supportedTrainingFormats: ['fp32', 'fp16_mixed', 'bf16_mixed', 'fp8_hybrid'],
+        supportedServePrecisions: ['fp16', 'bf16', 'fp8', 'int8', 'int4', 'ternary_1_58'],
       },
     ],
     computeListing: null,

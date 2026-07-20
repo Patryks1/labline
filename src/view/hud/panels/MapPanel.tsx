@@ -49,14 +49,10 @@ function tileTypeLabel(kind: string): string {
 export function MapPanel() {
   const selected = useGameStore((s) => s.selectedTile)
   const state = useGameStore((s) => s.state)
-  const placeBuilding = useGameStore((s) => s.placeBuilding)
   const upgradeBuilding = useGameStore((s) => s.upgradeBuilding)
-  const buildMode = useGameStore((s) => s.buildMode)
-  const setPanel = useGameStore((s) => s.setPanel)
 
   const tile = selected ? mapTileAtAny(state, selected.x, selected.y) : undefined
   const region = tile && state.map.regions.find((r) => r.id === tile.regionId)
-  const canBuild = tile && tile.kind === 'empty' && (tile.owner === 'neutral' || tile.owner === 'player')
   const isOurs = tile && tile.owner === 'player'
   const isRival = tile && tile.owner !== 'player' && tile.owner !== 'neutral'
   const constructing =
@@ -87,17 +83,16 @@ export function MapPanel() {
 
       <InfrastructureOverview />
 
-      <div
-        className={`rounded-2xl border p-3 text-xs ${
-          isOurs
-            ? 'border-mint/35 bg-mint/5'
-            : isRival
-              ? 'border-amber/30 bg-amber/5'
-              : 'border-line bg-panel-2'
-        }`}
-      >
-        {tile ? (
-          <>
+      {tile && tile.kind !== 'empty' && (
+        <div
+          className={`rounded-2xl border p-3 text-xs ${
+            isOurs
+              ? 'border-mint/35 bg-mint/5'
+              : isRival
+                ? 'border-amber/30 bg-amber/5'
+                : 'border-line bg-panel-2'
+          }`}
+        >
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0 flex-1">
                 <div className="font-mono text-[0.75rem] text-muted">
@@ -148,7 +143,7 @@ export function MapPanel() {
                   )}
                 </>
               )}
-              {!isScenicKind(tile.kind) && tile.kind !== 'empty' && (
+              {!isScenicKind(tile.kind) && (
                 <>
                   <span>Level</span>
                   <span className="text-right text-bone">L{tile.level}</span>
@@ -180,12 +175,6 @@ export function MapPanel() {
                     {tile.mwCapacity > 0 && tile.mwGeneration > 0 ? ' · ' : ''}
                     {tile.mwGeneration > 0 ? `${num(tile.mwGeneration, 1)} MW gen` : ''}
                   </span>
-                </>
-              )}
-              {tile.kind === 'empty' && (tile.landValue ?? 0) > 0 && (
-                <>
-                  <span>Land value</span>
-                  <span className="text-right text-bone">{money(tile.landValue)}</span>
                 </>
               )}
               {tile.capex > 0 && (
@@ -232,26 +221,10 @@ export function MapPanel() {
               </p>
             )}
 
-            {canBuild && buildMode && (
-              <button
-                type="button"
-                className="btn-primary mt-3 w-full"
-                onClick={() => placeBuilding(buildMode)}
-              >
-                Place {getBuildDef(buildMode).label} here
-              </button>
-            )}
-
             {isScenicKind(tile.kind) && (
               <p className="mt-2 rounded-lg border border-line bg-void/40 px-2.5 py-2 text-[0.8125rem] leading-snug text-muted">
                 Scenic {scenicLabel(tile.kind).toLowerCase()} — not a buildable parcel. Choose open
                 land (empty plot) for data halls and power.
-              </p>
-            )}
-
-            {tile.kind === 'empty' && !canBuild && !isRival && (
-              <p className="mt-2 text-[0.75rem] text-muted">
-                This land is outside a developable region or locked.
               </p>
             )}
 
@@ -293,27 +266,9 @@ export function MapPanel() {
                 Rival campus — you cannot build here. Compete on models and price instead.
               </p>
             )}
-          </>
-        ) : (
-          <span className="text-muted">
-            Select a tile on the map
-            {buildMode ? ', or click empty land to place.' : '.'}
-          </span>
-        )}
-      </div>
+        </div>
+      )}
 
-      <div className="grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          className="btn-ghost w-full py-2"
-          onClick={() => useGameStore.getState().openFleet()}
-        >
-          Racks →
-        </button>
-        <button type="button" className="btn-ghost w-full py-2" onClick={() => setPanel('chips')}>
-          Silicon →
-        </button>
-      </div>
     </div>
   )
 }

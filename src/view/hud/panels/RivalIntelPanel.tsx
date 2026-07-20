@@ -14,13 +14,12 @@ function range(values: [number, number] | undefined, format: (value: number) => 
 export function RivalIntelPanel() {
   const state = useGameStore((store) => store.state)
   const rivals = state.rivals
-  const fills = state.worldMarkets.fills
-  const [selectedId, setSelectedId] = useState(rivals[0]?.id ?? '')
-  const rival = rivals.find((entry) => entry.id === selectedId) ?? rivals[0]
-  const resourceWins = useMemo(
-    () => fills.filter((fill) => fill.labId === rival?.id).slice(0, 8),
-    [fills, rival?.id],
+  const rankedRivals = useMemo(
+    () => rivals.toSorted((left, right) => right.marketShare - left.marketShare),
+    [rivals],
   )
+  const [selectedId, setSelectedId] = useState(() => rankedRivals[0]?.id ?? '')
+  const rival = rankedRivals.find((entry) => entry.id === selectedId) ?? rankedRivals[0]
 
   if (!rival) return <p className="text-sm text-muted">No rival labs in this campaign.</p>
   const estimate = rival.publicEstimate
@@ -29,32 +28,69 @@ export function RivalIntelPanel() {
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="hud-panel-title">Rival intelligence</h2>
-          <p className="hud-panel-sub">Public offers, disclosed projects, and uncertain operating ranges.</p>
-        </div>
-        <select
-          value={rival.id}
-          onChange={(event) => setSelectedId(event.target.value)}
-          className="rounded-lg border border-line bg-void px-2 py-1.5 text-sm text-bone"
-        >
-          {rivals.map((entry) => (
-            <option key={entry.id} value={entry.id}>{entry.name}</option>
-          ))}
-        </select>
+      <div>
+        <h2 className="hud-panel-title">Rival intelligence</h2>
+        <p className="hud-panel-sub">Public offers, disclosed projects, and uncertain operating ranges.</p>
       </div>
 
-      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-        <IntelStat label="Market share" value={pct(rival.marketShare, 1)} />
-        <IntelStat label="Compute estimate" value={range(estimate?.computePf, (value) => `${num(value, 0)} PF`)} />
-        <IntelStat label="Data estimate" value={range(estimate?.dataMTok, (value) => `${num(value, 0)} MTok`)} />
-        <IntelStat label="Runway estimate" value={range(estimate?.runwayDays, (value) => `${num(value, 0)}d`)} />
-        <IntelStat label="Cash estimate" value={range(estimate?.cash, money)} />
-        <IntelStat label="Debt estimate" value={range(estimate?.debt, money)} />
-        <IntelStat label="Service" value={(rival.lastUnserved ?? 0) > 0.05 ? `${pct(rival.lastUnserved ?? 0, 0)} unserved` : 'Healthy'} />
-        <IntelStat label="Confidence" value={estimate ? pct(estimate.confidence, 0) : '—'} />
-      </div>
+      <section className="rounded-xl border border-line bg-panel-2 p-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-[0.75rem] font-medium uppercase tracking-wider text-muted">Market position</h3>
+            <p className="mt-0.5 text-[0.6875rem] text-muted">Select a rival to inspect its public intelligence.</p>
+          </div>
+          <span className="shrink-0 font-mono text-sm text-research">{pct(rival.marketShare, 1)}</span>
+        </div>
+        <div className="mt-3 space-y-2">
+          {[
+            { id: 'player', name: 'You', share: state.player.finance.totalShare },
+            ...rankedRivals.map((entry) => ({ id: entry.id, name: entry.name, share: entry.marketShare })),
+          ]
+            .toSorted((left, right) => right.share - left.share)
+            .map((entry) => {
+              const selected = entry.id === rival.id
+              const isPlayer = entry.id === 'player'
+              return (
+                <button
+                  key={entry.id}
+                  type="button"
+                  disabled={isPlayer}
+                  aria-pressed={selected}
+                  onClick={() => setSelectedId(entry.id)}
+                  className={`grid w-full grid-cols-[5rem_minmax(0,1fr)_3rem] items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[0.6875rem] transition-colors ${
+                    selected
+                      ? 'bg-research/10 ring-1 ring-research/35'
+                      : isPlayer
+                        ? 'cursor-default bg-mint/5'
+                        : 'hover:bg-void/55'
+                  }`}
+                >
+                  <span className={`truncate ${selected ? 'font-semibold text-research' : isPlayer ? 'text-mint' : 'text-muted'}`}>
+                    {entry.name}
+                  </span>
+                  <span className="h-2 overflow-hidden rounded-full bg-void">
+                    <span
+                      className={`block h-full rounded-full ${isPlayer ? 'bg-mint' : selected ? 'bg-research' : 'bg-line'}`}
+                      style={{ width: `${Math.min(100, entry.share * 100)}%` }}
+                    />
+                  </span>
+                  <span className="text-right font-mono text-bone">{pct(entry.share, 0)}</span>
+                </button>
+              )
+            })}
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-line bg-panel-2 p-3">
+        <h3 className="text-[0.75rem] font-medium uppercase tracking-wider text-muted">Estimated range</h3>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          <RangeRail label="Compute" values={estimate?.computePf} format={(value) => `${num(value, 0)} PF`} />
+          <RangeRail label="Training data" values={estimate?.dataMTok} format={(value) => `${num(value, 0)} MTok`} />
+          <RangeRail label="Runway" values={estimate?.runwayDays} format={(value) => `${num(value, 0)}d`} />
+          <RangeRail label="Cash" values={estimate?.cash} format={money} />
+        </div>
+        <div className="mt-3 grid grid-cols-3 gap-1.5"><IntelStat label="Debt" value={range(estimate?.debt, money)} /><IntelStat label="Service" value={(rival.lastUnserved ?? 0) > 0.05 ? `${pct(rival.lastUnserved ?? 0, 0)} short` : 'Healthy'} /><IntelStat label="Confidence" value={estimate ? pct(estimate.confidence, 0) : '—'} /></div>
+      </section>
 
       {estimate?.announcedProject && (
         <div className="rounded-xl border border-amber/30 bg-amber/5 px-3 py-2 text-[0.8125rem] text-amber">
@@ -117,24 +153,17 @@ export function RivalIntelPanel() {
         </div>
       </section>
 
-      <section className="space-y-1.5">
-        <h3 className="text-[0.75rem] font-medium uppercase tracking-wider text-muted">Public resource wins</h3>
-        {resourceWins.map((fill) => (
-          <div key={fill.id} className="flex justify-between rounded-lg border border-line/70 bg-void/35 px-2 py-1.5 font-mono text-[0.6875rem] text-muted">
-            <span>D{fill.day} · {fill.kind} · {fill.resourceId}</span>
-            <span className="text-bone">{num(fill.quantity, 1)} @ {money(fill.unitPrice)}</span>
-          </div>
-        ))}
-        {resourceWins.length === 0 && <p className="text-[0.75rem] text-muted">No disclosed shared-market wins yet.</p>}
-      </section>
-
-      <p className="text-[0.6875rem] text-muted">
-        Intelligence never reveals exact private cash, corpus mix, bids, research choice, or deterministic outcome seed.
-      </p>
     </div>
   )
 }
 
 function IntelStat({ label, value }: { label: string; value: string }) {
-  return <div className="rounded-xl border border-line bg-panel-2 px-2.5 py-2"><div className="text-[0.625rem] uppercase tracking-wider text-muted">{label}</div><div className="mt-0.5 font-mono text-[0.8125rem] text-bone">{value}</div></div>
+  return <div className="min-w-0 rounded-lg border border-line/70 bg-void/35 px-2 py-1.5"><div className="truncate text-[0.5625rem] uppercase tracking-wider text-muted">{label}</div><div className="mt-0.5 truncate font-mono text-[0.75rem] text-bone" title={value}>{value}</div></div>
+}
+
+function RangeRail({ label, values, format }: { label: string; values?: [number, number]; format: (value: number) => string }) {
+  const low = values?.[0] ?? 0
+  const high = values?.[1] ?? 0
+  const spread = high > 0 ? Math.max(.08, (high - low) / high) : 0
+  return <div className="rounded-lg bg-void/40 p-2" title={`${label} is an intelligence estimate, not an exact private value.`}><div className="flex justify-between gap-2 text-[0.6875rem]"><span className="text-muted">{label}</span><span className="font-mono text-bone">{values ? `${format(low)}–${format(high)}` : '—'}</span></div><div className="mt-2 h-1.5 rounded-full bg-line/30"><div className="h-full rounded-full bg-research" style={{ marginLeft: `${Math.max(0, 100 - spread * 100)}%`, width: `${spread * 100}%` }} /></div></div>
 }

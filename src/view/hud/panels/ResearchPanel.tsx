@@ -14,12 +14,10 @@ import {
   TRUNK_META,
   getResearchNode,
   researchBranchForNode,
-  type ResearchTrunkId,
 } from '../../../sim/balance/research'
 import {
   RESEARCH_LAYOUT,
   layoutResearchTree,
-  layoutResearchTrunk,
   type ResearchTreeLayout,
 } from '../../../sim/balance/researchLayout'
 import type { ResearchEffects } from '../../../sim/types'
@@ -50,6 +48,8 @@ import { useGameStore } from '../../../store/gameStore'
 import { computeSnapshot } from '../../../sim/tick'
 import { money, num } from '../format'
 
+const FULL_RESEARCH_LAYOUT = layoutResearchTree()
+
 export function ResearchPanel() {
   const state = useGameStore((s) => s.state)
   const focusRequest = useGameStore((s) => s.researchFocusRequest)
@@ -57,7 +57,6 @@ export function ResearchPanel() {
   const snap = computeSnapshot(state)
 
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [filter, setFilter] = useState<ResearchTrunkId | 'all'>('all')
   const [selectedPodId, setSelectedPodId] = useState(
     () => state.player.researchPods?.[0]?.id ?? '',
   )
@@ -97,20 +96,17 @@ export function ResearchPanel() {
         ]
     return planResearchPath(state.player.researchUnlocked, scheduled, selected.id).nodeIds
   })()
+  const selectedLineage = useMemo(() => researchLineage(selectedId), [selectedId])
 
   const apply = (next: typeof state) => setState({ state: next })
 
-  const layout = useMemo(() => {
-    if (filter === 'all') return layoutResearchTree()
-    return layoutResearchTrunk(filter)
-  }, [filter])
+  const layout = FULL_RESEARCH_LAYOUT
   const canvas = useResearchCanvas(layout)
   const centerResearchNode = canvas.centerNode
 
   useEffect(() => {
     if (!focusRequest) return
     const node = getResearchNode(focusRequest.nodeId)
-    setFilter(node.trunk as ResearchTrunkId)
     setSelectedId(node.id)
     setHighlightedId(node.id)
     const frame = window.requestAnimationFrame(() => centerResearchNode(node.id))
@@ -354,20 +350,6 @@ export function ResearchPanel() {
       </div>
       )}
 
-      {/* Trunk filters */}
-      <div className="flex shrink-0 flex-wrap gap-1">
-        <FilterChip active={filter === 'all'} onClick={() => setFilter('all')} label="All" />
-        {RESEARCH_TRUNKS.map((t) => (
-          <FilterChip
-            key={t}
-            active={filter === t}
-            onClick={() => setFilter(t)}
-            label={TRUNK_META[t].label}
-            color={TRUNK_META[t].color}
-          />
-        ))}
-      </div>
-
       {/* One navigable tree surface with a fixed decision inspector. */}
       <div className="grid min-h-[400px] flex-1 grid-cols-[minmax(0,1fr)_22rem] gap-2 overflow-hidden">
       <div
@@ -396,23 +378,8 @@ export function ResearchPanel() {
           className="absolute left-0 top-0 will-change-transform"
           style={{ width: layout.width, height: layout.height }}
         >
-          {/* Soft category territories make the graph read as a research map, not columns. */}
-          {researchRegions(layout).map((region) => (
-            <div
-              key={region.trunk}
-              className="pointer-events-none absolute rounded-2xl border"
-              style={{
-                left: region.x,
-                top: region.y,
-                width: region.w,
-                height: region.h,
-                borderColor: `${TRUNK_META[region.trunk].color}2e`,
-                background: `linear-gradient(145deg, ${TRUNK_META[region.trunk].color}12, transparent 64%)`,
-              }}
-            />
-          ))}
           {/* Branch labels */}
-          {(filter === 'all' ? RESEARCH_TRUNKS : [filter]).map((t) => {
+          {RESEARCH_TRUNKS.map((t) => {
             const branchRoot = layout.nodes
               .filter((node) => node.trunk === t)
               .sort((a, b) => a.depth - b.depth || a.y - b.y)[0]
@@ -450,27 +417,40 @@ export function ResearchPanel() {
               const midX = (e.x1 + e.x2) / 2
               const midY = (e.y1 + e.y2) / 2
               const done = state.player.researchUnlocked.includes(e.from)
+              const selectedEdge = selectedLineage.has(e.from) && selectedLineage.has(e.to)
+              const path = horizontal
+                ? `M ${e.x1} ${e.y1} C ${midX} ${e.y1}, ${midX} ${e.y2}, ${e.x2} ${e.y2}`
+                : `M ${e.x1} ${e.y1} C ${e.x1} ${midY}, ${e.x2} ${midY}, ${e.x2} ${e.y2}`
               return (
-                <path
-                  key={`${e.from}-${e.to}`}
-                  d={
-                    horizontal
-                      ? `M ${e.x1} ${e.y1} C ${midX} ${e.y1}, ${midX} ${e.y2}, ${e.x2} ${e.y2}`
-                      : `M ${e.x1} ${e.y1} C ${e.x1} ${midY}, ${e.x2} ${midY}, ${e.x2} ${e.y2}`
-                  }
-                  fill="none"
-                  stroke={
-                    e.crossTrunk
-                      ? done
-                        ? '#3dffc044'
-                        : '#2a2f3a88'
-                      : done
-                        ? '#3dffc088'
-                        : '#3a4150'
-                  }
-                  strokeWidth={e.crossTrunk ? 1 : 1.5}
-                  strokeDasharray={e.crossTrunk ? '4 3' : undefined}
-                />
+                <g key={`${e.from}-${e.to}`}>
+                  <path
+                    d={path}
+                    fill="none"
+                    stroke={
+                      e.crossTrunk
+                        ? done
+                          ? '#3dffc044'
+                          : '#2a2f3a88'
+                        : done
+                          ? '#3dffc088'
+                          : '#3a4150'
+                    }
+                    strokeWidth={e.crossTrunk ? 1 : 1.5}
+                    strokeDasharray={e.crossTrunk ? '4 3' : undefined}
+                  />
+                  {selectedEdge ? (
+                    <path
+                      data-selected-research-edge="true"
+                      className="research-edge-selected"
+                      d={path}
+                      fill="none"
+                      stroke="#bda8ff"
+                      strokeWidth={e.crossTrunk ? 2.25 : 2.75}
+                      strokeLinecap="round"
+                      strokeDasharray="10 8"
+                    />
+                  ) : null}
+                </g>
               )
             })}
           </svg>
@@ -811,31 +791,6 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
   }
 }
 
-function FilterChip({
-  active,
-  onClick,
-  label,
-  color,
-}: {
-  active: boolean
-  onClick: () => void
-  label: string
-  color?: string
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`rounded-full px-2 py-0.5 text-[0.75rem] font-medium transition ${
-        active ? 'bg-bone text-void' : 'bg-panel-2 text-muted hover:text-bone'
-      }`}
-      style={!active && color ? { boxShadow: `inset 0 0 0 1px ${color}44` } : undefined}
-    >
-      {label}
-    </button>
-  )
-}
-
 function nodeClass(
   st: NodeVisualStatus,
   sel: boolean,
@@ -893,16 +848,13 @@ function EffectsLine({ effects }: { effects: ResearchEffects }) {
   return <p className="mt-1 font-mono text-[0.75rem] text-research">{bits.join(' · ')}</p>
 }
 
-function researchRegions(layout: ResearchTreeLayout) {
-  return RESEARCH_TRUNKS.flatMap((trunk) => {
-    const nodes = layout.nodes.filter((node) => node.trunk === trunk)
-    if (nodes.length === 0) return []
-    const padX = 18
-    const padY = 34
-    const left = Math.min(...nodes.map((node) => node.x)) - padX
-    const top = Math.min(...nodes.map((node) => node.y)) - padY
-    const right = Math.max(...nodes.map((node) => node.x + node.w)) + padX
-    const bottom = Math.max(...nodes.map((node) => node.y + node.h)) + padY
-    return [{ trunk, x: left, y: top, w: right - left, h: bottom - top }]
-  })
+function researchLineage(selectedId: string | null): Set<string> {
+  const lineage = new Set<string>()
+  const visit = (nodeId: string) => {
+    if (lineage.has(nodeId)) return
+    lineage.add(nodeId)
+    for (const prereq of getResearchNode(nodeId).prereqs) visit(prereq)
+  }
+  if (selectedId) visit(selectedId)
+  return lineage
 }

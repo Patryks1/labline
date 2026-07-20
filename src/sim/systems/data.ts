@@ -24,7 +24,7 @@ import {
   totalSources,
   type DomainDataContract,
 } from '../balance/data'
-import { seededId } from '../rng'
+import { createRng, hashSeed, seededId } from '../rng'
 import { queueDataOfferOrder } from './sharedMarkets'
 import type {
   DataDomain,
@@ -38,7 +38,7 @@ import type {
   SynthGenJob,
   TrainingDataPlan,
 } from '../types'
-import { computeSnapshot } from './compute'
+import { computeSnapshot, normalizeAllocation } from './compute'
 import { campusBonuses } from './campus'
 import { aggregateEffects } from './research'
 import { modelCanCurateDataDomain } from './modelEligibility'
@@ -106,14 +106,70 @@ export function dataResearchReservationShare(data: LabData): number {
 export function grossResearchPoolPf(state: SimState): number {
   const data = ensureLabData(state)
   const reserved = dataResearchReservationShare(data)
-  const techPool = computeSnapshot(state).pools.research
-  return techPool / Math.max(0.15, 1 - reserved)
+  const snapshot = computeSnapshot(state)
+  const techPool = snapshot.pools.research
+  // The scheduler backfills an idle research reservation into training. Action
+  // previews still need the capacity that would return when research work is queued.
+  const prospectivePool =
+    snapshot.effectiveFlopsPf * normalizeAllocation(state.player.allocation).research
+  return Math.max(techPool / Math.max(0.15, 1 - reserved), prospectivePool)
 }
 
 export const DATA_PRUNE_QUALITY_FLOOR = 65
 const DATA_PRUNE_RESEARCH_SHARE = 0.08
 const DATA_PRUNE_MAX_JOBS = 9
 const DATA_PRUNE_MIN_ACTIVE_PF = 0.05
+const DATA_PRUNE_AUDIT_DAYS = 14
+
+export interface DataPruneAuditEstimate {
+  cashCost: number
+  validDays: number
+  validUntilDay: number
+  unlocked: boolean
+  ok: boolean
+  reason?: string
+}
+
+/** A paid sample audit reveals the otherwise private low-quality share of the corpus. */
+export function estimateDataPruneAudit(state: SimState): DataPruneAuditEstimate {
+  const data = ensureLabData(state)
+  const corpusMTok = totalRaw(data) + totalProcessed(data)
+  const cashCost = Math.max(10_000, Math.min(250_000, corpusMTok * 75))
+  const validUntilDay = data.pruneAuditValidUntilDay ?? -1
+  const unlocked = validUntilDay >= state.day
+  let reason: string | undefined
+  if (unlocked) reason = `Audit already active through D${validUntilDay}`
+  else if (corpusMTok < 0.5) reason = 'No corpus to audit'
+  else if (state.player.cash + 1e-9 < cashCost) reason = `Needs ${formatMoneyShort(cashCost)} cash`
+  return {
+    cashCost,
+    validDays: DATA_PRUNE_AUDIT_DAYS,
+    validUntilDay,
+    unlocked,
+    ok: reason == null,
+    reason,
+  }
+}
+
+export function purchaseDataPruneAudit(state: SimState): SimState {
+  const audit = estimateDataPruneAudit(state)
+  if (!audit.ok) return alert(state, audit.unlocked ? 'info' : 'warn', audit.reason ?? 'Unable to audit corpus.')
+  const data = cloneLabData(ensureLabData(state))
+  data.pruneAuditValidUntilDay = state.day + audit.validDays
+  const next = {
+    ...state,
+    player: {
+      ...state.player,
+      cash: state.player.cash - audit.cashCost,
+      data,
+    },
+  }
+  return alert(
+    next,
+    'info',
+    `Corpus audit complete. Low-quality volumes are visible through D${data.pruneAuditValidUntilDay}.`,
+  )
+}
 
 export interface DataPruneEstimate {
   domain: DataDomain
@@ -149,6 +205,7 @@ function lowQualityDataForDomain(data: LabData, domain: DataDomain): {
 
 export function estimateDataPrune(state: SimState, domain: DataDomain): DataPruneEstimate {
   const data = ensureLabData(state)
+  const audit = estimateDataPruneAudit(state)
   const lowQuality = lowQualityDataForDomain(data, domain)
   const totalMTok = lowQuality.rawMTok + lowQuality.processedMTok
   const meta = DATA_DOMAIN_META[domain]
@@ -161,6 +218,7 @@ export function estimateDataPrune(state: SimState, domain: DataDomain): DataPrun
   const alreadyQueued = data.pruneQueue.some((job) => job.domain === domain)
   let reason: string | undefined
   if (totalMTok < 0.5) reason = 'No low-quality stock detected'
+  else if (!audit.unlocked) reason = `Run corpus audit · ${formatMoneyShort(audit.cashCost)}`
   else if (alreadyQueued) reason = 'Audit already queued'
   else if (data.pruneQueue.length >= DATA_PRUNE_MAX_JOBS) reason = 'Pruning queue full'
   else if (researchers < researchersRequired) {
@@ -239,6 +297,7 @@ export interface AllDataPruneEstimate {
 
 export function estimateAllDataPrunes(state: SimState): AllDataPruneEstimate {
   const data = ensureLabData(state)
+  const audit = estimateDataPruneAudit(state)
   const candidates = DATA_DOMAINS.map((domain) => estimateDataPrune(state, domain)).filter(
     (estimate) => estimate.totalMTok >= 0.5 && !data.pruneQueue.some((job) => job.domain === estimate.domain),
   )
@@ -252,6 +311,7 @@ export function estimateAllDataPrunes(state: SimState): AllDataPruneEstimate {
   const researchers = playerStaff(state).researcher ?? 0
   let reason: string | undefined
   if (candidates.length === 0) reason = 'No low-quality stock detected'
+  else if (!audit.unlocked) reason = `Run corpus audit · ${formatMoneyShort(audit.cashCost)}`
   else if (data.pruneQueue.length + candidates.length > DATA_PRUNE_MAX_JOBS) reason = 'Pruning queue full'
   else if (researchers < researchersRequired) {
     reason = `Needs ${researchersRequired} researchers (have ${researchers})`
@@ -476,6 +536,154 @@ export function startSynthGen(
   }
 }
 
+export interface SynthBudgetEstimate {
+  model: Model | null
+  researchPf: number
+  grossMTokPerDay: number
+  usefulChance: number
+  hqChance: number
+}
+
+function synthBudgetTeacher(state: SimState): Model | null {
+  return (
+    state.player.models
+      .filter(
+        (model) =>
+          model.release === 'released' || model.shipped || model.release === 'internal',
+      )
+      .sort(
+        (left, right) =>
+          right.capability * 0.72 + right.quality.reliability * 0.28 -
+          (left.capability * 0.72 + left.quality.reliability * 0.28),
+      )[0] ?? null
+  )
+}
+
+/** Forecast an automatic synthetic portfolio from one player-facing compute budget. */
+export function estimateSynthBudget(
+  state: SimState,
+  researchShare: number,
+): SynthBudgetEstimate {
+  const model = synthBudgetTeacher(state)
+  const share = Math.max(0.05, Math.min(0.5, researchShare))
+  const researchPf = grossResearchPoolPf(state) * share
+  if (!model) {
+    return { model: null, researchPf, grossMTokPerDay: 0, usefulChance: 0, hqChance: 0 }
+  }
+
+  const intelligence = Math.max(
+    0,
+    Math.min(1, (model.capability * 0.72 + model.quality.reliability * 0.28) / 100),
+  )
+  const computeSignal = researchPf / Math.max(12, researchPf + 12)
+  const grossMTokPerDay = DATA_DOMAINS.reduce(
+    (sum, domain) =>
+      sum +
+      syntheticGenerationMTokPerDay({
+        domain,
+        teacherDomainCapability: teacherCapabilityForDataDomain(model, domain),
+        teacherReliability: model.quality.reliability,
+        researchPf: researchPf / DATA_DOMAINS.length,
+        tier: 'lq',
+      }),
+    0,
+  )
+
+  return {
+    model,
+    researchPf,
+    grossMTokPerDay,
+    usefulChance: Math.max(0.18, Math.min(0.9, 0.2 + intelligence * 0.45 + computeSignal * 0.25)),
+    hqChance: Math.max(0.12, Math.min(0.88, 0.1 + intelligence * 0.58 + computeSignal * 0.2)),
+  }
+}
+
+/** Start the simplified auto-routing generator used by the Data workspace. */
+export function startSynthBudget(
+  state: SimState,
+  opts: { researchShare: number },
+): SimState {
+  if (!state.player.researchUnlocked.includes('data_synth')) {
+    return alert(
+      state,
+      'warn',
+      'Unlock Synthetic Generators (data tree: mix → clean → eval → synth) first.',
+    )
+  }
+  const estimate = estimateSynthBudget(state, opts.researchShare)
+  if (!estimate.model) return alert(state, 'warn', 'Train a finished model before generating data.')
+
+  const data = cloneLabData(ensureLabData(state))
+  const existing = data.synthQueue.find((job) => job.autoPortfolio)
+  if (existing) {
+    const otherShare = data.synthQueue.reduce(
+      (sum, job) => sum + (job.id === existing.id ? 0 : job.researchShare),
+      0,
+    )
+    const availableShare = Math.max(0, DATA_ECONOMY.maxDataGenResearchShare - otherShare)
+    if (availableShare < 0.05) {
+      return alert(state, 'warn', 'Research pool is already reserved by other data jobs.')
+    }
+    const share = Math.max(0.05, Math.min(0.5, availableShare, opts.researchShare))
+    data.synthQueue = data.synthQueue.map((job) =>
+      job.id === existing.id ? { ...job, researchShare: share } : job,
+    )
+    data.dataGenResearchShare = dataResearchReservationShare(data)
+    return {
+      ...state,
+      player: { ...state.player, data },
+      alerts: [
+        {
+          id: `synth-budget-update-${state.day}`,
+          day: state.day,
+          severity: 'info' as const,
+          message: `Synthetic compute budget updated to ${Math.round(share * 100)}% of research.`,
+        },
+        ...state.alerts,
+      ].slice(0, 40),
+    }
+  }
+
+  if (data.synthQueue.length >= DATA_ECONOMY.maxSynthJobs) {
+    return alert(state, 'warn', 'Synthetic queue is full. Stop an existing generator first.')
+  }
+  const share = Math.max(0.05, Math.min(0.5, opts.researchShare))
+  const used = dataResearchReservationShare(data)
+  if (used + share > DATA_ECONOMY.maxDataGenResearchShare + 0.001) {
+    return alert(state, 'warn', 'Research pool is already reserved. Lower the synth budget first.')
+  }
+  const job: SynthGenJob = {
+    id: seededId('synth-auto', state.seed, state.day, estimate.model.id),
+    domain: 'chat',
+    modelId: estimate.model.id,
+    modelName: estimate.model.name,
+    targetMTok: 0,
+    progressMTok: 0,
+    continuous: true,
+    researchShare: share,
+    qualityTier: 'hq',
+    autoPortfolio: true,
+    hqMTok: 0,
+    lqMTok: 0,
+    wastedMTok: 0,
+  }
+  data.synthQueue = [...data.synthQueue, job]
+  data.dataGenResearchShare = dataResearchReservationShare(data)
+  return {
+    ...state,
+    player: { ...state.player, data },
+    alerts: [
+      {
+        id: job.id,
+        day: state.day,
+        severity: 'info' as const,
+        message: `Synthetic compute online: ${Math.round(share * 100)}% research, with ${estimate.model.name} auto-routing useful output.`,
+      },
+      ...state.alerts,
+    ].slice(0, 40),
+  }
+}
+
 export function cancelSynthGen(state: SimState, jobId: string): SimState {
   const data = cloneLabData(ensureLabData(state))
   data.synthQueue = data.synthQueue.filter((j) => j.id !== jobId)
@@ -629,6 +837,131 @@ export function tickData(state: SimState): SimState {
   // ─── AI synth jobs (claim research PF first) ───
   const synthQueue: SynthGenJob[] = []
   for (const job of data.synthQueue ?? []) {
+    if (job.autoPortfolio) {
+      const liveState = { ...state, player: { ...state.player, data } }
+      const estimate = estimateSynthBudget(liveState, job.researchShare)
+      const model = estimate.model
+      if (!model || estimate.grossMTokPerDay <= 0) {
+        synthQueue.push(job)
+        continue
+      }
+
+      let grossToday = 0
+      let hqToday = 0
+      let lqToday = 0
+      let wasteToday = 0
+      for (const domain of DATA_DOMAINS) {
+        const rng = createRng(hashSeed(state.seed, state.day, job.id, domain))
+        const domainGross = syntheticGenerationMTokPerDay({
+          domain,
+          teacherDomainCapability: teacherCapabilityForDataDomain(model, domain),
+          teacherReliability: model.quality.reliability,
+          researchPf: estimate.researchPf / DATA_DOMAINS.length,
+          tier: 'lq',
+        })
+        const gross = domainGross * (0.82 + rng.next() * 0.36)
+        const usefulFraction = Math.max(
+          0.04,
+          Math.min(0.96, estimate.usefulChance * (0.68 + rng.next() * 0.64)),
+        )
+        const hqFraction = Math.max(
+          0.05,
+          Math.min(0.95, estimate.hqChance * (0.72 + rng.next() * 0.56)),
+        )
+        const useful = gross * usefulFraction
+        const hq = useful * hqFraction
+        const lq = useful - hq
+        const waste = gross - useful
+        grossToday += gross
+        hqToday += hq
+        lqToday += lq
+        wasteToday += waste
+        if (useful <= 0.001) continue
+
+        const stock = normalizeDomainStock(data.stocks[domain])
+        const priorProcessed = stock.processed
+        const freshness = synthTeacherFreshness(liveState, model, domain)
+        const hqAssetSeed = syntheticDatasetAsset({
+          id: `dataset-${job.id}-${domain}-hq`,
+          name: `Auto ${DATA_DOMAIN_META[domain].label} synthetic · high quality`,
+          domain,
+          volumeMTok: hq,
+          quality: 0,
+          teacherModelId: model.id,
+          tier: 'hq',
+          day: state.day,
+        })
+        const lqAssetSeed = syntheticDatasetAsset({
+          id: `dataset-${job.id}-${domain}-lq`,
+          name: `Auto ${DATA_DOMAIN_META[domain].label} synthetic · low quality`,
+          domain,
+          volumeMTok: lq,
+          quality: 0,
+          teacherModelId: model.id,
+          tier: 'lq',
+          day: state.day,
+        })
+        const hqQuality = Math.max(
+          18,
+          estimateSyntheticQuality({
+            domain,
+            teacherDomainCapability: teacherCapabilityForDataDomain(model, domain),
+            provenance: hqAssetSeed.synthetic!,
+          }).quality - freshness.capabilityGap * 0.35,
+        )
+        const lqQuality = Math.max(
+          12,
+          estimateSyntheticQuality({
+            domain,
+            teacherDomainCapability: teacherCapabilityForDataDomain(model, domain),
+            provenance: lqAssetSeed.synthetic!,
+          }).quality - freshness.capabilityGap * 0.5,
+        )
+        const incomingQuality = (hqQuality * hq + lqQuality * lq) / useful
+        stock.processed = priorProcessed + useful
+        stock.fromSynth = (stock.fromSynth ?? 0) + useful
+        stock.fromSynthHQ = (stock.fromSynthHQ ?? 0) + hq
+        stock.fromSynthLQ = (stock.fromSynthLQ ?? 0) + lq
+        stock.quality =
+          stock.processed > 0
+            ? (stock.quality * priorProcessed + incomingQuality * useful) / stock.processed
+            : incomingQuality
+        data.stocks[domain] = stock
+
+        for (const [assetSeed, amount, quality] of [
+          [hqAssetSeed, hq, hqQuality],
+          [lqAssetSeed, lq, lqQuality],
+        ] as const) {
+          if (amount <= 0.001) continue
+          const prior = data.assets.find((asset) => asset.id === assetSeed.id)
+          const totalVolume = (prior?.volumeMTok ?? 0) + amount
+          const blendedQuality = prior
+            ? (prior.quality * prior.volumeMTok + quality * amount) / totalVolume
+            : quality
+          data = appendDatasetAsset(data, {
+            ...assetSeed,
+            volumeMTok: totalVolume,
+            quality: blendedQuality,
+            freshness: freshness.freshness,
+          })
+        }
+      }
+
+      data.daySynthMTok += hqToday + lqToday
+      data.dayProcessed += hqToday + lqToday
+      data.lifetimeProcessed += hqToday + lqToday
+      data.lifetimeCollected += hqToday + lqToday
+      synthQueue.push({
+        ...job,
+        modelId: model.id,
+        modelName: model.name,
+        progressMTok: job.progressMTok + grossToday,
+        hqMTok: (job.hqMTok ?? 0) + hqToday,
+        lqMTok: (job.lqMTok ?? 0) + lqToday,
+        wastedMTok: (job.wastedMTok ?? 0) + wasteToday,
+      })
+      continue
+    }
     const model = state.player.models.find((m) => m.id === job.modelId)
     if (!model) continue
     const tier = job.qualityTier ?? 'hq'
@@ -871,6 +1204,7 @@ export function consumeForLabData(
   const isContinue = mode === 'continue'
   const plan = resolveDataPlan(planIn, paramsB, family, opts?.legacyMix)
   if (planIn?.domainModels) plan.domainModels = { ...planIn.domainModels }
+  if (planIn?.syntheticTeacherIds) plan.syntheticTeacherIds = { ...planIn.syntheticTeacherIds }
 
   const weights = normalizeWeights(plan.weights)
   // Read-only clone for quality — stocks are never permanently depleted by pretrain
@@ -1022,14 +1356,26 @@ export function consumeForTraining(
     let qualityAcc = 0
     let qualityVolume = 0
     const verifierBonus = hasCorpusSpecialists(state) ? 8 : 0
+    const baseVolume = Object.values(base.consumed).reduce((sum, value) => sum + (value ?? 0), 0)
+    const attributedReal = Math.max(0, baseVolume - base.syntheticUnits)
+    const requestedMultiplier = Math.max(0, Math.min(3, planIn?.syntheticMultiplier ?? 3))
+    let remainingGenerationBudget = Math.max(
+      0,
+      attributedReal * requestedMultiplier - base.syntheticUnits,
+    )
     for (const domain of DATA_DOMAINS) {
-      const short = Math.max(0, wanted * weights[domain] - (consumed[domain] ?? 0))
+      const short = Math.min(
+        remainingGenerationBudget,
+        Math.max(0, wanted * weights[domain] - (consumed[domain] ?? 0)),
+      )
       if (short <= 0.01) continue
-      const teacher = state.player.models
+      const eligibleTeachers = state.player.models
         .filter((model) => modelCanCurateDataDomain(model, domain))
         .toSorted(
           (a, b) => specialistDomainBoost(b, domain) - specialistDomainBoost(a, domain),
-        )[0]
+        )
+      const selectedTeacherId = planIn?.syntheticTeacherIds?.[domain]
+      const teacher = eligibleTeachers.find((model) => model.id === selectedTeacherId) ?? eligibleTeachers[0]
       if (!teacher) continue
       const teacherSignal = specialistDomainBoost(teacher, domain)
       const quality = Math.min(92, 48 + teacherSignal * 1.8 + verifierBonus)
@@ -1040,6 +1386,7 @@ export function consumeForTraining(
       domainQuality[domain] = (priorQuality * prior + quality * short) / Math.max(0.01, prior + short)
       lowQualityShareByDomain[domain] = qualityTier === 'lq' ? short / Math.max(0.01, prior + short) : 0
       syntheticAdded += short
+      remainingGenerationBudget -= short
       syntheticProvenance.push({
         domain,
         teacherModelId: teacher.id,

@@ -9,7 +9,6 @@ import {
   serveInfraCost,
   splitInOutMTok,
 } from '../../../sim/balance/pricing'
-import { formatParams } from '../../../sim/balance/training'
 import { energyPriceForState } from '../../../sim/systems/map'
 import {
   formatAllowance,
@@ -21,6 +20,8 @@ import {
   planAllowanceExpectation,
   planComputePriority,
   planOfferingBreadth,
+  availablePlanPrecisionsForModel,
+  planModelServePrecision,
   planPriceTooHighScore,
   premiumPlanScrutiny,
   planServeModifiers,
@@ -29,33 +30,20 @@ import {
   unlockedPlanPrecisions,
 } from '../../../sim/systems/plans'
 import type { PlanOfferingBreadth } from '../../../sim/systems/plans'
-import { BENCHMARK_DEFS } from '../../../sim/balance/benchmarks'
 import { useGameStore } from '../../../store/gameStore'
 import { money, num, people } from '../format'
 import type {
   Model,
+  ComputeLedger,
+  NativeWorkUnits,
   PlanDayStats,
   PlanServePrecision,
-  ProductChannel,
-  ProductOffer,
   SubPlan,
 } from '../../../sim/types'
 import { computeSnapshot } from '../../../sim/tick'
 import { SliderField } from '../ui/SliderField'
 import { ResearchUnlockLink } from '../ui/ResearchUnlockLink'
-import {
-  deriveProductPortfolio,
-  PRODUCT_CHANNELS,
-} from '../../../sim/systems/productPortfolio'
-
-const PRODUCT_CHANNEL_LABELS: Record<ProductChannel, string> = {
-  free_assistant: 'Free assistant',
-  consumer_pro: 'Consumer Pro',
-  creator_developer: 'Creator / Developer',
-  payg_api: 'Pay-as-you-go API',
-  reserved_throughput_api: 'Reserved throughput',
-  enterprise_dedicated: 'Enterprise dedicated',
-}
+import { ModelProductSummary } from '../ui/ModelProductSummary'
 
 function formatNumberDraft(value: number, decimals?: number): string {
   return decimals == null ? String(value) : value.toFixed(decimals)
@@ -146,7 +134,6 @@ export function PlansPanel() {
     (m) => m.release === 'released' || m.shipped,
   )
   const pricing = state.player.pricing
-  const portfolio = deriveProductPortfolio(state)
   const snap = computeSnapshot(state)
   const energyPrice = energyPriceForState(state)
   const infra = serveInfraCost(state, snap, energyPrice)
@@ -255,6 +242,8 @@ export function PlansPanel() {
         )}
         apiModelUsage={state.lastMarket.apiModelUsage ?? []}
         plans={stats}
+        ledger={state.lastMarket.computeLedger}
+        headroom={state.industryDataPack.compute.onlineHeadroom ?? 0.25}
       >
         <CapacityRoutingControl
           value={pricing.apiVsSubPriority ?? 0.68}
@@ -358,31 +347,21 @@ export function PlansPanel() {
                       : 'border-line bg-panel-2'
                   }`}
                 >
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-sm font-semibold text-bone">{m.name}</span>
-                        {isApiLive && (
-                          <span className="rounded-full bg-mint/20 px-1.5 py-0.5 font-mono text-[0.6875rem] text-mint">
-                            API LIVE
-                          </span>
-                        )}
-                        <span className="font-mono text-[0.75rem] text-muted">
-                          {formatParams(m.paramsB)} · cap {apiServedModel.capability.toFixed(0)}
-                        </span>
-                        <PricingPill status={pricingStatus.primary} severity={pricingStatus.severity} />
-                      </div>
-                      <div className="mt-0.5 font-mono text-[0.75rem] text-muted">
-                        blended ${blend.toFixed(3)}/MTok · fully loaded floor $
-                        {liveCost.costIn.toFixed(3)} / ${liveCost.costOut.toFixed(3)}
-                        {' · '}{liveCost.source}
-                      </div>
-                      <div className="mt-0.5 font-mono text-[0.6875rem] text-muted">
-                        peer median {pricingStatus.peerMedian == null ? '—' : `$${pricingStatus.peerMedian.toFixed(3)}`}
-                        {' · '}interactive {num(m.serviceProfile?.interactiveTokPerSec ?? 52 * m.tokPerSecMult, 0)} tok/s
-                      </div>
-                    </div>
-                    <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
+                  <ModelProductSummary
+                    model={m}
+                    badge={isApiLive ? 'API live' : 'API paused'}
+                    badgeTone={isApiLive ? 'mint' : 'muted'}
+                    score={apiServedModel.capability.toFixed(2)}
+                    metrics={[
+                      { label: 'price', value: `$${blend.toFixed(2)}/M` },
+                      { label: 'floor', value: `$${liveCost.blended.toFixed(2)}/M`, tone: blend < liveCost.blended ? 'text-danger' : 'text-bone' },
+                      { label: 'speed', value: `${num(m.serviceProfile?.interactiveTokPerSec ?? 52 * m.tokPerSecMult, 0)} t/s` },
+                      { label: 'traffic', value: `${num(dayMTok, 1)} MTok` },
+                    ]}
+                  >
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                      <PricingPill status={pricingStatus.primary} severity={pricingStatus.severity} />
+                      <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
                       <button
                         type="button"
                         className={`rounded-full px-2 py-0.5 text-[0.75rem] ring-1 ${isApiLive ? 'bg-danger/10 text-danger ring-danger/30' : 'bg-mint/10 text-mint ring-mint/30'}`}
@@ -395,8 +374,9 @@ export function PlansPanel() {
                       >
                         {isApiLive ? 'Stop API' : 'Sell API'}
                       </button>
+                      </div>
                     </div>
-                  </div>
+                  </ModelProductSummary>
 
                   {/* Compact live demand and unit economics */}
                   <div className="mt-2 grid grid-cols-3 gap-1.5 font-mono text-[0.75rem]">
@@ -726,75 +706,7 @@ export function PlansPanel() {
         </button>
       </div> : null}
 
-      <PromotedEndpoints
-        portfolio={portfolio}
-        models={state.player.models}
-      />
     </div>
-  )
-}
-
-function formatProductOfferPrice(offer: ProductOffer): string {
-  const price = offer.pricing
-  if (price.monthlyUsd != null) return price.monthlyUsd <= 0 ? 'free' : `${money(price.monthlyUsd)}/mo`
-  if (price.minimumCommitmentUsd != null) return `${money(price.minimumCommitmentUsd)} min`
-  if (price.inputUsdPerMTok != null || price.outputUsdPerMTok != null) {
-    return `${money(price.inputUsdPerMTok ?? 0)}/${money(price.outputUsdPerMTok ?? 0)} per MTok`
-  }
-  return price.billingModel.replace('_', ' ')
-}
-
-function PromotedEndpoints({
-  portfolio,
-  models,
-}: {
-  portfolio: ReturnType<typeof deriveProductPortfolio>
-  models: Model[]
-}) {
-  return (
-    <section className="rounded-2xl border border-line bg-panel-2 p-3">
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <h3 className="text-xs font-semibold text-bone">Promoted endpoints</h3>
-          <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">
-            Six public surfaces share your released model fleet and serving capacity.
-          </p>
-        </div>
-        <span className="font-mono text-[0.75rem] text-mint">
-          {portfolio.promoted.length}/6 live
-        </span>
-      </div>
-      <div className="mt-2 grid grid-cols-2 gap-1.5">
-        {PRODUCT_CHANNELS.map((channel) => {
-          const offer = portfolio.byChannel[channel]
-          const model = offer
-            ? models.find((candidate) => candidate.id === offer.primaryModelId)
-            : undefined
-          return (
-            <div
-              key={channel}
-              className={`rounded-lg border px-2 py-1.5 ${
-                offer ? 'border-mint/30 bg-mint/5' : 'border-line/70 bg-void/35'
-              }`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="truncate text-[0.6875rem] font-medium text-bone">
-                  {PRODUCT_CHANNEL_LABELS[channel]}
-                </span>
-                <span className={`font-mono text-[0.625rem] uppercase ${offer ? 'text-mint' : 'text-muted'}`}>
-                  {offer ? 'live' : 'missing'}
-                </span>
-              </div>
-              <div className="mt-0.5 truncate font-mono text-[0.625rem] text-muted">
-                {offer
-                  ? `${model?.name ?? 'Model'} · ${formatProductOfferPrice(offer)}`
-                  : 'Release and package a compatible model'}
-              </div>
-            </div>
-          )
-        })}
-      </div>
-    </section>
   )
 }
 
@@ -986,12 +898,16 @@ function ComputeAllocationChart({
   apiPf,
   apiModelUsage,
   plans,
+  ledger,
+  headroom,
   children,
 }: {
   apiMTok: number
   apiPf: number
   apiModelUsage: NonNullable<PlanDayStats['modelUsage']>
   plans: PlanDayStats[]
+  ledger?: ComputeLedger
+  headroom: number
   children?: ReactNode
 }) {
   const [selectedId, setSelectedId] = useState('api')
@@ -1090,7 +1006,297 @@ function ComputeAllocationChart({
         </div>
       </div>
 
+      {ledger ? <WorkloadLedger ledger={ledger} headroom={headroom} /> : null}
+
       {children ? <div className="mt-3 border-t border-line/60 pt-3">{children}</div> : null}
+    </section>
+  )
+}
+
+function nativeMTok(units: NativeWorkUnits): number {
+  return Math.max(0, units.inputMTok ?? 0) + Math.max(0, units.outputMTok ?? 0)
+}
+
+function WorkloadLedger({
+  ledger,
+  headroom,
+}: {
+  ledger: ComputeLedger
+  headroom: number
+}) {
+  const admittedMTok = ledger.items.reduce((sum, item) => sum + nativeMTok(item.admitted), 0)
+  const servedMTok = ledger.items.reduce((sum, item) => sum + nativeMTok(item.served), 0)
+  const billedMTok = ledger.items.reduce((sum, item) => sum + nativeMTok(item.billed), 0)
+  const requestedMTok = ledger.items.reduce((sum, item) => sum + nativeMTok(item.requested), 0)
+  const usablePf = ledger.capacityPfDays / (1 + Math.max(0, headroom))
+  const utilization = usablePf > 0 ? Math.min(1, ledger.servedPfDays / usablePf) : 0
+  const latencyReservePf = Math.max(0, ledger.capacityPfDays - usablePf)
+  const channelRows = [
+    {
+      id: 'api',
+      label: 'API',
+      items: ledger.items.filter((item) => item.kind === 'api_text'),
+      tone: 'bg-infer',
+      text: 'text-infer',
+    },
+    {
+      id: 'subscription',
+      label: 'Plans',
+      items: ledger.items.filter((item) => item.kind === 'subscription_text'),
+      tone: 'bg-mint',
+      text: 'text-mint',
+    },
+  ].filter((channel) => channel.items.length > 0)
+  const stages = [
+    { label: 'Requested', mtok: requestedMTok, pf: ledger.requestedPfDays, tone: 'text-bone' },
+    { label: 'Admitted', mtok: admittedMTok, pf: ledger.admittedPfDays, tone: 'text-infer' },
+    { label: 'Served', mtok: servedMTok, pf: ledger.servedPfDays, tone: 'text-mint' },
+    { label: 'Billed', mtok: billedMTok, pf: ledger.billedPfDays, tone: 'text-amber' },
+  ]
+
+  return (
+    <section
+      aria-label="Daily serving workload ledger"
+      className="mt-2.5 overflow-hidden rounded-xl border border-line/60 bg-void/45"
+    >
+      <div className="flex items-center justify-between gap-2 border-b border-line/60 px-2.5 py-1.5">
+        <div>
+          <h4 className="text-[0.75rem] font-semibold text-bone">Workload ledger</h4>
+          <p className="text-[0.625rem] text-muted">Every admitted unit resolves once through service and billing.</p>
+        </div>
+        <div className="text-right font-mono">
+          <div className="text-[0.75rem] font-semibold text-mint">{Math.round(utilization * 100)}% used</div>
+          <div className="text-[0.5625rem] text-muted">of post-reserve capacity</div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-4 divide-x divide-line/50 border-b border-line/60">
+        {stages.map((stage, index) => (
+          <div key={stage.label} className="min-w-0 px-1.5 py-2 text-center" title={`${num(stage.pf, 3)} PF-days`}>
+            <div className="truncate text-[0.5625rem] uppercase tracking-wide text-muted">
+              {index > 0 ? '→ ' : ''}{stage.label}
+            </div>
+            <div className={`mt-0.5 truncate font-mono text-[0.75rem] font-semibold ${stage.tone}`}>
+              {num(stage.mtok, 2)}M
+            </div>
+            <div className="truncate font-mono text-[0.5625rem] text-muted">{num(stage.pf, 2)} PF-d</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="space-y-1.5 px-2.5 py-2">
+        {channelRows.map((channel) => {
+          const requested = channel.items.reduce((sum, item) => sum + nativeMTok(item.requested), 0)
+          const served = channel.items.reduce((sum, item) => sum + nativeMTok(item.served), 0)
+          const billed = channel.items.reduce((sum, item) => sum + nativeMTok(item.billed), 0)
+          const servedFraction = requested > 0 ? Math.min(1, served / requested) : 1
+          return (
+            <div key={channel.id} className="grid grid-cols-[3.25rem_minmax(0,1fr)_auto] items-center gap-2">
+              <span className={`text-[0.6875rem] font-medium ${channel.text}`}>{channel.label}</span>
+              <div className="h-1.5 overflow-hidden rounded-full bg-line/50">
+                <div className={`h-full ${channel.tone}`} style={{ width: `${servedFraction * 100}%` }} />
+              </div>
+              <span className="font-mono text-[0.625rem] text-muted">
+                {num(served, 1)}/{num(requested, 1)}M · {num(billed, 1)}M billed
+              </span>
+            </div>
+          )
+        })}
+
+        <div className="grid grid-cols-3 gap-1 pt-0.5 font-mono text-[0.5625rem] text-muted">
+          <span title="Capacity held back for p95 traffic and latency spikes">
+            latency reserve <b className="text-bone">{num(latencyReservePf, 2)} PF-d</b>
+          </span>
+          <span className="text-center" title="Work admitted from the API and plan channel guarantees">
+            channel reserve <b className="text-bone">{num(ledger.reservedPfDays, 2)} PF-d</b>
+          </span>
+          <span className="text-right" title="Unused channel reservation reassigned to waiting work">
+            backfill <b className="text-mint">{num(ledger.backfilledPfDays, 2)} PF-d</b>
+          </span>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+const PLAN_PRECISION_LABELS: Record<PlanServePrecision, string> = {
+  fp16: 'FP16',
+  bf16: 'BF16',
+  fp8: 'FP8',
+  int8: 'INT8',
+  int4: 'INT4',
+  nvfp4: 'NVFP4',
+  ternary_1_58: '1.58-bit',
+}
+
+function PlanModelRoster({
+  plan,
+  models,
+  unlocked,
+  onChange,
+}: {
+  plan: SubPlan
+  models: Model[]
+  unlocked: string[]
+  onChange: (patch: Partial<SubPlan>) => void
+}) {
+  const [addOpen, setAddOpen] = useState(false)
+  const [expandedModelId, setExpandedModelId] = useState<string | null>(null)
+  const selectedModels = plan.modelIds
+    .map((modelId) => models.find((model) => model.id === modelId))
+    .filter((model): model is Model => Boolean(model))
+  const selectedIds = new Set(selectedModels.map((model) => model.id))
+  const availableModels = models.filter((model) => !selectedIds.has(model.id))
+
+  const addModel = (model: Model) => {
+    const precision = planModelServePrecision(plan, model, unlocked)
+    onChange({
+      modelIds: [...plan.modelIds, model.id],
+      servePrecisionByModel: {
+        ...(plan.servePrecisionByModel ?? {}),
+        [model.id]: precision,
+      },
+    })
+    setExpandedModelId(model.id)
+    setAddOpen(false)
+  }
+
+  const removeModel = (modelId: string) => {
+    const precisionByModel = { ...(plan.servePrecisionByModel ?? {}) }
+    delete precisionByModel[modelId]
+    onChange({
+      modelIds: plan.modelIds.filter((id) => id !== modelId),
+      servePrecisionByModel: precisionByModel,
+    })
+    if (expandedModelId === modelId) setExpandedModelId(null)
+  }
+
+  const setPrecision = (modelId: string, precision: PlanServePrecision) => {
+    onChange({
+      servePrecisionByModel: {
+        ...(plan.servePrecisionByModel ?? {}),
+        [modelId]: precision,
+      },
+    })
+  }
+
+  return (
+    <section className="rounded-xl border border-line/60 bg-void/45 px-2.5 py-2">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <div className="text-[0.75rem] font-medium text-bone">Models on this plan</div>
+          <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">
+            Add released models, then open one to choose its serving precision.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setAddOpen((open) => !open)}
+          disabled={availableModels.length === 0}
+          className="shrink-0 rounded-full border border-mint/35 bg-mint/10 px-2.5 py-1 text-[0.75rem] font-medium text-mint disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          + Add model
+        </button>
+      </div>
+
+      {addOpen ? (
+        <div className="mt-2 grid grid-cols-1 gap-1 rounded-lg border border-mint/25 bg-panel-2/70 p-1.5 sm:grid-cols-2">
+          {availableModels.map((model) => (
+            <button
+              key={model.id}
+              type="button"
+              onClick={() => addModel(model)}
+              className="flex min-w-0 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left hover:bg-mint/10"
+            >
+              <span className="truncate text-[0.75rem] font-medium text-bone">{model.name}</span>
+              <span className="shrink-0 font-mono text-[0.625rem] text-muted">
+                {model.paramsB < 1 ? `${Math.round(model.paramsB * 1_000)}M` : `${num(model.paramsB, 1)}B`} · cap {num(model.capability, 0)}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="mt-2 space-y-1.5">
+        {selectedModels.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-line px-2.5 py-3 text-center text-[0.75rem] text-muted">
+            No model is available on this plan yet.
+          </div>
+        ) : selectedModels.map((model) => {
+          const expanded = expandedModelId === model.id
+          const precision = planModelServePrecision(plan, model, unlocked)
+          const precisionOptions = availablePlanPrecisionsForModel(model, unlocked)
+          const modifiers = planServeModifiers(precision, unlocked)
+          const modalityLabel = model.productPreset?.replaceAll('_', ' ') ?? model.modalities.join(' · ')
+          return (
+            <article key={model.id} className="overflow-hidden rounded-lg border border-line/50 bg-panel-2/55">
+              <div className="flex items-center gap-1.5 p-1.5">
+                <button
+                  type="button"
+                  aria-expanded={expanded}
+                  onClick={() => setExpandedModelId(expanded ? null : model.id)}
+                  className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-1.5 py-1 text-left hover:bg-void/50"
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate text-[0.75rem] font-semibold text-bone">{model.name}</span>
+                    <span className="block truncate text-[0.625rem] capitalize text-muted">{modalityLabel}</span>
+                  </span>
+                  <span className="shrink-0 text-right font-mono">
+                    <span className="block text-[0.6875rem] font-semibold text-infer">{PLAN_PRECISION_LABELS[precision]}</span>
+                    <span className="block text-[0.5625rem] text-muted">compute ×{modifiers.computeMult.toFixed(2)}</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Remove ${model.name} from ${plan.name}`}
+                  title="Remove model from plan"
+                  onClick={() => removeModel(model.id)}
+                  className="rounded-md px-1.5 py-1 text-[0.75rem] text-muted hover:bg-danger/10 hover:text-danger"
+                >
+                  ×
+                </button>
+              </div>
+
+              {expanded ? (
+                <div className="border-t border-line/50 px-2 py-2">
+                  <div className="flex flex-wrap gap-1">
+                    {precisionOptions.map((option) => {
+                      const active = option === precision
+                      const preview = planServeModifiers(option, unlocked)
+                      return (
+                        <button
+                          key={option}
+                          type="button"
+                          title={`${preview.label} · ${Math.round(preview.computeMult * 100)}% serving compute`}
+                          onClick={() => setPrecision(model.id, option)}
+                          className={`rounded-full px-2 py-1 font-mono text-[0.6875rem] ${
+                            active
+                              ? 'bg-infer/25 text-infer ring-1 ring-infer/40'
+                              : 'bg-void text-muted hover:text-bone'
+                          }`}
+                        >
+                          {PLAN_PRECISION_LABELS[option]}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <p className="mt-1.5 text-[0.625rem] leading-snug text-muted">
+                    {modifiers.label} uses {Math.round(modifiers.computeMult * 100)}% of full-precision serve compute
+                    {modifiers.capabilityDelta ? ` · capability ${modifiers.capabilityDelta}` : ' · no fixed capability penalty'}.
+                  </p>
+                  {precisionOptions.length <= 2 ? (
+                    <ResearchUnlockLink
+                      className="mt-1.5"
+                      nodeId="sys_quant"
+                      label="Research serving quantization for more formats"
+                    />
+                  ) : null}
+                </div>
+              ) : null}
+            </article>
+          )
+        })}
+      </div>
     </section>
   )
 }
@@ -1124,9 +1330,6 @@ function PlanCard({
 }) {
   const unlocked = useGameStore((s) => s.state.player.researchUnlocked)
   const free = isFreePlan(plan)
-  const precisions = unlockedPlanPrecisions(unlocked)
-  const quantUnlocked = precisions.length > 1
-  const serveMods = planServeModifiers(plan.servePrecision, unlocked)
   const subs = stats?.subscribers ?? 0
   const allowanceDay = planAllowanceMTokPerDay(plan)
   const allowanceMo = planAllowanceMTokPerMonth(plan)
@@ -1187,8 +1390,6 @@ function PlanCard({
   const premiumScrutiny = premiumPlanScrutiny(plan, allPlans)
   const allowanceExpectation = planAllowanceExpectation(plan)
   const dissatisfaction = stats?.dissatisfaction ?? allowanceExpectation.dissatisfaction
-  const benchmarkModel = models.find((candidate) => plan.modelIds.includes(candidate.id)) ?? models[0]
-  const benchmarkIds = ['mmlu', 'coding', 'math', 'law', 'health', 'agents'] as const
 
   return (
     <div
@@ -1402,6 +1603,13 @@ function PlanCard({
         </div>
 
         {/* Day totals */}
+        <PlanModelRoster
+          plan={plan}
+          models={models}
+          unlocked={unlocked}
+          onChange={onChange}
+        />
+
         <div className="grid grid-cols-4 gap-1.5 font-mono text-[0.75rem]">
           <Mini label="Day rev" value={money(stats?.dayRevenue ?? 0)} />
           <Mini label="Allocated serve ops" value={money(stats?.dayCogs ?? 0)} danger />
@@ -1477,108 +1685,6 @@ function PlanCard({
             )}
           </div>
         )}
-        {/* Serve precision — quant after research unlock */}
-        <div className="rounded-xl border border-line/60 bg-void/40 px-2.5 py-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[0.75rem] font-medium text-bone">Serve precision</span>
-            <span className="font-mono text-[0.6875rem] text-muted">
-              {serveMods.label} · compute ×{serveMods.computeMult.toFixed(2)}
-              {serveMods.capabilityDelta !== 0
-                ? ` · cap ${serveMods.capabilityDelta}`
-                : ''}
-            </span>
-          </div>
-          {quantUnlocked ? (
-            <div className="mt-1.5 flex flex-wrap gap-1">
-              {(
-                [
-                  { id: 'fp16' as const, label: 'Full', hint: 'Best quality · full PF' },
-                  { id: 'int8' as const, label: 'INT8', hint: '~68% compute · small eval hit' },
-                  { id: 'int4' as const, label: 'INT4', hint: '~42% compute · severe eval and brand hit' },
-                ] as { id: PlanServePrecision; label: string; hint: string }[]
-              )
-                .filter((o) => precisions.includes(o.id))
-                .map((o) => {
-                  const on = serveMods.precision === o.id
-                  return (
-                    <button
-                      key={o.id}
-                      type="button"
-                      title={o.hint}
-                      onClick={() => onChange({ servePrecision: o.id })}
-                      className={`rounded-full px-2.5 py-1 text-[0.75rem] font-medium ${
-                        on
-                          ? 'bg-infer/25 text-infer ring-1 ring-infer/40'
-                          : 'bg-void text-muted hover:text-bone'
-                      }`}
-                    >
-                      {o.label}
-                    </button>
-                  )
-                })}
-            </div>
-          ) : (
-            <ResearchUnlockLink
-              className="mt-1"
-              nodeId="sys_quant"
-              label="Unlock INT8 Quantization for cheaper serving"
-            />
-          )}
-          {benchmarkModel ? (
-            <div className="mt-2 overflow-x-auto rounded-lg border border-line/50">
-              <table className="min-w-[37rem] w-full border-collapse font-mono text-[0.625rem]">
-                <thead className="bg-panel-2 text-muted">
-                  <tr>
-                    <th className="px-2 py-1 text-left font-medium">Precision</th>
-                    <th className="px-2 py-1 text-right font-medium">Compute</th>
-                    {benchmarkIds.map((id) => (
-                      <th key={id} className="px-2 py-1 text-right font-medium">
-                        {BENCHMARK_DEFS.find((benchmark) => benchmark.id === id)?.short ?? id}
-                      </th>
-                    ))}
-                    <th className="px-2 py-1 text-right font-medium">Brand risk</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(['fp16', 'int8', 'int4'] as PlanServePrecision[]).map((precision) => {
-                    const preview = planServeModifiers(precision, ['sys_quant', 'sys_fp8'])
-                    const activePrecision = serveMods.precision === precision
-                    const available = precisions.includes(precision)
-                    return (
-                      <tr key={precision} className={`border-t border-line/40 ${activePrecision ? 'bg-infer/10 text-bone' : available ? 'text-muted' : 'text-muted/45'}`}>
-                        <td className="px-2 py-1.5 font-semibold uppercase">
-                          {precision === 'fp16' ? 'Full' : precision}
-                          {!available ? ' · locked' : ''}
-                        </td>
-                        <td className="px-2 py-1.5 text-right">{Math.round(preview.computeMult * 100)}%</td>
-                        {benchmarkIds.map((id) => {
-                          const base = benchmarkModel.benchmarks[id] ?? 0
-                          const score = Math.max(0, base + (preview.benchmarkDeltas[id] ?? 0))
-                          return (
-                            <td key={id} className={`px-2 py-1.5 text-right ${precision === 'int4' ? 'text-danger' : ''}`} title={`${benchmarkModel.name} ${id}: ${base.toFixed(0)} → ${score.toFixed(0)}`}>
-                              {score.toFixed(0)}
-                              {preview.benchmarkDeltas[id] ? <span className="ml-0.5 opacity-70">({preview.benchmarkDeltas[id]})</span> : null}
-                            </td>
-                          )
-                        })}
-                        <td className={`px-2 py-1.5 text-right ${preview.brandRisk >= 0.1 ? 'text-danger' : preview.brandRisk > 0 ? 'text-amber' : 'text-mint'}`}>
-                          {preview.brandRisk === 0 ? 'none' : preview.brandRisk < 0.1 ? 'low' : 'severe'}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-          {quantUnlocked && serveMods.precision !== 'fp16' && (
-            <p className="mt-1 text-[0.6875rem] leading-snug text-amber">
-              Quant saves inference PF for this plan only. The displayed eval loss affects demand;
-              sustained severe INT4 exposure also reduces brand trust.
-            </p>
-          )}
-        </div>
-
         <div>
           <div className="rounded-xl border border-infer/25 bg-infer/5 px-2.5 py-2">
             <div className="flex items-center justify-between gap-3">

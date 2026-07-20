@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
+import { tileId } from '../world/ids'
 import {
   cityGridConnectorCapacity,
   evaluatePowerExportOffer,
@@ -17,43 +18,48 @@ describe('power contracts', () => {
     const created = createGame(91_204)
     const city = created.map.cities?.[0]
     if (!city) throw new Error('Expected a generated city')
-    const sites = created.map.tiles.filter(
-      (tile) =>
-        tile.kind === 'empty' &&
-        tile.owner === 'neutral' &&
-        Math.max(Math.abs(tile.x - city.cx), Math.abs(tile.y - city.cy)) <= city.powerRadius,
-    )
+    const world = created.map.world
+    if (!world) throw new Error('Expected a compact world')
+    const sites = []
+    for (let y = city.cy - city.powerRadius; y <= city.cy + city.powerRadius; y += 1) {
+      for (let x = city.cx - city.powerRadius; x <= city.cx + city.powerRadius; x += 1) {
+        if (x < 0 || y < 0 || x >= created.map.width || y >= created.map.height) continue
+        const id = tileId(x, y, created.map.width, created.map.height)
+        if (!world.getFacilityAt(id)) sites.push(id)
+        if (sites.length === 2) break
+      }
+      if (sites.length === 2) break
+    }
     const connectorSite = sites[0]!
     const generationSite = sites[1]!
+    world.beginBatch()
+      .addFacility({
+        id: 'test-grid-connector',
+        kind: 'substation',
+        ownerId: 'player',
+        anchor: connectorSite,
+        footprint: [connectorSite],
+        level: 1,
+        constructionProgress: 1,
+        constructionTarget: 1,
+        stats: { mwCapacity: 6 },
+      })
+      .addFacility({
+        id: 'test-solar-generation',
+        kind: 'solar',
+        ownerId: 'player',
+        anchor: generationSite,
+        footprint: [generationSite],
+        level: 1,
+        constructionProgress: 1,
+        constructionTarget: 1,
+        stats: { mwGeneration: 1_000 },
+      })
+      .commit()
     const state = {
       ...created,
       player: { ...created.player, cash: 1_000_000_000 },
-      map: {
-        ...created.map,
-        tiles: created.map.tiles.map((tile) =>
-          tile.x === connectorSite.x && tile.y === connectorSite.y
-            ? {
-                ...tile,
-                kind: 'substation' as const,
-                owner: 'player' as const,
-                campusRole: 'anchor' as const,
-                mwCapacity: 6,
-                buildingProgress: 20,
-                buildingTarget: 20,
-              }
-            : tile.x === generationSite.x && tile.y === generationSite.y
-              ? {
-                ...tile,
-                kind: 'solar' as const,
-                owner: 'player' as const,
-                campusRole: 'anchor' as const,
-                mwGeneration: 1_000,
-                buildingProgress: 20,
-                buildingTarget: 20,
-              }
-            : tile,
-        ),
-      },
+      map: { ...created.map, worldRevision: world.revision },
     }
 
     const connector = cityGridConnectorCapacity(state, city.id)
@@ -75,9 +81,9 @@ describe('power contracts', () => {
     const exporting = signPowerExportContract(importing, city.id, 5, 60, highAsk.agreedPricePerMWh)
     expect(exporting.powerExportContracts).toHaveLength(1)
     const balance = powerBalance(exporting)
-    expect(balance.contractedExportMw).toBe(5)
+    expect(balance.contractedExportMw).toBe(exportQuote.contractMw)
     expect(balance.exportMw).toBeGreaterThan(0)
-    expect(balance.exportMw).toBeLessThanOrEqual(5)
+    expect(balance.exportMw).toBeLessThanOrEqual(exportQuote.contractMw)
     expect(balance.exportRevenueDay).toBeGreaterThan(0)
     expect(balance.curtailedMw).toBeGreaterThanOrEqual(0)
   })

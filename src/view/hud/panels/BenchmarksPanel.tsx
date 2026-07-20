@@ -2,10 +2,10 @@ import { useMemo, useState } from 'react'
 import { BENCHMARK_DEFS } from '../../../sim/balance/benchmarks'
 import { formatParams } from '../../../sim/balance/training'
 import { collectLeaderboardModels } from '../../../sim/systems/rivals'
-import { competitiveCatchUpSnapshot } from '../../../sim/systems/sharedMarkets'
 import { isGenerationOnlyModel } from '../../../sim/systems/modelEligibility'
 import { useGameStore } from '../../../store/gameStore'
 import { num } from '../format'
+import { buildAudienceReviewGroups, type PlanAudienceReview } from './planReviews'
 
 const PAGE = 15
 
@@ -16,34 +16,23 @@ export function BenchmarksPanel() {
   const state = useGameStore((s) => s.state)
   const [showAll, setShowAll] = useState(false)
   const [sortId, setSortId] = useState<'cap' | string>('cap')
+  const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null)
 
-  const { rows, excludedGenerationModels } = useMemo(() => {
+  const rows = useMemo(() => {
     const all = collectLeaderboardModels(state)
     const generalModels = all.filter((row) => !isGenerationOnlyModel(row.model))
-    const sorted = sortId === 'cap' ? generalModels : [...generalModels].sort((a, b) => {
+    return sortId === 'cap' ? generalModels : [...generalModels].sort((a, b) => {
       const sa = a.model.benchmarks[sortId as keyof typeof a.model.benchmarks] ?? 0
       const sb = b.model.benchmarks[sortId as keyof typeof b.model.benchmarks] ?? 0
       return sb - sa
     })
-    return {
-      rows: sorted,
-      excludedGenerationModels: all.length - generalModels.length,
-    }
   }, [state, sortId])
 
   const visible = showAll ? rows : rows.slice(0, PAGE)
   const hidden = Math.max(0, rows.length - PAGE)
-  const season = state.benchmarkSeasons.find((item) => item.active) ?? state.benchmarkSeasons.at(-1)
-  const pendingEvaluations = state.evaluations
-    .filter((evaluation) => !evaluation.published)
-    .toSorted((a, b) => a.publishDay - b.publishDay)
-  const latestReviews = state.reviews
-    .toSorted((a, b) => b.publishedDay - a.publishedDay)
-    .slice(0, 6)
-  const catchUp = useMemo(() => competitiveCatchUpSnapshot(state), [state])
-  const catchUpLab = catchUp.rivalId
-    ? state.rivals.find((rival) => rival.id === catchUp.rivalId)?.name
-    : null
+  const reviewGroups = useMemo(() => buildAudienceReviewGroups(state), [state])
+  const selectedReviewGroup =
+    reviewGroups.find((group) => group.reviewId === selectedReviewId) ?? reviewGroups[0]
 
   // Per-column leaders for highlight
   const leaders = useMemo(() => {
@@ -61,76 +50,57 @@ export function BenchmarksPanel() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h2 className="hud-panel-title">Benchmarks</h2>
-        <p className="hud-panel-sub">
-          Public and internal models across labs. Training outcomes can move individual evals —
-          not overnight wipeouts. Sorted by capability by default.
-        </p>
-        {excludedGenerationModels > 0 && (
-          <p className="mt-1 text-[0.6875rem] text-muted">
-            {excludedGenerationModels} image/video generation model{excludedGenerationModels === 1 ? '' : 's'} excluded from general reasoning ranks.
-          </p>
-        )}
-        {catchUp.frontierAgeDays > 0 && (
-          <p className={`mt-1 text-[0.6875rem] ${catchUp.frontierStale ? 'text-amber' : 'text-muted'}`}>
-            Player frontier age {catchUp.frontierAgeDays}d · rival response window{' '}
-            {catchUp.frontierStaleAfterDays}d
-            {catchUp.frontierStale && catchUpLab ? ` · ${catchUpLab} frontier sprint active` : ''}
-          </p>
-        )}
-      </div>
-
-      <section className="rounded-xl border border-mint/20 bg-mint/5 p-3">
-        <div className="flex items-start justify-between gap-3">
+      <section className="rounded-2xl border border-line bg-panel-2 p-3">
+        <div className="flex flex-wrap items-start justify-between gap-2">
           <div>
-            <h3 className="text-[0.8125rem] font-semibold text-bone">
-              {season?.name ?? 'Benchmark season pending'}
-            </h3>
-            <p className="mt-0.5 text-[0.6875rem] text-muted">
-              Internal estimates, public suites, blind audits, and field evidence publish on separate clocks.
-            </p>
+            <h2 className="text-[0.875rem] font-semibold text-bone">Reviews</h2>
+            <p className="mt-0.5 text-[0.6875rem] text-muted">Every audience scores the selected plan or model API by what it actually cares about.</p>
           </div>
-          <span className="shrink-0 font-mono text-[0.6875rem] text-mint">
-            v{season?.version ?? 0} · difficulty {((season?.difficulty ?? 0) * 100).toFixed(0)}
-          </span>
-        </div>
-        {pendingEvaluations.length > 0 ? (
-          <div className="mt-2 grid grid-cols-2 gap-1">
-            {pendingEvaluations.slice(0, 6).map((evaluation) => {
-              const model = state.player.models.find((item) => item.id === evaluation.modelId)
-              return (
-                <div key={evaluation.id} className="rounded border border-line/60 bg-void/40 px-2 py-1 font-mono text-[0.625rem]">
-                  <span className="block truncate text-bone">{model?.name ?? evaluation.modelId}</span>
-                  <span className="text-muted">{evaluation.kind.replaceAll('_', ' ')} · D{evaluation.publishDay}</span>
-                </div>
-              )
-            })}
-          </div>
-        ) : (
-          <p className="mt-2 text-[0.75rem] text-muted">Release a model to enter this season.</p>
-        )}
-      </section>
-
-      {latestReviews.length > 0 && (
-        <section className="space-y-1.5">
-          <h3 className="text-[0.75rem] font-medium uppercase tracking-wider text-muted">Audience reviews</h3>
-          {latestReviews.map((review) => (
-            <div key={review.id} className="rounded-lg border border-line bg-panel-2 px-2.5 py-2">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[0.75rem] text-bone">{review.headline}</span>
-                <span className="shrink-0 font-mono text-[0.625rem] uppercase text-muted">{review.phase.replace('_', ' ')}</span>
+          {selectedReviewGroup && (
+            <div className="text-right font-mono text-[0.6875rem] text-muted">
+              <div className="text-bone">
+                {selectedReviewGroup.reviewKind === 'api'
+                  ? `$${num(selectedReviewGroup.apiPriceInPerMTok, 2)} in · $${num(selectedReviewGroup.apiPriceOutPerMTok, 2)} out / MTok`
+                  : selectedReviewGroup.pricePerMonth <= 0
+                    ? 'Free'
+                    : `$${num(selectedReviewGroup.pricePerMonth, 0)}/mo`}
               </div>
-              <div className="mt-1 grid grid-cols-4 gap-1 font-mono text-[0.625rem] text-muted">
-                <Rating label="Cap" value={review.capability} />
-                <Rating label="Value" value={review.value} />
-                <Rating label="Product" value={review.productQuality} />
-                <Rating label="Trust" value={review.trust} />
+              <div className="max-w-[16rem] truncate" title={selectedReviewGroup.modelNames.join(', ')}>
+                {selectedReviewGroup.modelNames.join(' + ') || 'No released model'}
               </div>
             </div>
+          )}
+        </div>
+
+        <div className="mt-3 flex gap-1 overflow-x-auto pb-1">
+          {reviewGroups.map((group) => (
+            <button
+              key={group.reviewId}
+              type="button"
+              onClick={() => setSelectedReviewId(group.reviewId)}
+              className={`shrink-0 rounded-full px-3 py-1.5 text-[0.75rem] ${
+                selectedReviewGroup?.reviewId === group.reviewId
+                  ? 'bg-mint text-void'
+                  : 'border border-line bg-void/40 text-muted hover:text-bone'
+              }`}
+            >
+              {group.reviewName}
+            </button>
           ))}
-        </section>
-      )}
+        </div>
+
+        {selectedReviewGroup ? (
+          <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+            {selectedReviewGroup.reviews.map((review) => (
+              <AudienceReviewCard key={review.id} review={review} />
+            ))}
+          </div>
+        ) : (
+          <p className="mt-3 rounded-xl border border-dashed border-line p-4 text-center text-[0.75rem] text-muted">
+            Enable a subscription plan or release a model API to generate audience reviews.
+          </p>
+        )}
+      </section>
 
       <div className="flex flex-wrap gap-1">
         <SortChip active={sortId === 'cap'} onClick={() => setSortId('cap')} label="Capability" />
@@ -292,10 +262,35 @@ function SortChip({
   )
 }
 
-function Rating({ label, value }: { label: string; value: number }) {
+function AudienceReviewCard({ review }: { review: PlanAudienceReview }) {
+  const tone = review.score >= 70
+    ? 'border-mint/30 bg-mint/5 text-mint'
+    : review.score >= 50
+      ? 'border-amber/30 bg-amber/5 text-amber'
+      : 'border-danger/25 bg-danger/5 text-danger'
   return (
-    <span className="rounded bg-void/45 px-1.5 py-1">
-      {label} <strong className="text-bone">{value.toFixed(0)}</strong>
-    </span>
+    <article className={`rounded-xl border p-2.5 ${tone}`}>
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-[0.75rem] font-semibold text-bone">{review.label}</h3>
+        <span className="font-mono text-[0.75rem] font-semibold">{review.score.toFixed(0)}</span>
+      </div>
+      <p className="mt-1 min-h-8 text-[0.6875rem] leading-snug text-muted">{review.summary}</p>
+      <div className={`mt-2 grid gap-1 ${review.metrics.length === 3 ? 'grid-cols-3' : 'grid-cols-2'}`}>
+        {review.metrics.map((metric) => (
+          <div key={metric.label} className="min-w-0 rounded-lg bg-void/45 px-1.5 py-1">
+            <div className="flex items-center justify-between gap-1 font-mono text-[0.5625rem] uppercase text-muted">
+              <span className="truncate" title={metric.label}>{metric.label}</span>
+              <strong className="text-bone">{metric.value.toFixed(0)}</strong>
+            </div>
+            <div className="mt-1 h-1 overflow-hidden rounded-full bg-void">
+              <div
+                className="h-full bg-current"
+                style={{ width: `${Math.max(2, metric.value)}%` }}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+    </article>
   )
 }

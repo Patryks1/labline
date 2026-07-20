@@ -3,28 +3,20 @@ import { buildLabStats, sparkPath, type StatsSectionId } from '../../../sim/syst
 import type { PanelId } from '../../../sim/types'
 import { useGameStore } from '../../../store/gameStore'
 import { money, num, pct } from '../format'
-import { buildObjectives } from '../objectives'
-import { WarningCircle } from '@phosphor-icons/react'
 
 const SECTIONS: { id: StatsSectionId; label: string }[] = [
   { id: 'pnl', label: 'P&L' },
   { id: 'models', label: 'Models' },
   { id: 'compute', label: 'Compute' },
   { id: 'facilities', label: 'Sites' },
-  { id: 'trends', label: 'Trends' },
 ]
 
 export function StatsPanel() {
   const state = useGameStore((s) => s.state)
   const setPanel = useGameStore((s) => s.setPanel)
-  const autoBalanceHosting = useGameStore((s) => s.autoBalanceHosting)
   const setCommandView = useGameStore((s) => s.setCommandView)
   const [section, setSection] = useState<StatsSectionId>('pnl')
   const stats = useMemo(() => buildLabStats(state), [state])
-  const objectives = useMemo(
-    () => buildObjectives(state, !state.onboardingDismissed),
-    [state],
-  )
 
   return (
     <div className="space-y-2.5">
@@ -65,36 +57,6 @@ export function StatsPanel() {
         />
       </div>
 
-      {objectives.length > 0 ? (
-        <section className="rounded-xl border border-line/70 bg-void/35 p-3">
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <h3 className="text-[0.8125rem] font-semibold text-bone">Priority decisions</h3>
-            <span className="font-mono text-[0.6875rem] text-muted">{objectives.length} active</span>
-          </div>
-          <div className="grid gap-2 lg:grid-cols-3">
-            {objectives.map((objective) => (
-              <button
-                key={objective.id}
-                type="button"
-                onClick={() => {
-                  if (objective.buildKind) useGameStore.getState().setBuildMode(objective.buildKind)
-                  else setPanel(objective.panel)
-                }}
-                className="rounded-lg border border-line/70 bg-panel-2/75 p-2.5 text-left hover:border-mint/35"
-              >
-                <span className="flex items-start gap-2">
-                  <WarningCircle size="1rem" className={objective.severity === 'danger' ? 'text-danger' : objective.severity === 'warning' ? 'text-amber' : 'text-mint'} />
-                  <span className="min-w-0">
-                    <span className="block text-[0.75rem] font-semibold text-bone">{objective.title}</span>
-                    <span className="mt-1 block text-[0.6875rem] leading-snug text-muted">{objective.progress}</span>
-                  </span>
-                </span>
-              </button>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
       <nav className="flex gap-0.5 rounded-xl bg-void/50 p-0.5">
         {SECTIONS.map((s) => (
           <button
@@ -116,11 +78,9 @@ export function StatsPanel() {
         <ComputeSection
           stats={stats}
           setPanel={setPanel}
-          onAutoBalance={() => autoBalanceHosting()}
         />
       )}
       {section === 'facilities' && <FacilitiesSection stats={stats} />}
-      {section === 'trends' && <TrendsSection stats={stats} />}
     </div>
   )
 }
@@ -134,86 +94,29 @@ function PnlSection({
 }) {
   return (
     <div className="space-y-3">
-      <Section title="Income">
-        {stats.income.map((l) => (
-          <Line key={l.id} label={l.label} value={money(l.amount)} hint={l.hint} positive />
-        ))}
-        <Line label="Total revenue" value={money(stats.finance.dayRevenue)} strong />
-      </Section>
+      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+        <Kpi label="Revenue / day" value={money(stats.kpis.dayRevenue)} mint />
+        <Kpi label="Costs / day" value={money(-Math.abs(stats.finance.dayCogs + stats.operatingCosts.reduce((sum, line) => sum + Math.abs(line.amount), 0)))} danger />
+        <Kpi label="Net / day" value={money(stats.kpis.dayNet)} danger={stats.kpis.dayNet < 0} mint={stats.kpis.dayNet >= 0} />
+        <Kpi label="Cash" value={money(stats.kpis.cash)} danger={stats.kpis.cash < 2e6} />
+      </div>
+      <SparkCard label="Money over time" values={stats.trends.net} secondaryValues={stats.trends.revenue} days={stats.trends.days} format={money} secondaryLabel="Revenue" />
 
-      <Section title="Product COGS">
-        {stats.productCosts.map((l) => (
-          <Line key={l.id} label={l.label} value={money(l.amount)} hint={l.hint} danger />
-        ))}
-        <Line
-          label="Gross profit"
-          value={money(stats.finance.dayGrossProfit ?? stats.finance.dayRevenue - stats.finance.dayCogs)}
-          strong
-          danger={(stats.finance.dayGrossProfit ?? 0) < 0}
-          mint={(stats.finance.dayGrossProfit ?? 0) > 0}
-        />
-      </Section>
+      <FinanceDisclosure title="Money in" total={stats.finance.dayRevenue} tone="mint" summary="API, subscriptions, and contracts">
+        {stats.income.map((line) => <Line key={line.id} label={line.label} value={money(line.amount)} hint={line.hint} positive />)}
+      </FinanceDisclosure>
+      <FinanceDisclosure title="Product costs" total={-Math.abs(stats.finance.dayCogs)} tone={(stats.finance.dayGrossProfit ?? 0) < 0 ? 'danger' : 'neutral'} summary="Compute used to serve customers">
+        {stats.productCosts.map((line) => <Line key={line.id} label={line.label} value={money(line.amount)} hint={line.hint} danger />)}
+      </FinanceDisclosure>
+      <FinanceDisclosure title="Operations" total={-stats.operatingCosts.reduce((sum, line) => sum + Math.abs(line.amount), 0)} tone="danger" summary="People, sites, marketing, and financing">
+        {stats.operatingCosts.filter((line) => !line.id.includes('of which') || Math.abs(line.amount) > 1).map((line) => <Line key={line.id} label={line.label} value={money(line.amount)} hint={line.hint} danger muted={line.id.includes('of which')} />)}
+      </FinanceDisclosure>
 
-      <Section title="Operating costs">
-        {stats.operatingCosts
-          .filter((l) => !l.id.includes('of which') || Math.abs(l.amount) > 1)
-          .map((l) => (
-            <Line
-              key={l.id}
-              label={l.label}
-              value={money(l.amount)}
-              hint={l.hint}
-              danger
-              muted={l.id.includes('of which')}
-            />
-          ))}
-      </Section>
-
-      <Section title="Bottom line">
-        <Line
-          label="Day net P&L"
-          value={money(stats.kpis.dayNet)}
-          strong
-          danger={stats.kpis.dayNet < 0}
-          mint={stats.kpis.dayNet > 0}
-          hint="Matches cash ops delta"
-        />
-        <Line label="Lifetime revenue" value={money(stats.kpis.lifetimeRevenue)} />
-        <Line
-          label="Lifetime net"
-          value={money(stats.kpis.lifetimeNet)}
-          danger={stats.kpis.lifetimeNet < 0}
-          mint={stats.kpis.lifetimeNet > 0}
-        />
-        <Line label="Peak cash" value={money(stats.finance.peakCash ?? stats.kpis.cash)} />
-        <Line label="Lowest cash" value={money(stats.finance.lowestCash ?? stats.kpis.cash)} />
-      </Section>
-
-      <Section title="Unit economics">
-        <Line
-          label="Margin / MTok"
-          value={money(stats.unitEconomics.marginPerMTok)}
-          danger={stats.unitEconomics.marginPerMTok < 0}
-          mint={stats.unitEconomics.marginPerMTok > 0}
-        />
-        <Line
-          label="Margin / sub (mo)"
-          value={money(stats.unitEconomics.marginPerSubMonth)}
-          danger={stats.unitEconomics.marginPerSubMonth < 0}
-          mint={stats.unitEconomics.marginPerSubMonth > 0}
-        />
-        <Line label="Rev / MTok served" value={money(stats.unitEconomics.revenuePerMTok)} />
-        <Line label="Cost / MTok served" value={money(stats.unitEconomics.costPerMTok)} />
+      <Section title="Simple unit economics">
+        <Line label="You earn per MTok" value={money(stats.unitEconomics.revenuePerMTok)} />
+        <Line label="It costs per MTok" value={money(stats.unitEconomics.costPerMTok)} danger />
+        <Line label="Profit per MTok" value={money(stats.unitEconomics.marginPerMTok)} danger={stats.unitEconomics.marginPerMTok < 0} mint={stats.unitEconomics.marginPerMTok > 0} strong />
         <Line label="Gross margin" value={pct(stats.unitEconomics.grossMarginPct, 0)} />
-        <Line label="Net margin" value={pct(stats.unitEconomics.netMarginPct, 0)} />
-        <Line
-          label="API users (served)"
-          value={Math.round(stats.unitEconomics.apiUsers).toLocaleString()}
-        />
-        <Line
-          label="Plan subscribers"
-          value={Math.round(stats.unitEconomics.planSubscribers).toLocaleString()}
-        />
       </Section>
 
       {stats.plans.length > 0 && (
@@ -316,6 +219,7 @@ function ModelsSection({
 }
 
 function ModelCard({ m }: { m: ReturnType<typeof buildLabStats>['models'][0] }) {
+  const model = useGameStore((store) => store.state.player.models.find((candidate) => candidate.id === m.modelId))
   return (
     <div
       className={`rounded-xl border p-3 ${
@@ -358,68 +262,58 @@ function ModelCard({ m }: { m: ReturnType<typeof buildLabStats>['models'][0] }) 
         <span>Enterprise</span>
         <span className="text-right text-bone">{money(m.dayEnterpriseShare)}</span>
       </div>
+      {model ? <MiniCapabilityRadar model={model} /> : null}
       <p className="mt-2 text-[0.75rem] leading-snug text-muted">{m.note}</p>
     </div>
   )
 }
 
+function MiniCapabilityRadar({ model }: { model: import('../../../sim/types').Model }) {
+  const axes = [
+    ['Knowledge', model.benchmarks.mmlu ?? 0],
+    ['Code', model.benchmarks.coding ?? 0],
+    ['Reason', model.benchmarks.math ?? 0],
+    ['Safety', model.benchmarks.safety ?? model.quality.safety],
+    ['Speed', Math.min(100, (model.serviceProfile?.interactiveTokPerSec ?? 0) / 3)],
+  ] as const
+  const center = 55
+  const radius = 38
+  const points = axes.map(([, value], index) => {
+    const angle = -Math.PI / 2 + index / axes.length * Math.PI * 2
+    const r = radius * Math.max(0, Math.min(1, value / 100))
+    return `${center + Math.cos(angle) * r},${center + Math.sin(angle) * r}`
+  }).join(' ')
+  return <div className="mt-2 grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-2 rounded-lg border border-line/60 bg-void/30 p-2">
+    <svg viewBox="0 0 110 110" className="h-24 w-24" role="img" aria-label={`${model.name} evaluation radar`}>
+      {[.33, .66, 1].map((ring) => <circle key={ring} cx={center} cy={center} r={radius * ring} fill="none" stroke="rgba(139,171,181,.2)" />)}
+      <polygon points={points} fill="rgba(86,225,220,.2)" stroke="#56e1dc" strokeWidth="1.5" />
+    </svg>
+    <div className="grid grid-cols-2 gap-1">{axes.map(([label, value]) => <div key={label} className="rounded bg-panel-2 px-1.5 py-1"><span className="block text-[0.5625rem] uppercase text-muted">{label}</span><strong className="font-mono text-[0.6875rem] text-bone">{value.toFixed(0)}</strong></div>)}</div>
+  </div>
+}
+
 function ComputeSection({
   stats,
   setPanel,
-  onAutoBalance,
 }: {
   stats: ReturnType<typeof buildLabStats>
   setPanel: (p: PanelId) => void
-  onAutoBalance?: () => void
 }) {
   const c = stats.compute
   return (
     <div className="space-y-2.5">
-      <div className="rounded-xl border border-mint/20 bg-mint/5 px-2.5 py-2 text-[0.75rem] leading-snug text-muted">
-        Pool split lives on the <strong className="text-bone">bottom bar</strong> (Train / Serve /
-        Research). Use Auto-bal to target ~80% serve headroom.
-        {onAutoBalance && (
-          <button
-            type="button"
-            onClick={onAutoBalance}
-            className="ml-1.5 rounded-full bg-mint/20 px-2 py-0.5 font-medium text-mint"
-          >
-            Auto-bal
-          </button>
-        )}
+      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+        <Kpi label="Compute online" value={`${num(c.effectiveFlopsPf, 1)} PF`} />
+        <Kpi label="In use" value={pct(c.pfUtilization, 0)} danger={c.pfUtilization > .9} />
+        <Kpi label="Demand served" value={pct(1 - c.unservedRatio, 0)} danger={c.unservedRatio > .1} mint={c.unservedRatio <= .05} />
+        <Kpi label="Cost / MTok" value={money(c.costPerMTokServed)} />
       </div>
-      <Section title="Capacity">
-        <Line label="Raw PF" value={num(c.rawFlopsPf, 2)} />
-        <Line label="Effective PF" value={num(c.effectiveFlopsPf, 2)} />
-        <Line label="PF utilization" value={pct(c.pfUtilization, 0)} />
-        <Line label="Util cap" value={pct(c.utilCap, 0)} />
-        <Line
-          label="Power"
-          value={`${num(c.mwDemand, 2)} / ${num(c.mwAvailable, 2)} MW`}
-          danger={c.throttled}
-        />
-        <Line label="Racks" value={`${c.racksUsed} / ${c.rackCap}`} />
-        <Line
-          label="VRAM"
-          value={`${num(c.vramGb, 0)} GB`}
-          danger={c.vramDerateServe < 0.95 || c.vramDerateTrain < 0.95}
-        />
-        <Line label="Train VRAM derate" value={pct(c.vramDerateTrain, 0)} />
-        <Line label="Serve VRAM derate" value={pct(c.vramDerateServe, 0)} />
-      </Section>
-
-      <Section title="Tokens">
-        <Line label="Serve capacity" value={`${num(c.capacityMTok, 1)} MTok/d`} />
-        <Line label="Demand" value={`${num(c.demandMTok, 1)} MTok/d`} />
-        <Line label="Served" value={`${num(c.servedMTok, 1)} MTok/d`} />
-        <Line
-          label="Unserved"
-          value={pct(c.unservedRatio, 0)}
-          danger={c.unservedRatio > 0.1}
-        />
-        <Line label="Energy price" value={`$${num(c.energyPrice, 0)}/MWh`} />
-        <Line label="Energy cost / day" value={money(c.energyCostDay)} danger />
-        <Line label="Fully loaded $/MTok" value={money(c.costPerMTokServed)} />
+      <SparkCard label="Serving demand" values={stats.trends.servedMTok} secondaryValues={stats.trends.effectivePf} days={stats.trends.days} format={(value) => `${num(value, 1)} MTok`} secondaryLabel="Effective PF" secondaryFormat={(value) => `${num(value, 1)} PF`} />
+      <Section title="What limits you">
+        <MetricRail label="Compute utilization" value={c.pfUtilization} detail={`${num(c.effectiveFlopsPf, 1)} effective PF`} title="Share of effective compute currently doing useful work." />
+        <MetricRail label="Demand served" value={1 - c.unservedRatio} detail={`${num(c.servedMTok, 1)} / ${num(c.demandMTok, 1)} MTok`} title="Customer tokens served compared with requested tokens." />
+        <MetricRail label="Power headroom" value={c.mwAvailable > 0 ? 1 - c.mwDemand / c.mwAvailable : 0} detail={`${num(c.mwDemand, 2)} / ${num(c.mwAvailable, 2)} MW`} title="Power left before racks throttle." />
+        <MetricRail label="Rack space" value={c.rackCap > 0 ? c.racksUsed / c.rackCap : 0} detail={`${c.racksUsed} / ${c.rackCap} racks`} title="Physical rack bays occupied." />
       </Section>
 
       <Section title="Pool cost centers">
@@ -443,7 +337,9 @@ function ComputeSection({
         />
       </Section>
 
-      <Section title="Chip fleet">
+      <details className="rounded-xl border border-line bg-panel-2 p-3">
+        <summary className="cursor-pointer text-[0.8125rem] font-medium uppercase tracking-wider text-muted">Chip fleet details</summary>
+        <div className="mt-2">
         {stats.chips.length === 0 ? (
           <p className="text-[0.8125rem] text-muted">No silicon online.</p>
         ) : (
@@ -469,7 +365,8 @@ function ComputeSection({
         )}
         <Line label="Fleet book value" value={money(stats.chipTotals.bookValue)} />
         <Line label="Fleet amort / day" value={money(-stats.chipTotals.amortPerDay)} danger />
-      </Section>
+        </div>
+      </details>
 
       <div className="flex flex-wrap gap-2 text-[0.8125rem]">
         <button type="button" className="text-mint hover:underline" onClick={() => setPanel('racks')}>
@@ -499,7 +396,7 @@ function FacilitiesSection({ stats }: { stats: ReturnType<typeof buildLabStats> 
       </Section>
 
       {stats.facilities.length === 0 ? (
-        <Empty text="No player buildings yet." action="Open build map" onClick={() => useGameStore.getState().openSites()} />
+        <p className="rounded-xl border border-line bg-panel-2 p-3 text-xs text-muted">No player buildings yet.</p>
       ) : (
         <Section title="Buildings">
           <div className="space-y-1.5">
@@ -545,36 +442,6 @@ function FacilitiesSection({ stats }: { stats: ReturnType<typeof buildLabStats> 
           </div>
         </Section>
       )}
-
-      <button type="button" className="text-[0.8125rem] text-mint hover:underline" onClick={() => useGameStore.getState().openSites()}>
-        Campus map →
-      </button>
-    </div>
-  )
-}
-
-function TrendsSection({ stats }: { stats: ReturnType<typeof buildLabStats> }) {
-  const t = stats.trends
-  if (t.days.length < 2) {
-    return (
-      <p className="rounded-xl border border-line bg-panel-2 p-3 text-xs text-muted">
-        Trends fill as days advance (up to 90 samples). Step time or unpause to collect data.
-      </p>
-    )
-  }
-
-  return (
-    <div className="space-y-3">
-      <SparkCard label="Revenue / day" values={t.revenue} format={money} />
-      <SparkCard label="Net P&L / day" values={t.net} format={money} />
-      <SparkCard label="Cash" values={t.cash} format={money} />
-      <SparkCard label="Market share" values={t.share} format={(v) => pct(v, 1)} />
-      <SparkCard label="Served MTok" values={t.servedMTok} format={(v) => num(v, 1)} />
-      <SparkCard label="Effective PF" values={t.effectivePf} format={(v) => num(v, 2)} />
-      <SparkCard label="Valuation" values={t.valuation} format={money} />
-      <p className="font-mono text-[0.75rem] text-muted">
-        {t.days.length} days · day {t.days[0]} → {t.days[t.days.length - 1]}
-      </p>
     </div>
   )
 }
@@ -582,17 +449,28 @@ function TrendsSection({ stats }: { stats: ReturnType<typeof buildLabStats> }) {
 function SparkCard({
   label,
   values,
+  secondaryValues,
+  days,
   format,
+  secondaryLabel,
+  secondaryFormat,
 }: {
   label: string
   values: number[]
+  secondaryValues?: number[]
+  days?: number[]
   format: (n: number) => string
+  secondaryLabel?: string
+  secondaryFormat?: (n: number) => string
 }) {
+  const [hovered, setHovered] = useState<number | null>(null)
   const last = values[values.length - 1] ?? 0
   const first = values[0] ?? 0
   const delta = last - first
   const path = sparkPath(values, 200, 36)
+  const secondaryPath = secondaryValues ? sparkPath(secondaryValues, 200, 36) : ''
   const positive = last >= 0
+  const pointIndex = hovered == null ? values.length - 1 : Math.max(0, Math.min(values.length - 1, hovered))
   return (
     <div className="rounded-xl border border-line bg-panel-2 p-2.5">
       <div className="flex items-center justify-between gap-2">
@@ -607,11 +485,45 @@ function SparkCard({
           </div>
         </div>
       </div>
-      <svg viewBox="0 0 200 36" className="mt-1.5 h-9 w-full" preserveAspectRatio="none">
+      <svg
+        viewBox="0 0 200 36"
+        className="mt-1.5 h-14 w-full cursor-crosshair"
+        preserveAspectRatio="none"
+        onPointerMove={(event) => {
+          const rect = event.currentTarget.getBoundingClientRect()
+          setHovered(Math.round(((event.clientX - rect.left) / Math.max(1, rect.width)) * Math.max(0, values.length - 1)))
+        }}
+        onPointerLeave={() => setHovered(null)}
+      >
+        {secondaryPath ? <path d={secondaryPath} fill="none" stroke="currentColor" strokeWidth="1" className="text-research/70" /> : null}
         <path d={path} fill="none" stroke="currentColor" strokeWidth="1.5" className="text-mint/80" />
+        {hovered != null && values.length > 1 ? <line x1={(pointIndex / (values.length - 1)) * 200} x2={(pointIndex / (values.length - 1)) * 200} y1="0" y2="36" stroke="rgba(240,246,245,.45)" strokeWidth=".8" /> : null}
       </svg>
+      <div className="mt-1 flex items-center justify-between gap-2 font-mono text-[0.625rem] text-muted">
+        <span>D{days?.[pointIndex] ?? pointIndex + 1}</span>
+        <span className="text-mint">{label}: {format(values[pointIndex] ?? 0)}</span>
+        {secondaryValues ? <span className="text-research">{secondaryLabel}: {(secondaryFormat ?? format)(secondaryValues[pointIndex] ?? 0)}</span> : null}
+      </div>
     </div>
   )
+}
+
+function FinanceDisclosure({ title, total, tone, summary, children }: { title: string; total: number; tone: 'mint' | 'danger' | 'neutral'; summary: string; children: ReactNode }) {
+  return <details className="group rounded-xl border border-line bg-panel-2 p-3">
+    <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+      <span><strong className="block text-[0.8125rem] text-bone">{title}</strong><span className="text-[0.6875rem] text-muted">{summary}</span></span>
+      <span className={`font-mono text-sm ${tone === 'mint' ? 'text-mint' : tone === 'danger' ? 'text-danger' : 'text-bone'}`}>{money(total)}</span>
+    </summary>
+    <div className="mt-3 border-t border-line/60 pt-2">{children}</div>
+  </details>
+}
+
+function MetricRail({ label, value, detail, title }: { label: string; value: number; detail: string; title: string }) {
+  const clamped = Math.max(0, Math.min(1, value))
+  return <div className="mb-2 last:mb-0" title={title}>
+    <div className="flex justify-between gap-2 text-[0.75rem]"><span className="text-muted">{label} <span aria-hidden>ⓘ</span></span><span className="font-mono text-bone">{detail}</span></div>
+    <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-void"><div className={clamped > .9 ? 'h-full bg-amber' : 'h-full bg-mint'} style={{ width: `${clamped * 100}%` }} /></div>
+  </div>
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {

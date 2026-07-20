@@ -17,6 +17,7 @@ import { panelPresentation } from './view/hud/navConfig'
 import { ObjectivesDock } from './view/hud/ObjectivesDock'
 import { HudFeedback } from './view/hud/HudFeedback'
 import { FULL_BLEED_MAP_STYLE } from './view/hud/layout'
+import { MapNavigator } from './view/hud/MapNavigator'
 
 function GameShell() {
   const paused = useGameStore((s) => s.state.paused)
@@ -45,6 +46,7 @@ function GameShell() {
       className="game-shell grain relative h-full w-full overflow-hidden bg-void text-bone"
       data-workspace-open={leftOpen ? 'true' : 'false'}
       data-presentation={presentation}
+      data-active-panel={activePanel}
       data-intel-open={dockOpen && !workbenchOpen ? 'true' : 'false'}
     >
       <TopBar />
@@ -57,6 +59,7 @@ function GameShell() {
         <TileInspector />
       </main>
       <CommandDock forceCollapsed={workbenchOpen} />
+      <MapNavigator />
       <BottomBar />
       <ObjectivesDock />
       <BenchmarkOverlay />

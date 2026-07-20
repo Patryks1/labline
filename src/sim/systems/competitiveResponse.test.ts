@@ -1,10 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { emptyBenchmarks } from '../balance/benchmarks'
 import { createGame } from '../createGame'
 import type { Model } from '../types'
 import { competitiveCatchUpSnapshot, queueRivalMarketOrders } from './sharedMarkets'
 import { computeValuation } from './victory'
-import { ensureRivalLeapfrog, rivalCatchUpScaleTarget, tickRivals } from './rivals'
+import { progressRivalTrainingJob, rivalCatchUpScaleTarget } from './rivals'
 
 describe('competitive catch-up response', () => {
   it('lets the selected challenger scale faster without exceeding its data bound', () => {
@@ -78,44 +77,17 @@ describe('competitive catch-up response', () => {
     expect(response.rivalId).not.toBeNull()
   })
 
-  it('calibrates a catch-up release to only slightly beat the stale frontier', () => {
-    const challenger = {
-      id: 'challenger-release',
-      capability: 70,
-      benchmarks: emptyBenchmarks(),
-      quality: { reliability: 70 },
-    } as Model
-    const released = ensureRivalLeapfrog(challenger, 80, 44)
-    expect(released.capability).toBeGreaterThan(80)
-    expect(released.capability).toBeLessThanOrEqual(81.5)
-    expect(released.benchmarks.mmlu).toBeGreaterThan(challenger.benchmarks.mmlu)
-  })
-
-  it('ships a rival leapfrog within one sprint after the stale window opens', () => {
-    const created = createGame(926)
-    const frontier = {
-      id: 'player-old-public',
-      capability: 52,
-      release: 'released',
-      shipped: true,
-      releaseDay: 1,
-    } as Model
-    let state = {
-      ...created,
-      day: 170,
-      player: { ...created.player, models: [frontier] },
-    }
-    for (let day = 0; day < 24; day++) {
-      state = { ...state, day: state.day + 1 }
-      state = tickRivals(state)
-      if (state.rivals.some((rival) => rival.models.some((model) => model.capability > 52))) break
-    }
-    const rivalFrontier = Math.max(
-      0,
-      ...state.rivals.flatMap((rival) => rival.models.map((model) => model.capability)),
-    )
-    expect(rivalFrontier).toBeGreaterThan(52)
-    expect(rivalFrontier).toBeLessThanOrEqual(53.5)
+  it('never mints catch-up training progress beyond available physical work', () => {
+    const job = {
+      id: 'challenger-train',
+      progressPfDays: 20,
+      targetPfDays: 100,
+    } as ReturnType<typeof createGame>['rivals'][number]['trainingJob']
+    if (!job) throw new Error('expected job fixture')
+    const advanced = progressRivalTrainingJob(job, 3.25)
+    expect(advanced.workAppliedPfDays).toBe(3.25)
+    expect(advanced.job.progressPfDays).toBe(23.25)
+    expect(advanced.job.progressPfDays - job.progressPfDays).toBeLessThanOrEqual(3.25)
   })
 
   it('finances and queues accelerator demand for the selected challenger', () => {

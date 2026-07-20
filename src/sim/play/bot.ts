@@ -24,6 +24,10 @@ import {
   acceptEquityOffer,
   requestEquityOffers,
 } from '../systems/capital'
+import {
+  quoteComputeContract,
+  signComputeContract,
+} from '../systems/computeContracts'
 
 export interface Milestone {
   day: number
@@ -138,6 +142,40 @@ export function botAct(state: SimState): SimState {
   const hasPublic = s.player.models.some((m) => m.release === 'released' || m.shipped)
   const snap = computeSnapshot(s)
   const processedData = totalProcessed(s.player.data)
+
+  // The balance bot uses the same public provider action as the player. Renew
+  // cloud capacity after a finite term instead of silently receiving PF or
+  // becoming permanently unable to serve an otherwise viable small model.
+  const activeInboundPf = s.computeContracts.reduce(
+    (sum, contract) =>
+      sum +
+      (contract.buyerLabId === s.playerLabId &&
+      (contract.status === 'active' || contract.status === 'interrupted')
+        ? contract.pf
+        : 0),
+    0,
+  )
+  const observedDemandPf = Math.max(0, s.lastMarket.demandPf ?? 0)
+  const desiredCloudPf = Math.min(
+    192,
+    Math.max(24, observedDemandPf / Math.max(0.2, s.player.utilCap) * 1.25),
+  )
+  if (activeInboundPf + 1 < desiredCloudPf && s.player.cash > 2_000_000) {
+    const requestedPf = Math.max(1, Math.min(48, Math.ceil(desiredCloudPf - activeInboundPf)))
+    const provider = s.worldMarkets.cloudProviders
+      .filter((candidate) => candidate.availablePf >= requestedPf)
+      .toSorted((a, b) => a.basePricePerPfDay - b.basePricePerPfDay)[0]
+    if (provider) {
+      const quote = quoteComputeContract(s, {
+        providerId: provider.id,
+        buyerLabId: s.playerLabId,
+        kind: 'on_demand',
+        pf: requestedPf,
+        termDays: 180,
+      })
+      if (quote.canSign) s = signComputeContract(s, quote)
+    }
+  }
 
   const lastRoundDay = Math.max(
     -Infinity,

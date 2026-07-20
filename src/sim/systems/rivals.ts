@@ -28,9 +28,8 @@ import {
 } from '../balance/data'
 import { buildScaledModel } from '../balance/modelBuild'
 import { trainCostPfDays } from '../balance/training'
-import { blendApiPrice } from '../balance/pricing'
 import { ECONOMY } from '../balance/economy'
-import { getResearchNode, RESEARCH_NODES } from '../balance/research'
+import { getResearchNode } from '../balance/research'
 import { analyzeTrainingData } from '../balance/trainingV3'
 import {
   deriveModelCapabilities,
@@ -68,6 +67,20 @@ import {
 } from './dataRuntime'
 import { competitiveCatchUpSnapshot } from './sharedMarkets'
 import { defaultMarketingChannels } from './org'
+import { applyLabActionToTarget } from './labActionKernel'
+import {
+  advanceRivalStrategy,
+  allocationForRivalStrategy,
+  chooseRivalServePrecision,
+  chooseRivalTrainingNumerics,
+  planRivalResearchPath,
+  rivalActionRng,
+  rivalTrainingHardwareGeneration,
+} from './rivalStrategy'
+import {
+  LEGACY_TRAINING_NUMERICS,
+  trainingFormatThroughput,
+} from '../balance/trainingPrecision'
 
 /** Legacy compatibility marker; v3 never checks this as a release gate. */
 export const RIVAL_FIRST_RELEASE_DAY = 1
@@ -78,15 +91,11 @@ export function rivalMarketingBudgetTarget(
   playerSpendPerDay: number,
 ): number {
   const cash = Math.max(0, rival.cash)
-  const valuation = Math.max(rival.finance?.valuation ?? 0, cash * 8)
   const revenue = Math.max(rival.dayRevenue ?? 0, rival.finance?.dayRevenue ?? 0)
-  const ceiling = Math.min(
-    ECONOMY.marketingMax,
-    Math.max(5_000_000, valuation * 0.0001, cash * 0.003),
-  )
-  const affordable = Math.max(35_000, revenue * 0.1, cash * 0.00035)
-  const competitive = Math.min(Math.max(0, playerSpendPerDay) * 0.7, affordable * 3)
-  return Math.min(ceiling, cash * 0.02, Math.max(affordable, competitive))
+  const revenueBasis = Math.max(100_000, revenue)
+  const affordable = Math.max(35_000, revenueBasis * 0.1)
+  const competitive = Math.min(Math.max(0, playerSpendPerDay) * 0.7, revenueBasis * 2)
+  return Math.min(cash * 0.02, Math.max(affordable, competitive))
 }
 
 function initialRivalCapital(name: string): CapitalStack {
@@ -282,38 +291,6 @@ export function rivalCatchUpScaleTarget(input: {
   return Math.min(240, Math.max(input.baselineTargetParamsB, Math.min(capitalTarget, dataBound)))
 }
 
-/**
- * A stale player frontier triggers one deterministic rival leapfrog. The
- * challenger still completes a physical training run; this only calibrates the
- * finished outcome so the public frontier does not remain uncontested forever.
- */
-export function ensureRivalLeapfrog(
-  model: Model,
-  playerCapability: number,
-  seed: number,
-): Model {
-  if (playerCapability <= 0 || model.capability > playerCapability) return model
-  const edge = 0.5 + (hashSeed(seed, model.id, 'frontier-leapfrog-edge') % 11) / 10
-  const target = Math.min(100, playerCapability + edge)
-  const gain = Math.max(0, target - model.capability)
-  const benchmarks = { ...model.benchmarks }
-  for (const benchmark of BENCHMARK_DEFS) {
-    benchmarks[benchmark.id] = Math.min(
-      100,
-      (benchmarks[benchmark.id] ?? 0) + gain * 0.72,
-    )
-  }
-  return {
-    ...model,
-    capability: target,
-    benchmarks,
-    quality: {
-      ...model.quality,
-      reliability: Math.min(100, model.quality.reliability + gain * 0.25),
-    },
-  }
-}
-
 /** Exact research inputs used by the player scaling and train-cost paths. */
 export function rivalResearchTrainingModifiers(
   unlocked: readonly string[],
@@ -389,6 +366,32 @@ function rivalTrainPf(
     servingEfficiency: r.servingEfficiency,
     dataGenResearchShare: r.data?.dataGenResearchShare,
   })
+}
+
+/**
+ * Apply at most the numerics-adjusted useful work available this tick. The
+ * caller conserves the raw PF pool before converting it through the job's
+ * hardware-supported format; catch-up policy never mints raw compute.
+ */
+export function progressRivalTrainingJob(
+  job: RivalTrainJob,
+  availableEffectivePfDays: number,
+): { job: RivalTrainJob; workAppliedPfDays: number } {
+  const remaining = Math.max(0, job.targetPfDays - job.progressPfDays)
+  const workAppliedPfDays = Math.min(
+    remaining,
+    Math.max(
+      0,
+      Number.isFinite(availableEffectivePfDays) ? availableEffectivePfDays : 0,
+    ),
+  )
+  return {
+    job: {
+      ...job,
+      progressPfDays: job.progressPfDays + workAppliedPfDays,
+    },
+    workAppliedPfDays,
+  }
 }
 
 function rivalResearchPf(
@@ -650,7 +653,7 @@ export function createRivals(
   return all.slice(0, Math.max(1, Math.min(all.length, count))).map((r, index) => {
     // Difficulty changes forecasting, planning cadence, and risk tolerance in
     // rivalDifficultyPace; it never changes underlying starting resources.
-    const valueRng = createRng(hashSeed(seed, r.id, index, 'starting-value'))
+    const valueRng = createRng(hashSeed(seed, r.id, 'starting-value'))
     const [lo, hi] = [0.8, 1.25]
     const targetValue = playerStartingValue * valueRng.range(lo, hi)
     const assetShare =
@@ -778,14 +781,12 @@ export function tickRivals(state: SimState): SimState {
   const unserved = state.lastMarket.unservedRatio
   const competitiveResponse = competitiveCatchUpSnapshot(state)
 
-  const rivals = state.rivals.map((unboundedRival, ri) => {
+  const rivals = state.rivals.map((unboundedRival) => {
     const r = boundRivalTrainingHistory(unboundedRival)
     // Physical facilities/contracts do not change while this controller plans
     // its day. Resolve that expensive compact-world snapshot once, while still
     // applying the evolving allocation/staff fields from `next` below.
     const effectiveFlopsPf = rivalEffectiveFlops(state, r)
-    // Per-rival stream keeps decisions and hidden outcomes deterministic.
-    const rrng = createRng(state.seed + state.day * 17 + ri * 913)
     let next: RivalLab = {
       ...r,
       pricing: { ...r.pricing },
@@ -820,20 +821,70 @@ export function tickRivals(state: SimState): SimState {
       trainingJob: r.trainingJob ? { ...r.trainingJob } : null,
       trainPreferSynthHQ: r.trainPreferSynthHQ ?? true,
       trainAllowSynthLQ: r.trainAllowSynthLQ ?? false,
+      strategy: r.strategy
+        ? {
+            ...r.strategy,
+            beliefs: { ...r.strategy.beliefs },
+            plan: [...r.strategy.plan],
+            memory: r.strategy.memory.map((record) => ({ ...record })),
+            cooldowns: { ...r.strategy.cooldowns },
+          }
+        : undefined,
     }
+    next.strategy = advanceRivalStrategy(next, state)
+    const strategy = next.strategy
+    const synthRng = rivalActionRng(
+      state.seed,
+      next.id,
+      strategy.decisionRevision,
+      state.day,
+      'operational',
+      'synthetic-data',
+    )
+    const pricingRng = rivalActionRng(
+      state.seed,
+      next.id,
+      strategy.decisionRevision,
+      state.day,
+      'tactical',
+      'pricing',
+    )
+    const trainingRng = rivalActionRng(
+      state.seed,
+      next.id,
+      strategy.decisionRevision,
+      state.day,
+      'strategic',
+      'training',
+    )
+    const releaseRng = rivalActionRng(
+      state.seed,
+      next.id,
+      strategy.decisionRevision,
+      state.day,
+      'strategic',
+      'release',
+    )
     let data = next.data!
     const isCatchUpChallenger =
       competitiveResponse.active && competitiveResponse.rivalId === next.id
 
     // ── Allocation AI (same three pools as player) ──
     {
-      next.allocation = rivalAllocationPolicy(next.archetype, {
+      const baseAllocation = rivalAllocationPolicy(next.archetype, {
         training: !!next.trainingJob,
         hasModel: next.models.length > 0,
         overload: (next.lastUnserved ?? 0) > 0.15,
       })
+      next = applyLabActionToTarget(next, {
+        kind: 'set_allocation',
+        allocation: allocationForRivalStrategy(baseAllocation, strategy),
+      })
       if (isCatchUpChallenger && next.trainingJob) {
-        next.allocation = { training: 0.68, inference: 0.22, research: 0.1 }
+        next = applyLabActionToTarget(next, {
+          kind: 'set_allocation',
+          allocation: { training: 0.68, inference: 0.22, research: 0.1 },
+        })
       }
     }
 
@@ -903,8 +954,8 @@ export function tickRivals(state: SimState): SimState {
         next.researchUnlocked.includes('data_synth') &&
         next.models[0] != null &&
         next.models[0].capability >= 38 &&
-        state.day % 4 === ri % 4 &&
-        rrng.range(0, 1) < 0.4
+        state.day % 4 === hashSeed(state.seed, next.id, 'synth-phase') % 4 &&
+        synthRng.range(0, 1) < 0.4
       const totalResearchPf =
         rivalResearchPf(next, state, effectiveFlopsPf) *
         pace.researchSpeed *
@@ -914,26 +965,32 @@ export function tickRivals(state: SimState): SimState {
 
       // Pick / continue active research
       if (!next.activeResearch) {
-        const candidates = RESEARCH_NODES.filter((n) =>
-          canLabResearchNode(next.researchUnlocked, researchers, n.id).ok,
+        if ((next.researchQueue?.length ?? 0) === 0) {
+          const path =
+            strategy.plan.length > 0
+              ? strategy.plan
+              : planRivalResearchPath(next, strategy, state.seed)
+          const target = path.at(-1)
+          if (target) {
+            next = applyLabActionToTarget(next, {
+              kind: 'queue_research',
+              nodeId: target,
+            })
+          }
+        }
+        const queuedNodeId = next.researchQueue?.find((nodeId) =>
+          canLabResearchNode(next.researchUnlocked, researchers, nodeId).ok,
         )
-        const prefer =
-          next.archetype === 'efficiency'
-            ? 'moe'
-            : next.archetype === 'multimodal'
-              ? 'mm'
-              : next.archetype === 'safety'
-                ? 'align'
-                : next.archetype === 'open_weights'
-                  ? 'sys'
-                  : 'dense'
-        const ranked = [...candidates].sort((a, b) => {
-          const ap = a.trunk.startsWith(prefer) || a.id.startsWith(prefer) ? 0 : 1
-          const bp = b.trunk.startsWith(prefer) || b.id.startsWith(prefer) ? 0 : 1
-          return ap - bp || a.costPfDays - b.costPfDays
-        })
-        if (ranked[0] && baseRPf > 0.02) {
-          next.activeResearch = ranked[0].id
+        if (queuedNodeId && baseRPf > 0.02) {
+          const queuedNode = getResearchNode(queuedNodeId)
+          next.activeResearch = queuedNode.id
+          next.researchQueue = (next.researchQueue ?? []).filter(
+            (nodeId) => nodeId !== queuedNode.id,
+          )
+          next.strategy = {
+            ...strategy,
+            plan: strategy.plan.filter((nodeId) => nodeId !== queuedNode.id),
+          }
           next.researchProgress = 0
           next.researchDaysSpent = 0
           const pod = (next.researchPods ?? []).find(
@@ -941,8 +998,8 @@ export function tickRivals(state: SimState): SimState {
           )
           if (pod) {
             const program: ResearchProgram = {
-              id: `research-${next.id}-${ranked[0].id}-${state.day}`,
-              methodId: ranked[0].id,
+              id: `research-${next.id}-${queuedNode.id}-${state.day}`,
+              methodId: queuedNode.id,
               podId: pod.id,
               phase: 'hypothesis',
               evidence: [],
@@ -1098,9 +1155,9 @@ export function tickRivals(state: SimState): SimState {
         // Rivals may risk LQ when desperate for volume
         const useLq =
           next.trainAllowSynthLQ ||
-          (totalProcessed(data) < minDataMTokForParams(3) && rrng.range(0, 1) < 0.35)
+          (totalProcessed(data) < minDataMTokForParams(3) && synthRng.range(0, 1) < 0.35)
         const finalTier = useLq && !wantHQ ? 'lq' : tier
-        const dom = rrng.pick(rivalDataPriority(next.archetype))
+        const dom = synthRng.pick(rivalDataPriority(next.archetype))
         const step = syntheticGenerationMTokPerDay({
           domain: dom,
           teacherDomainCapability: teacherCapabilityForDataDomain(teacher, dom),
@@ -1189,7 +1246,7 @@ export function tickRivals(state: SimState): SimState {
       const m =
         next.models.find((model) => model.id === next.pricing.activeModelId) ??
         next.models[0]
-      if (m) {
+      if (m && strategy.lastTacticalDay === state.day) {
         const costFloor = Math.max(
           0.05,
           (m.costApiPriceIn ?? 0.1) * 0.3 + (m.costApiPriceOut ?? 0.4) * 0.7,
@@ -1208,7 +1265,8 @@ export function tickRivals(state: SimState): SimState {
         const anchor = Math.max(0.8, playerApi || next.pricing.apiPricePerMTok)
         let target = Math.max(
           costFloor,
-          anchor * targetMult * (1 + rrng.range(-pace.forecastNoise, pace.forecastNoise)),
+          anchor * targetMult *
+            (1 + pricingRng.range(-pace.forecastNoise, pace.forecastNoise)),
         )
         if (next.archetype === 'open_weights') target = Math.min(target, 1.4)
         // Smooth move toward target
@@ -1218,7 +1276,6 @@ export function tickRivals(state: SimState): SimState {
         // market and milestone ignored ten years of rival pricing decisions.
         const listIn = Math.max(m.costApiPriceIn ?? 0, blended * 0.35)
         const listOut = Math.max(m.costApiPriceOut ?? 0, blended * 1.25)
-        const listPrice = blendApiPrice(listIn, listOut)
         const nextPlusPrice = Math.max(
           0,
           next.pricing.subPlusPrice * 0.9 +
@@ -1235,14 +1292,12 @@ export function tickRivals(state: SimState): SimState {
         const plusIncluded =
           ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth * generosity
         const nextProPrice = Math.max(nextPlusPrice, nextPlusPrice * 2.25)
+        const servePrecision = chooseRivalServePrecision(next)
         // Rival offers face the same premium-tier scrutiny as the player:
         // above $180/mo, customers expect at least 20× entry-tier usage.
         const proIncluded = plusIncluded * (nextProPrice > 180 ? 20 : 5)
         next.pricing = {
           ...next.pricing,
-          apiPricePerMTok: listPrice,
-          apiPriceInPerMTok: listIn,
-          apiPriceOutPerMTok: listOut,
           subPlusPrice: nextPlusPrice,
           subProPrice: nextProPrice,
           plusIncludedMTok: plusIncluded,
@@ -1255,6 +1310,7 @@ export function tickRivals(state: SimState): SimState {
               usageMultiplier: plusIncluded /
                 (ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth),
               modelIds: [m.id],
+              servePrecision,
             },
             {
               ...(next.pricing.plans[1] ?? rivalPricing(blended).plans[1]!),
@@ -1263,42 +1319,62 @@ export function tickRivals(state: SimState): SimState {
               usageMultiplier: proIncluded /
                 (ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth),
               modelIds: [m.id],
+              servePrecision,
             },
           ],
         }
-        next.models = next.models.map((model) =>
-          model.id === m.id
-            ? {
-                ...model,
-                apiPricePerMTok: listPrice,
-                apiPriceInPerMTok: listIn,
-                apiPriceOutPerMTok: listOut,
-              }
-            : model,
-        )
+        next = applyLabActionToTarget(next, {
+          kind: 'set_api_price',
+          modelId: m.id,
+          input: listIn,
+          output: listOut,
+        })
+        next = applyLabActionToTarget(next, {
+          kind: 'set_api_precision',
+          modelId: m.id,
+          precision: servePrecision,
+        })
+        for (const plan of next.pricing.plans) {
+          next = applyLabActionToTarget(next, {
+            kind: 'configure_plan_route',
+            planId: plan.id,
+            route: {
+              modality: 'text',
+              primaryModelId: m.id,
+              fallbackModelId: null,
+              premiumShare: 1,
+              precision: servePrecision,
+            },
+          })
+        }
       }
     }
 
     // ── Multi-day training job (same scale formula + data coverage as player) ──
-    const cadence = pace.releaseCadence + (ri % 3)
+    const cadence =
+      pace.releaseCadence + (hashSeed(state.seed, next.id, 'release-cadence') % 3)
     const canStartTrain = rivalTrainPf(next, state, effectiveFlopsPf) > 0.02
     const corpus = totalProcessed(next.data!)
     next.dataMTok = corpus
 
     // Progress active job with train PF
     if (next.trainingJob) {
-      const job = { ...next.trainingJob }
+      let job = { ...next.trainingJob }
       const burn = job.cashBurnPerDay ?? 0
       const canFund = next.cash >= burn
       if (canFund) next.cash -= burn
+      const trainingNumerics = job.trainingNumerics ?? LEGACY_TRAINING_NUMERICS
+      job.trainingNumerics = trainingNumerics
+      const formatThroughput = trainingFormatThroughput(
+        rivalTrainingHardwareGeneration(next),
+        trainingNumerics,
+      )
       const baseTrainPf = canFund
-        ? rivalTrainPf(next, state, effectiveFlopsPf) * pace.researchSpeed
+        ? rivalTrainPf(next, state, effectiveFlopsPf) *
+          pace.researchSpeed *
+          formatThroughput
         : 0
-      const tPf =
-        canFund && isCatchUpChallenger && competitiveResponse.frontierStale
-          ? Math.max(baseTrainPf, job.targetPfDays / 14)
-          : baseTrainPf
-      job.progressPfDays += tPf
+      job = progressRivalTrainingJob(job, job.paused ? 0 : baseTrainPf).job
       const program = (next.trainingPrograms ?? []).find(
         (candidate) => candidate.id === job.id,
       )
@@ -1326,6 +1402,7 @@ export function tickRivals(state: SimState): SimState {
                       day: state.day,
                       stability,
                       reusable: true,
+                      trainingNumerics,
                     })),
                   ],
                 }
@@ -1350,7 +1427,7 @@ export function tickRivals(state: SimState): SimState {
                 ? `Chroma-${gen}`
                 : next.archetype === 'safety'
                   ? `Aegis-${gen}`
-                  : `${baseName}-${gen}.${rrng.int(0, 9)}`
+                  : `${baseName}-${gen}.${releaseRng.int(0, 9)}`
 
         const completedProgram = (next.trainingPrograms ?? []).find(
           (candidate) => candidate.id === job.id,
@@ -1391,6 +1468,7 @@ export function tickRivals(state: SimState): SimState {
         released = {
           ...released,
           trainComputeSpent: job.progressPfDays,
+          trainingNumerics,
           capabilities: deriveModelCapabilities({
             finalCapability: released.capability,
             trainComputePfDays: job.progressPfDays,
@@ -1402,9 +1480,6 @@ export function tickRivals(state: SimState): SimState {
             postTrain: released.postTrain,
             quality: released.quality,
           }),
-        }
-        if (isCatchUpChallenger && competitiveResponse.frontierStale) {
-          released = ensureRivalLeapfrog(released, playerCap, state.seed)
         }
         if (completedProgram) {
           released = {
@@ -1432,8 +1507,9 @@ export function tickRivals(state: SimState): SimState {
                               ? 0.58
                               : job.outcomeRisk === 'medium'
                                 ? 0.72
-                                : 0.84,
+                              : 0.84,
                           reusable: true,
+                          trainingNumerics,
                         },
                       ],
                 }
@@ -1446,7 +1522,10 @@ export function tickRivals(state: SimState): SimState {
           ? ` · ${released.outcome.kind} ${(released.outcome.yieldMultiplier * 100).toFixed(1)}% yield`
           : ''
         if (undertrained) {
-          next.brandTrust = Math.max(15, next.brandTrust - 2 - rrng.range(0, 3))
+          next.brandTrust = Math.max(
+            15,
+            next.brandTrust - 2 - releaseRng.range(0, 3),
+          )
           news.push(
             `Day ${state.day}: ${next.name} ships ${released.name} under-data (${Math.round(job.dataCoverage * 100)}% coverage) — cap ${released.capability.toFixed(0)}${outcomeNote}.`,
           )
@@ -1471,10 +1550,10 @@ export function tickRivals(state: SimState): SimState {
       !next.trainingJob &&
       (next.models.length === 0
         ? (isCatchUpChallenger && competitiveResponse.frontierStale) ||
-          rrng.range(0, 1) < 0.55
+          trainingRng.range(0, 1) < 0.55
         : (isCatchUpChallenger && competitiveResponse.frontierStale) ||
           (state.day % cadence === 0 &&
-            (isCatchUpChallenger || rrng.range(0, 1) < 0.45)))
+            (isCatchUpChallenger || trainingRng.range(0, 1) < 0.45)))
     ) {
       // Start a new job sized for available data (risk under-train like player)
       const prev = next.models[0]
@@ -1503,12 +1582,15 @@ export function tickRivals(state: SimState): SimState {
           paramsB = rivalDenseScaleTarget(
             next.archetype,
             comfortable,
-            rrng.range(0, 1),
+            trainingRng.range(0, 1),
           )
         }
         // Risk: try bigger than data supports (~1B with thin data)
-        if (rrng.range(0, 1) < 0.22 + pace.riskTolerance * 0.16) {
-          paramsB = Math.min(3, Math.max(paramsB, comfortable * (1.2 + rrng.range(0, 0.8))))
+        if (trainingRng.range(0, 1) < 0.22 + pace.riskTolerance * 0.16) {
+          paramsB = Math.min(
+            3,
+            Math.max(paramsB, comfortable * (1.2 + trainingRng.range(0, 0.8))),
+          )
         }
       } else {
         family =
@@ -1519,8 +1601,8 @@ export function tickRivals(state: SimState): SimState {
         modalities = prev.modalities
         const growth =
           next.archetype === 'hyperscale'
-            ? 1.16 + rrng.range(0, 0.16) * pace.researchSpeed
-            : 1.08 + rrng.range(0, 0.12) * pace.researchSpeed
+            ? 1.16 + trainingRng.range(0, 0.16) * pace.researchSpeed
+            : 1.08 + trainingRng.range(0, 0.12) * pace.researchSpeed
         paramsB = Math.min(120, prev.paramsB * growth)
         if (isCatchUpChallenger) {
           paramsB = rivalCatchUpScaleTarget({
@@ -1551,7 +1633,7 @@ export function tickRivals(state: SimState): SimState {
         next.trainPreferSynthHQ !== false && next.researchUnlocked.includes('data_synth')
       const useLQ =
         !!next.trainAllowSynthLQ ||
-        (corpus < dataNeed * 0.55 && rrng.range(0, 1) < 0.4)
+        (corpus < dataNeed * 0.55 && trainingRng.range(0, 1) < 0.4)
 
       // Shared recipe path with player (consumeForLabData)
       const recipe = consumeForLabData(
@@ -1583,7 +1665,7 @@ export function tickRivals(state: SimState): SimState {
       })
       // Risk under-train: may start even if usable < need
       if (usable < dataNeed * 0.25 && paramsB > 0.3) {
-        if (state.day % 7 === ri % 7) {
+        if (state.day % 7 === hashSeed(state.seed, next.id, 'train-news') % 7) {
           news.push(
             `Day ${state.day}: ${next.name} holds training — only ${Math.round(usable)}/${Math.round(dataNeed)} MTok.`,
           )
@@ -1593,6 +1675,7 @@ export function tickRivals(state: SimState): SimState {
           next.researchUnlocked,
           family,
         )
+        const trainingNumerics = chooseRivalTrainingNumerics(next, family)
         const targetPf = trainCostPfDays({
           paramsB,
           activeParamsB,
@@ -1607,7 +1690,7 @@ export function tickRivals(state: SimState): SimState {
           ECONOMY.trainCashBurnPerPfDay * Math.sqrt(Math.max(1, paramsB)),
         )
         if (next.cash < cashSunk) {
-          if (state.day % 7 === ri % 7) {
+          if (state.day % 7 === hashSeed(state.seed, next.id, 'train-news') % 7) {
             news.push(`Day ${state.day}: ${next.name} delays training — insufficient cash.`)
           }
           return next
@@ -1637,6 +1720,15 @@ export function tickRivals(state: SimState): SimState {
           modalityComputeMult: dataAnalysis.modalityComputeMult,
           cashSunk,
           cashBurnPerDay,
+          trainingNumerics,
+          computePriority:
+            next.archetype === 'hyperscale'
+              ? 82
+              : next.archetype === 'efficiency'
+                ? 72
+                : 64,
+          reservedPf: 0,
+          paused: false,
         }
         const manifestId = `manifest-${job.id}`
         const assetVolume = (data.assets ?? []).reduce(
@@ -1709,6 +1801,12 @@ export function tickRivals(state: SimState): SimState {
       (next.marketingSpendPerDay ?? marketingTarget) * 0.7 + marketingTarget * 0.3,
     )
     next.marketingSpendPerDay = marketingSpendPerDay
+    const rivalRevenueBasis = Math.max(
+      100_000,
+      next.dayRevenue ?? 0,
+      next.finance?.dayRevenue ?? 0,
+    )
+    next.marketingRevenueMultiple = marketingSpendPerDay / rivalRevenueBasis
     next.marketingChannels = defaultMarketingChannels(marketingSpendPerDay)
 
     return next
@@ -1793,7 +1891,6 @@ export function boundRivalTrainingHistory(rival: RivalLab): RivalLab {
  */
 export function expandRivalCampuses(state: SimState): SimState {
   if (usesCompactWorld(state)) return expandCompactRivalCampuses(state)
-  const rng = createRng(state.seed + state.day * 41 + 17)
   // Copy the row-major container once, then copy only records that change.
   // Rival AI and player systems continue to operate on the same MapTile
   // semantics without allocating a second million-object world every day.
@@ -1826,6 +1923,14 @@ export function expandRivalCampuses(state: SimState): SimState {
 
   for (let ri = 0; ri < rivals.length; ri++) {
     const r = rivals[ri]!
+    const rng = rivalActionRng(
+      state.seed,
+      r.id,
+      r.strategy?.decisionRevision ?? 0,
+      state.day,
+      'strategic',
+      'campus-expansion',
+    )
     // Capital projects are weekly policy decisions. Difficulty affects policy
     // quality elsewhere, never the construction cost or completion time.
     if (state.day % 7 !== hashSeed(state.seed, r.id, 'capex-day') % 7) continue
@@ -1917,7 +2022,7 @@ export function expandRivalCampuses(state: SimState): SimState {
       t.note = 'Rival peaker under construction for firm power.'
     }
     tiles[si] = t
-    if (state.day % 11 === ri % 11) {
+    if (state.day % 11 === hashSeed(state.seed, r.id, 'campus-news') % 11) {
       news.push(`Day ${state.day}: ${r.name} starts construction on ${t.name}.`)
     }
   }
@@ -1932,7 +2037,6 @@ export function expandRivalCampuses(state: SimState): SimState {
 
 function expandCompactRivalCampuses(state: SimState): SimState {
   const world = state.map.world!
-  const rng = createRng(state.seed + state.day * 41 + 17)
   const batch = world.beginBatch()
   const claimed = new Set<TileId>()
   let rivals = state.rivals.map((rival) => ({ ...rival }))
@@ -1945,7 +2049,10 @@ function expandCompactRivalCampuses(state: SimState): SimState {
     world.getOwner(id) === 'neutral' &&
     world.getKind(id) === TERRAIN_KIND.empty
 
-  const nearbySite = (anchor: TileId): TileId | undefined => {
+  const nearbySite = (
+    anchor: TileId,
+    rng: ReturnType<typeof createRng>,
+  ): TileId | undefined => {
     const { x: ax, y: ay } = tileCoords(anchor, world.descriptor.width)
     const candidates: TileId[] = []
     for (let dy = -2; dy <= 2; dy++) {
@@ -1961,7 +2068,10 @@ function expandCompactRivalCampuses(state: SimState): SimState {
     return candidates.length > 0 ? candidates[rng.int(0, candidates.length - 1)] : undefined
   }
 
-  const regionalSite = (regionId: string): TileId | undefined => {
+  const regionalSite = (
+    regionId: string,
+    rng: ReturnType<typeof createRng>,
+  ): TileId | undefined => {
     const region = world.staticWorld.regions.find((entry) => entry.id === regionId)
     const minX = region?.originX ?? 0
     const minY = region?.originY ?? 0
@@ -1978,6 +2088,14 @@ function expandCompactRivalCampuses(state: SimState): SimState {
 
   for (let ri = 0; ri < rivals.length; ri++) {
     const rival = rivals[ri]!
+    const rng = rivalActionRng(
+      state.seed,
+      rival.id,
+      rival.strategy?.decisionRevision ?? 0,
+      state.day,
+      'strategic',
+      'campus-expansion',
+    )
     if (state.day % 7 !== hashSeed(state.seed, rival.id, 'capex-day') % 7) continue
     // Include active builds so a weekly planning tick does not start duplicate
     // HQ or compute projects before the existing one completes.
@@ -1998,7 +2116,10 @@ function expandCompactRivalCampuses(state: SimState): SimState {
     )
 
     const anchor = owned.length > 0 ? owned[rng.int(0, owned.length - 1)]!.anchor : undefined
-    const spot = anchor === undefined ? regionalSite(rival.regionId) : nearbySite(anchor)
+    const spot =
+      anchor === undefined
+        ? regionalSite(rival.regionId, rng)
+        : nearbySite(anchor, rng)
     if (spot === undefined) continue
 
     const needPower = dcs.length > feeds.length + gens.length
@@ -2057,7 +2178,10 @@ function expandCompactRivalCampuses(state: SimState): SimState {
     })
     claimed.add(spot)
     changed = true
-    if (state.day % 11 === ri % 11) {
+    if (
+      state.day % 11 ===
+      hashSeed(state.seed, rival.id, 'campus-news') % 11
+    ) {
       news.push(`Day ${state.day}: ${rival.name} starts construction on ${name}.`)
     }
   }

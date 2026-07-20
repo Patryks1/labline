@@ -187,8 +187,8 @@ describe('player and rival product-market parity', () => {
     expect(playerShare('healthcare')).toBe(0)
   })
 
-  it('activates hard sales admission only for dominant, capacity-constrained labs', () => {
-    expect(dominantCapacitySalesGate(0.72, 0.4, 0.6)).toBe(true)
+  it('uses continuous capacity admission instead of a 50% market-share cliff', () => {
+    expect(dominantCapacitySalesGate(0.72, 0.4, 0.6)).toBe(false)
     expect(dominantCapacitySalesGate(0.49, 0.4, 0.6)).toBe(false)
     expect(dominantCapacitySalesGate(0.72, 1, 1)).toBe(false)
   })

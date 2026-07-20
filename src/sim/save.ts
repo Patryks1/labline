@@ -5,7 +5,18 @@
  * dynamic snapshot. Static typed layers, indexes, metrics, journals, and any
  * renderer state are regenerated after load.
  */
-import type { MapCity, MapRegion, MapTile, Model, RackDesign, SimState } from './types'
+import type {
+  MapCity,
+  MapRegion,
+  MapTile,
+  Model,
+  RackDesign,
+  RivalTrainJob,
+  SimState,
+  SubPlan,
+  TrainingJob,
+  TrainingNumerics,
+} from './types'
 import { calendarForDay, formatCampaignDate } from './campaign'
 import { DEMAND_MODEL_VERSION, ECONOMY, WORLD_POPULATION } from './balance/economy'
 import { normalizeModelEvaluations } from './balance/evaluationSuites'
@@ -17,6 +28,7 @@ import {
 } from './systems/labEngine'
 import { normalizeSiteEnergyState } from './systems/siteEnergy'
 import { clampSegmentUsageIntensity } from './systems/events'
+import { normalizedPlanRoutes, defaultSteadyPlanUsage } from './systems/plans'
 import {
   WORLD_FORMAT_VERSION,
   createDynamicWorld,
@@ -26,7 +38,7 @@ import {
 } from './world'
 
 export const SAVE_FORMAT = 'labline-save' as const
-export const SAVE_VERSION = 5 as const
+export const SAVE_VERSION = 6 as const
 export const V1_INCOMPATIBILITY_REASON =
   'Save format v1 is incompatible with the compact-world renderer. This campaign cannot be migrated; start a new operation.'
 export const V2_INCOMPATIBILITY_REASON =
@@ -367,6 +379,113 @@ function ensureRecord(value: unknown): Record<string, number> {
     : {}
 }
 
+const LEGACY_PLAN_BASE_ALLOWANCE_MTOK_PER_MONTH = 0.6
+
+/**
+ * Earlier saves initialized subscription allowances from a 0.6M-token
+ * monthly baseline. Only migrate values still close to that generated shape;
+ * deliberately customized plans remain untouched.
+ */
+function migrateLegacyPlanAllowances(state: SimState): void {
+  const plans = ensureArray<SubPlan>(state.player.pricing?.plans)
+  state.player.pricing.plans = plans.map((plan) => {
+    const multiplier = Math.max(0.1, Number(plan.usageMultiplier) || 1)
+    const allowance = Number(plan.includedMTokPerMonth)
+    if (!Number.isFinite(allowance) || allowance <= 0) return plan
+
+    const legacyAllowance = LEGACY_PLAN_BASE_ALLOWANCE_MTOK_PER_MONTH * multiplier
+    const legacyTolerance = Math.max(0.06, legacyAllowance * 0.12)
+    if (Math.abs(allowance - legacyAllowance) > legacyTolerance) return plan
+
+    return {
+      ...plan,
+      includedMTokPerMonth:
+        ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth * multiplier,
+    }
+  })
+}
+
+const LEGACY_TRAINING_NUMERICS: TrainingNumerics = {
+  computeFormat: 'bf16_mixed',
+  nativeWeightFormat: 'float',
+  recipeVersion: 1,
+}
+
+function normalizeTrainingJob(job: TrainingJob): TrainingJob {
+  const trainingNumerics = job.trainingNumerics ?? job.numerics ?? LEGACY_TRAINING_NUMERICS
+  return {
+    ...job,
+    trainingFormulaVersion: job.trainingFormulaVersion ?? 1,
+    trainingNumerics,
+    numerics: trainingNumerics,
+    computePriority: Math.max(10, Math.min(100, job.computePriority ?? 50)),
+    reservedPf: Math.max(0, job.reservedPf ?? 0),
+    paused: job.paused ?? false,
+    preemptible: job.preemptible ?? true,
+    stallReason: job.stallReason ?? null,
+    failed: job.failed ?? false,
+    lossHistory: ensureArray<NonNullable<TrainingJob['lossHistory']>[number]>(job.lossHistory).slice(-64),
+  }
+}
+
+function normalizeModelComputeV2(model: Model): Model {
+  const trainingNumerics = model.trainingNumerics ?? LEGACY_TRAINING_NUMERICS
+  return {
+    ...normalizeModelEvaluations(model),
+    trainingFormulaVersion: model.trainingFormulaVersion ?? 1,
+    trainingNumerics,
+    deploymentArtifacts: ensureArray(model.deploymentArtifacts),
+  }
+}
+
+function rivalJobToCanonical(job: RivalTrainJob): TrainingJob {
+  const totalMTok = Math.max(0, job.totalMTok ?? 0)
+  const trainShare = Math.max(0.4, Math.min(0.95, job.trainShare ?? 0.82))
+  return normalizeTrainingJob({
+    id: job.id,
+    name: job.name,
+    family: job.family,
+    backbone: job.family === 'moe' ? 'moe' : 'dense',
+    productPreset: 'language',
+    io: { inputs: { text: 50 }, outputs: { text: 50 }, tools: 0 },
+    targetParamsB: job.paramsB,
+    activeParamsB: job.activeParamsB,
+    targetPfDays: job.targetPfDays,
+    progressPfDays: job.progressPfDays,
+    postTrain: 'none',
+    postTrainProgress: 0,
+    postTrainTarget: 0,
+    mode: 'pretrain',
+    dataMix: 'web',
+    dataPlan: {
+      totalUnits: totalMTok,
+      totalMTok,
+      trainShare,
+      weights: { chat: 1 },
+      allowSynthetic: job.includeSynthHQ || job.includeSynthLQ,
+      includeSynthHQ: job.includeSynthHQ,
+      includeSynthLQ: job.includeSynthLQ,
+    },
+    dataConsumed: { chat: totalMTok },
+    dataCoverage: job.dataCoverage,
+    dataQualityUsed: job.dataQuality,
+    syntheticUnits: totalMTok * Math.max(0, job.synthLqShare ?? 0),
+    trainShare,
+    trainMTok: totalMTok * trainShare,
+    verifyMTok: totalMTok * (1 - trainShare),
+    cashBurnPerDay: job.cashBurnPerDay ?? 0,
+    cashSunk: job.cashSunk ?? 0,
+    synthLqShare: job.synthLqShare,
+    outcomeSeed: job.outcomeSeed,
+    outcomeRisk: job.outcomeRisk,
+    effectiveDataRatio: job.effectiveDataRatio,
+    repeatedDataEpochs: job.repeatedDataEpochs,
+    modalityComputeMult: job.modalityComputeMult,
+    trainingFormulaVersion: 1,
+    trainingNumerics: LEGACY_TRAINING_NUMERICS,
+  })
+}
+
 function regionsFromStatic(world: StaticWorld): MapRegion[] {
   return world.regions.map((region) => ({
     id: region.id,
@@ -478,16 +597,58 @@ function restoreState(stateRaw: unknown, snapshot: DynamicWorldSnapshotV2 | null
   restored.player.rackFleet = ensureArray(restored.player.rackFleet)
   restored.player.loans = ensureArray(restored.player.loans)
   restored.player.models = ensureArray(restored.player.models).map((model) =>
-    normalizeModelEvaluations(model as Model),
+    normalizeModelComputeV2(model as Model),
   )
+  migrateLegacyPlanAllowances(restored)
+  restored.player.trainingJobs = ensureArray<TrainingJob>(restored.player.trainingJobs).map(normalizeTrainingJob)
+  if (restored.player.trainingJob) {
+    const legacy = normalizeTrainingJob(restored.player.trainingJob)
+    restored.player.trainingJobs = [
+      legacy,
+      ...restored.player.trainingJobs.filter((job) => job.id !== legacy.id),
+    ]
+  }
+  restored.player.trainingJob = restored.player.trainingJobs[0] ?? null
+  restored.player.pricing.plans = restored.player.pricing.plans.map((plan) => ({
+    ...plan,
+    steadyUsageTarget: plan.steadyUsageTarget ?? defaultSteadyPlanUsage(plan.pricePerMonth),
+    demandShocks: ensureArray(plan.demandShocks),
+    modalityRoutes: plan.modalityRoutes ?? normalizedPlanRoutes(restored, plan),
+  }))
   restored.player.safetyCampaign = restored.player.safetyCampaign ?? null
   restored.player.researchUnlocked = ensureArray(restored.player.researchUnlocked)
   restored.player.researchQueue = ensureArray(restored.player.researchQueue)
   restored.player.chips = ensureArray(restored.player.chips)
-  restored.rivals = (ensureArray(restored.rivals) as SimState['rivals']).map((rival) => ({
-    ...rival,
-    models: (ensureArray(rival.models) as Model[]).map((model) => normalizeModelEvaluations(model)),
-  }))
+  restored.rivals = (ensureArray(restored.rivals) as SimState['rivals']).map((rival) => {
+    const canonicalJobs = ensureArray<TrainingJob>(rival.trainingJobs).map(normalizeTrainingJob)
+    if (canonicalJobs.length === 0 && rival.trainingJob) {
+      canonicalJobs.push(rivalJobToCanonical(rival.trainingJob))
+    }
+    return {
+      ...rival,
+      models: (ensureArray(rival.models) as Model[]).map(normalizeModelComputeV2),
+      trainingJobs: canonicalJobs,
+      researchQueue: ensureArray(rival.researchQueue),
+      strategy: rival.strategy ?? {
+        profileId: rival.archetype,
+        goal: rival.servicePain && rival.servicePain > 0.25 ? 'restore_service' : 'ship_model',
+        beliefs: {
+          observedDay: restored.day,
+          frontierCapability: Math.max(0, ...restored.player.models.map((model) => model.capability)),
+          marketPricePerMTok: Math.max(0.01, restored.player.pricing.apiPricePerMTok),
+          demandGrowth: 0,
+          confidence: restored.config.difficulty === 'hard' ? 0.88 : restored.config.difficulty === 'easy' ? 0.58 : 0.72,
+        },
+        plan: [],
+        memory: [],
+        cooldowns: {},
+        decisionRevision: 0,
+        lastOperationalDay: restored.day,
+        lastTacticalDay: restored.day,
+        lastStrategicDay: restored.day,
+      },
+    }
+  })
   restored.computeLeases = ensureArray(restored.computeLeases)
   restored.computeContracts = ensureArray(restored.computeContracts)
   restored.cityPowerContracts = ensureArray(restored.cityPowerContracts)
@@ -506,7 +667,7 @@ function restoreState(stateRaw: unknown, snapshot: DynamicWorldSnapshotV2 | null
         restored.lastMarket.apiDayDirectCogs ?? legacyDirect,
       ),
       apiDayAllocatedOps: Math.max(0, restored.lastMarket.apiDayAllocatedOps ?? 0),
-      modelFinance: ensureArray(restored.lastMarket.modelFinance).map((row) => {
+      modelFinance: (ensureArray(restored.lastMarket.modelFinance) as import('./types').ModelFinanceRow[]).map((row) => {
         const direct = Math.max(0, row.dayApiDirectCogs ?? row.dayApiCogs ?? 0)
         return {
           ...row,
@@ -717,7 +878,7 @@ function validateSaveEnvelope(data: unknown): SaveFile {
       'newer-version',
     )
   }
-  if (candidate.version !== SAVE_VERSION && candidate.version !== 4) {
+  if (candidate.version !== SAVE_VERSION && candidate.version !== 5 && candidate.version !== 4) {
     throw new SaveError(`Unsupported save version ${candidate.version}.`, 'incompatible-version')
   }
   const file = data as SaveFile

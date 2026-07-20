@@ -3,7 +3,10 @@ import { blendApiPrice } from '../balance/pricing'
 import type {
   BenchmarkId,
   Model,
+  ModelIOModality,
+  PlanDemandShock,
   PlanDayStats,
+  PlanModalityRoute,
   PlanServePrecision,
   SegmentId,
   SimState,
@@ -28,6 +31,10 @@ export function defaultPlans(): SubPlan[] {
       modelIds: [],
       computePriority: 20,
       servePrecision: 'fp16',
+      servePrecisionByModel: {},
+      steadyUsageTarget: 0.1,
+      modalityRoutes: {},
+      demandShocks: [],
       enabled: true,
     },
     {
@@ -40,6 +47,10 @@ export function defaultPlans(): SubPlan[] {
       modelIds: [],
       computePriority: 55,
       servePrecision: 'fp16',
+      servePrecisionByModel: {},
+      steadyUsageTarget: 0.3,
+      modalityRoutes: {},
+      demandShocks: [],
       enabled: true,
     },
     {
@@ -52,16 +63,92 @@ export function defaultPlans(): SubPlan[] {
       modelIds: [],
       computePriority: 75,
       servePrecision: 'fp16',
+      servePrecisionByModel: {},
+      steadyUsageTarget: 0.48,
+      modalityRoutes: {},
+      demandShocks: [],
       enabled: true,
     },
   ]
 }
 
+const MODALITY_TRAFFIC_SHARE: Record<ModelIOModality, number> = {
+  text: 0.78,
+  image: 0.1,
+  audio: 0.05,
+  video: 0.07,
+}
+
+export function defaultPremiumRouteShare(pricePerMonth: number): number {
+  if (pricePerMonth <= 0) return 0.05
+  if (pricePerMonth <= 30) return 0.3
+  if (pricePerMonth <= 100) return 0.65
+  return 0.9
+}
+
+export function defaultSteadyPlanUsage(pricePerMonth: number): number {
+  if (pricePerMonth <= 0) return 0.1
+  if (pricePerMonth <= 30) return 0.3
+  if (pricePerMonth <= 100) return 0.48
+  return 0.65
+}
+
+function modelSupportsOutput(model: Model, modality: ModelIOModality): boolean {
+  if ((model.io?.outputs[modality] ?? 0) > 0) return true
+  if (modality === 'text') return model.modalities.includes('text')
+  return model.modalities.includes(modality)
+}
+
+/**
+ * Derive legacy modality routes without changing the authoritative model
+ * roster. New routes intentionally have no fallback: model selection and
+ * precision now live on the plan's compact model roster.
+ */
+export function normalizedPlanRoutes(state: SimState, plan: SubPlan): Partial<Record<ModelIOModality, PlanModalityRoute>> {
+  const routes: Partial<Record<ModelIOModality, PlanModalityRoute>> = {}
+  const released = state.player.models.filter(
+    (model) => (model.release === 'released' || model.shipped) && plan.modelIds.includes(model.id),
+  )
+  for (const modality of Object.keys(MODALITY_TRAFFIC_SHARE) as ModelIOModality[]) {
+    const eligible = released
+      .filter((model) => modelSupportsOutput(model, modality))
+      .toSorted((a, b) => b.capability - a.capability)
+    if (eligible.length === 0) continue
+    routes[modality] = {
+      modality,
+      primaryModelId: eligible[0]?.id ?? null,
+      fallbackModelId: null,
+      premiumShare: defaultPremiumRouteShare(plan.pricePerMonth),
+      precision: planModelServePrecision(plan, eligible[0]!, state.player.researchUnlocked),
+    }
+  }
+  return routes
+}
+
+export function planDemandShockMultiplier(plan: SubPlan, day: number): number {
+  let multiplier = 1
+  for (const shock of plan.demandShocks ?? []) {
+    const age = Math.max(0, day - shock.startedDay)
+    multiplier += shock.amplitude * Math.pow(0.5, age / Math.max(1, shock.halfLifeDays))
+  }
+  return Math.max(0.5, Math.min(2.25, multiplier))
+}
+
+function appendPlanShock(
+  shocks: readonly PlanDemandShock[] | undefined,
+  shock: PlanDemandShock,
+): PlanDemandShock[] {
+  return [...(shocks ?? []).filter((item) => shock.startedDay - item.startedDay <= 84), shock].slice(-12)
+}
+
 /** Which quant levels the lab can assign on plans. */
 export function unlockedPlanPrecisions(unlocked: string[]): PlanServePrecision[] {
-  const out: PlanServePrecision[] = ['fp16']
+  const out: PlanServePrecision[] = ['fp16', 'bf16']
   if (unlocked.includes('sys_quant')) out.push('int8')
-  if (unlocked.includes('sys_fp8')) out.push('int4')
+  if (unlocked.includes('sys_fp8')) out.push('fp8')
+  if (unlocked.includes('sys_int4') || unlocked.includes('sys_fp8')) out.push('int4')
+  if (unlocked.includes('sys_nvfp4_runtime')) out.push('nvfp4')
+  if (unlocked.includes('sys_bitnet_runtime')) out.push('ternary_1_58')
   return out
 }
 
@@ -72,8 +159,62 @@ export function clampServePrecision(
   const allowed = unlockedPlanPrecisions(unlocked)
   const want = p ?? 'fp16'
   if (allowed.includes(want)) return want
-  if (want === 'int4' && allowed.includes('int8')) return 'int8'
+  if ((want === 'int4' || want === 'nvfp4') && allowed.includes('int8')) return 'int8'
+  if (want === 'fp8' && allowed.includes('bf16')) return 'bf16'
   return 'fp16'
+}
+
+/** Research- and checkpoint-compatible formats shown for one plan model. */
+export function availablePlanPrecisionsForModel(
+  model: Model,
+  unlocked: string[],
+): PlanServePrecision[] {
+  return unlockedPlanPrecisions(unlocked).filter(
+    (precision) =>
+      precision !== 'ternary_1_58' ||
+      model.trainingNumerics?.nativeWeightFormat === 'ternary_1_58',
+  )
+}
+
+export function clampModelServePrecision(
+  model: Model,
+  precision: PlanServePrecision | undefined,
+  unlocked: string[],
+): PlanServePrecision {
+  const available = availablePlanPrecisionsForModel(model, unlocked)
+  const clamped = clampServePrecision(precision, unlocked)
+  if (available.includes(clamped)) return clamped
+  return available.includes('bf16') ? 'bf16' : 'fp16'
+}
+
+/** Resolve an individual roster model's format with legacy-save fallbacks. */
+export function planModelServePrecision(
+  plan: SubPlan,
+  model: Model,
+  unlocked: string[],
+): PlanServePrecision {
+  const legacyRoute = Object.values(plan.modalityRoutes ?? {}).find(
+    (route) => route?.primaryModelId === model.id,
+  )
+  return clampModelServePrecision(
+    model,
+    plan.servePrecisionByModel?.[model.id] ?? legacyRoute?.precision ?? plan.servePrecision,
+    unlocked,
+  )
+}
+
+function normalizedPlanModelPrecisions(
+  state: SimState,
+  plan: SubPlan,
+): Record<string, PlanServePrecision> {
+  return Object.fromEntries(
+    plan.modelIds.flatMap((modelId) => {
+      const model = state.player.models.find((candidate) => candidate.id === modelId)
+      return model
+        ? [[modelId, planModelServePrecision(plan, model, state.player.researchUnlocked)] as const]
+        : []
+    }),
+  )
 }
 
 /**
@@ -98,52 +239,78 @@ export function planServeModifiers(
   label: string
 } {
   const p = clampServePrecision(precision, unlocked)
+  if (p === 'ternary_1_58') {
+    return {
+      precision: p,
+      computeMult: 0.22,
+      qualityMult: 0.995,
+      capabilityDelta: 0,
+      benchmarkDeltas: {},
+      brandRisk: 0.006,
+      label: 'Native 1.58-bit',
+    }
+  }
+  if (p === 'nvfp4') {
+    return {
+      precision: p,
+      computeMult: 0.28,
+      qualityMult: 0.985,
+      capabilityDelta: -0.5,
+      benchmarkDeltas: {},
+      brandRisk: 0.018,
+      label: 'NVFP4 artifact',
+    }
+  }
   if (p === 'int4') {
     return {
       precision: p,
-      computeMult: 0.42,
-      qualityMult: 0.74,
-      capabilityDelta: -14,
+      computeMult: 0.34,
+      qualityMult: 0.93,
+      capabilityDelta: -3,
       benchmarkDeltas: {
-        mmlu: -11,
-        coding: -15,
-        math: -14,
-        vision: -9,
-        law: -12,
-        health: -11,
-        science: -12,
-        multilingual: -9,
-        agents: -15,
-        safety: -8,
+        mmlu: -2,
+        coding: -4,
+        math: -4,
+        vision: -2,
+        law: -3,
+        health: -3,
+        science: -3,
+        multilingual: -2,
+        agents: -4,
+        safety: -1,
       },
-      brandRisk: 0.32,
+      brandRisk: 0.08,
       label: 'INT4 quant',
     }
   }
   if (p === 'int8') {
     return {
       precision: p,
-      computeMult: 0.68,
-      qualityMult: 0.94,
-      capabilityDelta: -3,
+      computeMult: 0.58,
+      qualityMult: 0.99,
+      capabilityDelta: -0.5,
       benchmarkDeltas: {
-        mmlu: -2,
-        coding: -4,
-        math: -3,
-        vision: -2,
-        law: -2,
-        health: -2,
-        science: -2,
-        multilingual: -2,
-        agents: -4,
-        safety: -1,
+        coding: -1,
+        math: -1,
+        agents: -1,
       },
-      brandRisk: 0.035,
+      brandRisk: 0.012,
       label: 'INT8 quant',
     }
   }
+  if (p === 'fp8') {
+    return {
+      precision: p,
+      computeMult: 0.55,
+      qualityMult: 0.995,
+      capabilityDelta: 0,
+      benchmarkDeltas: {},
+      brandRisk: 0.004,
+      label: 'FP8 runtime',
+    }
+  }
   return {
-    precision: 'fp16',
+    precision: p === 'bf16' ? 'bf16' : 'fp16',
     computeMult: 1,
     qualityMult: 1,
     capabilityDelta: 0,
@@ -159,7 +326,12 @@ export function modelForServePrecision(
   precision: PlanServePrecision | undefined,
   unlocked: string[],
 ): Model {
-  const m = planServeModifiers(precision, unlocked)
+  const requested =
+    precision === 'ternary_1_58' &&
+    model.trainingNumerics?.nativeWeightFormat !== 'ternary_1_58'
+      ? 'fp16'
+      : precision
+  const m = planServeModifiers(requested, unlocked)
   return {
     ...model,
     inferCostMult: (model.inferCostMult ?? 1) * m.computeMult,
@@ -186,7 +358,11 @@ export function modelForPlanServe(
   plan: SubPlan,
   unlocked: string[],
 ): Model {
-  return modelForServePrecision(model, plan.servePrecision, unlocked)
+  return modelForServePrecision(
+    model,
+    planModelServePrecision(plan, model, unlocked),
+    unlocked,
+  )
 }
 
 export interface PlanModelTraffic {
@@ -268,25 +444,19 @@ export function allocatePlanCompute<T extends { plan: SubPlan; demandPf: number 
 }
 
 /**
- * Token router for plans that expose more than one model. Free plans favor
+ * Token router for the plan's released-model roster. Free plans favor
  * efficient models; expensive plans route more traffic to higher capability.
+ * Legacy primary/fallback fields are intentionally ignored here so a removed
+ * model can never continue receiving hidden fallback traffic.
  */
 export function planModelTrafficMix(state: SimState, plan: SubPlan): PlanModelTraffic[] {
   const publicModel = (model: Model) => model.release === 'released' || model.shipped
   const selected = plan.modelIds
     .map((id) => state.player.models.find((model) => model.id === id && publicModel(model)))
     .filter((model): model is Model => Boolean(model))
-  if (selected.length === 0) {
-    const fallback = state.player.models.find(
-      (model) => model.id === state.player.pricing.activeModelId && publicModel(model),
-    ) ?? state.player.models.find(publicModel)
-    if (fallback) selected.push(fallback)
-  }
   if (selected.length === 0) return []
 
-  const served = selected.map((model) =>
-    modelForPlanServe(model, plan, state.player.researchUnlocked),
-  )
+  const served = selected.map((model) => modelForPlanServe(model, plan, state.player.researchUnlocked))
   const maxCapability = Math.max(...served.map((model) => model.capability), 1)
   const pfPerMTok = served.map((model) => Math.max(1e-6, inferencePfDemand(1, model, 1)))
   const cheapest = Math.min(...pfPerMTok)
@@ -373,7 +543,25 @@ export function createPlan(
         ? 'int8'
         : 'fp16'
       : 'fp16',
+    servePrecisionByModel: {},
+    steadyUsageTarget: defaultSteadyPlanUsage(input.pricePerMonth),
+    modalityRoutes: {},
+    demandShocks: [],
     enabled: true,
+  }
+  plan.servePrecisionByModel = normalizedPlanModelPrecisions(state, plan)
+  plan.modalityRoutes = normalizedPlanRoutes(state, plan)
+  for (const route of Object.values(plan.modalityRoutes)) {
+    if (!route?.primaryModelId) continue
+    plan.demandShocks = appendPlanShock(plan.demandShocks, {
+      id: seededId('plan-shock', state.seed, state.day, plan.id, route.modality),
+      kind: 'launch',
+      modality: route.modality,
+      modelId: route.primaryModelId,
+      startedDay: state.day,
+      amplitude: 0.35,
+      halfLifeDays: 14,
+    })
   }
 
   return {
@@ -422,7 +610,7 @@ export function updatePlan(state: SimState, planId: string, patch: Partial<SubPl
           ? ECONOMY.basePlanUsageMTokPerDay * usageMultiplier * ECONOMY.daysPerMonth
           : p.includedMTokPerMonth ??
             ECONOMY.basePlanUsageMTokPerDay * p.usageMultiplier * ECONOMY.daysPerMonth
-    return {
+    const next: SubPlan = {
       ...p,
       ...patch,
       id: p.id,
@@ -444,8 +632,82 @@ export function updatePlan(state: SimState, planId: string, patch: Partial<SubPl
         patch.servePrecision !== undefined
           ? clampServePrecision(patch.servePrecision, state.player.researchUnlocked)
           : p.servePrecision ?? 'fp16',
+      steadyUsageTarget:
+        patch.steadyUsageTarget !== undefined
+          ? Math.max(0.02, Math.min(0.9, patch.steadyUsageTarget))
+          : p.steadyUsageTarget ?? defaultSteadyPlanUsage(patch.pricePerMonth ?? p.pricePerMonth),
       name: patch.name !== undefined ? patch.name.trim() || p.name : p.name,
     }
+    const requestedPrecisions = patch.servePrecisionByModel !== undefined
+      ? patch.servePrecisionByModel
+      : patch.servePrecision !== undefined
+        ? Object.fromEntries(next.modelIds.map((modelId) => [modelId, patch.servePrecision!]))
+        : p.servePrecisionByModel
+    next.servePrecisionByModel = normalizedPlanModelPrecisions(state, {
+      ...next,
+      servePrecisionByModel: requestedPrecisions,
+    })
+    const firstModelPrecision = next.modelIds[0]
+      ? next.servePrecisionByModel[next.modelIds[0]]
+      : undefined
+    if (firstModelPrecision) next.servePrecision = firstModelPrecision
+    // The model roster is authoritative after any edit. Rebuild compatibility
+    // routes without hidden fallback assignments.
+    next.modalityRoutes = normalizedPlanRoutes(state, {
+      ...next,
+      modalityRoutes: {},
+    })
+    let shocks = next.demandShocks ?? []
+    const oldIds = new Set(p.modelIds)
+    const newIds = new Set(next.modelIds)
+    for (const modelId of newIds) {
+      if (oldIds.has(modelId)) continue
+      const model = state.player.models.find((candidate) => candidate.id === modelId)
+      const modality = (['text', 'image', 'audio', 'video'] as ModelIOModality[])
+        .find((candidate) => model && modelSupportsOutput(model, candidate)) ?? 'text'
+      shocks = appendPlanShock(shocks, {
+        id: seededId('plan-shock', state.seed, state.day, p.id, modelId, 'add'),
+        kind: 'launch',
+        modality,
+        modelId,
+        startedDay: state.day,
+        amplitude: 0.35,
+        halfLifeDays: 14,
+      })
+    }
+    for (const modelId of oldIds) {
+      if (newIds.has(modelId)) continue
+      shocks = appendPlanShock(shocks, {
+        id: seededId('plan-shock', state.seed, state.day, p.id, modelId, 'remove'),
+        kind: 'removal',
+        modality: 'text',
+        modelId,
+        startedDay: state.day,
+        amplitude: next.modelIds.length > 0 ? -0.15 : -0.4,
+        halfLifeDays: 21,
+      })
+    }
+    for (const modelId of next.modelIds) {
+      if (!oldIds.has(modelId)) continue
+      const model = state.player.models.find((candidate) => candidate.id === modelId)
+      if (!model) continue
+      const before = planModelServePrecision(p, model, state.player.researchUnlocked)
+      const after = planModelServePrecision(next, model, state.player.researchUnlocked)
+      if (before === after) continue
+      const modality = (['text', 'image', 'audio', 'video'] as ModelIOModality[])
+        .find((candidate) => modelSupportsOutput(model, candidate)) ?? 'text'
+      shocks = appendPlanShock(shocks, {
+        id: seededId('plan-shock', state.seed, state.day, p.id, modelId, after),
+        kind: 'quantization',
+        modality,
+        modelId,
+        startedDay: state.day,
+        amplitude: -0.1,
+        halfLifeDays: 21,
+      })
+    }
+    next.demandShocks = shocks
+    return next
   })
   return {
     ...state,
@@ -486,7 +748,30 @@ export function deletePlan(state: SimState, planId: string): SimState {
 export function attachModelToEmptyPlans(state: SimState, modelId: string): SimState {
   const plans = state.player.pricing.plans.map((p) => {
     if (p.modelIds.length > 0) return p
-    return { ...p, modelIds: [modelId] }
+    const model = state.player.models.find((candidate) => candidate.id === modelId)
+    const precision = model
+      ? clampModelServePrecision(model, p.servePrecision, state.player.researchUnlocked)
+      : clampServePrecision(p.servePrecision, state.player.researchUnlocked)
+    const next = {
+      ...p,
+      modelIds: [modelId],
+      servePrecisionByModel: { [modelId]: precision },
+    }
+    const routes = normalizedPlanRoutes(state, next)
+    const modality = (Object.keys(routes) as ModelIOModality[])[0] ?? 'text'
+    return {
+      ...next,
+      modalityRoutes: routes,
+      demandShocks: appendPlanShock(p.demandShocks, {
+        id: seededId('plan-shock', state.seed, state.day, p.id, modelId),
+        kind: 'launch',
+        modality,
+        modelId,
+        startedDay: state.day,
+        amplitude: 0.35,
+        halfLifeDays: 14,
+      }),
+    }
   })
   return {
     ...state,
@@ -634,12 +919,7 @@ export function bestModelOnPlan(state: SimState, plan: SubPlan) {
   const models = plan.modelIds
     .map((id) => state.player.models.find((m) => m.id === id && publicOk(m)))
     .filter(Boolean)
-  if (models.length === 0) {
-    const active = state.player.models.find(
-      (m) => m.id === state.player.pricing.activeModelId && publicOk(m),
-    )
-    return active ?? null
-  }
+  if (models.length === 0) return null
   return models.sort((a, b) => (b!.capability ?? 0) - (a!.capability ?? 0))[0] ?? null
 }
 

@@ -50,6 +50,62 @@ describe('workspace presentation', () => {
 })
 
 describe('map navigation', () => {
+  it('keeps the Build workspace open when placement mode starts', () => {
+    useGameStore.setState({
+      activePanel: 'map',
+      leftRailOpen: false,
+      selectedTile: { x: 4, y: 7 },
+      buildMode: null,
+    })
+
+    useGameStore.getState().setBuildMode('dc')
+
+    expect(useGameStore.getState()).toMatchObject({
+      activePanel: 'build',
+      leftRailOpen: true,
+      selectedTile: null,
+      buildMode: 'dc',
+    })
+  })
+
+  it('retains the chosen blueprint for consecutive map placements', () => {
+    const state = createGame({
+      seed: 813,
+      difficulty: 'easy',
+      advanced: { mapWidth: 60, mapHeight: 60, cityCount: 3, rivalCount: 1 },
+    })
+    const open = state.map.tiles.filter(
+      (tile) =>
+        tile.kind === 'empty' &&
+        tile.owner === 'neutral' &&
+        tile.regionId !== 'void',
+    )
+    expect(open.length).toBeGreaterThanOrEqual(2)
+    const first = open[0]!
+    const second = open[1]!
+    useGameStore.setState({
+      phase: 'playing',
+      state: {
+        ...state,
+        player: { ...state.player, cash: 1_000_000_000_000 },
+      },
+      activePanel: 'build',
+      leftRailOpen: true,
+      selectedTile: null,
+      buildMode: null,
+    })
+
+    useGameStore.getState().setBuildMode('solar')
+    useGameStore.getState().selectTile(first.x, first.y)
+    useGameStore.getState().selectTile(second.x, second.y)
+
+    const placed = useGameStore.getState()
+    expect(placed.buildMode).toBe('solar')
+    expect(placed.activePanel).toBe('build')
+    expect(placed.state.map.tiles.find((tile) => tile.x === first.x && tile.y === first.y)?.kind).toBe('solar')
+    expect(placed.state.map.tiles.find((tile) => tile.x === second.x && tile.y === second.y)?.kind).toBe('solar')
+  })
+
   it('issues repeatable focus requests for rival facility shortcuts', () => {
     useGameStore.setState({ mapFocusRequest: null, selectedTile: null, buildMode: 'dc' })
     useGameStore.getState().focusMapTile(17, 23)

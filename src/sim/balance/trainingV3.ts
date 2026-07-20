@@ -20,6 +20,7 @@ import {
   modalityComputeMultiplier,
   trainCostPfDays,
 } from './training'
+import { ECONOMY } from './economy'
 import { modelStackModifiers } from './modelStack'
 
 const DOMAIN_COUNT = 9
@@ -267,7 +268,9 @@ export function forecastTrainingV3(opts: {
     io: opts.spec.io,
     plan: opts.spec.dataPlan,
     data: opts.labData,
-    actualMTok: Math.min(requested, totalProcessed(opts.labData)),
+    actualMTok: opts.spec.dataPlan.allowSynthetic
+      ? requested
+      : Math.min(requested, totalProcessed(opts.labData)),
     quality: opts.dataQuality * 70,
   })
   const targetPfDays = trainCostPfDays({
@@ -297,7 +300,7 @@ export function forecastTrainingV3(opts: {
   return {
     targetPfDays,
     etaDays: opts.trainPoolPf > 0.001 ? Math.ceil(targetPfDays / opts.trainPoolPf) : Number.POSITIVE_INFINITY,
-    upfrontCash: Math.floor(targetPfDays * 12_000),
+    upfrontCash: Math.floor(targetPfDays * ECONOMY.trainUpfrontPerPfDay),
     weightedMTok: analysis.effectiveMTok,
     effectiveDataRatio: analysis.effectiveDataRatio,
     repeatedDataEpochs: analysis.repeatedEpochs,

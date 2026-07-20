@@ -7,6 +7,8 @@ import {
   ensureLabData,
   estimateAllDataPrunes,
   estimateDataPrune,
+  estimateDataPruneAudit,
+  purchaseDataPruneAudit,
   researchPoolForTech,
   tickData,
 } from './data'
@@ -18,7 +20,7 @@ function game(): SimState {
     difficulty: 'easy',
     advanced: { mapWidth: 24, mapHeight: 24, cityCount: 2, rivalCount: 1 },
   })
-  return {
+  const configured: SimState = {
     ...state,
     player: {
       ...state.player,
@@ -38,9 +40,32 @@ function game(): SimState {
       },
     ],
   }
+  return purchaseDataPruneAudit(configured)
 }
 
 describe('low-quality data pruning', () => {
+  it('charges for a time-limited audit before revealing actionable prune volumes', () => {
+    const audited = game()
+    const locked = {
+      ...audited,
+      player: {
+        ...audited.player,
+        data: { ...ensureLabData(audited), pruneAuditValidUntilDay: undefined },
+      },
+    }
+    const quote = estimateDataPruneAudit(locked)
+    const beforeCash = locked.player.cash
+    const before = estimateDataPrune(locked, 'code')
+    const next = purchaseDataPruneAudit(locked)
+
+    expect(quote.ok).toBe(true)
+    expect(before.ok).toBe(false)
+    expect(before.reason).toContain('Run corpus audit')
+    expect(next.player.cash).toBeCloseTo(beforeCash - quote.cashCost, 5)
+    expect(estimateDataPruneAudit(next).unlocked).toBe(true)
+    expect(estimateDataPrune(next, 'code').ok).toBe(true)
+  })
+
   it('previews real cash, PF-day, token, and researcher requirements', () => {
     const state = game()
     const estimate = estimateDataPrune(state, 'code')

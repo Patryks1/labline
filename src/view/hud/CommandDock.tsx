@@ -1,13 +1,11 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import {
   BellRinging,
   CaretLeft,
   CaretRight,
   ChartLine,
-  TrendUp,
   UsersThree,
 } from '@phosphor-icons/react'
-import { buildLabStats, sparkPath } from '../../sim/systems/stats'
 import { competitiveCatchUpSnapshot } from '../../sim/systems/sharedMarkets'
 import { useGameStore } from '../../store/gameStore'
 import { money, num, pct } from './format'
@@ -90,14 +88,13 @@ export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boole
 
           <div className="panel-scroll relative z-10 min-h-0 flex-1 overflow-y-auto p-3">
             {view === 'pnl' && <PnlView onOpenStats={() => setPanel('stats')} />}
-            {view === 'trends' && <TrendsView onOpenStats={() => setPanel('stats')} />}
             {view === 'rivals' && (
               <RivalsView
                 onOpenMarket={() => setPanel('market')}
                 onInspect={() => setPanel('rivals')}
               />
             )}
-            {view === 'feed' && <FeedView onOpenWorld={() => setPanel('events')} />}
+            {view === 'feed' && <FeedView />}
           </div>
 
           <div className="relative z-10 border-t border-line/60 px-2.5 py-1.5 font-mono text-[0.625rem] text-muted">
@@ -112,7 +109,7 @@ export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boole
 }
 
 function CommandIcon({ id }: { id: CommandViewId }) {
-  const Icon = id === 'pnl' ? ChartLine : id === 'trends' ? TrendUp : id === 'rivals' ? UsersThree : BellRinging
+  const Icon = id === 'pnl' ? ChartLine : id === 'rivals' ? UsersThree : BellRinging
   return <Icon size="1.05rem" weight="duotone" aria-hidden />
 }
 
@@ -302,69 +299,6 @@ function compactPeople(value: number): string {
   return Math.round(value).toLocaleString()
 }
 
-function TrendsView({ onOpenStats }: { onOpenStats: () => void }) {
-  const state = useGameStore((s) => s.state)
-  const stats = useMemo(() => buildLabStats(state), [state])
-  const t = stats.trends
-
-  if (t.days.length < 2) {
-    return (
-      <p className="rounded-lg border border-line bg-panel-2 p-2 text-[0.8125rem] text-muted">
-        Trends fill as days advance. Unpause or step (+).
-      </p>
-    )
-  }
-
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-center justify-between">
-        <h2 className="text-[0.6875rem] font-medium uppercase tracking-wider text-muted">Trends</h2>
-        <button type="button" onClick={onOpenStats} className="text-[0.75rem] text-mint hover:underline">
-          Full
-        </button>
-      </div>
-      <MiniSpark label="Revenue" values={t.revenue} format={money} />
-      <MiniSpark label="Net" values={t.net} format={money} />
-      <MiniSpark label="Cash" values={t.cash} format={money} />
-      <MiniSpark label="Share" values={t.share} format={(v) => pct(v, 1)} />
-      <MiniSpark label="Served" values={t.servedMTok} format={(v) => num(v, 1)} />
-      <MiniSpark label="PF" values={t.effectivePf} format={(v) => num(v, 2)} />
-    </div>
-  )
-}
-
-function MiniSpark({
-  label,
-  values,
-  format,
-}: {
-  label: string
-  values: number[]
-  format: (n: number) => string
-}) {
-  const last = values[values.length - 1] ?? 0
-  const first = values[0] ?? 0
-  const delta = last - first
-  const path = sparkPath(values, 160, 24)
-  return (
-    <div className="rounded-lg border border-line bg-panel-2 px-2 py-1">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[0.75rem] text-muted">{label}</span>
-        <div className="text-right font-mono text-[0.75rem]">
-          <span className={last < 0 ? 'text-danger' : 'text-bone'}>{format(last)}</span>
-          <span className={`ml-1 ${delta >= 0 ? 'text-mint' : 'text-danger'}`}>
-            {delta >= 0 ? '+' : ''}
-            {format(delta)}
-          </span>
-        </div>
-      </div>
-      <svg viewBox="0 0 160 24" className="mt-0.5 h-5 w-full text-mint/80" preserveAspectRatio="none">
-        <path d={path} fill="none" stroke="currentColor" strokeWidth="1.4" />
-      </svg>
-    </div>
-  )
-}
-
 function RivalsView({
   onOpenMarket,
   onInspect,
@@ -434,26 +368,23 @@ function RivalsView({
   )
 }
 
-function FeedView({ onOpenWorld }: { onOpenWorld: () => void }) {
+function FeedView() {
   const state = useGameStore((s) => s.state)
   const alerts = state.alerts.slice(0, 8)
 
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between">
-        <h2 className="text-[0.6875rem] font-medium uppercase tracking-wider text-muted">Feed</h2>
-        <button type="button" onClick={onOpenWorld} className="text-[0.75rem] text-mint hover:underline">
-          World
-        </button>
+        <h2 className="text-[0.6875rem] font-medium uppercase tracking-wider text-muted">World wire</h2>
+        <span className="font-mono text-[0.625rem] text-muted">D{state.day}</span>
       </div>
       {state.activeEvents[0] && (
-        <div className="rounded-lg border border-amber/30 bg-amber/10 px-2 py-1.5 text-[0.8125rem] text-amber">
-          <div className="font-medium text-bone">{state.activeEvents[0].title}</div>
-          <div className="mt-0.5 text-[0.75rem] text-muted">{state.activeEvents[0].duration}d left</div>
+        <div className="rounded-xl border border-amber/30 bg-amber/5 px-2.5 py-2 text-[0.8125rem] text-amber">
+          <div className="flex gap-2"><div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-amber/20 font-mono text-[0.625rem]">WI</div><div className="min-w-0"><div className="text-[0.6875rem] text-muted"><strong className="text-bone">World Intelligence</strong> @worldwire · D{state.day}</div><div className="mt-1 text-[0.75rem] leading-snug text-bone">{state.activeEvents[0].title}</div><div className="mt-1 text-[0.6875rem] text-amber">{state.activeEvents[0].duration}d remaining</div></div></div>
         </div>
       )}
       {alerts.map((a) => (
-        <div
+        <article
           key={a.id}
           className={`rounded-lg border px-2 py-1.5 text-[0.75rem] leading-snug ${
             a.severity === 'danger'
@@ -463,13 +394,11 @@ function FeedView({ onOpenWorld }: { onOpenWorld: () => void }) {
                 : 'border-line bg-panel-2 text-muted'
           }`}
         >
-          {a.message}
-        </div>
+          <div className="flex gap-2"><div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-void font-mono text-[0.625rem]">OPS</div><div className="min-w-0"><div className="mb-1 text-[0.625rem] text-muted"><strong className="text-bone">Labline Ops</strong> @operations · D{a.day}</div>{a.message}<div className="mt-1.5 flex gap-4 font-mono text-[0.625rem] opacity-60"><span>↗ signal</span><span>◇ watch</span></div></div></div>
+        </article>
       ))}
       {state.news.slice(0, 4).map((n, i) => (
-        <div key={i} className="rounded-lg border border-line/50 px-2 py-1.5 text-[0.75rem] text-muted">
-          {n}
-        </div>
+        <article key={i} className="rounded-xl border border-line/50 px-2.5 py-2 text-[0.75rem] text-muted"><div className="flex gap-2"><div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-mint/10 font-mono text-[0.625rem] text-mint">NW</div><div><div className="mb-1 text-[0.625rem]"><strong className="text-bone">Frontier News</strong> @frontier · D{Math.max(0, state.day - i)}</div>{n}<div className="mt-1.5 flex gap-4 font-mono text-[0.625rem] opacity-60"><span>↗ share</span><span>◇ save</span></div></div></div></article>
       ))}
       {alerts.length === 0 && state.news.length === 0 && (
         <p className="text-[0.8125rem] text-muted">Quiet wire.</p>

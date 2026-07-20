@@ -23,6 +23,25 @@ function providerAvailable(state: SimState, providerId: string): number {
 }
 
 describe('provider compute contracts', () => {
+  it('snapshots provider accelerator and numerical-format capabilities', () => {
+    const state = endStarterContract(createGame(799))
+    const provider = state.worldMarkets.cloudProviders.find(
+      (candidate) => candidate.id === 'cloud-northstar',
+    )!
+    const quote = quoteComputeContract(state, {
+      providerId: provider.id,
+      buyerLabId: state.playerLabId,
+      kind: 'on_demand',
+      pf: 24,
+      termDays: 30,
+    })
+    expect(provider.acceleratorGeneration).toBe(2)
+    expect(provider.supportedTrainingFormats).toContain('fp8_hybrid')
+    expect(quote.contract.acceleratorGeneration).toBe(provider.acceleratorGeneration)
+    expect(quote.contract.supportedTrainingFormats).toEqual(provider.supportedTrainingFormats)
+    expect(quote.contract.supportedTrainingFormats).not.toBe(provider.supportedTrainingFormats)
+  })
+
   it('allows long-running on-demand contracts beyond 180 days', () => {
     const state = endStarterContract(createGame(800))
     const quote = quoteComputeContract(state, {
@@ -397,7 +416,7 @@ describe('provider compute contracts', () => {
 })
 
 describe('remote compute integration', () => {
-  it('provides full train and serve infrastructure with zero local racks or power', () => {
+  it('backfills an unused serve reservation into training with zero local racks or power', () => {
     const state = createGame(807)
     expect(state.player.rackFleet).toEqual([])
 
@@ -405,7 +424,8 @@ describe('remote compute integration', () => {
     const withoutCloud = computeSnapshot({ ...state, computeContracts: [] })
     expect(cloud.rawFlopsPf).toBeGreaterThanOrEqual(24)
     expect(cloud.pools.training).toBeGreaterThan(4)
-    expect(cloud.pools.inference).toBeGreaterThan(3)
+    expect(cloud.pools.inference).toBe(0)
+    expect(cloud.backfilledPf).toBeGreaterThan(0)
     expect(cloud.vramDerateTrain).toBe(1)
     expect(cloud.vramDerateServe).toBe(1)
     expect(cloud.systemRamDerate).toBe(1)

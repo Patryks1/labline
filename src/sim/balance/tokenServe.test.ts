@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   familyServeMult,
+  estimateServingWorkload,
   modelServeCostMult,
   mtokPerDayFromTps,
   sizeTokMult,
@@ -24,6 +25,14 @@ const dense7 = {
   tokPerSecMult: 1,
 }
 
+const dense1 = {
+  paramsB: 1,
+  activeParamsB: 1,
+  family: 'dense' as const,
+  inferCostMult: 1,
+  tokPerSecMult: 0.75,
+}
+
 const moe70 = {
   paramsB: 70,
   activeParamsB: 8,
@@ -41,8 +50,8 @@ const omni7 = {
 }
 
 describe('tokenServe', () => {
-  it('family multipliers: moe 0.7, dense 1, omni 1.5', () => {
-    expect(familyServeMult('moe')).toBe(0.7)
+  it('family multipliers count MoE routing overhead after active experts', () => {
+    expect(familyServeMult('moe')).toBe(1.08)
     expect(familyServeMult('dense')).toBe(1)
     expect(familyServeMult('omni')).toBe(1.5)
   })
@@ -66,23 +75,65 @@ describe('tokenServe', () => {
     expect(modelServeCostMult(moe70)).toBeLessThan(modelServeCostMult(dense70))
   })
 
-  it('96× H100-class 400M at 80% serve clears well past early demand', () => {
-    // 96 * 2200 t/s hardware
-    const hw = 96 * 2200
+  it('converts effective PF-days directly into model-specific capacity', () => {
     const cap = tokensPerDayCapacity({
-      hardwareTokPerSec: hw,
+      effectivePfDays: 96 * 0.989 * 0.7,
       model: dense400,
       servingEfficiency: 0.55,
-      inferenceShare: 0.8,
-      util: 0.48,
-      powerDerate: 0.9,
-      vramDerate: 1,
-      systemRamDerate: 1,
-      cpuDerate: 1,
+      inferenceShare: 1,
     })
-    // After 5× mult: full small hall + 400M clears well into 100k+ MTok/d
     expect(cap).toBeGreaterThan(120_000)
-    expect(cap).toBeLessThan(2_000_000)
+    expect(cap).toBeLessThan(10_000_000)
+  })
+
+  it('one H100-class device supports at least 2,000 full 20M-token users', () => {
+    const capacityMTokPerDay = tokensPerDayCapacity({
+      // H100 BF16 dense peak after a conservative 70% online efficiency.
+      effectivePfDays: 0.989 * 0.7,
+      model: dense1,
+      servingEfficiency: 1,
+      inferenceShare: 1,
+    })
+    const fullAllowanceUsers = capacityMTokPerDay / (20 / 30)
+
+    expect(fullAllowanceUsers).toBeGreaterThan(2_000)
+  })
+
+  it('puts 70.6B daily tokens on a 1B model in single-digit PF', () => {
+    const estimate = estimateServingWorkload({
+      model: dense1,
+      inputMTok: 70_600 * 0.7,
+      outputMTok: 70_600 * 0.3,
+      servingEfficiency: 1,
+    })
+
+    expect(estimate.physicalPfDays).toBeGreaterThan(1.6)
+    expect(estimate.physicalPfDays).toBeLessThan(1.75)
+    expect(estimate.physicalPfDays / 0.35).toBeLessThan(5)
+  })
+
+  it('reports context, precision, and HBM constraints explicitly', () => {
+    const bf16 = estimateServingWorkload({
+      model: dense7,
+      inputMTok: 100,
+      outputMTok: 20,
+      precision: 'bf16',
+      avgInputTokens: 16_384,
+      concurrentRequests: 32,
+      batchSize: 8,
+      hbmGb: 8,
+    })
+    const fp8 = estimateServingWorkload({
+      model: dense7,
+      inputMTok: 100,
+      outputMTok: 20,
+      precision: 'fp8',
+    })
+
+    expect(bf16.fitsHbm).toBe(false)
+    expect(bf16.bottleneck).toBe('hbm_capacity')
+    expect(fp8.physicalPfDays).toBeLessThan(bf16.physicalPfDays)
+    expect(fp8.weightMemoryGb).toBeLessThan(bf16.weightMemoryGb)
   })
 
   it('SKU tok scales with model size', () => {

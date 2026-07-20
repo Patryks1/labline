@@ -11,6 +11,9 @@ import {
 import {
   startTraining,
   advancePostTrain,
+  selectPostTrain,
+  cancelTraining,
+  benchmarkTrainingJob,
   shipModel,
   keepInternal,
   releaseFromJob,
@@ -20,6 +23,7 @@ import {
   setModelApiInOut,
   applyModelApiMarkup,
 } from '../sim/systems/training'
+import { applyLabAction } from '../sim/systems/labActionKernel'
 import {
   cancelSafetyCampaign,
   startSafetyCampaign,
@@ -70,6 +74,8 @@ import {
   setAutoProcess,
   setCollectionRate,
   startSynthGen,
+  startSynthBudget,
+  purchaseDataPruneAudit,
   type DataPortfolioChannel,
 } from '../sim/systems/data'
 import { createPlan, updatePlan, deletePlan } from '../sim/systems/plans'
@@ -180,10 +186,15 @@ interface GameStore {
   setChipDesignFocus: (focus: ChipDesignFocus) => void
   toggleChipDesignTech: (techId: ChipDesignTechId) => void
   startTraining: (opts: StartTrainingOpts) => void
-  advancePostTrain: () => void
+  setTrainingPriority: (jobId: string, priority: number, reservedPf?: number) => void
+  pauseTraining: (jobId: string, paused: boolean) => void
+  cancelTraining: (jobId: string) => void
+  selectPostTrain: (jobId: string, stage: Exclude<import('../sim/types').PostTrainStage, 'none'>) => void
+  benchmarkTrainingJob: (jobId: string) => void
+  advancePostTrain: (jobId?: string) => void
   shipModel: () => void
-  keepInternal: () => void
-  releaseFromJob: () => void
+  keepInternal: (jobId?: string) => void
+  releaseFromJob: (jobId?: string) => void
   releaseModel: (id: string) => void
   deleteModel: (id: string) => void
   setModelApiPrice: (id: string, price: number | null) => void
@@ -239,6 +250,7 @@ interface GameStore {
   enqueueProcessAll: () => void
   enqueueDataPrune: (domain: DataDomain) => void
   enqueueAllDataPrunes: () => void
+  purchaseDataPruneAudit: () => void
   startSynthGen: (opts: {
     domain: DataDomain
     modelId: string
@@ -246,6 +258,7 @@ interface GameStore {
     researchShare: number
     qualityTier?: 'hq' | 'lq'
   }) => void
+  startSynthBudget: (opts: { researchShare: number }) => void
   cancelSynthGen: (jobId: string) => void
   buyDomainContract: (contractId: string) => void
   dismissOnboarding: () => void
@@ -482,10 +495,11 @@ export const useGameStore = create<GameStore>((set, get) => ({
   setBuildMode: (k) =>
     set({
       buildMode: k,
-      // Entering build mode jumps to Sites; clearing leaves the current panel alone
+      // Build is its own workspace now. Keep its catalogue visible while the
+      // player previews, drags, and multi-places facilities on the map.
       ...(k
         ? {
-            activePanel: 'map' as const,
+            activePanel: 'build' as const,
             leftRailOpen: true,
             selectedTile: null,
           }
@@ -533,7 +547,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
         selectedTile: ok ? { x, y } : null,
         state: next,
         buildMode: get().buildMode,
-        activePanel: 'map',
+        activePanel: 'build',
         leftRailOpen: true,
       })
       return
@@ -626,10 +640,32 @@ export const useGameStore = create<GameStore>((set, get) => ({
   cancelActiveResearch: () => set((st) => ({ state: cancelActiveResearch(st.state) })),
 
   startTraining: (opts) => set((st) => ({ state: startTraining(st.state, opts) })),
-  advancePostTrain: () => set((st) => ({ state: advancePostTrain(st.state) })),
+  setTrainingPriority: (jobId, priority, reservedPf) =>
+    set((st) => ({
+      state: applyLabAction(st.state, st.state.playerLabId, {
+        kind: 'set_training_priority',
+        jobId,
+        priority,
+        reservedPf,
+      }),
+    })),
+  pauseTraining: (jobId, paused) =>
+    set((st) => ({
+      state: applyLabAction(st.state, st.state.playerLabId, {
+        kind: 'pause_training',
+        jobId,
+        paused,
+      }),
+    })),
+  cancelTraining: (jobId) => set((st) => ({ state: cancelTraining(st.state, jobId) })),
+  selectPostTrain: (jobId, stage) =>
+    set((st) => ({ state: selectPostTrain(st.state, jobId, stage) })),
+  benchmarkTrainingJob: (jobId) =>
+    set((st) => ({ state: benchmarkTrainingJob(st.state, jobId) })),
+  advancePostTrain: (jobId) => set((st) => ({ state: advancePostTrain(st.state, jobId) })),
   shipModel: () => set((st) => ({ state: shipModel(st.state) })),
-  keepInternal: () => set((st) => ({ state: keepInternal(st.state) })),
-  releaseFromJob: () => set((st) => ({ state: releaseFromJob(st.state) })),
+  keepInternal: (jobId) => set((st) => ({ state: keepInternal(st.state, jobId) })),
+  releaseFromJob: (jobId) => set((st) => ({ state: releaseFromJob(st.state, jobId) })),
   releaseModel: (id) => set((st) => ({ state: releaseModel(st.state, id) })),
   deleteModel: (id) => set((st) => ({ state: deleteModel(st.state, id) })),
   setModelApiPrice: (id, price) => set((st) => ({ state: setModelApiPrice(st.state, id, price) })),
@@ -783,8 +819,10 @@ export const useGameStore = create<GameStore>((set, get) => ({
   enqueueProcessAll: () => set((st) => ({ state: enqueueProcessAll(st.state) })),
   enqueueDataPrune: (domain) => set((st) => ({ state: enqueueDataPrune(st.state, domain) })),
   enqueueAllDataPrunes: () => set((st) => ({ state: enqueueAllDataPrunes(st.state) })),
+  purchaseDataPruneAudit: () => set((st) => ({ state: purchaseDataPruneAudit(st.state) })),
 
   startSynthGen: (opts) => set((st) => ({ state: startSynthGen(st.state, opts) })),
+  startSynthBudget: (opts) => set((st) => ({ state: startSynthBudget(st.state, opts) })),
   cancelSynthGen: (jobId) => set((st) => ({ state: cancelSynthGen(st.state, jobId) })),
   buyDomainContract: (contractId) =>
     set((st) => ({ state: buyDomainContract(st.state, contractId) })),

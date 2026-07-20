@@ -1,14 +1,12 @@
 import { useMemo, useState } from 'react'
+import { Handshake, PaperPlaneTilt } from '@phosphor-icons/react'
 import {
   acceptComputeOffer,
   activeLeases,
   cancelComputeLease,
-  minComputeLeasePricePerPfDay,
   openOffers,
-  playerSparePf,
   rejectComputeOffer,
   rivalHostingBalance,
-  signPlayerComputeSale,
 } from '../../../sim/systems/computeMarket'
 import { useGameStore } from '../../../store/gameStore'
 import { useUiStore } from '../../../store/uiStore'
@@ -18,11 +16,16 @@ import {
   signComputeContract,
   terminateComputeContract,
 } from '../../../sim/systems/computeContracts'
-import type { ComputeContractKind } from '../../../sim/types'
 import { computeLabSnapshot } from '../../../sim/systems/labEngine'
 import { CapacitySalesCeilingCard } from '../ui/CapacitySalesCeilingCard'
-
-type NegotiationStatus = 'idle' | 'countered' | 'accepted'
+import {
+  NegotiationHeader,
+  NegotiationMessage,
+  NegotiationMetric,
+  NegotiationMood,
+  NegotiationSlider,
+  type NegotiationStatus,
+} from '../ui/NegotiationRoom'
 
 type ProviderEvent = {
   title: string
@@ -68,41 +71,6 @@ const PROVIDER_EVENTS: ProviderEvent[] = [
   },
 ]
 
-const BUYER_EVENTS: ProviderEvent[] = [
-  {
-    title: 'Training deadline',
-    body: 'The lab needs a short burst of capacity before a training checkpoint closes.',
-    priceMultiplier: 1.12,
-    capacityMultiplier: 1.25,
-    riskDelta: 0,
-    satisfactionDelta: 10,
-  },
-  {
-    title: 'Capacity shortfall',
-    body: 'A delayed hall leaves the buyer exposed. They will pay a premium for a dependable block.',
-    priceMultiplier: 1.08,
-    capacityMultiplier: 1.35,
-    riskDelta: 0,
-    satisfactionDelta: 8,
-  },
-  {
-    title: 'Expansion window',
-    body: 'Product demand is rising and procurement has room for one additional capacity partner.',
-    priceMultiplier: 1.05,
-    capacityMultiplier: 1.1,
-    riskDelta: 0,
-    satisfactionDelta: 5,
-  },
-  {
-    title: 'Procurement review',
-    body: 'Finance is challenging every infrastructure contract. A leaner ask will close faster.',
-    priceMultiplier: 0.93,
-    capacityMultiplier: 0.8,
-    riskDelta: 0,
-    satisfactionDelta: -10,
-  },
-]
-
 function clamp(min: number, max: number, value: number): number {
   return Math.max(min, Math.min(max, value))
 }
@@ -110,11 +78,6 @@ function clamp(min: number, max: number, value: number): number {
 function providerEvent(day: number, providerId: string): ProviderEvent {
   const hash = [...providerId].reduce((sum, char) => sum + char.charCodeAt(0), 0)
   return PROVIDER_EVENTS[Math.abs(hash + Math.floor(day / 5)) % PROVIDER_EVENTS.length]
-}
-
-function buyerEvent(day: number, rivalId: string): ProviderEvent {
-  const hash = [...rivalId].reduce((sum, char) => sum + char.charCodeAt(0), 0)
-  return BUYER_EVENTS[Math.abs(hash + Math.floor(day / 4)) % BUYER_EVENTS.length]
 }
 
 /**
@@ -133,19 +96,11 @@ export function ComputeMarketPanel() {
       state.worldMarkets.cloudProviders[0]?.id ??
       '',
   )
-  const [cloudKind, setCloudKind] = useState<ComputeContractKind>('on_demand')
   const [cloudPf, setCloudPf] = useState(24)
   const [cloudTerm, setCloudTerm] = useState(90)
   const [offerPercent, setOfferPercent] = useState(95)
   const [negotiationStatus, setNegotiationStatus] = useState<NegotiationStatus>('idle')
   const [negotiationMessage, setNegotiationMessage] = useState('')
-  const [saleRivalId, setSaleRivalId] = useState(state.rivals[0]?.id ?? '')
-  const [salePf, setSalePf] = useState(24)
-  const [saleTerm, setSaleTerm] = useState(90)
-  const [askPercent, setAskPercent] = useState(110)
-  const [saleNegotiationStatus, setSaleNegotiationStatus] =
-    useState<NegotiationStatus>('idle')
-  const [saleNegotiationMessage, setSaleNegotiationMessage] = useState('')
   const resetNegotiation = () => {
     setNegotiationStatus('idle')
     setNegotiationMessage('')
@@ -155,11 +110,11 @@ export function ComputeMarketPanel() {
       quoteComputeContract(state, {
         providerId: cloudProviderId,
         buyerLabId: state.playerLabId,
-        kind: cloudKind,
+        kind: 'on_demand',
         pf: cloudPf,
         termDays: cloudTerm,
       }),
-    [state, cloudProviderId, cloudKind, cloudPf, cloudTerm],
+    [state, cloudProviderId, cloudPf, cloudTerm],
   )
   const selectedProvider = state.worldMarkets.cloudProviders.find(
     (provider) => provider.id === cloudProviderId,
@@ -259,66 +214,6 @@ export function ComputeMarketPanel() {
       detail: `${active.filter((lease) => !lease.playerSells).length} live rival lease${active.filter((lease) => !lease.playerSells).length === 1 ? '' : 's'}`,
     },
   ]
-  const selectedBuyer = state.rivals.find((rival) => rival.id === saleRivalId)
-  const selectedBuyerBalance = selectedBuyer
-    ? rivalHostingBalance(state, selectedBuyer)
-    : null
-  const sparePf = playerSparePf(state)
-  const saleEvent = buyerEvent(state.day, saleRivalId)
-  const saleFloor = minComputeLeasePricePerPfDay(state)
-  const buyerNeedPf = selectedBuyerBalance
-    ? Math.max(0, selectedBuyerBalance.needPf - selectedBuyerBalance.totalPf)
-    : 0
-  const baseBuyerAppetite = selectedBuyerBalance
-    ? buyerNeedPf + Math.max(8, selectedBuyerBalance.totalPf * 0.12)
-    : 0
-  const buyerAppetitePf = Math.max(
-    0,
-    Math.min(
-      sparePf,
-      400,
-      Math.floor(baseBuyerAppetite * saleEvent.capacityMultiplier),
-    ),
-  )
-  const salePricePerPfDay = Math.max(
-    saleFloor,
-    saleFloor * (askPercent / 100) * saleEvent.priceMultiplier,
-  )
-  const saleDailyRevenue = salePf * salePricePerPfDay
-  const existingSale = active.some(
-    (lease) => lease.playerSells && lease.rivalId === saleRivalId,
-  )
-  const saleSatisfaction = clamp(
-    0,
-    100,
-    58 +
-      Math.min(14, buyerNeedPf / 8) +
-      Math.min(10, saleTerm / 45) -
-      Math.max(0, askPercent - 105) * 0.85 -
-      (salePf / Math.max(1, buyerAppetitePf)) * 18 +
-      saleEvent.satisfactionDelta,
-  )
-  const saleCanNegotiate =
-    Boolean(selectedBuyer) &&
-    sparePf >= 2 &&
-    salePf >= 2 &&
-    salePf <= buyerAppetitePf &&
-    salePf <= sparePf &&
-    !existingSale
-  const saleReason = existingSale
-    ? `${selectedBuyer?.name ?? 'This lab'} already has a live capacity contract.`
-    : sparePf < 2
-      ? 'No spare compute is available to sell.'
-      : salePf > buyerAppetitePf
-        ? `${selectedBuyer?.name ?? 'Buyer'} will currently take up to ${buyerAppetitePf.toFixed(0)} PF.`
-        : salePf > sparePf
-          ? `Only ${sparePf.toFixed(0)} PF is spare.`
-          : ''
-  const resetSaleNegotiation = () => {
-    setSaleNegotiationStatus('idle')
-    setSaleNegotiationMessage('')
-  }
-
   return (
     <div className="space-y-3">
       <div>
@@ -332,174 +227,210 @@ export function ComputeMarketPanel() {
 
       <CapacitySalesCeilingCard state={state} />
 
-      <section className="space-y-2 rounded-xl border border-mint/25 bg-mint/5 p-3">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h3 className="text-[0.8125rem] font-semibold text-bone">Provider deal room</h3>
-            <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">
-              Build a package, make an offer, and protect the relationship. Remote PF includes power, memory, and hosting.
-            </p>
-          </div>
-          <span className="shrink-0 rounded-full border border-mint/25 bg-void/60 px-2 py-0.5 font-mono text-[0.6875rem] text-mint">
-            {Math.round(providerSatisfaction)} satisfaction
-          </span>
-        </div>
-        <div className="h-1.5 overflow-hidden rounded-full bg-void">
-          <div
-            className={`h-full transition-[width] ${providerSatisfaction >= 58 ? 'bg-mint' : providerSatisfaction >= 40 ? 'bg-amber' : 'bg-danger'}`}
-            style={{ width: `${providerSatisfaction}%` }}
-          />
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          <label className="text-[0.6875rem] text-muted">
-            Provider
+      <section className="overflow-hidden rounded-2xl border border-mint/25 bg-panel-2/90">
+        <NegotiationHeader
+          title="Provider desk"
+          subtitle="Live capacity negotiation"
+          status={negotiationStatus}
+        />
+
+        <div className="space-y-2 p-2.5">
+          <label className="flex items-center gap-2 rounded-lg border border-line/70 bg-void/55 px-2 py-1.5">
+            <span className="shrink-0 font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">
+              Chat with
+            </span>
             <select
               value={cloudProviderId}
               onChange={(event) => {
                 setCloudProviderId(event.target.value)
                 resetNegotiation()
               }}
-              className="mt-0.5 w-full rounded border border-line bg-void px-1.5 py-1 text-[0.75rem] text-bone"
+              className="min-w-0 flex-1 bg-transparent text-right text-[0.75rem] font-medium text-bone outline-none"
+              aria-label="Compute provider"
             >
               {state.worldMarkets.cloudProviders.map((provider) => (
-                <option key={provider.id} value={provider.id}>
-                  {provider.name} · {provider.availablePf.toFixed(0)} PF
+                <option key={provider.id} value={provider.id} className="bg-void">
+                  {provider.name} · {provider.availablePf.toFixed(0)} PF open
                 </option>
               ))}
             </select>
           </label>
-          <label className="text-[0.6875rem] text-muted">
-            Route
-            <select
-              value={cloudKind}
-              onChange={(event) => {
-                setCloudKind(event.target.value as ComputeContractKind)
-                resetNegotiation()
-              }}
-              className="mt-0.5 w-full rounded border border-line bg-void px-1.5 py-1 text-[0.75rem] text-bone"
-            >
-              <option value="on_demand">On-demand</option>
-              <option value="reserved">Reserved</option>
-              <option value="spot">Spot</option>
-              <option value="colocation">Colocation</option>
-              <option value="emergency">Emergency</option>
-            </select>
-          </label>
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          <Field
-            label="Capacity PF"
-            value={cloudPf}
-            set={(value) => {
-              setCloudPf(value)
-              resetNegotiation()
-            }}
-            min={1}
-            max={1000}
-            step={1}
-          />
-          <Field
-            label="Term days"
-            value={cloudTerm}
-            set={(value) => {
-              setCloudTerm(value)
-              resetNegotiation()
-            }}
-            min={1}
-            max={720}
-            step={1}
-          />
-        </div>
-        <div className="rounded-lg border border-violet/25 bg-violet/5 px-2.5 py-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[0.75rem] font-medium text-bone">{dealEvent.title}</span>
-            <span className="font-mono text-[0.6875rem] text-violet">D{state.day} market event</span>
+
+          <div className="space-y-2 rounded-xl border border-line/60 bg-void/35 p-2">
+            <NegotiationMessage side="provider" name={selectedProvider?.name ?? 'Provider'}>
+              <span className="font-medium text-bone">{dealEvent.title}</span>
+              <span className="mt-0.5 block text-muted">{dealEvent.body}</span>
+              <span className="mt-1.5 flex flex-wrap gap-1 font-mono text-[0.625rem] text-muted">
+                <span className="rounded-full bg-void/70 px-1.5 py-0.5">
+                  {selectedProvider?.availablePf.toFixed(0) ?? 0} PF open
+                </span>
+                <span className="rounded-full bg-void/70 px-1.5 py-0.5">
+                  {((selectedProvider?.reliability ?? 0) * 100).toFixed(1)}% uptime
+                </span>
+              </span>
+            </NegotiationMessage>
+
+            <NegotiationMessage side="player" name="You">
+              <span className="font-medium text-bone">Here’s my proposal.</span>
+              <span className="mt-0.5 block text-muted">
+                {cloudPf.toFixed(0)} PF for {cloudTerm} days at {offerPercent}% of list.
+              </span>
+            </NegotiationMessage>
+
+            {negotiationMessage && (
+              <NegotiationMessage
+                side="provider"
+                name={selectedProvider?.name ?? 'Provider'}
+                status={negotiationStatus}
+              >
+                {negotiationMessage}
+              </NegotiationMessage>
+            )}
           </div>
-          <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">{dealEvent.body}</p>
+
+          {negotiationStatus !== 'signed' && (
+            <>
+              <div className="rounded-xl border border-line/70 bg-void/45 p-2">
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <span className="font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">
+                    Your offer
+                  </span>
+                  <span className="text-[0.6875rem] text-muted">Drag to negotiate</span>
+                </div>
+                <div className="space-y-1.5">
+                  <NegotiationSlider
+                    label="Compute"
+                    value={cloudPf}
+                    min={1}
+                    max={Math.max(
+                      1,
+                      Math.min(1000, Math.floor(selectedProvider?.availablePf ?? 1)),
+                    )}
+                    suffix=" PF"
+                    onChange={(value) => {
+                      setCloudPf(value)
+                      resetNegotiation()
+                    }}
+                  />
+                  <NegotiationSlider
+                    label="Term"
+                    value={cloudTerm}
+                    min={1}
+                    max={720}
+                    suffix=" days"
+                    onChange={(value) => {
+                      setCloudTerm(value)
+                      resetNegotiation()
+                    }}
+                  />
+                  <NegotiationSlider
+                    label="Offer"
+                    value={offerPercent}
+                    min={70}
+                    max={115}
+                    suffix="% list"
+                    onChange={(value) => {
+                      setOfferPercent(value)
+                      resetNegotiation()
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-4 gap-1 font-mono text-[0.6875rem]">
+                <NegotiationMetric label="Capacity" value={`${negotiatedQuote.contract.pf.toFixed(0)} PF`} />
+                <NegotiationMetric label="Daily" value={money(negotiatedQuote.dailyCost)} />
+                <NegotiationMetric label="Term" value={`${negotiatedQuote.contract.daysTotal}d`} />
+                <NegotiationMetric
+                  label="Risk"
+                  value={`${(negotiatedQuote.contract.interruptionRisk * 100).toFixed(1)}%`}
+                />
+              </div>
+
+              <NegotiationMood score={providerSatisfaction} />
+
+              {!negotiatedQuote.canSign && (
+                <p className="rounded-lg border border-amber/30 bg-amber/5 px-2 py-1.5 text-[0.75rem] text-amber">
+                  {negotiatedQuote.reason}
+                </p>
+              )}
+            </>
+          )}
+
+          {(negotiationStatus === 'idle' || negotiationStatus === 'countered') && (
+            <button
+              type="button"
+              disabled={!negotiatedQuote.canSign}
+              className="btn-primary flex w-full items-center justify-center gap-1.5 py-1.5 text-[0.8125rem] disabled:cursor-not-allowed disabled:opacity-40"
+              onClick={() => {
+                if (providerSatisfaction >= 58) {
+                  const signed = signComputeContract(state, negotiatedQuote)
+                  setState({
+                    ...signed,
+                    news: [
+                      `Day ${state.day}: ${selectedProvider?.name ?? 'Provider'} accepts and activates a negotiated ${negotiatedQuote.contract.pf.toFixed(0)} PF package after ${dealEvent.title.toLowerCase()}.`,
+                      ...signed.news,
+                    ].slice(0, 48),
+                  })
+                  setNegotiationStatus('signed')
+                  setNegotiationMessage(
+                    `Deal accepted. ${negotiatedQuote.contract.pf.toFixed(0)} PF is live now; billing starts today.`,
+                  )
+                  return
+                }
+                if (providerSatisfaction < 30) {
+                  setNegotiationStatus('declined')
+                  setNegotiationMessage(
+                    'We can’t approve that package. Reduce the capacity or improve the price.',
+                  )
+                  return
+                }
+                const counter = Math.min(
+                  115,
+                  offerPercent + Math.max(2, Math.ceil((58 - providerSatisfaction) / 2)),
+                )
+                setOfferPercent(counter)
+                setNegotiationStatus('countered')
+                setNegotiationMessage(
+                  `We can do ${counter}% of list. Send that offer or adjust the package.`,
+                )
+              }}
+            >
+              <PaperPlaneTilt size={15} weight="fill" />
+              {negotiationStatus === 'countered' ? 'Send counter-offer' : 'Send proposal'}
+            </button>
+          )}
+          {negotiationStatus === 'signed' && (
+            <div className="flex items-center justify-center gap-1.5 rounded-lg border border-mint/35 bg-mint/10 px-2 py-1.5 text-[0.8125rem] font-medium text-mint">
+              <Handshake size={16} weight="duotone" />
+              Contract active · compute online
+            </div>
+          )}
+          {negotiationStatus === 'declined' && (
+            <button
+              type="button"
+              className="btn-ghost flex w-full items-center justify-center gap-1.5 py-1.5 text-[0.8125rem]"
+              onClick={resetNegotiation}
+            >
+              <Handshake size={15} />
+              Edit proposal
+            </button>
+          )}
         </div>
-        <label className="block rounded-lg border border-line/70 bg-void/45 px-2.5 py-2 text-[0.6875rem] text-muted">
-          <span className="flex items-center justify-between gap-2">
-            <span>Your offer</span>
-            <span className="font-mono text-bone">{offerPercent}% of list</span>
-          </span>
-          <input
-            type="range"
-            min={70}
-            max={115}
-            step={1}
-            value={offerPercent}
-            onChange={(event) => {
-              setOfferPercent(Number(event.target.value))
-              resetNegotiation()
-            }}
-            className="mt-1 w-full accent-mint"
-            aria-label="Provider offer percent of list price"
-          />
-        </label>
-        <div className="grid grid-cols-3 gap-1 font-mono text-[0.6875rem]">
-          <Quote label="Daily" value={money(negotiatedQuote.dailyCost)} />
-          <Quote label="$/PF-day" value={money(negotiatedQuote.contract.pricePerPfDay)} />
-          <Quote
-            label="Interrupt"
-            value={`${(negotiatedQuote.contract.interruptionRisk * 100).toFixed(1)}%`}
-          />
-        </div>
-        {!negotiatedQuote.canSign && <p className="text-[0.75rem] text-amber">{negotiatedQuote.reason}</p>}
-        {negotiationMessage && (
-          <p className={`rounded-lg border px-2 py-1.5 text-[0.75rem] ${negotiationStatus === 'accepted' ? 'border-mint/30 bg-mint/5 text-mint' : 'border-amber/30 bg-amber/5 text-amber'}`}>
-            {negotiationMessage}
-          </p>
-        )}
-        {negotiationStatus !== 'accepted' ? (
-          <button
-            type="button"
-            disabled={!negotiatedQuote.canSign}
-            className="btn-primary w-full py-1.5 text-[0.8125rem] disabled:cursor-not-allowed disabled:opacity-40"
-            onClick={() => {
-              if (providerSatisfaction >= 58) {
-                setNegotiationStatus('accepted')
-                setNegotiationMessage(`${selectedProvider?.name ?? 'Provider'} accepts. Lock the package before the window moves.`)
-                return
-              }
-              const counter = Math.min(115, offerPercent + Math.max(2, Math.ceil((58 - providerSatisfaction) / 2)))
-              setOfferPercent(counter)
-              setNegotiationStatus('countered')
-              setNegotiationMessage(`${selectedProvider?.name ?? 'Provider'} counters at ${counter}% of list. Longer terms or a stronger offer improve satisfaction.`)
-            }}
-          >
-            Negotiate {negotiatedQuote.contract.pf.toFixed(0)} PF package
-          </button>
-        ) : (
-          <button
-            type="button"
-            disabled={!negotiatedQuote.canSign}
-            className="btn-primary w-full py-1.5 text-[0.8125rem] disabled:cursor-not-allowed disabled:opacity-40"
-            onClick={() => {
-              const signed = signComputeContract(state, negotiatedQuote)
-              setState({
-                ...signed,
-                news: [
-                  `Day ${state.day}: ${selectedProvider?.name ?? 'Provider'} closes a negotiated ${negotiatedQuote.contract.pf.toFixed(0)} PF package after ${dealEvent.title.toLowerCase()}.`,
-                  ...signed.news,
-                ].slice(0, 48),
-              })
-              resetNegotiation()
-            }}
-          >
-            Sign deal · {negotiatedQuote.contract.daysTotal} days
-          </button>
-        )}
 
         {providerContracts.length > 0 && (
-          <div className="space-y-1 border-t border-mint/15 pt-2">
+          <div className="space-y-1 border-t border-line/70 bg-void/25 px-2.5 py-2">
+            <div className="font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">
+              Active contracts
+            </div>
             {providerContracts.map((contract) => (
               <div key={contract.id} className="flex items-center justify-between gap-2 rounded-lg border border-line/70 bg-void/45 px-2 py-1.5">
                 <div className="min-w-0">
                   <div className="truncate text-[0.75rem] text-bone">
-                    {contract.providerName} · {contract.kind.replaceAll('_', ' ')}
+                    {contract.providerName} · {contract.pf.toFixed(0)} PF
                   </div>
                   <div className="font-mono text-[0.6875rem] text-muted">
-                    {contract.pf.toFixed(0)} PF · {money(contract.pf * contract.pricePerPfDay)}/d · {contract.daysLeft}d ·{' '}
+                    {money(contract.pf * contract.pricePerPfDay)}/day · {contract.daysLeft}d left ·{' '}
                     {contract.availableDay != null && contract.availableDay > state.day
                       ? `provisions D${contract.availableDay}`
                       : contract.status}
@@ -518,152 +449,6 @@ export function ComputeMarketPanel() {
         )}
       </section>
 
-      <section className="space-y-2 rounded-xl border border-violet/30 bg-violet/5 p-3">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h3 className="text-[0.8125rem] font-semibold text-bone">Capacity sales desk</h3>
-            <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">
-              Package spare PF, negotiate with a rival, and earn daily contract revenue.
-            </p>
-          </div>
-          <span className="shrink-0 rounded-full border border-violet/30 bg-void/60 px-2 py-0.5 font-mono text-[0.6875rem] text-violet">
-            {Math.round(saleSatisfaction)} satisfaction
-          </span>
-        </div>
-        <div className="h-1.5 overflow-hidden rounded-full bg-void">
-          <div
-            className={`h-full transition-[width] ${saleSatisfaction >= 58 ? 'bg-violet' : saleSatisfaction >= 40 ? 'bg-amber' : 'bg-danger'}`}
-            style={{ width: `${saleSatisfaction}%` }}
-          />
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          <label className="text-[0.6875rem] text-muted">
-            Buyer
-            <select
-              value={saleRivalId}
-              onChange={(event) => {
-                setSaleRivalId(event.target.value)
-                resetSaleNegotiation()
-              }}
-              className="mt-0.5 w-full rounded border border-line bg-void px-1.5 py-1 text-[0.75rem] text-bone"
-            >
-              {state.rivals.map((rival) => (
-                <option key={rival.id} value={rival.id}>
-                  {rival.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="rounded border border-line bg-void px-1.5 py-1">
-            <span className="block text-[0.6875rem] text-muted">Available package</span>
-            <span className="font-mono text-[0.75rem] text-bone">
-              {num(sparePf, 0)} PF spare · {num(buyerAppetitePf, 0)} PF wanted
-            </span>
-          </div>
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          <Field
-            label="Capacity PF"
-            value={salePf}
-            set={(value) => {
-              setSalePf(value)
-              resetSaleNegotiation()
-            }}
-            min={2}
-            max={400}
-            step={1}
-          />
-          <Field
-            label="Term days"
-            value={saleTerm}
-            set={(value) => {
-              setSaleTerm(value)
-              resetSaleNegotiation()
-            }}
-            min={7}
-            max={720}
-            step={1}
-          />
-        </div>
-        <div className="rounded-lg border border-violet/25 bg-void/45 px-2.5 py-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[0.75rem] font-medium text-bone">{saleEvent.title}</span>
-            <span className="font-mono text-[0.6875rem] text-violet">D{state.day} buyer event</span>
-          </div>
-          <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">{saleEvent.body}</p>
-        </div>
-        <label className="block rounded-lg border border-line/70 bg-void/45 px-2.5 py-2 text-[0.6875rem] text-muted">
-          <span className="flex items-center justify-between gap-2">
-            <span>Your ask</span>
-            <span className="font-mono text-bone">{askPercent}% of market floor</span>
-          </span>
-          <input
-            type="range"
-            min={90}
-            max={160}
-            step={1}
-            value={askPercent}
-            onChange={(event) => {
-              setAskPercent(Number(event.target.value))
-              resetSaleNegotiation()
-            }}
-            className="mt-1 w-full accent-violet"
-            aria-label="Compute sale ask percent of market floor"
-          />
-        </label>
-        <div className="grid grid-cols-3 gap-1 font-mono text-[0.6875rem]">
-          <Quote label="Daily revenue" value={money(saleDailyRevenue)} />
-          <Quote label="$/PF-day" value={money(salePricePerPfDay)} />
-          <Quote label="Contract" value={money(saleDailyRevenue * saleTerm)} />
-        </div>
-        {saleReason && <p className="text-[0.75rem] text-amber">{saleReason}</p>}
-        {saleNegotiationMessage && (
-          <p className={`rounded-lg border px-2 py-1.5 text-[0.75rem] ${saleNegotiationStatus === 'accepted' ? 'border-mint/30 bg-mint/5 text-mint' : 'border-amber/30 bg-amber/5 text-amber'}`}>
-            {saleNegotiationMessage}
-          </p>
-        )}
-        {saleNegotiationStatus !== 'accepted' ? (
-          <button
-            type="button"
-            disabled={!saleCanNegotiate}
-            className="btn-primary w-full py-1.5 text-[0.8125rem] disabled:cursor-not-allowed disabled:opacity-40"
-            onClick={() => {
-              if (saleSatisfaction >= 58) {
-                setSaleNegotiationStatus('accepted')
-                setSaleNegotiationMessage(`${selectedBuyer?.name ?? 'Buyer'} accepts the package. Commit the spare PF to start daily settlement.`)
-                return
-              }
-              const counter = Math.max(90, askPercent - Math.max(2, Math.ceil((58 - saleSatisfaction) / 2)))
-              setAskPercent(counter)
-              setSaleNegotiationStatus('countered')
-              setSaleNegotiationMessage(`${selectedBuyer?.name ?? 'Buyer'} counters at ${counter}% of market floor. A smaller block or longer term improves satisfaction.`)
-            }}
-          >
-            Negotiate sale · {salePf.toFixed(0)} PF
-          </button>
-        ) : (
-          <button
-            type="button"
-            disabled={!saleCanNegotiate}
-            className="btn-primary w-full py-1.5 text-[0.8125rem] disabled:cursor-not-allowed disabled:opacity-40"
-            onClick={() => {
-              setState(
-                signPlayerComputeSale(state, {
-                  rivalId: saleRivalId,
-                  pf: salePf,
-                  pricePerPfDay: salePricePerPfDay,
-                  termDays: saleTerm,
-                  note: `${saleEvent.title}: negotiated at ${askPercent}% of market floor.`,
-                }),
-              )
-              resetSaleNegotiation()
-            }}
-          >
-            Sign sale · {saleTerm} days
-          </button>
-        )}
-      </section>
-
       {/* Incoming offers */}
       <div>
         <h3 className="mb-1.5 text-[0.8125rem] font-semibold text-bone">
@@ -671,7 +456,7 @@ export function ComputeMarketPanel() {
         </h3>
         {offers.length === 0 ? (
           <p className="text-[0.8125rem] text-muted">
-            No open offers. Rivals approach when they have unused capacity or need your listing.
+            No open offers. Rivals send offers when they have spare compute and need cash.
           </p>
         ) : (
           <div className="space-y-1.5">
@@ -872,45 +657,5 @@ function ComputeCapacityPie({ entries }: { entries: ComputeCapacityEntry[] }) {
         </div>
       </div>
     </section>
-  )
-}
-
-function Field({
-  label,
-  value,
-  set,
-  min,
-  max,
-  step,
-}: {
-  label: string
-  value: number
-  set: (n: number) => void
-  min: number
-  max: number
-  step: number
-}) {
-  return (
-    <label className="text-[0.6875rem] text-muted">
-      {label}
-      <input
-        type="number"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => set(Number(e.target.value) || min)}
-        className="mt-0.5 w-full rounded border border-line bg-void px-1.5 py-1 font-mono text-[0.8125rem] text-bone"
-      />
-    </label>
-  )
-}
-
-function Quote({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded border border-line/60 bg-void/40 px-1.5 py-1">
-      <span className="block text-muted">{label}</span>
-      <span className="text-bone">{value}</span>
-    </div>
   )
 }

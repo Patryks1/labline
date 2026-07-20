@@ -8,12 +8,19 @@ import type { ComputeSnapshot } from '../systems/compute'
 import { ECONOMY } from './economy'
 import {
   modelCostMult,
-  pfPerMTokForModel as pfPerMTokToken,
+  pfPerMTokForModel as pfPerMTokPhysical,
   serveAgainstTokenPool,
   serveEffFactor,
   tokensPerDayFromSnapshotPrecise,
   type ServeModelPick,
 } from './tokenServe'
+export {
+  ledgerRowsForChannel,
+  settleComputeLedger,
+  type ComputeLedger,
+  type ComputeLedgerRow,
+  type ComputeWorkItem,
+} from './serveLedger'
 
 export { serveEffFactor, modelCostMult, serveAgainstTokenPool }
 export { sizeTokMult, familyServeMult, mtokPerDayForSku } from './tokenServe'
@@ -25,7 +32,7 @@ export function pfPerMTokForModel(
   model: Pick<Model, 'paramsB' | 'activeParamsB' | 'family' | 'inferCostMult'>,
   servingEfficiency = 1,
 ): number {
-  return pfPerMTokToken(model, servingEfficiency, ECONOMY.pfPerMTokAt7B)
+  return pfPerMTokPhysical(model, servingEfficiency)
 }
 
 /** Inference PF available today (pool already is train/serve/research split). */
@@ -43,25 +50,14 @@ export function inferenceCapacityMTok(
   inferenceShare?: number,
 ): number {
   if (!model) return 0
-  const share =
-    inferenceShare ??
-    // Fallback: assume snapshot pools already encode share — use 1 so we don't double-tax
-    // when caller passes a snap whose pools.inference is already the serve slice.
-    // Prefer explicit share from market.
-    1
-  // When share omitted, approximate from pool vs raw effective
-  let inferShare = share
-  if (inferenceShare == null) {
-    const total =
-      snap.pools.training + snap.pools.inference + snap.pools.research
-    inferShare =
-      total > 1e-9 ? snap.pools.inference / total : 0.35
-  }
+  // The snapshot pool already includes the configured allocation and all fleet
+  // derates. Passing that share through the token path again used to tax serving
+  // twice, so the explicit argument is retained only for API compatibility.
+  void inferenceShare
   return tokensPerDayFromSnapshotPrecise(
     snap,
     model,
     servingEfficiency,
-    inferShare,
   )
 }
 
@@ -88,8 +84,7 @@ export function serveAgainstInferencePool(
   if (capacityPf <= 1e-12) {
     return { serveFrac: 0, unservedRatio: 1, servedPf: 0 }
   }
-  const slack = 1.02
-  const serveFrac = Math.min(1, (capacityPf * slack) / demandPf)
+  const serveFrac = Math.min(1, capacityPf / demandPf)
   return {
     serveFrac: Math.min(1, serveFrac),
     unservedRatio: Math.max(0, 1 - Math.min(1, capacityPf / demandPf)),
@@ -105,32 +100,25 @@ export function planUsageUtilization(
   allPlans: SubPlan[],
   opts?: { modelCapability?: number; frontierCapability?: number },
 ): number {
-  const enabled = allPlans.filter((p) => p.enabled)
-  const paid = enabled.filter((p) => p.pricePerMonth > 0)
   const cap = opts?.modelCapability ?? 50
   const frontier = Math.max(opts?.frontierCapability ?? cap, cap)
   const sota = Math.max(0, Math.min(1, (cap - 25) / Math.max(25, frontier - 25 + 1e-6)))
-
-  if (plan.pricePerMonth <= 0) {
-    return Math.min(0.55, 0.28 + sota * 0.18)
-  }
-
-  if (paid.length <= 1) {
-    const p = plan.pricePerMonth
-    let u = 0.52 + Math.min(0.45, Math.log10(p + 1) / 3.2)
-    u = Math.min(1, u * (1 + sota * 0.18))
-    return Math.max(0.15, Math.min(1, u))
-  }
-
-  const prices = paid.map((p) => p.pricePerMonth).sort((a, b) => a - b)
-  const minP = prices[0]!
-  const maxP = prices[prices.length - 1]!
-  const rank =
-    maxP <= minP ? 0.5 : (plan.pricePerMonth - minP) / (maxP - minP)
-
-  let u = 0.5 + rank * 0.48
-  u = Math.min(1, u * (1 + sota * 0.15))
-  return Math.max(0.15, Math.min(1, u))
+  void allPlans
+  // Steady-state allowance use is a tier promise, not a hidden multiplier over
+  // entitlement. SOTA quality moves a plan within its band but never beyond it.
+  const [low, high] =
+    plan.pricePerMonth <= 0
+      ? [0.05, 0.15]
+      : plan.pricePerMonth <= 25
+        ? [0.2, 0.4]
+        : plan.pricePerMonth <= 180
+          ? [0.35, 0.6]
+          : [0.5, 0.8]
+  const endogenous = low + (high - low) * sota
+  const configured = plan.steadyUsageTarget
+  return configured == null
+    ? endogenous
+    : Math.max(low, Math.min(high, configured * (0.9 + sota * 0.2)))
 }
 
 /** Allowance MTok/user/day × utilization = actual use. */

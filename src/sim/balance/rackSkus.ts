@@ -1,7 +1,37 @@
-import type { RackDesign, RackSku, SimState } from '../types'
+import type { AcceleratorProfile, RackDesign, RackSku, SimState } from '../types'
 
-/** Global effective-compute uplift applied to every complete rack. */
-export const RACK_PF_MULTIPLIER = 2
+/** @deprecated Compute-v2 stores physical aggregate throughput per node. */
+export const RACK_PF_MULTIPLIER = 1
+
+function accelerator(
+  input: Omit<AcceleratorProfile, 'supportedTrainingFormats' | 'supportedServePrecisions'>,
+): AcceleratorProfile {
+  const training: AcceleratorProfile['supportedTrainingFormats'] = [
+    'fp32',
+    'fp16_mixed',
+    'bf16_mixed',
+  ]
+  const serving: AcceleratorProfile['supportedServePrecisions'] = [
+    'fp16',
+    'bf16',
+    'int8',
+    'int4',
+    'ternary_1_58',
+  ]
+  if (input.generation >= 2) {
+    training.push('fp8_hybrid')
+    serving.push('fp8')
+  }
+  if (input.generation >= 3) {
+    training.push('nvfp4')
+    serving.push('nvfp4')
+  }
+  return {
+    ...input,
+    supportedTrainingFormats: training,
+    supportedServePrecisions: serving,
+  }
+}
 
 /**
  * Complete rack products you order into a data hall.
@@ -14,12 +44,26 @@ const BASE_RACK_SKU_CATALOG: RackSku[] = [
     blurb: 'Entry training/serve rack. Cheap, power-hungry for the FLOPS.',
     generation: 1,
     rackUnits: 1,
-    flopsPf: 0.35,
-    vramGb: 80,
+    flopsPf: 2.496,
+    vramGb: 640,
     systemRamGb: 256,
     cpuScore: 24,
     mw: 0.0065,
-    tokPerSec: 1100,
+    tokPerSec: 24_000,
+    accelerator: accelerator({
+      deviceCount: 8,
+      generation: 1,
+      fp32TfPerDevice: 19.5,
+      fp16Bf16TfPerDevice: 312,
+      fp8TfPerDevice: 0,
+      fp4TfPerDevice: 0,
+      hbmGbPerDevice: 80,
+      hbmBandwidthTbPerSecPerDevice: 2.04,
+      interconnectGbps: 600,
+      idleMw: 0.0021,
+      maxMw: 0.0056,
+      hostOverheadMw: 0.0009,
+    }),
     price: 180_500,
     leadTimeDays: 4,
     sellBackRate: 0.42,
@@ -31,12 +75,26 @@ const BASE_RACK_SKU_CATALOG: RackSku[] = [
     blurb: 'Workhorse dense-training rack. Best $/PF early game.',
     generation: 2,
     rackUnits: 1,
-    flopsPf: 0.7,
-    vramGb: 80,
+    flopsPf: 7.912,
+    vramGb: 640,
     systemRamGb: 512,
     cpuScore: 40,
     mw: 0.0072,
-    tokPerSec: 2200,
+    tokPerSec: 96_000,
+    accelerator: accelerator({
+      deviceCount: 8,
+      generation: 2,
+      fp32TfPerDevice: 67,
+      fp16Bf16TfPerDevice: 989,
+      fp8TfPerDevice: 1_979,
+      fp4TfPerDevice: 0,
+      hbmGbPerDevice: 80,
+      hbmBandwidthTbPerSecPerDevice: 3.35,
+      interconnectGbps: 900,
+      idleMw: 0.002,
+      maxMw: 0.0056,
+      hostOverheadMw: 0.0016,
+    }),
     price: 313_500,
     leadTimeDays: 6,
     sellBackRate: 0.4,
@@ -48,12 +106,26 @@ const BASE_RACK_SKU_CATALOG: RackSku[] = [
     blurb: 'High-VRAM serve node. Good for larger context and MoE.',
     generation: 2,
     rackUnits: 1,
-    flopsPf: 0.85,
-    vramGb: 141,
+    flopsPf: 7.912,
+    vramGb: 1_128,
     systemRamGb: 768,
     cpuScore: 48,
     mw: 0.0078,
-    tokPerSec: 2800,
+    tokPerSec: 112_000,
+    accelerator: accelerator({
+      deviceCount: 8,
+      generation: 2,
+      fp32TfPerDevice: 67,
+      fp16Bf16TfPerDevice: 989,
+      fp8TfPerDevice: 1_979,
+      fp4TfPerDevice: 0,
+      hbmGbPerDevice: 141,
+      hbmBandwidthTbPerSecPerDevice: 4.8,
+      interconnectGbps: 900,
+      idleMw: 0.0021,
+      maxMw: 0.0056,
+      hostOverheadMw: 0.0022,
+    }),
     price: 418_000,
     leadTimeDays: 8,
     sellBackRate: 0.38,
@@ -65,12 +137,26 @@ const BASE_RACK_SKU_CATALOG: RackSku[] = [
     blurb: 'Next-gen dense rack. Needs Silicon research for best pricing.',
     generation: 3,
     rackUnits: 1,
-    flopsPf: 1.45,
-    vramGb: 192,
+    flopsPf: 18,
+    vramGb: 1_536,
     systemRamGb: 1024,
     cpuScore: 64,
     mw: 0.0095,
-    tokPerSec: 5200,
+    tokPerSec: 240_000,
+    accelerator: accelerator({
+      deviceCount: 8,
+      generation: 3,
+      fp32TfPerDevice: 90,
+      fp16Bf16TfPerDevice: 2_250,
+      fp8TfPerDevice: 4_500,
+      fp4TfPerDevice: 9_000,
+      hbmGbPerDevice: 192,
+      hbmBandwidthTbPerSecPerDevice: 8,
+      interconnectGbps: 1_800,
+      idleMw: 0.0027,
+      maxMw: 0.008,
+      hostOverheadMw: 0.0015,
+    }),
     price: 646_000,
     leadTimeDays: 10,
     sellBackRate: 0.35,
@@ -82,12 +168,26 @@ const BASE_RACK_SKU_CATALOG: RackSku[] = [
     blurb: 'Inference-optimized: lower VRAM, high tokens/sec, efficient draw.',
     generation: 2,
     rackUnits: 1,
-    flopsPf: 0.4,
-    vramGb: 48,
+    flopsPf: 1.98,
+    vramGb: 192,
     systemRamGb: 384,
     cpuScore: 56,
     mw: 0.0042,
-    tokPerSec: 4500,
+    tokPerSec: 76_000,
+    accelerator: accelerator({
+      deviceCount: 4,
+      generation: 2,
+      fp32TfPerDevice: 34,
+      fp16Bf16TfPerDevice: 495,
+      fp8TfPerDevice: 990,
+      fp4TfPerDevice: 0,
+      hbmGbPerDevice: 48,
+      hbmBandwidthTbPerSecPerDevice: 2.5,
+      interconnectGbps: 450,
+      idleMw: 0.0012,
+      maxMw: 0.0032,
+      hostOverheadMw: 0.001,
+    }),
     price: 209_000,
     leadTimeDays: 5,
     sellBackRate: 0.4,
@@ -99,12 +199,26 @@ const BASE_RACK_SKU_CATALOG: RackSku[] = [
     blurb: 'Dual-bay training rack (2 hall slots). Huge VRAM for big pretrains.',
     generation: 3,
     rackUnits: 2,
-    flopsPf: 2.2,
-    vramGb: 320,
+    flopsPf: 18,
+    vramGb: 1_536,
     systemRamGb: 1536,
     cpuScore: 80,
     mw: 0.016,
-    tokPerSec: 3600,
+    tokPerSec: 184_000,
+    accelerator: accelerator({
+      deviceCount: 8,
+      generation: 3,
+      fp32TfPerDevice: 90,
+      fp16Bf16TfPerDevice: 2_250,
+      fp8TfPerDevice: 4_500,
+      fp4TfPerDevice: 9_000,
+      hbmGbPerDevice: 192,
+      hbmBandwidthTbPerSecPerDevice: 8,
+      interconnectGbps: 1_800,
+      idleMw: 0.004,
+      maxMw: 0.014,
+      hostOverheadMw: 0.002,
+    }),
     price: 988_000,
     leadTimeDays: 12,
     sellBackRate: 0.33,
@@ -116,10 +230,24 @@ const BASE_RACK_SKU_CATALOG: RackSku[] = [
     blurb: 'Your custom silicon in a full rack. Unlocks when fab hits volume.',
     generation: 4,
     rackUnits: 1,
-    flopsPf: 1.9,
-    vramGb: 160,
+    flopsPf: 12,
+    vramGb: 1_280,
     mw: 0.0058,
-    tokPerSec: 7500,
+    tokPerSec: 190_000,
+    accelerator: accelerator({
+      deviceCount: 8,
+      generation: 4,
+      fp32TfPerDevice: 80,
+      fp16Bf16TfPerDevice: 1_500,
+      fp8TfPerDevice: 3_200,
+      fp4TfPerDevice: 6_400,
+      hbmGbPerDevice: 160,
+      hbmBandwidthTbPerSecPerDevice: 6,
+      interconnectGbps: 1_800,
+      idleMw: 0.0015,
+      maxMw: 0.0048,
+      hostOverheadMw: 0.001,
+    }),
     price: 180_500,
     leadTimeDays: 2,
     sellBackRate: 0.5,
@@ -127,15 +255,12 @@ const BASE_RACK_SKU_CATALOG: RackSku[] = [
   },
 ]
 
-export const RACK_SKU_CATALOG: RackSku[] = BASE_RACK_SKU_CATALOG.map((sku) => ({
-  ...sku,
-  flopsPf: sku.flopsPf * RACK_PF_MULTIPLIER,
-}))
+export const RACK_SKU_CATALOG: RackSku[] = BASE_RACK_SKU_CATALOG
 
 const extra: Record<string, RackSku> = {}
 
 export function registerRackSku(sku: RackSku) {
-  extra[sku.id] = { ...sku, flopsPf: sku.flopsPf * RACK_PF_MULTIPLIER }
+  extra[sku.id] = { ...sku }
 }
 
 export function getRackSku(id: string): RackSku {

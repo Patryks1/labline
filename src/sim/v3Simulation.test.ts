@@ -76,13 +76,15 @@ describe('simulation v3 shared rules', () => {
       activeParamsB: 32,
       family: 'moe',
       trainEfficiency: 1,
-      dataRatio: 6,
+      trainingTokensMTok: 6_000_000,
     })
     const denseEquivalentCost = trainCostPfDays({
-      paramsB: 225.6,
+      // Formula v2: 32B active + 5% of the inactive expert set for
+      // routing/communication overhead = 80.4B effective compute parameters.
+      paramsB: 80.4,
       family: 'dense',
       trainEfficiency: 1,
-      dataRatio: 6,
+      trainingTokensMTok: 6_000_000,
     })
     expect(moeCost / denseEquivalentCost).toBeGreaterThan(0.95)
     expect(moeCost / denseEquivalentCost).toBeLessThan(1.2)

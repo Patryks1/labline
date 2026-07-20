@@ -116,6 +116,7 @@ function scoreEvaluation(state: SimState, run: EvaluationRun, model: Model): Par
     value += rng.range(-noise, noise)
     if (run.kind === 'real_world') {
       value = value * 0.82 + model.quality.reliability * 0.18
+      value -= (model.benchmarkOverfit ?? 0) * 28
     }
     scores[benchmark.id] = Math.round(clamp(value) * 10) / 10
   }
@@ -162,12 +163,13 @@ export function evaluateMarket(
 ): MarketEvaluation | null {
   const model = modelFor(state, modelId, labId)
   if (!model) return null
-  const capability = clamp(audienceCapability(model, audience))
+  const overfit = Math.max(0, Math.min(1, model.benchmarkOverfit ?? 0))
+  const capability = clamp(audienceCapability(model, audience) - overfit * 22)
   const price = Math.max(0.01, model.apiPricePerMTok ?? model.suggestedApiPrice ?? 1)
   const referencePrice = Math.max(0.01, model.suggestedApiPrice ?? price)
   const priceFactor = clamp(50 - Math.log(price / referencePrice) * 22)
   const speedFactor = clamp(42 + Math.log1p(Math.max(0.01, model.tokPerSecMult) * 4) * 20)
-  const reliability = clamp(model.quality.reliability)
+  const reliability = clamp(model.quality.reliability - overfit * 18)
   const brand = clamp(brandFor(state, labId))
   const value = clamp(capability * 0.58 + priceFactor * 0.3 + speedFactor * 0.12)
   const productQuality = clamp(reliability * 0.62 + speedFactor * 0.23 + model.quality.chat * 0.15)

@@ -3,6 +3,13 @@ import * as THREE from 'three'
 import { canPlaceBuilding, dcFootprint } from '../../sim/systems/map'
 import type { BuildableKind, MapRegion, SimState } from '../../sim/types'
 import { useGameStore } from '../../store/gameStore'
+import {
+  hasBuildBlueprintDrag,
+  placementCostAt,
+  placementTooltipPosition,
+  readBuildBlueprintDrag,
+} from '../buildPlacement'
+import { money } from '../hud/format'
 import { currentInteraction, createMapPerfSession, type MapPerfSession } from './integration/perfSession'
 import { createArtDirectedArchetypeRegistry } from './integration/artDirectedRegistry'
 import { enforceCloseUpNearOnly } from './integration/lodPolicy'
@@ -17,7 +24,11 @@ import {
   type TileBounds,
   type ViewportUpdateResult,
 } from './v2'
-import { grabbedWorldPanDelta, hasPointerDragged } from './mapControls'
+import {
+  grabbedWorldPanDelta,
+  hasPointerDragged,
+  mapCameraDistanceScale,
+} from './mapControls'
 import {
   primaryRivalMapSites,
   rivalMapSites,
@@ -36,6 +47,9 @@ const IDLE_FRAME_MS = 1000 / 30
 const INTERACTION_TAIL_MS = 250
 const MAX_WHEEL_DELTA_PX = 120
 const VIEWPORT_BASE_MARGIN_TILES = 3
+const DEFAULT_FRUSTUM = 11
+const MIN_FRUSTUM = 5
+const MAX_FRUSTUM = 30
 // Detailed city kits can rise several tile widths above their owning tile.
 // Expand the ground-plane bounds by their projected camera offset so a tower
 // cannot disappear while its roof is still on screen.
@@ -75,6 +89,9 @@ interface LiveMapProjection {
 
 export function GameMap() {
   const mountRef = useRef<HTMLDivElement>(null)
+  const placementTooltipRef = useRef<HTMLDivElement>(null)
+  const placementLandRef = useRef<HTMLSpanElement>(null)
+  const placementTotalRef = useRef<HTMLSpanElement>(null)
   // This primitive subscription exists only for the cursor class. All map and
   // simulation updates are consumed imperatively inside the Three lifecycle.
   const buildMode = useGameStore((store) => store.buildMode)
@@ -107,7 +124,7 @@ export function GameMap() {
     let renderedWidth = initialWidth
     let renderedHeight = initialHeight
     let aspect = renderedWidth / Math.max(1, renderedHeight)
-    let frustum = 11
+    let frustum = DEFAULT_FRUSTUM
     const camera = new THREE.OrthographicCamera(
       -frustum * aspect,
       frustum * aspect,
@@ -220,7 +237,16 @@ export function GameMap() {
     }
 
     function applyCamera(): void {
-      camera.position.set(target.x + 14, 16, target.z + 14)
+      // An orthographic camera's distance does not affect map scale. Move it
+      // back as the frustum grows so the bottom-most parallel rays still start
+      // above the ground plane. Without this, maximum zoom-out exposes a
+      // horizontal band of the sky clear color above the operations HUD.
+      const distanceScale = mapCameraDistanceScale(frustum, DEFAULT_FRUSTUM)
+      camera.position.set(
+        target.x + 14 * distanceScale,
+        16 * distanceScale,
+        target.z + 14 * distanceScale,
+      )
       camera.lookAt(target)
       sun.position.set(target.x + 18, 28, target.z + 12)
       sun.target.position.copy(target)
@@ -335,11 +361,16 @@ export function GameMap() {
       preview.volume.visible = false
       preview.hoverKey = null
       for (const mesh of preview.meshes) mesh.visible = false
+      if (placementTooltipRef.current) placementTooltipRef.current.hidden = true
     }
 
-    function updateBuildPreview(clientX: number, clientY: number): void {
+    function updateBuildPreview(
+      clientX: number,
+      clientY: number,
+      dragKind?: BuildableKind,
+    ): void {
       const store = useGameStore.getState()
-      const kind = store.buildMode
+      const kind = dragKind ?? store.buildMode
       if (!kind) {
         clearBuildPreview()
         return
@@ -375,6 +406,21 @@ export function GameMap() {
       preview.volume.scale.set(widthScale, heightScale, widthScale)
       preview.group.visible = true
       preview.hoverKey = hoverKey
+
+      const cost = placementCostAt(store.state, tile.x, tile.y, kind)
+      const tooltip = placementTooltipRef.current
+      if (cost && tooltip && placementLandRef.current && placementTotalRef.current) {
+        const bounds = renderer.domElement.getBoundingClientRect()
+        const position = placementTooltipPosition(clientX, clientY, bounds)
+        placementLandRef.current.textContent = `Land ${money(cost.landCash)}`
+        placementTotalRef.current.textContent = `${money(cost.totalCash)} total · ${
+          check.ok ? 'ready' : 'blocked'
+        }`
+        tooltip.dataset.placeable = check.ok ? 'true' : 'false'
+        tooltip.style.left = `${position.left}px`
+        tooltip.style.top = `${position.top}px`
+        tooltip.hidden = false
+      }
     }
 
     function viewportBounds(): TileBounds {
@@ -458,7 +504,11 @@ export function GameMap() {
         0,
         replayFrame.pose.targetY * MAP_TILE_SIZE,
       )
-      frustum = THREE.MathUtils.clamp(5 / Math.max(0.16, replayFrame.pose.zoom), 5, 30)
+      frustum = THREE.MathUtils.clamp(
+        MIN_FRUSTUM / Math.max(0.16, replayFrame.pose.zoom),
+        MIN_FRUSTUM,
+        MAX_FRUSTUM,
+      )
       clampTarget()
       updateProjectionMatrix()
       applyCamera()
@@ -639,6 +689,43 @@ export function GameMap() {
       if (!drag.active) clearBuildPreview()
     }
 
+    function onBlueprintDragOver(event: DragEvent): void {
+      if (!hasBuildBlueprintDrag(event.dataTransfer)) return
+      const kind =
+        readBuildBlueprintDrag(event.dataTransfer) ?? useGameStore.getState().buildMode
+      if (!kind) return
+      event.preventDefault()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+      updateBuildPreview(event.clientX, event.clientY, kind)
+      markInteraction()
+    }
+
+    function onBlueprintDrop(event: DragEvent): void {
+      if (!hasBuildBlueprintDrag(event.dataTransfer)) return
+      const store = useGameStore.getState()
+      const kind = readBuildBlueprintDrag(event.dataTransfer) ?? store.buildMode
+      if (!kind) return
+      event.preventDefault()
+      const tile = pickTileAt(event.clientX, event.clientY)
+      if (!tile) {
+        clearBuildPreview()
+        return
+      }
+      if (store.buildMode !== kind) store.setBuildMode(kind)
+      useGameStore.getState().selectTile(tile.x, tile.y)
+      clearBuildPreview()
+      markInteraction()
+    }
+
+    function onBlueprintDragLeave(event: DragEvent): void {
+      if (event.relatedTarget === renderer.domElement) return
+      clearBuildPreview()
+    }
+
+    function onBlueprintDragEnd(): void {
+      clearBuildPreview()
+    }
+
     function onWheel(event: WheelEvent): void {
       event.preventDefault()
       // Some browsers coalesce a fast wheel gesture into a multi-thousand-pixel
@@ -655,8 +742,13 @@ export function GameMap() {
         -MAX_WHEEL_DELTA_PX,
         MAX_WHEEL_DELTA_PX,
       )
-      frustum = THREE.MathUtils.clamp(frustum + deltaPixels * 0.008, 5, 30)
+      frustum = THREE.MathUtils.clamp(
+        frustum + deltaPixels * 0.008,
+        MIN_FRUSTUM,
+        MAX_FRUSTUM,
+      )
       updateProjectionMatrix()
+      applyCamera()
       viewportDirty = true
       markInteraction()
     }
@@ -761,7 +853,7 @@ export function GameMap() {
           0,
           next.mapFocusRequest.y * MAP_TILE_SIZE,
         )
-        frustum = Math.min(frustum, 11)
+        frustum = Math.min(frustum, DEFAULT_FRUSTUM)
         clampTarget()
         updateProjectionMatrix()
         applyCamera()
@@ -775,8 +867,12 @@ export function GameMap() {
     renderer.domElement.addEventListener('pointermove', onPointerMove)
     renderer.domElement.addEventListener('pointerleave', onPointerLeave)
     renderer.domElement.addEventListener('wheel', onWheel, { passive: false })
+    renderer.domElement.addEventListener('dragover', onBlueprintDragOver)
+    renderer.domElement.addEventListener('dragleave', onBlueprintDragLeave)
+    renderer.domElement.addEventListener('drop', onBlueprintDrop)
     window.addEventListener('pointermove', onPointerMove)
     window.addEventListener('pointerup', onPointerUp)
+    window.addEventListener('dragend', onBlueprintDragEnd)
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
     document.addEventListener('visibilitychange', onVisibilityChange)
@@ -801,12 +897,16 @@ export function GameMap() {
       document.removeEventListener('visibilitychange', onVisibilityChange)
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', onPointerUp)
+      window.removeEventListener('dragend', onBlueprintDragEnd)
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
       renderer.domElement.removeEventListener('pointerdown', onPointerDown)
       renderer.domElement.removeEventListener('pointermove', onPointerMove)
       renderer.domElement.removeEventListener('pointerleave', onPointerLeave)
       renderer.domElement.removeEventListener('wheel', onWheel)
+      renderer.domElement.removeEventListener('dragover', onBlueprintDragOver)
+      renderer.domElement.removeEventListener('dragleave', onBlueprintDragLeave)
+      renderer.domElement.removeEventListener('drop', onBlueprintDrop)
       projection.viewport.dispose()
       projection.registry.dispose()
       disposeRegionLabels(labels)
@@ -826,7 +926,16 @@ export function GameMap() {
       tabIndex={0}
       className={`absolute inset-0 outline-none ${buildMode ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
       title="WASD / arrows to pan · drag · scroll zoom"
-    />
+    >
+      <div
+        ref={placementTooltipRef}
+        hidden
+        className="build-placement-tooltip pointer-events-none absolute z-30 min-w-40 rounded-lg border border-mint/45 bg-void/95 px-2.5 py-2 font-mono shadow-xl backdrop-blur-md"
+      >
+        <span ref={placementLandRef} className="block text-[0.6875rem] font-semibold text-bone" />
+        <span ref={placementTotalRef} className="build-placement-total mt-0.5 block text-[0.5625rem] text-mint" />
+      </div>
+    </div>
   )
 }
 

@@ -210,6 +210,20 @@ export function quoteComputeContract(
     interruptionRisk: quotedInterruptionRisk(source, request.kind),
     terminationFee,
     status: 'offered',
+    acceleratorGeneration:
+      request.kind === 'rival_resale' ? undefined : source.acceleratorGeneration,
+    supportedTrainingFormats:
+      request.kind === 'rival_resale'
+        ? undefined
+        : source.supportedTrainingFormats
+          ? [...source.supportedTrainingFormats]
+          : undefined,
+    supportedServePrecisions:
+      request.kind === 'rival_resale'
+        ? undefined
+        : source.supportedServePrecisions
+          ? [...source.supportedServePrecisions]
+          : undefined,
     availableDay:
       request.kind === 'colocation'
         ? state.day + 90 + (Math.abs(hashSeed(state.seed, state.day, request.providerId, pf, 'colo-lead')) % 91)

@@ -6,6 +6,7 @@ import type {
   QualityAxes,
   SimState,
   StartTrainingOpts,
+  TrainingComputeFormat,
   TrainingJob,
 } from '../types'
 import { computeSnapshot } from './compute'
@@ -17,7 +18,7 @@ import {
 } from '../balance/modelScaling'
 import { getResearchNode } from '../balance/research'
 import { attachModelToEmptyPlans } from './plans'
-import { scheduleReleaseEvaluations } from './evaluations'
+import { scheduleEvaluation, scheduleReleaseEvaluations } from './evaluations'
 import { deriveModelCapabilities } from '../balance/modelCapabilities'
 import {
   DATA_MIX_DEFS,
@@ -28,8 +29,14 @@ import {
   sizeGate,
   suggestedApiPricePerMTok,
   trainCostPfDays,
-  trainingVolumeMultiplier,
 } from '../balance/training'
+import {
+  allocateTrainingHardwarePools,
+  DEFAULT_TRAINING_NUMERICS,
+  LEGACY_TRAINING_NUMERICS,
+  validateTrainingNumerics,
+} from '../balance/trainingPrecision'
+import type { TrainingHardwarePool } from '../balance/trainingPrecision'
 import {
   analyzeTrainingData,
   backboneFromFamily,
@@ -38,12 +45,12 @@ import {
   rollTrainingOutcome,
   serviceProfileForModel,
 } from '../balance/trainingV3'
-import { hashSeed, seededId } from '../rng'
+import { createRng, hashSeed, seededId } from '../rng'
 import { suggestApiInOut } from '../balance/pricing'
 import { DATA_DOMAIN_META, DATA_DOMAINS } from '../balance/data'
 import { ECONOMY } from '../balance/economy'
 import { modelTrainVramGb } from '../balance/racks'
-import { fleetStats } from './racks'
+import { fleetStats, resolveRackSku } from './racks'
 import { modelCanCurateDataDomain } from './modelEligibility'
 import type { DataMix, TrainingDataPlan } from '../types'
 import {
@@ -61,8 +68,114 @@ import { lqSynthCapabilityMult, normalizeWeights } from '../balance/data'
 import { createDataManifest } from './dataAssets'
 import { modelStackModifiers, sanitizeModelStack } from '../balance/modelStack'
 import { normalizeModelEvaluations } from '../balance/evaluationSuites'
+import { syntheticTrainingProfile } from '../balance/syntheticTraining'
 
 const POST_TRAIN_ORDER: PostTrainStage[] = ['none', 'sft', 'rlhf', 'process', 'tools']
+
+/** Read concurrent jobs while honoring direct legacy `trainingJob` mutations in old saves/tests. */
+export function playerTrainingJobs(state: SimState): TrainingJob[] {
+  const jobs = state.player.trainingJobs ?? []
+  const legacy = state.player.trainingJob
+  if (!legacy) return jobs
+  return [legacy, ...jobs.filter((job) => job.id !== legacy.id)]
+}
+
+function withTrainingJobs(state: SimState, jobs: TrainingJob[]): SimState {
+  return {
+    ...state,
+    player: {
+      ...state.player,
+      trainingJobs: jobs,
+      trainingJob: jobs[0] ?? null,
+    },
+  }
+}
+
+function playerTrainingHardwareGeneration(
+  state: SimState,
+  format: TrainingComputeFormat,
+): number {
+  let generation = 0
+  for (const rack of state.player.rackFleet ?? []) {
+    if (rack.status !== 'live' || rack.count <= 0) continue
+    const accelerator = resolveRackSku(
+      rack.skuId,
+      state.player.rackDesigns ?? [],
+    ).accelerator
+    if (accelerator && !accelerator.supportedTrainingFormats.includes(format)) continue
+    generation = Math.max(
+      generation,
+      accelerator?.generation ?? 1,
+    )
+  }
+  for (const contract of state.computeContracts) {
+    if (
+      contract.buyerLabId !== state.playerLabId ||
+      contract.status !== 'active' ||
+      contract.pf <= 0 ||
+      (contract.availableDay != null && state.day < contract.availableDay)
+    ) continue
+    if (
+      contract.supportedTrainingFormats &&
+      !contract.supportedTrainingFormats.includes(format)
+    ) continue
+    generation = Math.max(generation, contract.acceleratorGeneration ?? 1)
+  }
+  return Math.max(generation, 1)
+}
+
+function playerTrainingHardwarePools(
+  state: SimState,
+  availableTrainingPf: number,
+): TrainingHardwarePool[] {
+  const capacityByGeneration = new Map<number, number>()
+  let catalogLocalPf = 0
+  for (const rack of state.player.rackFleet ?? []) {
+    if (rack.status !== 'live' || rack.count <= 0) continue
+    const sku = resolveRackSku(rack.skuId, state.player.rackDesigns ?? [])
+    const capacity = Math.max(0, sku.flopsPf * rack.count)
+    const generation = sku.accelerator?.generation ?? 1
+    catalogLocalPf += capacity
+    capacityByGeneration.set(
+      generation,
+      (capacityByGeneration.get(generation) ?? 0) + capacity,
+    )
+  }
+
+  // Include legacy blueprint deployments as conservative generation-1 PF.
+  const aggregateLocalPf = Math.max(0, fleetStats(state).flopsPf)
+  const legacyLocalPf = Math.max(0, aggregateLocalPf - catalogLocalPf)
+  if (legacyLocalPf > 0) {
+    capacityByGeneration.set(1, (capacityByGeneration.get(1) ?? 0) + legacyLocalPf)
+  }
+
+  const remoteContracts = state.computeContracts.filter(
+    (contract) =>
+      contract.buyerLabId === state.playerLabId &&
+      contract.status === 'active' &&
+      contract.pf > 0 &&
+      (contract.availableDay == null || state.day >= contract.availableDay),
+  )
+  const localBasis = [...capacityByGeneration.values()].reduce((sum, pf) => sum + pf, 0)
+  const remoteBasis = remoteContracts.reduce((sum, contract) => sum + contract.pf, 0)
+  const basis = localBasis + remoteBasis
+  if (basis <= 0) {
+    return [{ id: 'fallback-gen1', rawPf: Math.max(0, availableTrainingPf), hardwareGeneration: 1 }]
+  }
+  return [
+    ...[...capacityByGeneration.entries()].map(([generation, pf]) => ({
+      id: `local-gen-${generation}`,
+      rawPf: Math.max(0, availableTrainingPf) * (pf / basis),
+      hardwareGeneration: generation,
+    })),
+    ...remoteContracts.map((contract) => ({
+      id: `contract-${contract.id}`,
+      rawPf: Math.max(0, availableTrainingPf) * (contract.pf / basis),
+      hardwareGeneration: contract.acceleratorGeneration ?? 1,
+      supportedTrainingFormats: contract.supportedTrainingFormats,
+    })),
+  ]
+}
 
 function postTrainTarget(stage: PostTrainStage): number {
   switch (stage) {
@@ -76,6 +189,69 @@ function postTrainTarget(stage: PostTrainStage): number {
       return 6
     default:
       return 0
+  }
+}
+
+type TrainableStage = 'base' | Exclude<PostTrainStage, 'none'>
+
+/** One deterministic 5% failure roll per base/post-training stage. */
+export function trainingStageFailurePlan(
+  job: Pick<TrainingJob, 'id' | 'outcomeSeed'>,
+  stage: TrainableStage,
+): { willFail: boolean; atFraction: number } {
+  const rng = createRng(hashSeed(job.outcomeSeed ?? 0, job.id, stage, 'stage-failure-v1'))
+  const willFail = rng.next() < 0.05
+  return { willFail, atFraction: 0.18 + rng.next() * 0.7 }
+}
+
+function trainingLoss(
+  job: Pick<TrainingJob, 'id' | 'outcomeSeed' | 'targetParamsB'>,
+  stage: TrainableStage,
+  progress: number,
+  day: number,
+): number {
+  const p = Math.max(0, Math.min(1, progress))
+  const stageFloor = stage === 'base' ? 1.15 : 0.72
+  const stageStart = stage === 'base' ? 8.4 + Math.log10(Math.max(1, job.targetParamsB)) * 0.4 : 2.1
+  const jitter = createRng(hashSeed(job.outcomeSeed ?? 0, job.id, stage, day, 'loss-v1')).range(-0.08, 0.08)
+  return Math.max(0.05, Math.round((stageFloor + (stageStart - stageFloor) * Math.exp(-4.2 * p) + jitter) * 1000) / 1000)
+}
+
+function appendLossPoint(
+  job: TrainingJob,
+  stage: TrainableStage,
+  progress: number,
+  day: number,
+): TrainingJob['lossHistory'] {
+  const history = job.lossHistory ?? []
+  const next = [...history, { day, stage, progress, loss: trainingLoss(job, stage, progress, day) }]
+  return next.slice(-64)
+}
+
+function failedAtCrossing(
+  job: TrainingJob,
+  stage: TrainableStage,
+  previous: number,
+  next: number,
+  target: number,
+): boolean {
+  if (job.failed || target <= 0) return false
+  const plan = trainingStageFailurePlan(job, stage)
+  const failureAt = target * plan.atFraction
+  return plan.willFail && previous < failureAt && next >= failureAt
+}
+
+function failTrainingJob(job: TrainingJob, stage: TrainableStage, day: number): TrainingJob {
+  return {
+    ...job,
+    failed: true,
+    failureStage: stage,
+    failureDay: day,
+    failureReason: stage === 'base'
+      ? 'Loss diverged during base training. This checkpoint is unrecoverable.'
+      : `The ${stage.toUpperCase()} stage destabilized the checkpoint. This run is unrecoverable.`,
+    paused: true,
+    stallReason: 'Training failed — delete this run.',
   }
 }
 
@@ -98,12 +274,8 @@ export function estimateTrainingCost(
 }
 
 export function startTraining(state: SimState, opts: StartTrainingOpts): SimState {
-  if (state.player.trainingJob) {
-    return withAlert(state, 'warn', 'A training job is already running.')
-  }
-  if (state.player.safetyCampaign) {
-    return withAlert(state, 'warn', 'Finish or cancel the active safety campaign first.')
-  }
+  const existingJobs = playerTrainingJobs(state)
+  let numerics = opts.trainingNumerics ?? DEFAULT_TRAINING_NUMERICS
 
   const mode = opts.mode ?? 'pretrain'
   const dataMix: DataMix = opts.dataMix ?? 'web'
@@ -129,8 +301,21 @@ export function startTraining(state: SimState, opts: StartTrainingOpts): SimStat
     paramsB = base.paramsB
     activeParamsB = base.activeParamsB
     continueFromId = base.id
+    numerics = opts.trainingNumerics ?? base.trainingNumerics ?? DEFAULT_TRAINING_NUMERICS
+    if (existingJobs.some((candidate) => candidate.continueFromId === base.id)) {
+      return withAlert(state, 'warn', `${base.name} already has a continuation run in progress.`)
+    }
     baseContinueCap = base.capability
   }
+
+  const numericsCheck = validateTrainingNumerics({
+    hardwareGeneration: playerTrainingHardwareGeneration(state, numerics.computeFormat),
+    numerics,
+    researchUnlocked: state.player.researchUnlocked,
+    family,
+    enforceResearch: !(mode === 'continue' && opts.trainingNumerics == null),
+  })
+  if (!numericsCheck.ok) return withAlert(state, 'warn', numericsCheck.reason)
 
   const modelStack = sanitizeModelStack(
     opts.modelStack ?? [],
@@ -309,17 +494,53 @@ export function startTraining(state: SimState, opts: StartTrainingOpts): SimStat
     quality: consume.qualityUsed,
     lqShare: consume.synthLqShare,
   })
-  // Base cost is normalized to the strong 6:1 text run. Actual volume and
-  // media density now scale PF-days directly.
-  target *= trainingVolumeMultiplier(dataAnalysis.effectiveDataRatio)
-  target *= dataAnalysis.modalityComputeMult
+  // Formula v2 charges the actual train tokens at C≈6ND. Held-out verification
+  // is forward-only (≈2ND), so data quality changes outcomes rather than making
+  // physical work disappear. The earlier estimate only exists for preflight UI.
+  target = trainCostPfDays({
+    paramsB,
+    family,
+    trainEfficiency: state.player.trainEfficiency,
+    activeParamsB,
+    mode: mode === 'distill' ? 'distill' : 'pretrain',
+    teacherParamsB: teacherId
+      ? state.player.models.find((model) => model.id === teacherId)?.paramsB
+      : undefined,
+    trainingTokensMTok: consume.trainMTok,
+    verificationTokensMTok: consume.verifyMTok,
+    modalityComputeMult: dataAnalysis.modalityComputeMult,
+    formulaVersion: 2,
+  })
+  if (mode === 'continue') target = Math.max(4, target * 0.22)
+  if (mode === 'distill') {
+    const selfShare = 1 - distillTeacherShare
+    target *= 0.82 + selfShare * 0.45
+  }
   target *= stackModifiers.trainCostMult
 
-  const needVram = modelTrainVramGb(paramsB, activeParamsB, family)
-  const haveVram = fleetStats(state).vramGb
+  const needVram = modelTrainVramGb(
+    paramsB,
+    activeParamsB,
+    family,
+    numerics,
+    state.player.researchUnlocked.includes('opt_checkpoint'),
+  )
+  const placement = computeSnapshot(state)
+  const haveVram = placement.vramGb
+  const existingVram = placement.vramNeedTrain
+  if (haveVram + 1e-9 < existingVram + needVram) {
+    return withAlert(
+      state,
+      'warn',
+      `Training placement needs ${(existingVram + needVram).toFixed(0)} GB aggregate HBM; compatible fleet and provider contracts expose ${haveVram.toFixed(0)} GB.`,
+    )
+  }
 
+  // Even tiny runs incur cluster setup, checkpointing, orchestration and eval
+  // overhead. Preserve physical PF scaling while preventing zero-cost jobs.
   const cashSunk =
-    Math.floor(target * ECONOMY.trainUpfrontPerPfDay) + Math.floor(consume.cashCost)
+    Math.max(1_000, Math.floor(target * ECONOMY.trainUpfrontPerPfDay)) +
+    Math.floor(consume.cashCost)
   const cashBurnPerDay = Math.floor(
     ECONOMY.trainCashBurnPerPfDay * Math.sqrt(Math.max(1, paramsB)),
   )
@@ -387,6 +608,19 @@ export function startTraining(state: SimState, opts: StartTrainingOpts): SimStat
     dataQualityByDomain: consume.domainQuality,
     lowQualityShareByDomain: consume.lowQualityShareByDomain,
     syntheticProvenance: consume.syntheticProvenance,
+    trainingFormulaVersion: 2,
+    trainingNumerics: numerics,
+    computePriority: Math.max(10, Math.min(100, opts.computePriority ?? 50)),
+    reservedPf: Math.max(0, opts.reservedPf ?? 0),
+    minimumDevices: Math.max(1, Math.ceil(needVram / 80)),
+    preemptible: true,
+    failed: false,
+    lossHistory: [{
+      day: state.day,
+      stage: 'base',
+      progress: 0,
+      loss: trainingLoss({ id: jobId, outcomeSeed: hashSeed(state.seed, state.day, opts.name, paramsB, family, 'train-outcome'), targetParamsB: paramsB }, 'base', 0, state.day),
+    }],
   }
 
   void baseContinueCap
@@ -417,7 +651,8 @@ export function startTraining(state: SimState, opts: StartTrainingOpts): SimStat
       ...state.player,
       cash: state.player.cash - cashSunk,
       data: manifestSnapshot.data,
-      trainingJob: job,
+      trainingJobs: [...existingJobs, job],
+      trainingJob: existingJobs[0] ?? job,
     },
     alerts: [
       {
@@ -449,8 +684,9 @@ function withAlert(state: SimState, severity: 'info' | 'warn' | 'danger', messag
   }
 }
 
-export function advancePostTrain(state: SimState): SimState {
-  const job = state.player.trainingJob
+export function advancePostTrain(state: SimState, jobId?: string): SimState {
+  const jobs = playerTrainingJobs(state)
+  const job = jobId ? jobs.find((candidate) => candidate.id === jobId) : jobs[0]
   if (!job) return state
   const idx = POST_TRAIN_ORDER.indexOf(job.postTrain)
   if (idx < 0 || idx >= POST_TRAIN_ORDER.length - 1) return state
@@ -465,28 +701,74 @@ export function advancePostTrain(state: SimState): SimState {
     return withAlert(state, 'warn', 'Unlock Process Reward Models first.')
   }
 
-  return {
-    ...state,
-    player: {
-      ...state.player,
-      trainingJob: {
-        ...job,
-        postTrain: nextStage,
-        postTrainProgress: 0,
-        postTrainTarget: postTrainTarget(nextStage),
-      },
-    },
+  return selectPostTrain(state, job.id, nextStage as Exclude<PostTrainStage, 'none'>)
+}
+
+/** Start a specific researched post-training stage from a completed checkpoint. */
+export function selectPostTrain(
+  state: SimState,
+  jobId: string,
+  nextStage: Exclude<PostTrainStage, 'none'>,
+): SimState {
+  const jobs = playerTrainingJobs(state)
+  const job = jobs.find((candidate) => candidate.id === jobId)
+  if (!job || job.failed || job.progressPfDays < job.targetPfDays) return state
+  if (job.postTrain !== 'none' && job.postTrainProgress < job.postTrainTarget) {
+    return withAlert(state, 'warn', 'Finish or cancel the current post-training stage first.')
   }
+  if (nextStage === 'rlhf' && !state.player.researchUnlocked.includes('align_rlhf')) {
+    return withAlert(state, 'warn', 'Unlock RLHF Pipeline for preference training.')
+  }
+  if (nextStage === 'process' && !state.player.researchUnlocked.includes('align_process')) {
+    return withAlert(state, 'warn', 'Unlock Process Reward Models first.')
+  }
+  const updated: TrainingJob = {
+    ...job,
+    postTrain: nextStage,
+    postTrainProgress: 0,
+    postTrainTarget: postTrainTarget(nextStage),
+    paused: false,
+    stallReason: null,
+  }
+  return withTrainingJobs(state, jobs.map((candidate) => candidate.id === job.id ? updated : candidate))
+}
+
+/** Cancel an unfinished or failed run. Upfront costs and consumed data remain spent. */
+export function cancelTraining(state: SimState, jobId: string): SimState {
+  const jobs = playerTrainingJobs(state)
+  const job = jobs.find((candidate) => candidate.id === jobId)
+  if (!job) return state
+  return withAlert(
+    withTrainingJobs(state, jobs.filter((candidate) => candidate.id !== jobId)),
+    job.failed ? 'info' : 'warn',
+    job.failed
+      ? `Deleted failed ${job.name} run.`
+      : `Cancelled ${job.name}. Consumed data and $${(job.cashSunk / 1e6).toFixed(2)}M upfront cost were not recovered.`,
+  )
 }
 
 /** Finish job → internal (private) model. Not on the market until released. */
-export function keepInternal(state: SimState): SimState {
-  return finalizeJob(state, 'internal')
+export function keepInternal(state: SimState, jobId?: string): SimState {
+  return finalizeJob(state, 'internal', jobId)
 }
 
 /** Finish job and release publicly (plans/API eligible). */
-export function releaseFromJob(state: SimState): SimState {
-  return finalizeJob(state, 'released')
+export function releaseFromJob(state: SimState, jobId?: string): SimState {
+  return finalizeJob(state, 'released', jobId)
+}
+
+/** Materialize a private checkpoint and queue a non-public benchmark run. */
+export function benchmarkTrainingJob(state: SimState, jobId: string): SimState {
+  const job = playerTrainingJobs(state).find((candidate) => candidate.id === jobId)
+  if (!job || job.failed || job.progressPfDays < job.targetPfDays) return state
+  const before = new Set(state.player.models.map((model) => model.id))
+  let next = finalizeJob(state, 'internal', jobId)
+  const model = job.mode === 'continue' && job.continueFromId
+    ? next.player.models.find((candidate) => candidate.id === job.continueFromId)
+    : next.player.models.find((candidate) => !before.has(candidate.id))
+  if (!model) return next
+  next = scheduleEvaluation(next, model.id, 'internal', 0)
+  return withAlert(next, 'info', `${model.name} internal benchmark queued. Results publish from the Evals tab.`)
 }
 
 /** @deprecated use releaseFromJob / keepInternal */
@@ -494,9 +776,10 @@ export function shipModel(state: SimState): SimState {
   return releaseFromJob(state)
 }
 
-function finalizeJob(state: SimState, release: 'internal' | 'released'): SimState {
-  const job = state.player.trainingJob
-  if (!job || job.progressPfDays < job.targetPfDays) return state
+function finalizeJob(state: SimState, release: 'internal' | 'released', jobId?: string): SimState {
+  const jobs = playerTrainingJobs(state)
+  const job = jobId ? jobs.find((candidate) => candidate.id === jobId) : jobs[0]
+  if (!job || job.failed || job.progressPfDays < job.targetPfDays) return state
   if (job.postTrain !== 'none' && job.postTrainProgress < job.postTrainTarget) {
     // allow finish mid post-train with partial quality
   }
@@ -554,7 +837,8 @@ function finalizeJob(state: SimState, release: 'internal' | 'released'): SimStat
     ...state,
     player: {
       ...state.player,
-      trainingJob: null,
+      trainingJobs: jobs.filter((candidate) => candidate.id !== job.id),
+      trainingJob: jobs.find((candidate) => candidate.id !== job.id) ?? null,
       models,
       pricing,
       brandTrust: brand,
@@ -655,14 +939,13 @@ export function releaseModel(state: SimState, modelId: string): SimState {
 export function deleteModel(state: SimState, modelId: string): SimState {
   const m = state.player.models.find((x) => x.id === modelId)
   if (!m) return withAlert(state, 'warn', 'Model not found.')
-  const job = state.player.trainingJob
-  if (
-    job &&
-    (job.continueFromId === modelId ||
-      job.teacherId === modelId ||
-      job.dataPlan?.domainModels &&
-        Object.values(job.dataPlan.domainModels).includes(modelId))
-  ) {
+  const inUse = playerTrainingJobs(state).some((job) =>
+    job.continueFromId === modelId ||
+    job.teacherId === modelId ||
+    (job.dataPlan?.domainModels && Object.values(job.dataPlan.domainModels).includes(modelId)) ||
+    (job.dataPlan?.syntheticTeacherIds && Object.values(job.dataPlan.syntheticTeacherIds).includes(modelId)),
+  )
+  if (inUse) {
     return withAlert(state, 'warn', 'Cannot delete — in use by the active training job.')
   }
 
@@ -1178,6 +1461,50 @@ function buildModelFromJob(
     }
   }
 
+  const syntheticTeacherWeights = new Map<string, number>()
+  for (const item of job.syntheticProvenance ?? []) {
+    if (!item.teacherModelId) continue
+    syntheticTeacherWeights.set(
+      item.teacherModelId,
+      (syntheticTeacherWeights.get(item.teacherModelId) ?? 0) + item.volumeMTok,
+    )
+  }
+  const weightedTeacher = [...syntheticTeacherWeights.entries()].reduce(
+    (acc, [modelId, volume]) => {
+      const source = state.player.models.find((model) => model.id === modelId)
+      return source
+        ? { capability: acc.capability + source.capability * volume, volume: acc.volume + volume }
+        : acc
+    },
+    { capability: 0, volume: 0 },
+  )
+  const syntheticTeacherCapability = weightedTeacher.volume > 0
+    ? weightedTeacher.capability / weightedTeacher.volume
+    : 0
+  const frontierCapability = Math.max(
+    syntheticTeacherCapability,
+    ...state.player.models.filter((model) => model.release === 'released' || model.shipped).map((model) => model.capability),
+    ...state.rivals.flatMap((rival) => rival.models.filter((model) => model.release === 'released' || model.shipped).map((model) => model.capability)),
+  )
+  const syntheticProfile = syntheticTrainingProfile({
+    realMTok: Math.max(0, dataVol - (job.syntheticUnits ?? 0)),
+    syntheticMTok: job.syntheticUnits ?? 0,
+    teacherCapability: syntheticTeacherCapability,
+    frontierCapability,
+  })
+  if (syntheticTeacherCapability > 0 && syntheticProfile.syntheticShare > 0) {
+    const imitationTarget = syntheticTeacherCapability * syntheticProfile.imitationRetention
+    capability = clamp(
+      capability + Math.max(0, imitationTarget - capability) * syntheticProfile.syntheticShare,
+    )
+    const benchmarkLift = syntheticProfile.syntheticShare * 3 + syntheticProfile.benchmarkOverfit * 6
+    for (const key of Object.keys(benchmarks) as (keyof BenchmarkScores)[]) {
+      benchmarks = { ...benchmarks, [key]: clamp(benchmarks[key]! + benchmarkLift) }
+    }
+    quality.reliability = clamp(quality.reliability - syntheticProfile.benchmarkOverfit * 18)
+    quality.chat = clamp(quality.chat - syntheticProfile.benchmarkOverfit * 10)
+  }
+
   const apiSug = suggestApiInOut({
     costPerMTokBase: 0.28,
     paramsB,
@@ -1312,6 +1639,19 @@ function buildModelFromJob(
     dataQualityByDomain: job.dataQualityByDomain ?? continueBase?.dataQualityByDomain,
     lowQualityShareByDomain: job.lowQualityShareByDomain ?? continueBase?.lowQualityShareByDomain,
     syntheticProvenance: job.syntheticProvenance ?? continueBase?.syntheticProvenance,
+    syntheticMultiplier: job.syntheticUnits > 0
+      ? syntheticProfile.syntheticMultiplier
+      : continueBase?.syntheticMultiplier ?? 0,
+    syntheticShare: job.syntheticUnits > 0
+      ? syntheticProfile.syntheticShare
+      : continueBase?.syntheticShare ?? 0,
+    benchmarkOverfit: Math.max(
+      continueBase?.benchmarkOverfit ?? 0,
+      syntheticProfile.benchmarkOverfit,
+    ),
+    trainingNumerics:
+      job.trainingNumerics ?? job.numerics ?? continueBase?.trainingNumerics,
+    trainingFormulaVersion: job.trainingFormulaVersion ?? 2,
   })
 }
 
@@ -1320,13 +1660,24 @@ function clamp(n: number, lo = 0, hi = 100) {
 }
 
 export function tickTraining(state: SimState): SimState {
-  const job = state.player.trainingJob
-  if (!job) return state
+  const jobs = playerTrainingJobs(state)
+  if (!jobs.length) return state
 
   const snap = computeSnapshot(state)
-  const trainPool = snap.pools.training
-  const burn = job.cashBurnPerDay ?? 0
-  let cash = state.player.cash - burn
+  const hardwarePools = playerTrainingHardwarePools(state, snap.pools.training)
+  const allocations = allocateTrainingHardwarePools(hardwarePools, [
+    ...jobs.map((job) => ({
+      id: job.id,
+      weight: job.computePriority ?? 50,
+      eligible: !job.paused && !job.failed,
+      numerics: job.trainingNumerics ?? job.numerics ?? LEGACY_TRAINING_NUMERICS,
+    })),
+    ...(state.player.safetyCampaign
+      ? [{ id: '__safety_campaign__', weight: 50, numerics: DEFAULT_TRAINING_NUMERICS }]
+      : []),
+  ])
+  const totalBurn = jobs.reduce((sum, job) => sum + (job.failed ? 0 : job.cashBurnPerDay ?? 0), 0)
+  let cash = state.player.cash - totalBurn
   if (cash < 0) {
     // Job stalls without cash — no progress, still opex
     return {
@@ -1344,44 +1695,66 @@ export function tickTraining(state: SimState): SimState {
     }
   }
 
-  if (job.progressPfDays < job.targetPfDays) {
-    // trainPool already includes trainEfficiency, allocation, power derate, leased PF
-    const step = Math.max(0, trainPool)
-    return {
-      ...state,
-      player: {
-        ...state.player,
-        cash,
-        trainingJob: {
+  const nextJobs = jobs.map((job) => {
+    if (job.failed) return job
+    const trainPool = allocations[job.id]?.effectivePf ?? 0
+    const stallReason = job.paused
+      ? 'Paused'
+      : trainPool <= 1e-9
+        ? 'No compatible training hardware is available.'
+        : null
+    if (job.progressPfDays < job.targetPfDays) {
+      const nextProgress = Math.min(job.targetPfDays, job.progressPfDays + Math.max(0, trainPool))
+      if (failedAtCrossing(job, 'base', job.progressPfDays, nextProgress, job.targetPfDays)) {
+        return failTrainingJob({
           ...job,
-          progressPfDays: Math.min(job.targetPfDays, job.progressPfDays + step),
-        },
-      },
+          progressPfDays: nextProgress,
+          lossHistory: appendLossPoint(job, 'base', nextProgress / Math.max(1e-9, job.targetPfDays), state.day),
+        }, 'base', state.day)
+      }
+      return {
+        ...job,
+        stallReason,
+        progressPfDays: nextProgress,
+        lossHistory: appendLossPoint(job, 'base', nextProgress / Math.max(1e-9, job.targetPfDays), state.day),
+      }
     }
-  }
-
-  if (job.postTrain !== 'none' && job.postTrainProgress < job.postTrainTarget) {
-    const postPool = snap.pools.inference * 0.35 + trainPool * 0.25
-    const scale = 1 + Math.log10(Math.max(1, job.targetParamsB)) * 0.25
-    return {
-      ...state,
-      player: {
-        ...state.player,
-        cash,
-        trainingJob: {
+    if (job.postTrain !== 'none' && job.postTrainProgress < job.postTrainTarget) {
+      const postPool = snap.pools.inference * 0.35 / jobs.length + trainPool * 0.25
+      const scale = 1 + Math.log10(Math.max(1, job.targetParamsB)) * 0.25
+      const nextProgress = Math.min(
+        job.postTrainTarget,
+        job.postTrainProgress + (postPool * 0.15) / scale,
+      )
+      if (failedAtCrossing(job, job.postTrain, job.postTrainProgress, nextProgress, job.postTrainTarget)) {
+        return failTrainingJob({
           ...job,
-          postTrainProgress: Math.min(
-            job.postTrainTarget,
-            job.postTrainProgress + (postPool * 0.15) / scale,
-          ),
-        },
-      },
+          postTrainProgress: nextProgress,
+          lossHistory: appendLossPoint(job, job.postTrain, nextProgress / Math.max(1e-9, job.postTrainTarget), state.day),
+        }, job.postTrain, state.day)
+      }
+      return {
+        ...job,
+        postTrainProgress: nextProgress,
+        lossHistory: appendLossPoint(job, job.postTrain, nextProgress / Math.max(1e-9, job.postTrainTarget), state.day),
+      }
     }
-  }
-
+    return job
+  })
+  const next = withTrainingJobs(state, nextJobs)
+  const newlyFailed = nextJobs.filter((job) => job.failed && !jobs.find((before) => before.id === job.id)?.failed)
   return {
-    ...state,
-    player: { ...state.player, cash },
+    ...next,
+    player: { ...next.player, cash },
+    alerts: [
+      ...newlyFailed.map((job) => ({
+        id: `train-failed-${job.id}-${state.day}`,
+        day: state.day,
+        severity: 'danger' as const,
+        message: `${job.name} failed during ${job.failureStage === 'base' ? 'base training' : `${job.failureStage?.toUpperCase()} post-training`}. The run is unrecoverable and must be deleted.`,
+      })),
+      ...state.alerts,
+    ].slice(0, 40),
   }
 }
 

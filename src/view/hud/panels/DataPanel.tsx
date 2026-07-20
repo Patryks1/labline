@@ -9,15 +9,13 @@ import {
   ensureDataMarket,
   ensureLabData,
   estimateAllDataPrunes,
+  estimateDataPruneAudit,
   estimateDataPrune,
-  estimateSynthMTokPerDay,
+  estimateSynthBudget,
   formatTokens,
-  grossResearchPoolPf,
-  researchPoolForTech,
   totalProcessed,
   totalRaw,
   totalSources,
-  synthTeacherFreshness,
   type DataPortfolioChannel,
   type DataPruneEstimate,
 } from '../../../sim/systems/data'
@@ -65,9 +63,10 @@ export function DataPanel() {
   const enqueueProcessAll = useGameStore((s) => s.enqueueProcessAll)
   const enqueueDataPrune = useGameStore((s) => s.enqueueDataPrune)
   const enqueueAllDataPrunes = useGameStore((s) => s.enqueueAllDataPrunes)
+  const purchaseDataPruneAudit = useGameStore((s) => s.purchaseDataPruneAudit)
   const buyDataPortfolio = useGameStore((s) => s.buyDataPortfolio)
   const buyDomainContract = useGameStore((s) => s.buyDomainContract)
-  const startSynthGen = useGameStore((s) => s.startSynthGen)
+  const startSynthBudget = useGameStore((s) => s.startSynthBudget)
   const cancelSynthGen = useGameStore((s) => s.cancelSynthGen)
 
   const data = ensureLabData(state)
@@ -76,7 +75,6 @@ export function DataPanel() {
   const sources = totalSources(data)
   const sourceTotal = sources.web + sources.user + sources.bought + sources.synth
   const srcSum = sourceTotal || 1
-  const techShare = researchPoolForTech(state)
   const playerDataOrders = state.worldMarkets.orders.filter(
     (order) => order.labId === state.playerLabId && order.kind === 'data',
   )
@@ -85,14 +83,7 @@ export function DataPanel() {
     (fill) => fill.labId === state.playerLabId && fill.kind === 'data',
   )
 
-  const models = state.player.models.filter(
-    (m) => m.release === 'released' || m.shipped || m.release === 'internal',
-  )
-
-  const [genDomain, setGenDomain] = useState<DataDomain>('chat')
-  const [genModelId, setGenModelId] = useState(models[0]?.id ?? '')
   const [genShare, setGenShare] = useState(0.25)
-  const [genTier, setGenTier] = useState<'hq' | 'lq'>('hq')
   const [selectedSource, setSelectedSource] = useState<CorpusSourceKey>('user')
   const [marketFilter, setMarketFilter] = useState<
     'all' | DataQualityBand | DataDomain | DataSellerKind
@@ -111,15 +102,10 @@ export function DataPanel() {
     [state],
   )
   const pruneAllEstimate = useMemo(() => estimateAllDataPrunes(state), [state])
+  const pruneAuditEstimate = useMemo(() => estimateDataPruneAudit(state), [state])
 
-  const genModel = models.find((m) => m.id === genModelId) ?? models[0]
-  const teacherFreshness = genModel
-    ? synthTeacherFreshness(state, genModel, genDomain)
-    : null
-  const estPerDay = useMemo(() => {
-    if (!genModel) return 0
-    return estimateSynthMTokPerDay(state, genModel, genDomain, genShare)
-  }, [state, genModel, genDomain, genShare])
+  const synthEstimate = useMemo(() => estimateSynthBudget(state, genShare), [state, genShare])
+  const autoSynthJob = data.synthQueue.find((job) => job.autoPortfolio)
 
   const sourceMix = (['web', 'bought', 'user', 'synth'] as const).map((key) => ({
     key,
@@ -185,6 +171,10 @@ export function DataPanel() {
           </div>
           <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-void">
             <div className="h-full rounded-full bg-mint" style={{ width: `${Math.max(2, readyShare * 100)}%` }} />
+          </div>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-1 border-t border-line/60 pt-2 text-[0.6875rem] text-muted">
+            <span>Dataset library</span>
+            <span className="font-mono text-bone">{data.assets.length} assets · {data.manifests.length} manifests</span>
           </div>
         </div>
       </section>
@@ -318,211 +308,81 @@ export function DataPanel() {
         </div>
       </section>
 
-      <details className="group rounded-2xl border border-line bg-panel-2">
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5">
-          <div>
-            <h3 className="text-[0.8125rem] font-semibold text-bone">Dataset vault</h3>
-            <p className="mt-0.5 text-[0.6875rem] text-muted">Reusable assets and frozen training manifests.</p>
-          </div>
-          <span className="flex items-center gap-2 font-mono text-[0.6875rem] text-muted">
-            {data.assets.length} assets · {data.manifests.length} manifests
-            <span className="text-mint transition-transform group-open:rotate-45">+</span>
-          </span>
-        </summary>
-        <div className="space-y-1.5 border-t border-line px-3 py-2.5">
-          {data.assets
-            .slice(-6)
-            .reverse()
-            .map((asset) => {
-              const topDomain = Object.entries(asset.domainWeights).sort(
-                ([, left], [, right]) => (right ?? 0) - (left ?? 0),
-              )[0]?.[0]
-              return (
-                <div key={asset.id} className="rounded-lg border border-line/70 bg-void/40 px-2 py-1.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="min-w-0 truncate text-[0.75rem] font-medium text-bone">
-                      {asset.name}
-                    </span>
-                    <span className="shrink-0 font-mono text-[0.6875rem] text-mint">
-                      {formatTokens(asset.volumeMTok)} · Q{Math.round(asset.quality)}
-                    </span>
-                  </div>
-                  <div className="mt-0.5 flex flex-wrap gap-x-2 text-[0.625rem] uppercase tracking-wide text-muted">
-                    <span>{topDomain ?? 'mixed'}</span>
-                    <span>{asset.source}</span>
-                    <span>{asset.rights}</span>
-                    <span>div {Math.round(asset.diversity * 100)}</span>
-                    <span>risk {Math.round(asset.contaminationRisk * 100)}</span>
-                    {asset.synthetic?.method && <span className="text-research">{asset.synthetic.method}</span>}
-                  </div>
-                </div>
-              )
-            })}
-          {data.assets.length === 0 && (
-            <p className="rounded-lg border border-dashed border-line p-3 text-center text-[0.75rem] text-muted">
-              Acquire, process, or synthesize data to build the library.
-            </p>
-          )}
-          {data.manifests.at(-1) && (
-            <div className="mt-2 border-t border-line pt-2 font-mono text-[0.6875rem] text-muted">
-              Latest manifest: {data.manifests.at(-1)!.assetIds.length} assets ·{' '}
-              {formatTokens(data.manifests.at(-1)!.uniqueMTok)} unique ·{' '}
-              {formatTokens(data.manifests.at(-1)!.repeatedMTok)} repeated · Q
-              {Math.round(data.manifests.at(-1)!.effectiveQuality)}
-            </div>
-          )}
-        </div>
-      </details>
-
-      <details id="data-synth" className="group scroll-mt-4 rounded-2xl border border-research/35 bg-research/5">
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5">
+      <section id="data-synth" className="scroll-mt-4 rounded-2xl border border-research/35 bg-research/5">
+        <div className="flex items-center justify-between gap-3 px-3 py-2.5">
           <div>
             <h3 className="text-[0.8125rem] font-semibold text-research">Synthetic lab</h3>
-            <p className="mt-0.5 text-[0.6875rem] text-muted">Scale data with research compute and a live teacher.</p>
+            <p className="mt-0.5 text-[0.6875rem] text-muted">Set compute. The lab chooses models, domains, and quality.</p>
           </div>
-          <span className="flex items-center gap-2 font-mono text-[0.6875rem] text-research">
-            {data.synthQueue.length} active · ~{formatTokens(estPerDay)}/d
-            <span className="transition-transform group-open:rotate-45">+</span>
+          <span className="font-mono text-[0.6875rem] text-research">
+            {autoSynthJob ? 'active' : 'idle'} · ~{formatTokens(synthEstimate.grossMTokPerDay)}/d
           </span>
-        </summary>
-        <div className="space-y-2 border-t border-research/20 px-3 py-2.5">
-        <p className="text-[0.75rem] leading-snug text-muted">
-          Choose a teacher and research share. Quality falls when a stronger frontier appears.
-        </p>
-        {models.length === 0 ? (
-          <p className="text-[0.75rem] text-amber">Train a model first (internal or public).</p>
-        ) : (
-          <>
-            <div className="grid grid-cols-2 gap-2">
-              <label className="block text-[0.75rem] text-muted">
-                Domain
-                <select
-                  className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1 text-[0.8125rem] text-bone"
-                  value={genDomain}
-                  onChange={(e) => setGenDomain(e.target.value as DataDomain)}
-                >
-                  {DATA_DOMAINS.map((d) => (
-                    <option key={d} value={d}>
-                      {DATA_DOMAIN_META[d].label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="block text-[0.75rem] text-muted">
-                Model
-                <select
-                  className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1 text-[0.8125rem] text-bone"
-                  value={genModelId || models[0]!.id}
-                  onChange={(e) => setGenModelId(e.target.value)}
-                >
-                  {models.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name} · cap {m.capability.toFixed(0)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <label className="block text-[0.75rem] text-muted">
-              Research share: {Math.round(genShare * 100)}% of pool
-              <input
-                type="range"
-                min={5}
-                max={50}
-                step={1}
-                value={Math.round(genShare * 100)}
-                onChange={(e) => setGenShare(Number(e.target.value) / 100)}
-                className="mt-1 w-full"
-              />
-            </label>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                className={`flex-1 rounded-lg border px-2 py-1 text-[0.75rem] ${
-                  genTier === 'hq'
-                    ? 'border-mint/50 bg-mint/15 text-mint'
-                    : 'border-line text-muted'
-                }`}
-                onClick={() => setGenTier('hq')}
-              >
-                HQ (slower, clean)
-              </button>
-              <button
-                type="button"
-                className={`flex-1 rounded-lg border px-2 py-1 text-[0.75rem] ${
-                  genTier === 'lq'
-                    ? 'border-danger/50 bg-danger/15 text-danger'
-                    : 'border-line text-muted'
-                }`}
-                onClick={() => setGenTier('lq')}
-              >
-                LQ (fast, risky)
-              </button>
-            </div>
-            <p className="font-mono text-[0.75rem] text-muted">
-              {synthUnlocked
-                ? `Diverts ${num(grossResearchPoolPf(state) * genShare, 2)} PF continuously · tech keeps ${pct(Math.max(0, techShare - genShare), 0)} · teacher freshness ${pct(teacherFreshness?.freshness ?? 0, 0)}`
-                : 'Locked — queue Mixture Engineering → Data Cleaning → Eval Harness → Synthetic Generators in Research.'}
-            </p>
-            {!synthUnlocked ? (
-              <ResearchUnlockLink
-                nodeId="data_synth"
-                label="Open Synthetic Generators research"
-              />
-            ) : null}
-            {teacherFreshness && teacherFreshness.capabilityGap > 0.5 && (
-              <p className="rounded-lg border border-amber/30 bg-amber/10 px-2 py-1 text-[0.6875rem] text-amber">
-                Teacher trails {teacherFreshness.frontierName} by {teacherFreshness.capabilityGap.toFixed(1)} domain capability. Generated quality will decay until you switch models.
-              </p>
-            )}
-            <button
-              type="button"
-              disabled={!synthUnlocked}
-              className="w-full rounded-full bg-research/25 py-1.5 text-[0.8125rem] font-medium text-research hover:bg-research/35 disabled:opacity-40"
-              onClick={() =>
-                startSynthGen({
-                  domain: genDomain,
-                  modelId: genModelId || models[0]!.id,
-                  researchShare: genShare,
-                  qualityTier: genTier,
-                })
-              }
-            >
-              Start continuous {genTier.toUpperCase()} generation · ~{formatTokens(estPerDay)}/d
-            </button>
-          </>
-        )}
-
-        {(data.synthQueue?.length ?? 0) > 0 && (
-          <div className="mt-2 space-y-1 border-t border-research/20 pt-2">
-            {data.synthQueue.map((j) => {
-              const jobModel = models.find((model) => model.id === j.modelId)
-              const freshness = jobModel ? synthTeacherFreshness(state, jobModel, j.domain) : null
-              return (
-                <div key={j.id} className="rounded-lg border border-line bg-void/50 px-2 py-1.5">
-                  <div className="flex items-center justify-between gap-2 text-[0.75rem]">
-                    <span className="text-bone">
-                      {DATA_DOMAIN_META[j.domain].label} · {j.modelName}
-                    </span>
-                    <button
-                      type="button"
-                      className="text-muted hover:text-danger"
-                      onClick={() => cancelSynthGen(j.id)}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                  <div className="mt-0.5 font-mono text-[0.6875rem] text-muted">
-                    {formatTokens(j.progressMTok)} generated · {Math.round(j.researchShare * 100)}% research · {freshness ? `${Math.round(freshness.freshness * 100)}% teacher freshness` : 'teacher unavailable'}
-                  </div>
-                  <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-void"><div className="h-full bg-research" style={{ width: `${Math.max(8, (freshness?.freshness ?? 0) * 100)}%` }} /></div>
-                </div>
-              )
-            })}
-          </div>
-        )}
         </div>
-      </details>
+        <div className="space-y-2 border-t border-research/20 px-3 py-2.5">
+          <p className="text-[0.75rem] leading-snug text-muted">
+            Every day uses deterministic RNG. More compute produces more attempts; stronger models and larger budgets improve the chance that an attempt becomes useful, high-quality data.
+          </p>
+          <label className="block rounded-lg border border-line/70 bg-void/35 p-2.5 text-[0.75rem] text-muted">
+            <span className="flex items-center justify-between gap-3">
+              <span>Research compute budget</span>
+              <strong className="font-mono text-research">{Math.round(genShare * 100)}% · {num(synthEstimate.researchPf, 2)} PF</strong>
+            </span>
+            <input
+              type="range"
+              min={5}
+              max={50}
+              step={1}
+              value={Math.round(genShare * 100)}
+              onChange={(event) => setGenShare(Number(event.target.value) / 100)}
+              className="mt-2 w-full"
+            />
+          </label>
+          <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+            <SourceStat label="Attempts / day" value={formatTokens(synthEstimate.grossMTokPerDay)} />
+            <SourceStat label="Useful chance" value={pct(synthEstimate.usefulChance, 0)} />
+            <SourceStat label="High-Q chance" value={pct(synthEstimate.hqChance, 0)} />
+            <SourceStat label="Auto model" value={synthEstimate.model?.name ?? 'None'} />
+          </div>
+          {!synthUnlocked ? (
+            <ResearchUnlockLink nodeId="data_synth" label="Open Synthetic Generators research" />
+          ) : null}
+          <button
+            type="button"
+            disabled={!synthUnlocked || !synthEstimate.model}
+            className="w-full rounded-full bg-research/25 py-1.5 text-[0.8125rem] font-medium text-research hover:bg-research/35 disabled:opacity-40"
+            onClick={() => startSynthBudget({ researchShare: genShare })}
+          >
+            {autoSynthJob ? 'Update compute budget' : 'Start automatic generation'}
+          </button>
+
+          {autoSynthJob && (
+            <div className="rounded-lg border border-research/25 bg-void/50 p-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="truncate text-[0.75rem] font-medium text-bone">Auto portfolio · {autoSynthJob.modelName}</div>
+                  <div className="mt-0.5 font-mono text-[0.625rem] text-muted">{Math.round(autoSynthJob.researchShare * 100)}% of research · useful output goes straight to processed</div>
+                </div>
+                <button type="button" className="shrink-0 text-[0.6875rem] text-muted hover:text-danger" onClick={() => cancelSynthGen(autoSynthJob.id)}>Stop</button>
+              </div>
+              <div className="mt-2 grid grid-cols-3 gap-1.5">
+                <SourceStat label="High quality" value={formatTokens(autoSynthJob.hqMTok ?? 0)} />
+                <SourceStat label="Low quality" value={formatTokens(autoSynthJob.lqMTok ?? 0)} />
+                <SourceStat label="Rejected" value={formatTokens(autoSynthJob.wastedMTok ?? 0)} />
+              </div>
+              <div className="mt-2 flex h-1.5 overflow-hidden rounded-full bg-void" title="High quality / low quality / rejected attempts">
+                {(() => {
+                  const total = Math.max(1, autoSynthJob.progressMTok)
+                  return <>
+                    <div className="bg-mint" style={{ width: `${((autoSynthJob.hqMTok ?? 0) / total) * 100}%` }} />
+                    <div className="bg-research" style={{ width: `${((autoSynthJob.lqMTok ?? 0) / total) * 100}%` }} />
+                    <div className="bg-danger/60" style={{ width: `${((autoSynthJob.wastedMTok ?? 0) / total) * 100}%` }} />
+                  </>
+                })()}
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
 
       <section id="data-evaluate" className="scroll-mt-4 rounded-2xl border border-line bg-panel-2 p-3">
         <div className="flex items-start justify-between gap-3">
@@ -549,19 +409,40 @@ export function DataPanel() {
             </button>
           </div>
         </div>
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber/20 bg-amber/5 px-2.5 py-2 text-[0.6875rem]">
-          <span className="text-muted">
-            Audit preview · discard <strong className="font-mono text-amber">{formatTokens(pruneAllEstimate.totalMTok)}</strong>
-          </span>
-          <span className="font-mono text-muted">
-            {money(pruneAllEstimate.cashCost)} · {num(pruneAllEstimate.pfDays, 0)} PFd · {pruneAllEstimate.researchersRequired} researchers
-          </span>
-          {!pruneAllEstimate.ok && <span className="w-full text-amber">Blocked: {pruneAllEstimate.reason}</span>}
-        </div>
+        {pruneAuditEstimate.unlocked ? (
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber/20 bg-amber/5 px-2.5 py-2 text-[0.6875rem]">
+            <span className="text-muted">
+              Paid audit · discard <strong className="font-mono text-amber">{formatTokens(pruneAllEstimate.totalMTok)}</strong>
+            </span>
+            <span className="font-mono text-muted">
+              {money(pruneAllEstimate.cashCost)} · {num(pruneAllEstimate.pfDays, 0)} PFd · {pruneAllEstimate.researchersRequired} researchers
+            </span>
+            <span className="w-full text-mint">Volumes unlocked through D{pruneAuditEstimate.validUntilDay}.</span>
+            {!pruneAllEstimate.ok && <span className="w-full text-amber">Blocked: {pruneAllEstimate.reason}</span>}
+          </div>
+        ) : (
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber/25 bg-amber/5 px-2.5 py-2 text-[0.6875rem]">
+            <span className="min-w-0 flex-1 text-muted">
+              Run a sample audit to reveal discardable volume and per-domain pruning costs for {pruneAuditEstimate.validDays} days.
+            </span>
+            <button
+              type="button"
+              disabled={!pruneAuditEstimate.ok}
+              title={pruneAuditEstimate.reason}
+              onClick={() => purchaseDataPruneAudit()}
+              className="shrink-0 rounded-full border border-amber/40 px-2.5 py-1 font-medium text-amber hover:bg-amber/10 disabled:cursor-not-allowed disabled:opacity-35"
+            >
+              Audit corpus · {money(pruneAuditEstimate.cashCost)}
+            </button>
+            {!pruneAuditEstimate.ok && <span className="w-full text-amber">Blocked: {pruneAuditEstimate.reason}</span>}
+          </div>
+        )}
         <div className="mt-2.5 grid gap-1.5 sm:grid-cols-2">
           {DATA_DOMAINS.map((d) => {
             const s = data.stocks[d]
-            const sum = (s.fromWeb ?? 0) + (s.fromBought ?? 0) + (s.fromUser ?? 0) + (s.fromSynth ?? 0) || 1
+            const queued = data.processQueue
+              .filter((job) => job.domain === d)
+              .reduce((sum, job) => sum + job.remaining, 0)
             return (
               <DomainRow
                 key={d}
@@ -570,11 +451,9 @@ export function DataPanel() {
                 processed={s.processed}
                 quality={s.quality}
                 dayIn={data.dayCollectByDomain[d] ?? 0}
-                web={(s.fromWeb ?? 0) / sum}
-                bought={(s.fromBought ?? 0) / sum}
-                user={(s.fromUser ?? 0) / sum}
-                synth={(s.fromSynth ?? 0) / sum}
+                queued={queued}
                 prune={pruneEstimates.get(d)!}
+                auditUnlocked={pruneAuditEstimate.unlocked}
                 onProcess={() => enqueueProcess(d, Math.min(s.raw, 50), 70)}
                 onPrune={() => enqueueDataPrune(d)}
               />
@@ -582,35 +461,6 @@ export function DataPanel() {
           })}
         </div>
       </section>
-
-      <div id="data-process" className="scroll-mt-4">
-      {data.processQueue.length > 0 && (
-        <div className="rounded-2xl border border-line bg-panel-2 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="text-[0.8125rem] font-semibold text-bone">Cleaning queue</h3>
-            <span className="font-mono text-[0.6875rem] text-muted">{data.processQueue.length} active</span>
-          </div>
-          <div className="mt-2 space-y-1.5 font-mono text-[0.75rem]">
-            {data.processQueue.map((j) => {
-              const done = 1 - j.remaining / Math.max(0.01, j.total)
-              return (
-                <div key={j.id}>
-                  <div className="flex justify-between text-muted">
-                    <span className="text-bone">{DATA_DOMAIN_META[j.domain].label}</span>
-                    <span>
-                      {formatTokens(j.remaining)} left · Q{j.qualityTarget.toFixed(0)}
-                    </span>
-                  </div>
-                  <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-void">
-                    <div className="h-full bg-mint/80" style={{ width: `${done * 100}%` }} />
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
-      </div>
 
       {data.pruneQueue.length > 0 && (
         <div className="rounded-2xl border border-amber/30 bg-amber/5 p-3">
@@ -646,17 +496,16 @@ export function DataPanel() {
         </div>
       )}
 
-      <details className="group rounded-2xl border border-line bg-panel-2">
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5">
+      <section className="rounded-2xl border border-line bg-panel-2">
+        <div className="flex items-center justify-between gap-3 px-3 py-2.5">
           <div>
             <h3 className="text-[0.8125rem] font-semibold text-bone">Acquire data</h3>
             <p className="mt-0.5 text-[0.6875rem] text-muted">Buy live lots or build a diversified portfolio.</p>
           </div>
-          <span className="flex items-center gap-2 font-mono text-[0.6875rem] text-muted">
+          <span className="font-mono text-[0.6875rem] text-muted">
             {market.offers.filter((offer) => offer.mTokLeft > 0).length} live · refresh D{market.nextRefreshDay}
-            <span className="text-mint transition-transform group-open:rotate-45">+</span>
           </span>
-        </summary>
+        </div>
         <div className="border-t border-line px-3 py-2.5">
 
         <div className="mt-2 grid grid-cols-3 gap-1.5 font-mono text-[0.6875rem]">
@@ -849,7 +698,7 @@ export function DataPanel() {
           </button>
         </div>
         </div>
-      </details>
+      </section>
     </div>
   )
 }
@@ -860,11 +709,9 @@ function DomainRow({
   processed,
   quality,
   dayIn,
-  web,
-  bought,
-  user,
-  synth,
+  queued,
   prune,
+  auditUnlocked,
   onProcess,
   onPrune,
 }: {
@@ -873,16 +720,15 @@ function DomainRow({
   processed: number
   quality: number
   dayIn: number
-  web: number
-  bought: number
-  user: number
-  synth: number
+  queued: number
   prune: DataPruneEstimate
+  auditUnlocked: boolean
   onProcess: () => void
   onPrune: () => void
 }) {
   const meta = DATA_DOMAIN_META[domain]
-  const readyRatio = processed / Math.max(1, raw + processed)
+  const total = Math.max(1, raw + processed + queued)
+  const readyRatio = processed / total
   return (
     <div className="rounded-xl border border-line/70 bg-void/35 p-2.5">
       <div className="flex items-center justify-between gap-2">
@@ -914,14 +760,16 @@ function DomainRow({
         <span className="text-muted">Raw <strong className="text-bone">{formatTokens(raw)}</strong></span>
         <span className="text-right text-muted">Ready <strong className="text-mint">{formatTokens(processed)}</strong></span>
       </div>
-      <div className="mt-1.5 flex h-1 overflow-hidden rounded-full bg-panel-2">
-        <div className="bg-muted/50" style={{ width: `${web * 100}%` }} title="web" />
-        <div className="bg-amber/70" style={{ width: `${bought * 100}%` }} title="bought" />
-        <div className="bg-mint/70" style={{ width: `${user * 100}%` }} title="user" />
-        <div className="bg-research/80" style={{ width: `${synth * 100}%` }} title="synth" />
+      <div className="mt-1.5 flex h-1.5 overflow-hidden rounded-full bg-panel-2" title="Raw / cleaning / ready">
+        <div className="bg-amber/65" style={{ width: `${(raw / total) * 100}%` }} />
+        <div className="bg-research/90" style={{ width: `${(queued / total) * 100}%` }} />
+        <div className="bg-mint/80" style={{ width: `${(processed / total) * 100}%` }} />
       </div>
+      {queued > 0.01 && <div className="mt-1 font-mono text-[0.625rem] text-research">Cleaning {formatTokens(queued)}</div>}
       <div className="mt-1.5 border-t border-line/60 pt-1.5 font-mono text-[0.625rem] text-muted">
-        {prune.totalMTok >= 0.5 ? (
+        {!auditUnlocked ? (
+          <span>Pay for a corpus audit to reveal low-quality volume</span>
+        ) : prune.totalMTok >= 0.5 ? (
           <>
             Low-Q {formatTokens(prune.totalMTok)} · {money(prune.cashCost)} · {num(prune.pfDays, 0)} PFd · {prune.researchersRequired}R
             {!prune.ok && <span className="mt-0.5 block text-amber">{prune.reason}</span>}

@@ -102,6 +102,8 @@ describe('authoritative training programs', () => {
     }
     state = resolveCheckpoint(state, programId, 'continue')
     expect(state.player.trainingPrograms![0]!.checkpoints).toHaveLength(1)
+    expect(state.player.trainingPrograms![0]!.checkpoints[0]!.trainingNumerics)
+      .toEqual(originalJob.trainingNumerics)
 
     const beforeStabilize = state.player.trainingJob!
     const cashBefore = state.player.cash
@@ -134,6 +136,8 @@ describe('authoritative training programs', () => {
     expect(model.dataManifestId).toBe(state.player.trainingPrograms![0]!.dataManifestId)
     expect(model.integratedMethods).toEqual(['dense_basics'])
     expect(state.player.trainingPrograms![0]!.checkpoints.at(-1)?.progress).toBe(1)
+    expect(state.player.trainingPrograms![0]!.checkpoints.at(-1)?.trainingNumerics)
+      .toEqual(originalJob.trainingNumerics)
     expect(state.player.researchPods?.find((pod) => pod.id === 'pod-foundations')?.assignmentId).toBeNull()
     expect(state.evaluations.filter((evaluation) => evaluation.modelId === model.id)).toHaveLength(4)
   })

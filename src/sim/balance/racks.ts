@@ -1,5 +1,15 @@
-import type { ChassisDef, ModuleDef, RackDesign, RackDesignStats } from '../types'
+import type {
+  ChassisDef,
+  ModuleDef,
+  RackDesign,
+  RackDesignStats,
+  TrainingNumerics,
+} from '../types'
 import { RACK_PF_MULTIPLIER } from './rackSkus'
+import {
+  estimateTrainingMemoryGb,
+  LEGACY_TRAINING_NUMERICS,
+} from './trainingPrecision'
 
 /** Grid is 6 columns × N rows of 1×1 cells; larger slots span cells. */
 export const CHASSIS_CATALOG: ChassisDef[] = [
@@ -375,10 +385,18 @@ export function modelVramGb(paramsB: number, activeParamsB?: number, family?: st
   return paramsB * 2.15 + Math.max(4, paramsB * 0.4)
 }
 
-export function modelTrainVramGb(paramsB: number, activeParamsB?: number, family?: string): number {
-  if (family === 'moe' && activeParamsB != null) {
-    return paramsB * 2.4 + 16 // full expert set + optim states partial
-  }
-  // Adam states roughly 8–12 bytes/param peak with sharding relief
-  return paramsB * 6 + 16
+export function modelTrainVramGb(
+  paramsB: number,
+  activeParamsB?: number,
+  family?: string,
+  numerics: TrainingNumerics = LEGACY_TRAINING_NUMERICS,
+  activationCheckpointing = false,
+): number {
+  return estimateTrainingMemoryGb({
+    paramsB,
+    activeParamsB,
+    family,
+    numerics,
+    activationCheckpointing,
+  }).totalGb
 }

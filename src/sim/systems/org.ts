@@ -64,6 +64,7 @@ export function buyDataPartnership(state: SimState): SimState {
 
 export function setMarketing(state: SimState, perDay: number): SimState {
   const total = Math.max(0, Math.min(marketingBudgetCeiling(state), perDay))
+  const revenueMultiple = total / marketingRevenueBasis(state)
   const prior = marketingChannels(state)
   const priorTotal = Object.values(prior).reduce((sum, value) => sum + value, 0)
   const channels = priorTotal > 0
@@ -76,22 +77,38 @@ export function setMarketing(state: SimState, perDay: number): SimState {
     player: {
       ...state.player,
       marketingSpendPerDay: total,
+      marketingRevenueMultiple: revenueMultiple,
       marketingChannels: channels,
     },
   }
 }
 
-/**
- * Daily growth budget available to the player. It opens with company scale,
- * while retaining a finite global guardrail for pathological saves.
- */
-export function marketingBudgetCeiling(state: SimState): number {
-  const valuation = Math.max(0, state.player.finance.valuation ?? 0)
-  const cash = Math.max(0, state.player.cash)
-  return Math.min(
-    ECONOMY.marketingMax,
-    Math.max(5_000_000, valuation * 0.0001, cash * 0.003),
+export const MARKETING_MAX_REVENUE_MULTIPLE = 5
+const MARKETING_LAUNCH_REVENUE_FLOOR = 100_000
+
+/** Revenue scale used by the growth allocation. The launch floor prevents a
+ * pre-revenue company from being locked out of acquiring its first customers. */
+export function marketingRevenueBasis(state: SimState): number {
+  return Math.max(
+    MARKETING_LAUNCH_REVENUE_FLOOR,
+    state.player.finance.dayRevenue ?? 0,
   )
+}
+
+/** The player's persistent growth choice, inferred for legacy saves. */
+export function marketingRevenueMultiple(state: SimState): number {
+  const stored = state.player.marketingRevenueMultiple
+  const inferred = state.player.marketingSpendPerDay / marketingRevenueBasis(state)
+  const selected = typeof stored === 'number' && Number.isFinite(stored) ? stored : inferred
+  return Math.max(
+    0,
+    Math.min(MARKETING_MAX_REVENUE_MULTIPLE, selected),
+  )
+}
+
+/** Dynamic UI limit. There is no fixed dollar ceiling: it follows revenue. */
+export function marketingBudgetCeiling(state: SimState): number {
+  return marketingRevenueBasis(state) * MARKETING_MAX_REVENUE_MULTIPLE
 }
 
 export function defaultMarketingChannels(total: number): MarketingChannels {
@@ -134,6 +151,7 @@ export function setMarketingChannel(
     player: {
       ...state.player,
       marketingSpendPerDay: total,
+      marketingRevenueMultiple: total / marketingRevenueBasis(state),
       marketingChannels: nextChannels,
     },
   }
@@ -164,6 +182,31 @@ export function marketingReach(state: SimState): MarketingReach {
 }
 
 export function tickOrg(state: SimState): SimState {
+  const selectedMultiple = marketingRevenueMultiple(state)
+  const rebasedSpend = marketingRevenueBasis(state) * selectedMultiple
+  if (
+    state.player.marketingRevenueMultiple == null ||
+    Math.abs(rebasedSpend - state.player.marketingSpendPerDay) >= 1
+  ) {
+    const priorChannels = marketingChannels(state)
+    const priorTotal = Object.values(priorChannels).reduce((sum, value) => sum + value, 0)
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        marketingSpendPerDay: rebasedSpend,
+        marketingRevenueMultiple: selectedMultiple,
+        marketingChannels: priorTotal > 0
+          ? Object.fromEntries(
+              Object.entries(priorChannels).map(([channel, value]) => [
+                channel,
+                rebasedSpend * value / priorTotal,
+              ]),
+            ) as MarketingChannels
+          : defaultMarketingChannels(rebasedSpend),
+      },
+    }
+  }
   const effects = aggregateEffects(state.player.researchUnlocked)
   let dataQuality = state.player.dataQuality
   let brandTrust = state.player.brandTrust

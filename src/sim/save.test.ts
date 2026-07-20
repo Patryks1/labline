@@ -171,6 +171,47 @@ describe('save / load v4', () => {
     )
   })
 
+  it('migrates untouched legacy plan allowances to the 20M monthly baseline', () => {
+    const state = createGame({ seed: 82, difficulty: 'easy' })
+    state.player.pricing.plans = state.player.pricing.plans.map((plan) => ({
+      ...plan,
+      includedMTokPerMonth:
+        plan.id === 'plan-plus' ? 0.65 : 0.6 * plan.usageMultiplier,
+    }))
+
+    const restored = roundTripState(state)
+    const free = restored.player.pricing.plans.find((plan) => plan.id === 'plan-free')!
+    const plus = restored.player.pricing.plans.find((plan) => plan.id === 'plan-plus')!
+    const pro = restored.player.pricing.plans.find((plan) => plan.id === 'plan-pro')!
+
+    expect(free.includedMTokPerMonth).toBeCloseTo(2)
+    expect(plus.includedMTokPerMonth).toBeCloseTo(20)
+    expect(pro.includedMTokPerMonth).toBeCloseTo(100)
+  })
+
+  it('preserves deliberately customized subscription allowances on restore', () => {
+    const state = createGame({ seed: 82, difficulty: 'easy' })
+    const plus = state.player.pricing.plans.find((plan) => plan.id === 'plan-plus')!
+    plus.includedMTokPerMonth = 12
+
+    const restored = roundTripState(state)
+    expect(
+      restored.player.pricing.plans.find((plan) => plan.id === 'plan-plus')!
+        .includedMTokPerMonth,
+    ).toBe(12)
+  })
+
+  it('round-trips per-model plan serving precision while legacy precision remains optional', () => {
+    const state = createGame({ seed: 425, difficulty: 'normal' })
+    const plan = state.player.pricing.plans[1]!
+    plan.servePrecisionByModel = { 'released-model': 'int8' }
+    const restored = roundTripState(state)
+    expect(
+      restored.player.pricing.plans.find((candidate) => candidate.id === plan.id)
+        ?.servePrecisionByModel,
+    ).toEqual({ 'released-model': 'int8' })
+  })
+
   it('caps oversized legacy audiences at the world population on restore', () => {
     const state = createGame({ seed: 81, difficulty: 'easy' })
     state.segments = state.segments.map((segment) => ({

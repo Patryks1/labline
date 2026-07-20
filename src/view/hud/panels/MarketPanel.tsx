@@ -1,11 +1,36 @@
 import { useState } from 'react'
 import { SEGMENTS, WORLD_POPULATION } from '../../../sim/balance/economy'
+import {
+  deriveProductPortfolio,
+  PRODUCT_CHANNELS,
+} from '../../../sim/systems/productPortfolio'
+import type { ProductChannel, ProductOffer } from '../../../sim/types'
 import { useGameStore } from '../../../store/gameStore'
 import { audience, money, num, pct, people } from '../format'
+
+const PRODUCT_CHANNEL_LABELS: Record<ProductChannel, string> = {
+  free_assistant: 'Free assistant',
+  consumer_pro: 'Consumer Pro',
+  creator_developer: 'Creator / Developer',
+  payg_api: 'Pay-as-you-go API',
+  reserved_throughput_api: 'Reserved throughput',
+  enterprise_dedicated: 'Enterprise dedicated',
+}
+
+function formatProductOfferPrice(offer: ProductOffer): string {
+  const price = offer.pricing
+  if (price.monthlyUsd != null) return price.monthlyUsd <= 0 ? 'free' : `${money(price.monthlyUsd)}/mo`
+  if (price.minimumCommitmentUsd != null) return `${money(price.minimumCommitmentUsd)} min`
+  if (price.inputUsdPerMTok != null || price.outputUsdPerMTok != null) {
+    return `${money(price.inputUsdPerMTok ?? 0)}/${money(price.outputUsdPerMTok ?? 0)} per MTok`
+  }
+  return price.billingModel.replace('_', ' ')
+}
 
 export function MarketPanel() {
   const state = useGameStore((s) => s.state)
   const setPanel = useGameStore((s) => s.setPanel)
+  const portfolio = deriveProductPortfolio(state)
   const shares = state.lastMarket.sharesByLab
   const labs = [
     { id: 'player', name: 'You' },
@@ -41,6 +66,50 @@ export function MarketPanel() {
           the same rule. Intel is also on the right dock (F3).
         </p>
       </div>
+
+      <section className="rounded-2xl border border-line bg-panel-2 p-3">
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <h3 className="text-xs font-semibold text-bone">Promoted endpoints</h3>
+            <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">
+              Six public surfaces share your released model fleet and serving capacity.
+            </p>
+          </div>
+          <span className="font-mono text-[0.75rem] text-mint">
+            {portfolio.promoted.length}/6 live
+          </span>
+        </div>
+        <div className="mt-2 grid grid-cols-2 gap-1.5">
+          {PRODUCT_CHANNELS.map((channel) => {
+            const offer = portfolio.byChannel[channel]
+            const model = offer
+              ? state.player.models.find((candidate) => candidate.id === offer.primaryModelId)
+              : undefined
+            return (
+              <div
+                key={channel}
+                className={`rounded-lg border px-2 py-1.5 ${
+                  offer ? 'border-mint/30 bg-mint/5' : 'border-line/70 bg-void/35'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate text-[0.6875rem] font-medium text-bone">
+                    {PRODUCT_CHANNEL_LABELS[channel]}
+                  </span>
+                  <span className={`font-mono text-[0.625rem] uppercase ${offer ? 'text-mint' : 'text-muted'}`}>
+                    {offer ? 'live' : 'missing'}
+                  </span>
+                </div>
+                <div className="mt-0.5 truncate font-mono text-[0.625rem] text-muted">
+                  {offer
+                    ? `${model?.name ?? 'Model'} · ${formatProductOfferPrice(offer)}`
+                    : 'Release and package a compatible model'}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </section>
 
       <div className="rounded-2xl border border-line bg-panel-2 p-3">
         <div className="flex items-center justify-between gap-3">

@@ -11,6 +11,8 @@ import type {
   SegmentId,
   SimState,
   SubPlan,
+  ComputeLedger as SimComputeLedger,
+  ComputeWorkItem as SimComputeWorkItem,
 } from '../types'
 import { analyzeApiPricing, apiRevenueFromMTok, blendApiPrice } from '../balance/pricing'
 import {
@@ -19,7 +21,7 @@ import {
   inferencePfDemand,
   planActualMTokPerUser,
   planUsageUtilization,
-  serveAgainstInferencePool,
+  settleComputeLedger,
 } from '../balance/serveCompute'
 import { normalizeAllocation } from './compute'
 import { computeSnapshot } from './compute'
@@ -54,13 +56,14 @@ import {
   freeTierDemandProfile,
   planPriceTooHighScore,
   planModelTrafficMix,
-  allocatePlanCompute,
+  planModelServePrecision,
   planComputePriority,
   modelForServePrecision,
   planAllowanceExpectation,
   planStabilityDissatisfaction,
   planServeModifiers,
   planSubsidyRatio,
+  planDemandShockMultiplier,
 } from './plans'
 import {
   offerUtility,
@@ -98,19 +101,15 @@ export function attributedServingFixedCost(input: {
 export const DOMINANT_MARKET_SHARE = 0.5
 
 /**
- * A dominant lab cannot keep selling subscriptions or API tokens it cannot
- * physically serve. Below 50% share, normal overload churn remains the brake;
- * at/above 50%, admission control becomes a hard revenue ceiling.
+ * @deprecated Capacity admission now applies continuously at every market
+ * share through the compute ledger. Retained for old callers and saves.
  */
 export function dominantCapacitySalesGate(
-  marketShare: number,
-  apiServeFrac: number,
-  subServeFrac: number,
+  _marketShare: number,
+  _apiServeFrac: number,
+  _subServeFrac: number,
 ): boolean {
-  return (
-    marketShare >= DOMINANT_MARKET_SHARE &&
-    (apiServeFrac < 0.995 || subServeFrac < 0.995)
-  )
+  return false
 }
 
 /**
@@ -525,9 +524,41 @@ export function settleRivalOfferDemand(
       ),
     0,
   )
-  const capacity = serveAgainstInferencePool(demandPf, Math.max(0, capacityPf))
-  const serveFrac = capacity.serveFrac
-  const unservedRatio = capacity.unservedRatio
+  const workItems = buckets.flatMap((bucket, index) => {
+    const apiWork = inferencePfDemand(bucket.apiMTok, bucket.model, servingEfficiency)
+    const subscriptionWork = inferencePfDemand(
+      bucket.subscriptionMTok,
+      bucket.model,
+      servingEfficiency,
+    )
+    return [
+      ...(bucket.apiMTok > 0
+        ? [{
+            id: `api:${index}`,
+            channel: 'api',
+            requestedUnits: bucket.apiMTok,
+            requestedWorkPfDays: apiWork,
+            priority: 70,
+          }]
+        : []),
+      ...(bucket.subscriptionMTok > 0
+        ? [{
+            id: `subscription:${index}`,
+            channel: 'subscription',
+            requestedUnits: bucket.subscriptionMTok,
+            requestedWorkPfDays: subscriptionWork,
+            priority: 60,
+          }]
+        : []),
+    ]
+  })
+  const ledger = settleComputeLedger(workItems, {
+    capacityPfDays: Math.max(0, capacityPf),
+    reservations: { api: 0.68, subscription: 0.32 },
+  })
+  const serveFrac =
+    ledger.requestedUnits > 1e-9 ? ledger.servedUnits / ledger.requestedUnits : 1
+  const unservedRatio = ledger.unservedRatio
   const pain = Math.max(0, Math.min(1, priorServicePain))
   const baseChurn =
     unservedRatio <= 0.03
@@ -538,9 +569,7 @@ export function settleRivalOfferDemand(
             pain * 0.28 +
             (unservedRatio > 0.5 ? 0.08 : 0),
         )
-  const apiChurn = Math.min(0.55, baseChurn * 0.85 + (1 - serveFrac) * 0.28)
   const subChurn = Math.min(0.62, baseChurn * 0.9 + (1 - serveFrac) * 0.38)
-  const apiKeep = Math.max(0.2, 1 - apiChurn * 1.1)
   const subKeep = Math.max(0.08, 1 - subChurn * 1.05)
 
   let apiServedMTok = 0
@@ -548,23 +577,30 @@ export function settleRivalOfferDemand(
   let keptSubscriptionUsers = 0
   let apiRevenue = 0
   let subscriptionRevenue = 0
-  for (const bucket of buckets) {
-    const apiServed = bucket.apiMTok * serveFrac * apiKeep
-    const subServed = bucket.subscriptionMTok * serveFrac * subKeep
+  for (let index = 0; index < buckets.length; index += 1) {
+    const bucket = buckets[index]!
+    const apiRow = ledger.rows.find((row) => row.id === `api:${index}`)
+    const subscriptionRow = ledger.rows.find((row) => row.id === `subscription:${index}`)
+    const apiServed = apiRow?.servedUnits ?? 0
+    const subServed = subscriptionRow?.servedUnits ?? 0
     // Same addressable-seat conversion used by the player's plan funnel.
-    const keptSeats = bucket.subscriptionUsers * 0.00075 * subKeep * serveFrac
+    const subDelivery = bucket.subscriptionMTok > 1e-9
+      ? subServed / bucket.subscriptionMTok
+      : 1
+    const keptSeats = bucket.subscriptionUsers * 0.00075 * subKeep
     apiServedMTok += apiServed
     subscriptionServedMTok += subServed
     keptSubscriptionUsers += keptSeats
     apiRevenue += apiServed * Math.max(0, bucket.offer.apiPrice)
     subscriptionRevenue +=
-      (keptSeats * Math.max(0, bucket.offer.subPrice)) / ECONOMY.daysPerMonth
+      (keptSeats * Math.max(0, bucket.offer.subPrice) * (0.5 + 0.5 * subDelivery)) /
+      ECONOMY.daysPerMonth
   }
 
   return {
     demandMTok,
     demandPf,
-    capacityServedMTok: demandMTok * serveFrac,
+    capacityServedMTok: apiServedMTok + subscriptionServedMTok,
     apiServedMTok,
     subscriptionServedMTok,
     keptSubscriptionUsers,
@@ -958,7 +994,8 @@ export function tickMarket(state: SimState): SimState {
         )
       : state.player.pricing.apiPricePerMTok
 
-  // Capacity priority: API vs Subs — split **token** Cap (same for rivals via shared helpers)
+  // API/subscription shares are reservations, not hard partitions. The unified
+  // ledger backfills either reservation when its channel is quiet.
   const apiPrio = Math.max(
     0.12,
     Math.min(
@@ -1017,10 +1054,11 @@ export function tickMarket(state: SimState): SimState {
     const usageRate = autoU
     const sota = sotaProximity(cap, frontierCap)
     const free = isFreePlan(plan)
-    // Free users are light; paid engagement scales with SOTA but stays token-cheap
-    const sotaEngagement = free
-      ? 0.22 + Math.pow(sota, 1.35) * 0.55
-      : 0.4 + Math.pow(sota, 1.35) * 1.35
+    // Capability moves use within the tier's steady-state band. It must never
+    // multiply actual consumption beyond the configured entitlement.
+    const qualityEngagement = free
+      ? 0.7 + Math.pow(sota, 1.35) * 0.3
+      : 0.85 + Math.pow(sota, 1.35) * 0.15
     const priceTooHigh = planPriceTooHighScore(plan, {
       apiPricePerMTok: playerApiBlend,
       modelCapability: cap,
@@ -1031,8 +1069,13 @@ export function tickMarket(state: SimState): SimState {
     subscribers *= Math.max(0.08, Math.pow(Math.max(0.05, 1 - priceTooHigh), 1.55))
     // Closing free: paid take-rate bonus (conversion funnel)
     if (!free && !freePlanOn) subscribers *= 1.35
-    let perUser =
-      planActualMTokPerUser(plan, ECONOMY.basePlanUsageMTokPerDay, usageRate) * sotaEngagement
+    const dailyAllowance = planAllowanceMTokPerMonth(plan) / ECONOMY.daysPerMonth
+    let perUser = Math.min(
+      dailyAllowance,
+      planActualMTokPerUser(plan, ECONOMY.basePlanUsageMTokPerDay, usageRate) *
+        qualityEngagement *
+        planDemandShockMultiplier(plan, state.day),
+    )
     if (free && priorPain > 0.08) perUser *= painDemandDamp
     const rawMTok = subscribers * perUser
     const demandPf = modelMix.reduce(
@@ -1130,37 +1173,54 @@ export function tickMarket(state: SimState): SimState {
   const demandPf = apiDemandPf + planDemandPf
   const playerDemandMTok = playerApiMTok + planDemandMTok
 
-  // Both products settle against real PF. Subscription capacity is then
-  // divided by per-plan priority, so expensive plans can remain reliable while
-  // lower-priority tiers absorb more throttling.
-  const apiServe = serveAgainstInferencePool(apiDemandPf, apiPoolPf)
-  const planServeFractions = allocatePlanCompute(buckets, subPoolPf)
-  const serveFracApi = apiServe.serveFrac
-  const subServedDemandMTok = buckets.reduce(
-    (sum, bucket) =>
-      sum + bucket.rawMTok * (planServeFractions.get(bucket.plan.id) ?? 1),
-    0,
+  const computeLedger = settleComputeLedger(
+    [
+      ...playerApiBuckets.map((bucket, index) => ({
+        id: `api:${index}`,
+        channel: 'api',
+        requestedUnits: bucket.demandMTok,
+        requestedWorkPfDays: inferencePfDemand(
+          bucket.demandMTok,
+          bucket.serveModel,
+          serveEff,
+        ),
+        priority: 70,
+      })),
+      ...buckets.map((bucket) => ({
+        id: `plan:${bucket.plan.id}`,
+        channel: 'subscription',
+        requestedUnits: bucket.rawMTok,
+        requestedWorkPfDays: bucket.demandPf,
+        priority: planComputePriority(bucket.plan),
+      })),
+    ],
+    {
+      capacityPfDays: capacityPf,
+      reservations: { api: apiPrio, subscription: 1 - apiPrio },
+    },
   )
+  const apiRows = computeLedger.rows.filter((row) => row.channel === 'api')
+  const planServeFractions = new Map(
+    buckets.map((bucket) => [
+      bucket.plan.id,
+      computeLedger.rows.find((row) => row.id === `plan:${bucket.plan.id}`)?.serveFraction ?? 1,
+    ]),
+  )
+  const apiAdmittedMTok = apiRows.reduce((sum, row) => sum + row.servedUnits, 0)
+  const serveFracApi = playerApiMTok > 1e-9 ? apiAdmittedMTok / playerApiMTok : 1
+  const subServedDemandMTok = computeLedger.rows
+    .filter((row) => row.channel === 'subscription')
+    .reduce((sum, row) => sum + row.servedUnits, 0)
   const serveFracSub =
     planDemandMTok > 1e-9 ? Math.max(0, Math.min(1, subServedDemandMTok / planDemandMTok)) : 1
-  const unservedRatio =
-    playerDemandMTok > 1e-9
-      ? (playerApiMTok * (1 - serveFracApi) +
-          planDemandMTok * (1 - serveFracSub)) /
-        playerDemandMTok
-      : 0
+  const unservedRatio = computeLedger.unservedRatio
   const serveFrac =
     playerDemandMTok > 1e-9
       ? (playerApiMTok * serveFracApi + planDemandMTok * serveFracSub) /
         playerDemandMTok
       : 1
-  const servedMTok =
-    playerApiMTok * serveFracApi + planDemandMTok * serveFracSub
-  const capacitySalesCapped = dominantCapacitySalesGate(
-    sharesByLab.player ?? state.player.finance.totalShare ?? 0,
-    serveFracApi,
-    serveFracSub,
-  )
+  const servedMTok = computeLedger.servedUnits
+  const capacitySalesCapped = false
 
   const servicePain = nextServicePain(priorPain, unservedRatio)
   const effectiveLatencyScore = playerServiceLatencyScore(state, {
@@ -1172,10 +1232,6 @@ export function tickMarket(state: SimState): SimState {
       ? servicePain * 0.04
       : Math.min(0.55, unservedRatio * 0.22 + servicePain * 0.28 + (unservedRatio > 0.5 ? 0.08 : 0))
   // Channel-specific churn: starved product loses users faster
-  const apiChurnFrac = Math.min(
-    0.55,
-    baseChurn * 0.85 + (1 - serveFracApi) * 0.28,
-  )
   const churnFrac = baseChurn
 
   // ── Money: revenue = prices only; costs = real ops (not list COGS) ──
@@ -1209,9 +1265,8 @@ export function tickMarket(state: SimState): SimState {
   })
   const marginalPerMTok = attributedServeOps / denomMTok + ECONOMY.bandwidthPerMTok
 
-  const apiKeep = Math.max(0.2, 1 - apiChurnFrac * 1.1)
-  const apiModelSettlement = playerApiBuckets.map((bucket) => {
-    const dayMTok = bucket.demandMTok * serveFracApi * apiKeep
+  const apiModelSettlement = playerApiBuckets.map((bucket, index) => {
+    const dayMTok = computeLedger.rows.find((row) => row.id === `api:${index}`)?.servedUnits ?? 0
     const dayInferPf = inferencePfDemand(dayMTok, bucket.serveModel, serveEff)
     const { priceIn, priceOut } = modelApiInOut(state, bucket.model.id)
     return {
@@ -1236,15 +1291,10 @@ export function tickMarket(state: SimState): SimState {
     )
     const retainedAfterChurn =
       b.subscribers * Math.max(0.08, 1 - planSubChurnFrac * (free ? 0.75 : 1.05))
-    // At dominant share, the sub pool is an admission ceiling. Customers who
-    // cannot be served are not billed as active seats.
-    const admissionFrac = capacitySalesCapped ? planServeFrac : 1
-    const kept = retainedAfterChurn * admissionFrac
-    blockedSubscriptionSeats += Math.max(0, retainedAfterChurn - kept)
-    const seatFrac = b.subscribers > 0 ? kept / b.subscribers : 1
-    const deliveryFrac = capacitySalesCapped ? 1 : planServeFrac
+    const kept = retainedAfterChurn
+    blockedSubscriptionSeats += retainedAfterChurn * (1 - planServeFrac)
     const dayMTok =
-      b.rawMTok * seatFrac * deliveryFrac * Math.max(0.15, 1 - planSubChurnFrac * 0.55)
+      computeLedger.rows.find((row) => row.id === `plan:${b.plan.id}`)?.servedUnits ?? 0
     const modelUsage = b.modelMix.map((item) => {
       const modelMTok = dayMTok * item.share
       const modelPf = inferencePfDemand(modelMTok, item.model, serveEff)
@@ -1258,12 +1308,12 @@ export function tickMarket(state: SimState): SimState {
       }
     })
     const dayInferPf = modelUsage.reduce((sum, usage) => sum + usage.dayInferPf, 0)
-    // Subscription invoices are delivery-backed: under capacity pressure the
-    // bill is prorated to the fraction of normalized token service delivered.
-    const billableServeFrac = capacitySalesCapped ? 1 : planServeFrac
+    // Subscription revenue accrues by seat; material outages issue automatic
+    // service credits instead of pretending every token is usage-billed.
+    const serviceCredit = planServeFrac >= 0.97 ? 1 : 0.5 + 0.5 * planServeFrac
     const dayRevenue = free
       ? 0
-      : (kept * b.plan.pricePerMonth * billableServeFrac) / ECONOMY.daysPerMonth
+      : (kept * b.plan.pricePerMonth * serviceCredit) / ECONOMY.daysPerMonth
     return {
       planId: b.plan.id,
       name: b.plan.name,
@@ -1358,6 +1408,51 @@ export function tickMarket(state: SimState): SimState {
   const servedPf =
     apiInferPf + planStats.reduce((sum, plan) => sum + plan.dayInferPf, 0)
 
+  const nativeTextUnits = (mtok: number) => ({
+    inputMTok: Math.max(0, mtok) * 0.7,
+    outputMTok: Math.max(0, mtok) * 0.3,
+  })
+  const reconciledWorkItems: SimComputeWorkItem[] = computeLedger.rows.map((row) => {
+    const apiIndex = row.id.startsWith('api:') ? Number(row.id.slice(4)) : -1
+    const planId = row.id.startsWith('plan:') ? row.id.slice(5) : undefined
+    const apiSettlement = apiIndex >= 0 ? apiModelSettlement[apiIndex] : undefined
+    const apiUsage = apiIndex >= 0 ? apiModelUsage[apiIndex] : undefined
+    const planSettlement = planId
+      ? planStats.find((plan) => plan.planId === planId)
+      : undefined
+    const directCogs = apiSettlement
+      ? (apiUsage?.costPerMTok ?? 0) * apiSettlement.dayMTok
+      : planSettlement?.dayCogs ?? 0
+    return {
+      id: `${state.day}:${row.id}`,
+      labId: state.playerLabId,
+      kind: row.channel === 'api' ? 'api_text' : 'subscription_text',
+      modelId: apiSettlement?.model.id,
+      planId,
+      requested: nativeTextUnits(row.requestedUnits),
+      admitted: nativeTextUnits(row.admittedUnits),
+      served: nativeTextUnits(row.servedUnits),
+      billed: nativeTextUnits(row.billedUnits),
+      requestedPfDays: row.requestedWorkPfDays,
+      servedPfDays: row.servedWorkPfDays,
+      revenue: apiSettlement?.dayRevenue ?? planSettlement?.dayRevenue ?? 0,
+      directCogs,
+      ...(row.admitFraction < 0.999999 ? { rejectedReason: 'capacity' as const } : {}),
+    }
+  })
+  const reconciledComputeLedger: SimComputeLedger = {
+    day: state.day,
+    labId: state.playerLabId,
+    items: reconciledWorkItems,
+    requestedPfDays: computeLedger.requestedWorkPfDays,
+    admittedPfDays: computeLedger.admittedWorkPfDays,
+    servedPfDays: computeLedger.servedWorkPfDays,
+    billedPfDays: computeLedger.billedWorkPfDays,
+    capacityPfDays: computeLedger.capacityPfDays,
+    reservedPfDays: computeLedger.reservedWorkPfDays,
+    backfilledPfDays: computeLedger.backfilledWorkPfDays,
+  }
+
   // Enterprise peels off when SLA is bad
   let enterpriseContracts = state.player.enterpriseContracts
   if (servicePain > 0.25 && enterpriseContracts > 0) {
@@ -1371,8 +1466,8 @@ export function tickMarket(state: SimState): SimState {
       ECONOMY.daysPerMonth *
       (1 + state.player.pricing.enterpriseContractBonus * 0.12) +
     enterpriseWeight * softArpu * serveFrac * Math.max(0.25, 1 - churnFrac)
-  const enterpriseRevenue =
-    enterpriseRevenueBeforeCapacity * (capacitySalesCapped ? serveFrac : 1)
+  const enterpriseServiceCredit = serveFrac >= 0.97 ? 1 : 0.5 + 0.5 * serveFrac
+  const enterpriseRevenue = enterpriseRevenueBeforeCapacity * enterpriseServiceCredit
   const capacityProductRevenueCeiling = apiRevenue + subRevenue + enterpriseRevenue
 
   // Staff wages (HQ employees) — replaces legacy talent×base wage
@@ -1414,10 +1509,22 @@ export function tickMarket(state: SimState): SimState {
   for (const stat of planStats) {
     const plan = enabledPlans.find((candidate) => candidate.id === stat.planId)
     if (!plan || stat.dayMTok <= 0) continue
-    const quant = planServeModifiers(plan.servePrecision, state.player.researchUnlocked)
+    const weightedBrandRisk = (stat.modelUsage ?? []).reduce((sum, usage) => {
+      const planModel = state.player.models.find((candidate) => candidate.id === usage.modelId)
+      if (!planModel) return sum
+      const precision = planModelServePrecision(
+        plan,
+        planModel,
+        state.player.researchUnlocked,
+      )
+      return sum + planServeModifiers(precision, state.player.researchUnlocked).brandRisk * usage.share
+    }, 0)
+    const brandRisk = stat.modelUsage?.length
+      ? weightedBrandRisk
+      : planServeModifiers(plan.servePrecision, state.player.researchUnlocked).brandRisk
     const trafficShare = stat.dayMTok / Math.max(0.001, servedMTok)
     if (isFreePlan(plan)) continue
-    brand = Math.max(5, brand - quant.brandRisk * Math.min(1, trafficShare * 2.5) * 1.15)
+    brand = Math.max(5, brand - brandRisk * Math.min(1, trafficShare * 2.5) * 1.15)
   }
   // API customers pay per token and expect the advertised benchmark profile.
   // Quantized endpoints save PF, but sustained eval loss is visible and erodes
@@ -1702,8 +1809,12 @@ export function tickMarket(state: SimState): SimState {
         capability: m.capability,
         apiPricePerMTok: price,
         dayApiRevenue: modelApiRevenue,
+        dayApiDirectCogs: modelApiCogs,
+        dayApiAllocatedOps: 0,
         dayApiCogs: modelApiCogs,
         dayApiMTok: modelApiMTok,
+        dayApiContribution: modelApiRevenue - modelApiCogs,
+        apiCapacityUtilization: capacityMTok > 0 ? modelApiMTok / capacityMTok : 0,
         daySubRevenue: subscription.revenue,
         daySubCogs: subscription.cogs,
         dayEnterpriseShare: m.id === activeId ? enterpriseRevenue : 0,
@@ -1729,8 +1840,12 @@ export function tickMarket(state: SimState): SimState {
       capability: m.capability,
       apiPricePerMTok: price,
       dayApiRevenue: 0,
+      dayApiDirectCogs: 0,
+      dayApiAllocatedOps: 0,
       dayApiCogs: 0,
       dayApiMTok: 0,
+      dayApiContribution: 0,
+      apiCapacityUtilization: 0,
       daySubRevenue: 0,
       daySubCogs: 0,
       dayEnterpriseShare: 0,
@@ -1746,13 +1861,17 @@ export function tickMarket(state: SimState): SimState {
   let alerts = state.alerts
   let news = state.news
   // Only complain when demand actually exceeds inference PF (not residual pain with headroom)
-  if (unservedRatio > 0.08 && demandPf > capacityPf * 1.02 && playerDemandMTok > 0.05) {
+  if (
+    unservedRatio > 0.08 &&
+    demandPf > computeLedger.usableCapacityPfDays &&
+    playerDemandMTok > 0.05
+  ) {
     const latDrop = Math.max(0, campusLatency - effectiveLatencyScore)
     const msg =
       unservedRatio > 0.4
-        ? `Outage-level load: ${(unservedRatio * 100).toFixed(0)}% demand unserved · need ${demandPf.toFixed(1)} PF / have ${capacityPf.toFixed(1)} · customers leaving.`
+        ? `Outage-level load: ${(unservedRatio * 100).toFixed(0)}% demand unserved · need ${demandPf.toFixed(1)} PF-d / have ${computeLedger.usableCapacityPfDays.toFixed(1)} after latency reserve · customers leaving.`
         : unservedRatio > 0.2
-          ? `Service complaints: demand ${demandPf.toFixed(1)} PF vs pool ${capacityPf.toFixed(1)} · churn ${(churnFrac * 100).toFixed(0)}%/d. Expand Serve or efficiency research.`
+          ? `Service complaints: demand ${demandPf.toFixed(1)} PF-d vs pool ${computeLedger.usableCapacityPfDays.toFixed(1)} after reserve · churn ${(churnFrac * 100).toFixed(0)}%/d. Expand Serve or efficiency research.`
           : `Elevated load: ${(unservedRatio * 100).toFixed(0)}% unserved (latency −${latDrop.toFixed(0)}). Add inference or ship serving research.`
     alerts = [
       {
@@ -1782,17 +1901,6 @@ export function tickMarket(state: SimState): SimState {
   }
 
   alerts = alerts.filter((alert) => !alert.id.startsWith('sales-cap-'))
-  if (capacitySalesCapped) {
-    alerts = [
-      {
-        id: `sales-cap-${state.day}`,
-        day: state.day,
-        severity: 'danger' as const,
-        message: `Compute sales ceiling active at ${((sharesByLab.player ?? 0) * 100).toFixed(1)}% share: API tokens beyond ${apiServed.toFixed(1)} MTok and ${Math.round(blockedSubscriptionSeats).toLocaleString()} plan seats were not sold. Add serving capacity to raise the $${(capacityProductRevenueCeiling / 1_000_000).toFixed(2)}M/day product ceiling.`,
-      },
-      ...alerts,
-    ].slice(0, 40)
-  }
 
   if (snap.throttled) {
     alerts = [
@@ -1907,10 +2015,12 @@ export function tickMarket(state: SimState): SimState {
       effectiveLatencyScore,
       servicePain,
       planStats,
-      apiSubscribers: playerApiUsers * serveFracApi * apiKeep,
+      apiSubscribers: playerApiUsers * serveFracApi,
       apiDemandMTok: playerApiMTok,
       apiDayMTok: apiServed,
       apiDayRevenue: apiRevenue,
+      apiDayDirectCogs: apiCogs,
+      apiDayAllocatedOps: 0,
       apiDayCogs: apiCogs,
       apiModelUsage,
       capacityMTok,
@@ -1932,6 +2042,7 @@ export function tickMarket(state: SimState): SimState {
       blockedApiMTok: Math.max(0, playerApiMTok - apiServed),
       blockedSubscriptionSeats,
       capacityProductRevenueCeiling,
+      computeLedger: reconciledComputeLedger,
     },
     financeHistory,
     alerts,

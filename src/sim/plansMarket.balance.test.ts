@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest'
 import { createGame } from './createGame'
 import { ECONOMY } from './balance/economy'
 import {
+  defaultPlans,
   formatAllowance,
   allocatePlanCompute,
   freeTierDemandProfile,
@@ -13,6 +14,8 @@ import {
   planAllowanceExpectation,
   planApiEquivalentValue,
   planAttractiveness,
+  availablePlanPrecisionsForModel,
+  planModelServePrecision,
   planModelTrafficMix,
   planOfferingBreadth,
   planPriceTooHighScore,
@@ -368,7 +371,9 @@ describe('plan token value vs rivals', () => {
     const mix = planModelTrafficMix(s, plan)
     expect(mix).toHaveLength(2)
     expect(mix.reduce((sum, lane) => sum + lane.share, 0)).toBeCloseTo(1)
-    expect(mix.find((lane) => lane.model.id === large.id)!.share).toBeGreaterThan(0.7)
+    expect(mix.find((lane) => lane.model.id === large.id)!.share).toBeGreaterThan(
+      mix.find((lane) => lane.model.id === small.id)!.share,
+    )
 
     s = tickMarket(s)
     const usage = s.lastMarket.planStats.find((p) => p.planId === plan.id)!.modelUsage!
@@ -450,7 +455,102 @@ describe('plan token value vs rivals', () => {
 })
 
 describe('precision and premium scrutiny', () => {
-  it('INT4 saves the most compute and has severe benchmark and brand penalties', () => {
+  it('persists independent plan-model precisions and removes legacy fallback behavior', () => {
+    let state = shipModel(createGame(242), 62)
+    const small = state.player.models[0]!
+    const large: Model = {
+      ...small,
+      id: 'plan-large',
+      name: 'Plan Large',
+      paramsB: small.paramsB * 2,
+      capability: small.capability + 5,
+    }
+    const plan = basePlan({
+      id: 'roster',
+      modelIds: [small.id, large.id],
+      servePrecision: 'fp16',
+      modalityRoutes: {
+        text: {
+          modality: 'text',
+          primaryModelId: small.id,
+          fallbackModelId: large.id,
+          premiumShare: 0.5,
+          precision: 'fp16',
+        },
+      },
+    })
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        models: [small, large],
+        researchUnlocked: [...state.player.researchUnlocked, 'sys_quant', 'sys_fp8'],
+        pricing: { ...state.player.pricing, plans: [plan] },
+      },
+    }
+
+    state = updatePlan(state, plan.id, {
+      modelIds: [small.id, large.id],
+      servePrecisionByModel: { [small.id]: 'int8', [large.id]: 'int4' },
+    })
+    const updated = state.player.pricing.plans[0]!
+    expect(updated.servePrecisionByModel).toEqual({
+      [small.id]: 'int8',
+      [large.id]: 'int4',
+    })
+    expect(Object.values(updated.modalityRoutes ?? {}).every((route) => route?.fallbackModelId == null)).toBe(true)
+    const mix = planModelTrafficMix(state, updated)
+    expect(mix.map((lane) => lane.model.id).sort()).toEqual([small.id, large.id].sort())
+    expect(planModelServePrecision(updated, small, state.player.researchUnlocked)).toBe('int8')
+    expect(planModelServePrecision(updated, large, state.player.researchUnlocked)).toBe('int4')
+    expect(mix.find((lane) => lane.model.id === large.id)!.model.capability).toBe(
+      large.capability + planServeModifiers('int4', state.player.researchUnlocked).capabilityDelta,
+    )
+
+    state = updatePlan(state, plan.id, {
+      modelIds: [small.id],
+      servePrecisionByModel: { [small.id]: 'int8' },
+    })
+    expect(planModelTrafficMix(state, state.player.pricing.plans[0]!).map((lane) => lane.model.id)).toEqual([small.id])
+  })
+
+  it('clamps locked and checkpoint-incompatible plan-model formats', () => {
+    let state = shipModel(createGame(2_421), 62)
+    const model = state.player.models[0]!
+    const plan = basePlan({ id: 'compat', modelIds: [model.id] })
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        pricing: { ...state.player.pricing, plans: [plan] },
+      },
+    }
+
+    state = updatePlan(state, plan.id, {
+      servePrecisionByModel: { [model.id]: 'int4' },
+    })
+    expect(planModelServePrecision(state.player.pricing.plans[0]!, model, state.player.researchUnlocked)).toBe('fp16')
+
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        researchUnlocked: [
+          ...state.player.researchUnlocked,
+          'sys_quant',
+          'sys_fp8',
+          'sys_bitnet_runtime',
+        ],
+      },
+    }
+    expect(availablePlanPrecisionsForModel(model, state.player.researchUnlocked)).not.toContain('ternary_1_58')
+    state = updatePlan(state, plan.id, {
+      servePrecisionByModel: { [model.id]: 'ternary_1_58' },
+    })
+    expect(state.player.pricing.plans[0]!.servePrecisionByModel?.[model.id]).not.toBe('ternary_1_58')
+  })
+
+  it('INT4 saves the most compute with bounded eval and brand risk', () => {
     const unlocks = ['sys_quant', 'sys_fp8']
     const full = planServeModifiers('fp16', unlocks)
     const int8 = planServeModifiers('int8', unlocks)
@@ -458,7 +558,8 @@ describe('precision and premium scrutiny', () => {
     expect(int4.computeMult).toBeLessThan(int8.computeMult)
     expect(int8.computeMult).toBeLessThan(full.computeMult)
     expect(int4.benchmarkDeltas.coding).toBeLessThan(int8.benchmarkDeltas.coding!)
-    expect(int4.benchmarkDeltas.math).toBeLessThanOrEqual(-10)
+    expect(int4.benchmarkDeltas.math).toBeLessThan(int8.benchmarkDeltas.math!)
+    expect(int4.benchmarkDeltas.math).toBeGreaterThan(-10)
     expect(int4.brandRisk).toBeGreaterThan(int8.brandRisk)
   })
 
@@ -475,7 +576,7 @@ describe('precision and premium scrutiny', () => {
     expect(int4.benchmarks.math).toBeLessThan(full.benchmarks.math)
   })
 
-  it('quantized API traffic saves PF and damages brand', () => {
+  it('quantized API traffic saves PF without a blanket capability collapse', () => {
     const setup = (precision: 'fp16' | 'int4') => {
       let state = shipModel(createGame(244), 68)
       state = {
@@ -508,7 +609,10 @@ describe('precision and premium scrutiny', () => {
     expect((int4Usage?.dayInferPf ?? 0) / (int4Usage?.dayMTok ?? 1)).toBeLessThan(
       (fullUsage?.dayInferPf ?? 0) / (fullUsage?.dayMTok ?? 1),
     )
-    expect(int4.player.brandTrust).toBeLessThan(full.player.brandTrust)
+    expect(int4.player.models[0]!.capability).toBe(full.player.models[0]!.capability)
+    expect(int4.lastMarket.computeLedger?.requestedPfDays).toBeLessThan(
+      full.lastMarket.computeLedger?.requestedPfDays ?? Number.POSITIVE_INFINITY,
+    )
   })
 
   it('free plan quantization does not carry a brand penalty', () => {
@@ -579,6 +683,19 @@ describe('precision and premium scrutiny', () => {
     expect(weakPremium.maximumMTok).toBe(300)
     expect(weakPremium.dissatisfaction).toBeGreaterThan(0.8)
     expect(viablePremium.dissatisfaction).toBe(0)
+  })
+
+  it('ships default subscription allowances that clear their price expectations', () => {
+    const plans = defaultPlans()
+    const free = plans.find((plan) => plan.id === 'plan-free')!
+    const plus = plans.find((plan) => plan.id === 'plan-plus')!
+    const pro = plans.find((plan) => plan.id === 'plan-pro')!
+
+    expect(planAllowanceMTokPerMonth(free)).toBeCloseTo(2)
+    expect(planAllowanceMTokPerMonth(plus)).toBeCloseTo(20)
+    expect(planAllowanceMTokPerMonth(pro)).toBeCloseTo(100)
+    expect(planAllowanceExpectation(plus).dissatisfaction).toBe(0)
+    expect(planAllowanceExpectation(pro).dissatisfaction).toBe(0)
   })
 
   it('unsustainable plans create a large stability dissatisfaction penalty', () => {
@@ -684,6 +801,7 @@ describe('subsidy and high ARPU', () => {
     const plan = basePlan({
       pricePerMonth: 5000,
       usageMultiplier: 150,
+      includedMTokPerMonth: 100,
     })
     const api = 10
     const apiEq = planApiEquivalentValue(plan, api, 0.85)

@@ -65,18 +65,42 @@ describe('company systems', () => {
     expect(tickOrg(state).player.brandTrust).toBeGreaterThan(state.player.brandTrust)
   })
 
-  it('opens a much larger growth budget as company value scales', () => {
+  it('keeps a revenue-relative growth allocation as daily revenue changes', () => {
     const created = createGame(9107)
-    const state = {
+    let state = {
       ...created,
       player: {
         ...created.player,
         cash: 10_000_000_000,
-        finance: { ...created.player.finance, valuation: 1_000_000_000_000 },
+        finance: {
+          ...created.player.finance,
+          dayRevenue: 100_000_000,
+          valuation: 1_000_000_000_000,
+        },
       },
     }
-    expect(marketingBudgetCeiling(state)).toBeGreaterThanOrEqual(100_000_000)
-    expect(setMarketing(state, 75_000_000).player.marketingSpendPerDay).toBe(75_000_000)
+    expect(marketingBudgetCeiling(state)).toBe(500_000_000)
+    state = setMarketing(state, 300_000_000)
+    expect(state.player.marketingRevenueMultiple).toBe(3)
+    const priorWebShare = state.player.marketingChannels!.web / state.player.marketingSpendPerDay
+
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        finance: { ...state.player.finance, dayRevenue: 200_000_000 },
+      },
+    }
+    state = tickOrg(state)
+    expect(state.player.marketingSpendPerDay).toBe(600_000_000)
+    expect(state.player.marketingRevenueMultiple).toBe(3)
+    expect(state.player.marketingChannels!.web / state.player.marketingSpendPerDay).toBeCloseTo(
+      priorWebShare,
+    )
+
+    state = setMarketing(state, 0)
+    expect(state.player.marketingRevenueMultiple).toBe(0)
+    expect(tickOrg(state).player.marketingSpendPerDay).toBe(0)
   })
 
   it('gives rivals a competitive but cash-bounded marketing target', () => {

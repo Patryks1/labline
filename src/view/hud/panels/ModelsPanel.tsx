@@ -7,18 +7,24 @@ import type {
   ModelBackbone,
   ModelFamily,
   ModelProductPreset,
+  NativeWeightFormat,
+  PostTrainStage,
   SafetyCampaign,
   SafetyCampaignIntensity,
   TrainMode,
+  TrainingComputeFormat,
 } from '../../../sim/types'
 import {
   PARAM_PRESETS,
   estimateTrainDays,
+  estimateTrainingRun,
   formatParams,
   recommendedChips,
-  trainCostPfDays,
-  trainingVolumeMultiplier,
 } from '../../../sim/balance/training'
+import {
+  estimateTrainingMemoryGb,
+  TRAINING_PRECISION_PROFILES,
+} from '../../../sim/balance/trainingPrecision'
 import {
   familyFromSpec,
   forecastTrainingV3,
@@ -59,6 +65,41 @@ import {
 import { safetyCampaignEstimate } from '../../../sim/systems/safetyCampaigns'
 import { playerStaff } from '../../../sim/systems/staff'
 import { RadarChart } from '../ui/RadarChart'
+import { TrainingDataRadar } from '../ui/TrainingDataRadar'
+import { ModelProductSummary } from '../ui/ModelProductSummary'
+import { syntheticTrainingProfile } from '../../../sim/balance/syntheticTraining'
+
+const TRAINING_FORMAT_OPTIONS: ReadonlyArray<{
+  value: TrainingComputeFormat
+  research?: string
+}> = [
+  { value: 'fp32' },
+  { value: 'fp16_mixed' },
+  { value: 'bf16_mixed', research: 'opt_mixed' },
+  { value: 'fp8_hybrid', research: 'opt_fp8_train' },
+  { value: 'nvfp4', research: 'opt_nvfp4_train' },
+]
+
+function bestRecipeWeights(
+  family: ModelFamily,
+  dataMTok: number,
+  labData: ReturnType<typeof ensureLabData>,
+): Record<DataDomain, number> {
+  const ideal = defaultDataWeights(family)
+  const adjusted = { ...ideal }
+  for (const domain of DATA_DOMAINS) {
+    const stock = labData.stocks[domain]
+    const available = Math.max(0, stock.processed)
+    const required = Math.max(1, dataMTok * ideal[domain])
+    const coverage = Math.min(1, available / required)
+    const modalityFloor = domain === 'image' || domain === 'video' || domain === 'audio'
+      ? ideal[domain] * 0.55
+      : ideal[domain] * 0.35
+    adjusted[domain] = Math.max(modalityFloor, ideal[domain] * (0.55 + coverage * 0.45))
+  }
+  const sum = DATA_DOMAINS.reduce((total, domain) => total + adjusted[domain], 0)
+  return Object.fromEntries(DATA_DOMAINS.map((domain) => [domain, adjusted[domain] / sum])) as Record<DataDomain, number>
+}
 
 function parseSizeInput(value: string, unit: 'M' | 'B' | 'T'): number {
   const n = Number(value)
@@ -77,7 +118,11 @@ function applyParamsB(paramsB: number): { val: string; unit: 'M' | 'B' | 'T' } {
 export function ModelsPanel() {
   const state = useGameStore((s) => s.state)
   const startTraining = useGameStore((s) => s.startTraining)
-  const advancePostTrain = useGameStore((s) => s.advancePostTrain)
+  const setTrainingPriority = useGameStore((s) => s.setTrainingPriority)
+  const pauseTraining = useGameStore((s) => s.pauseTraining)
+  const cancelTraining = useGameStore((s) => s.cancelTraining)
+  const selectPostTrain = useGameStore((s) => s.selectPostTrain)
+  const benchmarkTrainingJob = useGameStore((s) => s.benchmarkTrainingJob)
   const keepInternal = useGameStore((s) => s.keepInternal)
   const releaseFromJob = useGameStore((s) => s.releaseFromJob)
   const releaseModel = useGameStore((s) => s.releaseModel)
@@ -106,7 +151,8 @@ export function ModelsPanel() {
   const [teacherShare, setTeacherShare] = useState(0.72)
   const [continueFromId, setContinueFromId] = useState('')
   /** Training volume in MTok (million tokens) */
-  const [dataMTok, setDataMTok] = useState(500)
+  const [realDataMTok, setRealDataMTok] = useState(500)
+  const [syntheticMultiplier, setSyntheticMultiplier] = useState(0)
   /** Share of volume for training (rest = verify/safety) */
   const [trainShare, setTrainShare] = useState(0.82)
   const [weights, setWeights] = useState<Record<DataDomain, number>>(() =>
@@ -115,12 +161,17 @@ export function ModelsPanel() {
   const [allowSynthetic, setAllowSynthetic] = useState(true)
   const [includeSynthHQ, setIncludeSynthHQ] = useState(true)
   const [includeSynthLQ, setIncludeSynthLQ] = useState(false)
+  const [syntheticTeacherIds, setSyntheticTeacherIds] = useState<Partial<Record<DataDomain, string>>>({})
   const [modelStack, setModelStack] = useState<string[]>(() =>
     defaultModelStack(state.player.researchUnlocked, 'dense'),
   )
   const [benchmarkSuite, setBenchmarkSuite] = useState<BenchmarkSuiteId>('language')
   const [safetyIntensity, setSafetyIntensity] = useState<SafetyCampaignIntensity>('standard')
   const [safetyResearchers, setSafetyResearchers] = useState(1)
+  const [trainingFormat, setTrainingFormat] = useState<TrainingComputeFormat>('fp16_mixed')
+  const [nativeWeightFormat, setNativeWeightFormat] = useState<NativeWeightFormat>('float')
+  const [computePriority, setComputePriority] = useState(50)
+  const [cancelConfirmId, setCancelConfirmId] = useState<string | null>(null)
 
   const paramsB = parseSizeInput(sizeVal, sizeUnit)
   const family = familyFromSpec(backbone, productPreset)
@@ -155,11 +206,17 @@ export function ModelsPanel() {
   }
   const mixUnlocked = unlocked.includes('data_mix')
   const synthUnlocked = unlocked.includes('data_synth')
+  const effectiveSyntheticMultiplier = allowSynthetic && synthUnlocked ? syntheticMultiplier : 0
+  const dataMTok = realDataMTok * (1 + effectiveSyntheticMultiplier)
 
   const teachers = state.player.models
   const modelIteration = useMemo(() => resolveModelIteration(teachers, name), [teachers, name])
   const previousTemplates = useMemo(() => recentModelTemplates(teachers), [teachers])
-  const job = state.player.trainingJob
+  const jobs = state.player.trainingJobs?.length
+    ? state.player.trainingJobs
+    : state.player.trainingJob
+      ? [state.player.trainingJob]
+      : []
   const pricing = state.player.pricing
   const active = state.player.models.find((m) => m.id === pricing.activeModelId)
   const labData = ensureLabData(state)
@@ -182,21 +239,23 @@ export function ModelsPanel() {
       totalUnits: dataMTok,
       totalMTok: dataMTok,
       trainShare,
-      weights: mixUnlocked ? weights : defaultDataWeights(family),
+      weights,
       allowSynthetic: allowSynthetic && synthUnlocked,
       includeSynthHQ: includeSynthHQ && allowSynthetic && synthUnlocked,
       includeSynthLQ: includeSynthLQ && allowSynthetic && synthUnlocked,
+      syntheticTeacherIds,
+      syntheticMultiplier: effectiveSyntheticMultiplier,
     }),
     [
       dataMTok,
       trainShare,
-      mixUnlocked,
       weights,
-      family,
       allowSynthetic,
       synthUnlocked,
       includeSynthHQ,
       includeSynthLQ,
+      syntheticTeacherIds,
+      effectiveSyntheticMultiplier,
     ],
   )
   const trainingForecast = useMemo(
@@ -241,14 +300,14 @@ export function ModelsPanel() {
   useEffect(() => {
     if (mode === 'continue') {
       // Continue only uses data collected since last train — no 1:1 min
-      setDataMTok(Math.max(1, Math.round(newSinceContinue || 50)))
+      setRealDataMTok(Math.max(1, Math.round(newSinceContinue || 50)))
       return
     }
     const target = Math.min(
       Math.max(minMTok, Math.min(recData, Math.max(processedAvail, minMTok))),
       Math.max(processedAvail * 1.5, recData * 2, minMTok),
     )
-    setDataMTok(Math.round(target))
+    setRealDataMTok(Math.round(Math.min(target, Math.max(1, processedAvail))))
   }, [
     minMTok,
     recData,
@@ -260,8 +319,8 @@ export function ModelsPanel() {
     newSinceContinue,
   ])
 
-  const costPf = useMemo(() => {
-    let base = trainCostPfDays({
+  const trainingRun = useMemo(() => {
+    let estimate = estimateTrainingRun({
       paramsB:
         mode === 'continue'
           ? (teachers.find((t) => t.id === continueFromId)?.paramsB ?? paramsB)
@@ -274,12 +333,20 @@ export function ModelsPanel() {
       activeParamsB,
       mode: mode === 'continue' ? 'pretrain' : mode === 'distill' ? 'distill' : 'pretrain',
       teacherParamsB: teachers.find((t) => t.id === teacherId)?.paramsB,
+      trainingTokensMTok: dataMTok * trainShare,
+      verificationTokensMTok: dataMTok * (1 - trainShare),
+      modalityComputeMult: trainingForecast.modalityComputeMult * stackModifiers.trainCostMult,
     })
-    if (mode === 'continue') base *= 0.22
-    base *= trainingVolumeMultiplier(trainingForecast.effectiveDataRatio)
-    base *= trainingForecast.modalityComputeMult
-    base *= stackModifiers.trainCostMult
-    return base
+    if (mode === 'continue') {
+      estimate = {
+        ...estimate,
+        trainingPfDays: estimate.trainingPfDays * 0.22,
+        verificationPfDays: estimate.verificationPfDays * 0.22,
+        physicalPfDays: estimate.physicalPfDays * 0.22,
+        gamePfDays: estimate.gamePfDays * 0.22,
+      }
+    }
+    return estimate
   }, [
     paramsB,
     family,
@@ -289,16 +356,37 @@ export function ModelsPanel() {
     teacherId,
     teachers,
     continueFromId,
-    trainingForecast.effectiveDataRatio,
+    dataMTok,
+    trainShare,
     trainingForecast.modalityComputeMult,
     stackModifiers.trainCostMult,
   ])
 
-  const upfront = Math.floor(costPf * ECONOMY.trainUpfrontPerPfDay)
+  const costPf = trainingRun.gamePfDays
+
+  const upfront = Math.max(1_000, Math.floor(costPf * ECONOMY.trainUpfrontPerPfDay))
 
   const daysEst = estimateTrainDays(costPf, snap.pools.training)
   const recChips = recommendedChips(paramsB, family)
-  const needVramGb = modelTrainVramGb(trainParamsB, activeParamsB, family)
+  const trainingMemory = useMemo(
+    () =>
+      estimateTrainingMemoryGb({
+        paramsB: trainParamsB,
+        activeParamsB,
+        family,
+        numerics: {
+          computeFormat: trainingFormat,
+          nativeWeightFormat,
+          recipeVersion: 1,
+        },
+        activationCheckpointing: unlocked.includes('opt_checkpoint'),
+      }),
+    [trainParamsB, activeParamsB, family, trainingFormat, nativeWeightFormat, unlocked],
+  )
+  const needVramGb = Math.max(
+    modelTrainVramGb(trainParamsB, activeParamsB, family),
+    trainingMemory.totalGb,
+  )
   const underProvisioned = snap.chipCount > 0 && snap.chipCount < recChips * 0.35
   const publicFrontier = Math.max(
     0,
@@ -315,15 +403,31 @@ export function ModelsPanel() {
   const internal = state.player.models.filter((m) => m.release === 'internal' || !m.shipped)
   const released = state.player.models.filter((m) => m.release === 'released' || m.shipped)
 
-  const weightSum = DATA_DOMAINS.reduce((s, d) => s + weights[d], 0) || 1
-
-  const setWeight = (d: DataDomain, v: number) => {
-    setWeights((w) => ({ ...w, [d]: Math.max(0, v) }))
-  }
-
-  const volMax = Math.max(processedAvail * 2, recData * 2.5, minMTok * 2, 100)
-  const shortfall = Math.max(0, dataMTok - processedAvail)
+  const realVolMax = Math.max(1, processedAvail)
+  const strongestTeacher = teachers.reduce<Model | null>(
+    (best, candidate) => !best || candidate.capability > best.capability ? candidate : best,
+    null,
+  )
+  const syntheticTeacherCapability = DATA_DOMAINS.reduce((sum, domain) => {
+    const selected = teachers.find((model) => model.id === syntheticTeacherIds[domain])
+    return sum + ((selected ?? strongestTeacher)?.capability ?? 0) * (weights[domain] ?? 0)
+  }, 0)
+  const syntheticFrontierCapability = Math.max(
+    syntheticTeacherCapability,
+    ...state.player.models.filter((model) => model.release === 'released' || model.shipped).map((model) => model.capability),
+    ...state.rivals.flatMap((rival) => rival.models.filter((model) => model.release === 'released' || model.shipped).map((model) => model.capability)),
+  )
+  const syntheticProfile = syntheticTrainingProfile({
+    realMTok: Math.min(realDataMTok, processedAvail),
+    syntheticMTok: Math.min(realDataMTok, processedAvail) * effectiveSyntheticMultiplier,
+    teacherCapability: Number.isFinite(syntheticTeacherCapability) ? syntheticTeacherCapability : 0,
+    frontierCapability: syntheticFrontierCapability,
+  })
   const evaluatedActive = useMemo(() => active ? normalizeModelEvaluations(active) : null, [active])
+  const safetyTarget = useMemo(
+    () => (internal[0] ? normalizeModelEvaluations(internal[0]) : null),
+    [internal],
+  )
   const availableSuites = useMemo(
     () => evaluatedActive
       ? (Object.keys(evaluatedActive.benchmarkSuites ?? {}) as BenchmarkSuiteId[])
@@ -340,10 +444,10 @@ export function ModelsPanel() {
   const frontierComparison = frontierForSuite(allPublicModels, activeSuite)
   const researcherCount = playerStaff(state).researcher ?? 0
   const safetyEstimate = useMemo(
-    () => evaluatedActive
-      ? safetyCampaignEstimate(state, evaluatedActive.id, safetyIntensity)
+    () => safetyTarget
+      ? safetyCampaignEstimate(state, safetyTarget.id, safetyIntensity)
       : null,
-    [state, evaluatedActive, safetyIntensity],
+    [state, safetyTarget, safetyIntensity],
   )
 
   useEffect(() => {
@@ -367,8 +471,8 @@ export function ModelsPanel() {
         <p className="hud-panel-sub">Design the recipe, verify the corpus, size the run, then release it to production.</p>
       </div>
 
-      {job ? (
-        <div className="rounded-2xl border border-train/30 bg-train/5 p-3">
+      {jobs.map((job) => (
+        <div key={job.id} className={`rounded-2xl border p-3 ${job.failed ? 'border-danger/50 bg-danger/8' : 'border-train/30 bg-train/5'}`}>
           <div className="flex justify-between gap-2 text-sm">
             <span className="font-medium text-bone">{job.name}</span>
             <span className="font-mono text-[0.8125rem] text-muted">
@@ -378,6 +482,25 @@ export function ModelsPanel() {
                   ? 'continue'
                   : 'pretrain'}{' '}
               · {job.family}
+            </span>
+          </div>
+          <div className="mt-2 flex items-center justify-between rounded-lg border border-train/20 bg-void/35 px-2 py-1 text-[0.6875rem] text-muted">
+            <span>{job.failed ? 'Failed run' : job.paused ? 'Paused' : 'Shared training compute'}</span>
+            <span className="font-mono text-train">
+              {job.failed ? '0.0' : num(
+                snap.pools.training *
+                  ((job.computePriority ?? 50) /
+                    Math.max(
+                      1,
+                      jobs.reduce(
+                        (sum, candidate) =>
+                          sum + (candidate.paused ? 0 : candidate.computePriority ?? 50),
+                        0,
+                      ),
+                    )),
+                1,
+              )}{' '}
+              PF/d · priority {job.computePriority ?? 50}
             </span>
           </div>
           <p className="mt-1 font-mono text-[0.8125rem] text-muted">
@@ -397,8 +520,50 @@ export function ModelsPanel() {
             <span className="rounded-full border border-line bg-void/50 px-2 py-0.5 font-mono text-[0.6875rem] text-muted">
               modality compute {(job.modalityComputeMult ?? 1).toFixed(2)}×
             </span>
-            <span className="text-[0.6875rem] text-muted">Outcome remains hidden until completion.</span>
+            <span className="rounded-full border border-line bg-void/50 px-2 py-0.5 font-mono text-[0.6875rem] text-muted">
+              {(job.trainingNumerics?.computeFormat ?? 'bf16_mixed').replaceAll('_', ' ')}
+              {(job.trainingNumerics?.nativeWeightFormat ?? 'float') === 'ternary_1_58'
+                ? ' · native 1.58-bit'
+                : ''}
+            </span>
+            <span className="text-[0.6875rem] text-muted">5% stage failure risk · outcome remains hidden until completion.</span>
           </div>
+          {job.failed ? (
+            <div className="mt-2 rounded-lg border border-danger/35 bg-danger/10 p-2">
+              <div className="flex items-center justify-between gap-2">
+                <strong className="text-xs text-danger">{job.failureStage === 'base' ? 'Base training failed' : `${job.failureStage?.toUpperCase()} failed`}</strong>
+                <span className="font-mono text-[0.625rem] text-muted">Day {job.failureDay ?? state.day}</span>
+              </div>
+              <p className="mt-1 text-[0.6875rem] text-muted">{job.failureReason}</p>
+            </div>
+          ) : (
+          <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 rounded-lg border border-line/60 bg-void/30 p-2">
+            <label className="text-[0.6875rem] text-muted">
+              Compute priority · {job.computePriority ?? 50}/100
+              <input
+                type="range"
+                min={10}
+                max={100}
+                step={5}
+                value={job.computePriority ?? 50}
+                onChange={(event) =>
+                  setTrainingPriority(job.id, Number(event.target.value), job.reservedPf)
+                }
+                className="mt-1 w-full"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => pauseTraining(job.id, !job.paused)}
+              className="rounded-full border border-line px-3 py-1.5 text-xs text-bone"
+            >
+              {job.paused ? 'Resume' : 'Pause'}
+            </button>
+          </div>
+          )}
+          {job.stallReason ? (
+            <p className="mt-1 text-[0.75rem] text-amber">{job.stallReason}</p>
+          ) : null}
           {job.dataPlan && (
             <p className="mt-1 text-[0.75rem] text-muted">
               Mix:{' '}
@@ -425,37 +590,81 @@ export function ModelsPanel() {
               detail={`${num(job.postTrainProgress, 1)} / ${num(job.postTrainTarget, 1)}`}
             />
           )}
+          <TrainingLossChart history={job.lossHistory ?? []} failed={job.failed ?? false} />
           {snap.pools.training < 0.05 && (
             <p className="mt-2 text-[0.8125rem] text-danger">
               Train pool near zero — build compute and raise Training allocation.
             </p>
           )}
-          <div className="mt-3 flex flex-wrap gap-2">
+          {job.failed ? (
             <button
               type="button"
-              disabled={job.progressPfDays < job.targetPfDays}
-              onClick={() => advancePostTrain()}
-              className="rounded-full bg-research/20 px-3 py-1.5 text-xs text-research disabled:opacity-40"
+              onClick={() => cancelTraining(job.id)}
+              className="mt-3 rounded-full border border-danger/50 bg-danger/10 px-3 py-1.5 text-xs text-danger"
             >
-              Next post-train
+              Delete failed run
             </button>
-            <button
-              type="button"
-              disabled={job.progressPfDays < job.targetPfDays}
-              onClick={() => keepInternal()}
-              className="rounded-full border border-line px-3 py-1.5 text-xs text-bone disabled:opacity-40"
-            >
-              Keep internal
-            </button>
-            <button
-              type="button"
-              disabled={job.progressPfDays < job.targetPfDays}
-              onClick={() => releaseFromJob()}
-              className="rounded-full bg-mint px-3 py-1.5 text-xs font-medium text-void disabled:opacity-40"
-            >
-              Release public
-            </button>
+          ) : (
+          <div className="mt-3 space-y-2">
+            <div className="flex flex-wrap gap-2">
+            {job.progressPfDays < job.targetPfDays ? (
+              <button
+                type="button"
+                onClick={() => {
+                  if (cancelConfirmId === job.id) {
+                    cancelTraining(job.id)
+                    setCancelConfirmId(null)
+                  } else {
+                    setCancelConfirmId(job.id)
+                  }
+                }}
+                className={`rounded-full border px-3 py-1.5 text-xs ${cancelConfirmId === job.id ? 'border-danger bg-danger/15 text-danger' : 'border-line text-muted'}`}
+              >
+                {cancelConfirmId === job.id ? 'Confirm cancel' : 'Cancel run'}
+              </button>
+            ) : (
+              <>
+                <button type="button" onClick={() => releaseFromJob(job.id)} className="rounded-full bg-mint px-3 py-1.5 text-xs font-medium text-void">Release</button>
+                <button type="button" onClick={() => benchmarkTrainingJob(job.id)} className="rounded-full border border-mint/40 bg-mint/5 px-3 py-1.5 text-xs text-mint">Run benchmarks</button>
+                <button type="button" onClick={() => keepInternal(job.id)} className="rounded-full border border-line px-3 py-1.5 text-xs text-bone">Keep internal</button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (cancelConfirmId === job.id) {
+                      cancelTraining(job.id)
+                      setCancelConfirmId(null)
+                    } else {
+                      setCancelConfirmId(job.id)
+                    }
+                  }}
+                  className={`rounded-full border px-3 py-1.5 text-xs ${cancelConfirmId === job.id ? 'border-danger bg-danger/15 text-danger' : 'border-line text-muted'}`}
+                >
+                  {cancelConfirmId === job.id ? 'Confirm delete' : 'Delete run'}
+                </button>
+              </>
+            )}
+            </div>
+            {job.progressPfDays >= job.targetPfDays ? (
+              <div className="rounded-lg border border-research/25 bg-research/5 p-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[0.6875rem] font-medium text-bone">Optional post-training</span>
+                  <span className="font-mono text-[0.625rem] text-muted">choose next stage</span>
+                </div>
+                <div className="mt-1.5 grid grid-cols-2 gap-1 sm:grid-cols-4">
+                  {(['sft', 'rlhf', 'process', 'tools'] as Exclude<PostTrainStage, 'none'>[]).map((stage) => {
+                    const locked = (stage === 'rlhf' && !unlocked.includes('align_rlhf')) || (stage === 'process' && !unlocked.includes('align_process'))
+                    const busy = job.postTrain !== 'none' && job.postTrainProgress < job.postTrainTarget
+                    return (
+                      <button key={stage} type="button" disabled={locked || busy} onClick={() => selectPostTrain(job.id, stage)} className={`rounded-md border px-2 py-1.5 text-[0.6875rem] uppercase ${job.postTrain === stage ? 'border-research bg-research/20 text-research' : 'border-line text-muted'} disabled:cursor-not-allowed disabled:opacity-35`}>
+                        {stage}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            ) : null}
           </div>
+          )}
           {job.progressPfDays >= job.targetPfDays && job.postTrain === 'sft' && !unlocked.includes('align_rlhf') ? (
             <ResearchUnlockLink className="mt-2" nodeId="align_rlhf" label="Unlock RLHF Pipeline for the next post-train stage" />
           ) : null}
@@ -463,8 +672,9 @@ export function ModelsPanel() {
             <ResearchUnlockLink className="mt-2" nodeId="align_process" label="Unlock Process Reward Models for the next stage" />
           ) : null}
         </div>
-      ) : (
-        <div id="model-recipe" className="space-y-2.5 rounded-2xl border border-line bg-panel-2 p-3 scroll-mt-4">
+      ))}
+
+      <div id="model-recipe" className="space-y-2.5 rounded-2xl border border-line bg-panel-2 p-3 scroll-mt-4">
           <div className="space-y-1.5">
             <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
               <label className="block text-xs text-muted">
@@ -551,7 +761,7 @@ export function ModelsPanel() {
                   if (nextBackbone !== backbone) setBackbone(nextBackbone)
                   const nextFamily = familyFromSpec(nextBackbone, next)
                   setWeights(defaultDataWeights(nextFamily))
-                  setDataMTok(recommendedDataMTok(paramsB, nextFamily))
+                  setRealDataMTok(Math.min(processedAvail, recommendedDataMTok(paramsB, nextFamily)))
                 }}
                 className="mt-1 w-full rounded-md border border-line bg-void px-2 py-1.5 text-sm text-bone outline-none"
               >
@@ -600,6 +810,106 @@ export function ModelsPanel() {
               </div>
             </div>
           </div>
+
+          <section className="space-y-2 rounded-xl border border-train/25 bg-train/5 p-2.5">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h3 className="text-[0.75rem] font-medium uppercase tracking-wider text-muted">
+                  Training numerics
+                </h3>
+                <p className="text-[0.6875rem] text-muted">
+                  Format changes speed, memory, compatibility, and failure tails—not a blanket score penalty.
+                </p>
+              </div>
+              <span className="font-mono text-[0.6875rem] text-train">
+                {TRAINING_PRECISION_PROFILES[trainingFormat].label}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="text-xs text-muted">
+                Compute format
+                <select
+                  value={trainingFormat}
+                  onChange={(event) => {
+                    const next = event.target.value as TrainingComputeFormat
+                    setTrainingFormat(next)
+                    if (nativeWeightFormat === 'ternary_1_58' && next !== 'bf16_mixed') {
+                      setNativeWeightFormat('float')
+                    }
+                  }}
+                  className="mt-1 w-full rounded-md border border-line bg-void px-2 py-1.5 text-sm text-bone outline-none"
+                >
+                  {TRAINING_FORMAT_OPTIONS.map((option) => {
+                    const locked = Boolean(option.research && !unlocked.includes(option.research))
+                    return (
+                      <option key={option.value} value={option.value} disabled={locked}>
+                        {TRAINING_PRECISION_PROFILES[option.value].label}
+                        {locked ? ' · research required' : ''}
+                      </option>
+                    )
+                  })}
+                </select>
+              </label>
+              <label className="text-xs text-muted">
+                Native weights
+                <select
+                  value={nativeWeightFormat}
+                  onChange={(event) => {
+                    const next = event.target.value as NativeWeightFormat
+                    setNativeWeightFormat(next)
+                    if (next === 'ternary_1_58') setTrainingFormat('bf16_mixed')
+                  }}
+                  className="mt-1 w-full rounded-md border border-line bg-void px-2 py-1.5 text-sm text-bone outline-none"
+                >
+                  <option value="float">Float weights</option>
+                  <option
+                    value="ternary_1_58"
+                    disabled={family !== 'dense' || !unlocked.includes('dense_bitnet')}
+                  >
+                    1.58-bit native / BitNet
+                    {family !== 'dense' || !unlocked.includes('dense_bitnet')
+                      ? ' · research + dense required'
+                      : ''}
+                  </option>
+                </select>
+              </label>
+            </div>
+            <label className="block text-xs text-muted">
+              Initial compute priority · {computePriority}/100
+              <input
+                type="range"
+                min={10}
+                max={100}
+                step={5}
+                value={computePriority}
+                onChange={(event) => setComputePriority(Number(event.target.value))}
+                className="mt-1 w-full"
+              />
+            </label>
+            <div className="grid grid-cols-3 gap-1.5 font-mono text-[0.6875rem]">
+              <div className="rounded-lg bg-void/45 p-2 text-muted">
+                Throughput
+                <strong className="block text-bone">
+                  up to{' '}
+                  {Math.max(
+                    0,
+                    ...Object.values(
+                      TRAINING_PRECISION_PROFILES[trainingFormat].throughputByGeneration,
+                    ).map((value) => value ?? 0),
+                  ).toFixed(2)}
+                  × BF16
+                </strong>
+              </div>
+              <div className="rounded-lg bg-void/45 p-2 text-muted">
+                Live state
+                <strong className="block text-bone">{num(trainingMemory.totalGb, 0)} GB</strong>
+              </div>
+              <div className="rounded-lg bg-void/45 p-2 text-muted">
+                Checkpoint
+                <strong className="block text-bone">{num(trainingMemory.packedCheckpointGb, 1)} GB</strong>
+              </div>
+            </div>
+          </section>
 
           <section
             className="space-y-2 rounded-xl border border-line/70 bg-void/25 p-2.5"
@@ -744,56 +1054,46 @@ export function ModelsPanel() {
                 </>
               )}
             </p>
-            <label className="mt-2 block text-xs text-muted">
-              Volume: {formatTokens(dataMTok)}
+            <div className="mt-2 rounded-xl border border-line/70 bg-void/40 p-3">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <span className="text-[0.6875rem] uppercase tracking-wider text-muted">Training volume</span>
+                  <strong className="block font-mono text-base text-bone">{formatTokens(dataMTok)} total</strong>
+                </div>
+                <div className="text-right font-mono text-[0.6875rem]">
+                  <span className="text-mint">{formatTokens(syntheticProfile.realMTok)} real</span>
+                  <span className="mx-1 text-muted">+</span>
+                  <span className="text-research">{formatTokens(syntheticProfile.syntheticMTok)} synthetic</span>
+                </div>
+              </div>
+              <div className="mt-2 flex h-2 overflow-hidden rounded-full bg-panel-2" aria-label={`${Math.round((1 - syntheticProfile.syntheticShare) * 100)} percent real data and ${Math.round(syntheticProfile.syntheticShare * 100)} percent synthetic data`}>
+                <div className="bg-mint" style={{ width: `${(1 - syntheticProfile.syntheticShare) * 100}%` }} />
+                <div className="bg-research" style={{ width: `${syntheticProfile.syntheticShare * 100}%` }} />
+              </div>
               {mode !== 'continue' && dataMTok < minMTok && (
-                <span className="ml-1 text-amber">(below 1:1 min — model will be under-trained)</span>
+                <p className="mt-1 text-[0.6875rem] text-amber">Below 1:1 minimum — the model will be under-trained.</p>
               )}
               {mode === 'continue' && dataMTok > newSinceContinue + 1 && (
-                <span className="ml-1 text-amber">
-                  · capped by new data (+ optional synth)
-                </span>
+                <p className="mt-1 text-[0.6875rem] text-amber">Continue training is capped by new real data plus generated expansion.</p>
               )}
-              {mode !== 'continue' && shortfall > 1 && allowSynthetic && synthUnlocked && (
-                <span className="ml-1 rounded-sm bg-amber/10 px-1.5 py-0.5 text-amber">
-                  Synthetic required: {formatTokens(shortfall)} · automatic verifier
+              <label className="mt-3 block text-xs text-muted">
+                Real corpus · {formatTokens(Math.min(realDataMTok, processedAvail))}
+                <input type="range" min={1} max={Math.max(1, Math.round(mode === 'continue' ? Math.max(1, newSinceContinue) : realVolMax))} step={Math.max(1, Math.round(realVolMax / 200))} value={Math.min(mode === 'continue' ? Math.max(1, newSinceContinue) : realVolMax, Math.max(1, realDataMTok))} onChange={(event) => setRealDataMTok(Number(event.target.value))} className="mt-1 w-full" />
+              </label>
+              <label className="mt-3 block text-xs text-muted">
+                Synthetic expansion · {effectiveSyntheticMultiplier.toFixed(1)}× real
+                <input type="range" min={0} max={3} step={0.1} value={effectiveSyntheticMultiplier} disabled={!synthUnlocked || !strongestTeacher} onChange={(event) => { const value = Number(event.target.value); setSyntheticMultiplier(value); setAllowSynthetic(value > 0); if (value > 0) setIncludeSynthHQ(true) }} className="mt-1 w-full" />
+                <span className="mt-1 flex justify-between text-[0.625rem]">
+                  <span>0× · real only</span>
+                  <span className={syntheticProfile.teacherTier === 'medium' ? 'text-mint' : ''}>2× · medium teacher</span>
+                  <span className={syntheticProfile.teacherTier === 'sota' ? 'text-mint' : ''}>3× · SOTA teacher</span>
                 </span>
-              )}
-              <input
-                type="range"
-                min={
-                  mode === 'continue'
-                    ? 1
-                    : Math.max(10, Math.round(minMTok * 0.2))
-                }
-                max={Math.round(
-                  mode === 'continue'
-                    ? Math.max(newSinceContinue * 1.5, 100)
-                    : volMax,
-                )}
-                step={Math.max(
-                  1,
-                  Math.round(
-                    (mode === 'continue'
-                      ? Math.max(newSinceContinue, 50)
-                      : volMax) / 200,
-                  ),
-                )}
-                value={Math.min(
-                  mode === 'continue'
-                    ? Math.max(newSinceContinue * 1.5, 100)
-                    : volMax,
-                  Math.max(1, dataMTok),
-                )}
-                onChange={(e) => setDataMTok(Number(e.target.value))}
-                className="mt-1 w-full"
-              />
-            </label>
-            <TokenRatioRail
-              ratio={trainingForecast.effectiveDataRatio}
-              omni={productPreset === 'omni'}
-              repeatedEpochs={trainingForecast.repeatedDataEpochs}
-            />
+              </label>
+              <div className={`mt-2 rounded-lg border px-2 py-1.5 text-[0.6875rem] ${syntheticProfile.benchmarkOverfit >= 0.2 ? 'border-danger/35 bg-danger/8 text-danger' : syntheticProfile.benchmarkOverfit >= 0.08 ? 'border-amber/35 bg-amber/8 text-amber' : 'border-mint/25 bg-mint/5 text-muted'}`}>
+                <div className="flex justify-between gap-2"><span>{syntheticProfile.teacherTier === 'none' ? 'No eligible teacher' : `${syntheticProfile.teacherTier.toUpperCase()} teacher · ideal ${syntheticProfile.idealMultiplier.toFixed(0)}×`}</span><span className="font-mono">up to {Math.round(syntheticProfile.imitationRetention * 100)}% teacher retention</span></div>
+                <p className="mt-0.5">Benchmark-overfit risk {Math.round(syntheticProfile.benchmarkOverfit * 100)}% · excess synthetic data can improve evals while reducing field reliability.</p>
+              </div>
+            </div>
             <label className="mt-2 block text-xs text-muted">
               Train {Math.round(trainShare * 100)}% / Verify {Math.round((1 - trainShare) * 100)}%
               <input
@@ -809,76 +1109,23 @@ export function ModelsPanel() {
                 More train → capability · more verify → safety / reliability
               </span>
             </label>
-            <div className={`mt-2 space-y-1.5 ${!mixUnlocked ? 'opacity-65' : ''}`}>
-              {!mixUnlocked && (
-                <ResearchUnlockLink nodeId="data_mix" label="Unlock domain mix with Mixture Engineering" />
-              )}
-              {DATA_DOMAINS.map((d) => {
-                const pct = Math.round((weights[d] / weightSum) * 100)
-                const have = labData.stocks[d].processed
-                const need = dataMTok * (weights[d] / weightSum)
-                const short = need > have + 0.05
-                return (
-                  <div key={d}>
-                    <div className="flex justify-between text-[0.75rem]">
-                      <span className="text-bone">{DATA_DOMAIN_META[d].label}</span>
-                      <span className={short ? 'text-amber' : 'text-muted'}>
-                        {pct}% · need {formatTokens(need)} / have {formatTokens(have)}
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={100}
-                      step={1}
-                      disabled={!mixUnlocked}
-                      value={Math.round(weights[d] * 100)}
-                      onChange={(e) => setWeight(d, Number(e.target.value) / 100)}
-                      className="w-full disabled:cursor-not-allowed"
-                    />
-                  </div>
-                )
-              })}
-            </div>
-
-            <label
-              className={`mt-2 flex items-center gap-2 text-[0.8125rem] ${
-                synthUnlocked ? 'text-bone' : 'text-muted opacity-50'
-              }`}
-            >
-              <input
-                type="checkbox"
-                checked={allowSynthetic && synthUnlocked}
-                disabled={!synthUnlocked}
-                onChange={(e) => setAllowSynthetic(e.target.checked)}
-              />
-              Use synthetic data in this train
-              {!synthUnlocked && (
-                <span className="text-[0.6875rem] text-amber">
-                  — unlock Synthetic Generators (data: mix → clean → eval → synth)
-                </span>
-              )}
-            </label>
-            {synthUnlocked && allowSynthetic && (
-              <div className="mt-1.5 space-y-1 pl-1">
-                <label className="flex items-center gap-2 text-[0.8125rem] text-bone">
-                  <input
-                    type="checkbox"
-                    checked={includeSynthHQ}
-                    onChange={(e) => setIncludeSynthHQ(e.target.checked)}
-                  />
-                  Include <strong className="text-mint">HQ synth</strong> (helps quality)
-                </label>
-                <label className="flex items-center gap-2 text-[0.8125rem] text-bone">
-                  <input
-                    type="checkbox"
-                    checked={includeSynthLQ}
-                    onChange={(e) => setIncludeSynthLQ(e.target.checked)}
-                  />
-                  Include <strong className="text-danger">LQ synth</strong> (volume, can regress)
-                </label>
-              </div>
-            )}
+            {!mixUnlocked ? <ResearchUnlockLink className="mt-2" nodeId="data_mix" label="Unlock automated Mixture Engineering" /> : null}
+            {!synthUnlocked ? <ResearchUnlockLink className="mt-1" nodeId="data_synth" label="Unlock Synthetic Generators for automatic shortage fill" /> : null}
+            <TrainingDataRadar
+              weights={weights}
+              totalMTok={dataMTok}
+              data={labData}
+              autoBalanceDisabled={!mixUnlocked}
+              teachers={teachers}
+              syntheticTeacherIds={syntheticTeacherIds}
+              includeSynthHQ={includeSynthHQ && synthUnlocked}
+              includeSynthLQ={includeSynthLQ && synthUnlocked}
+              onChange={setWeights}
+              onAutoBalance={() => setWeights(bestRecipeWeights(family, dataMTok, labData))}
+              onTeacherChange={(domain, teacher) => setSyntheticTeacherIds((current) => ({ ...current, [domain]: teacher }))}
+              onIncludeSynthHQChange={(value) => { setAllowSynthetic(value || includeSynthLQ); setIncludeSynthHQ(value) }}
+              onIncludeSynthLQChange={(value) => { setAllowSynthetic(value || includeSynthHQ); setIncludeSynthLQ(value) }}
+            />
           </div>
 
           {mode === 'continue' && (
@@ -1016,6 +1263,23 @@ export function ModelsPanel() {
             </div>
           )}
 
+          <div className="grid grid-cols-3 gap-1.5 rounded-xl border border-line/60 bg-void/30 p-2 font-mono text-[0.6875rem] text-muted">
+            <div>
+              Physical work
+              <strong className="block text-bone">{num(trainingRun.physicalPfDays, 2)} PF-d</strong>
+            </div>
+            <div>
+              Game work · 4×
+              <strong className="block text-bone">{num(trainingRun.gamePfDays, 2)} PF-d</strong>
+            </div>
+            <div>
+              Tokens
+              <strong className="block text-bone">
+                {formatTokens(trainingRun.trainingTokensMTok + trainingRun.verificationTokensMTok)}
+              </strong>
+            </div>
+          </div>
+
           <ForecastBoard
             capability={trainingForecast.expectedCapability}
             speed={trainingForecast.interactiveTokPerSec}
@@ -1059,9 +1323,15 @@ export function ModelsPanel() {
                 continueFromId: mode === 'continue' ? continueFromId || undefined : undefined,
                 dataPlan: recipePlan,
                 modelStack: selectedStack,
+                trainingNumerics: {
+                  computeFormat: trainingFormat,
+                  nativeWeightFormat,
+                  recipeVersion: 1,
+                },
+                computePriority,
               })
             }
-            disabled={!familyUnlocked(family) || !productUnlocked(productPreset) || !!job}
+            disabled={!familyUnlocked(family) || !productUnlocked(productPreset)}
             className="w-full rounded-full bg-train px-3 py-2 text-xs font-medium text-void disabled:cursor-not-allowed disabled:opacity-40"
           >
             Start{' '}
@@ -1073,6 +1343,20 @@ export function ModelsPanel() {
             · {money(upfront)} upfront
           </button>
         </div>
+
+      {(safetyTarget || state.player.safetyCampaign) && (
+        <SafetyCampaignCard
+          activeModel={safetyTarget}
+          campaign={state.player.safetyCampaign}
+          intensity={safetyIntensity}
+          setIntensity={setSafetyIntensity}
+          researchers={safetyResearchers}
+          setResearchers={setSafetyResearchers}
+          researcherCount={researcherCount}
+          estimate={safetyEstimate}
+          onStart={() => safetyTarget && startSafetyCampaign(safetyTarget.id, safetyIntensity, safetyResearchers)}
+          onCancel={cancelSafetyCampaign}
+        />
       )}
 
       <ModelList
@@ -1146,20 +1430,6 @@ export function ModelsPanel() {
         </section>
       )}
 
-      {(evaluatedActive || state.player.safetyCampaign) && (
-        <SafetyCampaignCard
-          activeModel={evaluatedActive}
-          campaign={state.player.safetyCampaign}
-          intensity={safetyIntensity}
-          setIntensity={setSafetyIntensity}
-          researchers={safetyResearchers}
-          setResearchers={setSafetyResearchers}
-          researcherCount={researcherCount}
-          estimate={safetyEstimate}
-          onStart={() => evaluatedActive && startSafetyCampaign(evaluatedActive.id, safetyIntensity, safetyResearchers)}
-          onCancel={cancelSafetyCampaign}
-        />
-      )}
     </div>
   )
 }
@@ -1246,24 +1516,18 @@ function ModelList({
             className={`overflow-hidden rounded-lg border transition ${selected ? 'border-mint/55 bg-mint/8' : 'border-line/75 bg-panel-2 hover:border-line'}`}
           >
             <button type="button" onClick={() => onSelect(model.id)} className="w-full p-2.5 text-left">
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <span className="truncate text-[0.8125rem] font-semibold text-bone">{model.name}</span>
-                    <span className={`rounded-sm px-1.5 py-0.5 font-mono text-[0.5625rem] uppercase ${tier.tone}`}>{tier.label}</span>
-                  </div>
-                  <div className="mt-0.5 truncate font-mono text-[0.625rem] text-muted">
-                    {privateList ? 'internal' : 'released'} · {model.backbone ?? model.family} · {formatParams(model.paramsB)} · r{model.revision ?? 1}
-                  </div>
-                </div>
-                <span className="font-mono text-sm text-mint">{model.capability.toFixed(2)}</span>
-              </div>
-              <div className="mt-2 grid grid-cols-4 gap-1 font-mono text-[0.625rem]">
-                <RosterStat label="suite" value={suiteScore.toFixed(2)} />
-                <RosterStat label="frontier" value={`${gap >= 0 ? '+' : ''}${gap.toFixed(2)}`} tone={gap >= 0 ? 'text-mint' : 'text-amber'} />
-                <RosterStat label="speed" value={`${speed.toFixed(2)} t/s`} />
-                <RosterStat label="serve" value={unit == null ? '—' : `${displayRate(unit)}/M`} />
-              </div>
+              <ModelProductSummary
+                model={model}
+                badge={privateList ? `internal · ${tier.label}` : `released · ${tier.label}`}
+                badgeTone={privateList ? 'muted' : gap >= 0 ? 'mint' : 'amber'}
+                score={model.capability.toFixed(2)}
+                metrics={[
+                  { label: 'suite', value: suiteScore.toFixed(2) },
+                  { label: 'frontier', value: `${gap >= 0 ? '+' : ''}${gap.toFixed(2)}`, tone: gap >= 0 ? 'text-mint' : 'text-amber' },
+                  { label: 'speed', value: `${speed.toFixed(2)} t/s` },
+                  { label: 'serve', value: unit == null ? '—' : `${displayRate(unit)}/M` },
+                ]}
+              />
               <div className="mt-2 h-1 overflow-hidden rounded-sm bg-void">
                 <div className="h-full bg-mint transition-[width] duration-300" style={{ width: `${Math.max(0, Math.min(100, progress))}%` }} />
               </div>
@@ -1609,55 +1873,6 @@ function RiskPill({ risk }: { risk: 'low' | 'medium' | 'high' }) {
   )
 }
 
-function TokenRatioRail({
-  ratio,
-  omni,
-  repeatedEpochs,
-}: {
-  ratio: number
-  omni: boolean
-  repeatedEpochs: number
-}) {
-  const markers = omni ? [10, 24] : [1, 6, 20]
-  const max = omni ? 24 : 20
-  const strong = omni ? 10 : 6
-  const floor = omni ? 10 : 1
-  const color = ratio < floor ? 'bg-danger' : ratio < strong ? 'bg-amber' : 'bg-mint'
-  const status = ratio < floor ? 'UNDERTRAINED' : ratio < max ? 'STRONG' : 'FRONTIER DATA'
-  return (
-    <div className="mt-2 rounded-xl border border-line/70 bg-void/50 px-2.5 py-2">
-      <div className="flex items-center justify-between gap-2 text-[0.6875rem]">
-        <span className="uppercase tracking-wider text-muted">Quality-weighted tokens / parameter</span>
-        <span className={ratio < floor ? 'text-danger' : ratio < strong ? 'text-amber' : 'text-mint'}>
-          {ratio.toFixed(2)}× · {status}
-        </span>
-      </div>
-      <div className="relative mt-2 h-2 rounded-full bg-panel-2">
-        <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(100, (ratio / max) * 100)}%` }} />
-        {markers.map((marker) => (
-          <div
-            key={marker}
-            className="absolute top-[-0.2rem] h-3 w-px bg-bone/70"
-            style={{ left: `${(marker / max) * 100}%` }}
-          />
-        ))}
-      </div>
-      <div className="relative mt-1 h-3 font-mono text-[0.5625rem] text-muted">
-        {markers.map((marker) => (
-          <span key={marker} className="absolute -translate-x-1/2" style={{ left: `${(marker / max) * 100}%` }}>
-            {marker}×
-          </span>
-        ))}
-      </div>
-      {repeatedEpochs > 4 && (
-        <p className="mt-1 text-[0.6875rem] text-danger">
-          Repeated-data risk: {repeatedEpochs.toFixed(1)} corpus epochs; gains decay sharply after four.
-        </p>
-      )}
-    </div>
-  )
-}
-
 function Bar({ label, value, detail }: { label: string; value: number; detail: string }) {
   const v = Math.max(0, Math.min(1, value))
   return (
@@ -1668,6 +1883,54 @@ function Bar({ label, value, detail }: { label: string; value: number; detail: s
       </div>
       <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-void">
         <div className="h-full bg-mint" style={{ width: `${v * 100}%` }} />
+      </div>
+    </div>
+  )
+}
+
+function TrainingLossChart({
+  history,
+  failed,
+}: {
+  history: Array<{ day: number; stage: string; progress: number; loss: number }>
+  failed: boolean
+}) {
+  const points = history.length > 1
+    ? history
+    : history.length === 1
+      ? [history[0]!, { ...history[0]!, progress: Math.max(0.01, history[0]!.progress), loss: history[0]!.loss }]
+      : []
+  if (!points.length) {
+    return (
+      <div className="mt-2 rounded-lg border border-line/50 bg-void/25 px-2 py-1.5 text-[0.6875rem] text-muted">
+        Loss telemetry begins when this run receives compute.
+      </div>
+    )
+  }
+  const width = 320
+  const height = 64
+  const losses = points.map((point) => point.loss)
+  const min = Math.min(...losses)
+  const max = Math.max(...losses)
+  const range = Math.max(0.05, max - min)
+  const path = points.map((point, index) => {
+    const x = points.length === 1 ? 0 : (index / (points.length - 1)) * width
+    const y = 6 + ((max - point.loss) / range) * (height - 12)
+    return `${index === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
+  }).join(' ')
+  const current = points.at(-1)!
+  return (
+    <div className="mt-2 rounded-lg border border-line/60 bg-void/30 p-2">
+      <div className="flex items-center justify-between gap-2 text-[0.6875rem]">
+        <span className="text-muted">Observed loss · {current.stage}</span>
+        <span className={`font-mono ${failed ? 'text-danger' : 'text-mint'}`}>{current.loss.toFixed(3)}</span>
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Training loss over time" className="mt-1 h-16 w-full overflow-visible">
+        <path d={`M 0 ${height - 6} H ${width}`} stroke="currentColor" className="text-line" strokeWidth="1" />
+        <path d={path} fill="none" stroke="currentColor" className={failed ? 'text-danger' : 'text-mint'} strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      </svg>
+      <div className="flex justify-between font-mono text-[0.5625rem] text-muted">
+        <span>D{points[0]!.day}</span><span>D{current.day}</span>
       </div>
     </div>
   )

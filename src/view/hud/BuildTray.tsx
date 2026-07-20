@@ -1,5 +1,16 @@
-import { useEffect, useMemo, useState } from 'react'
-import { MagnifyingGlass, X } from '@phosphor-icons/react'
+import { useEffect, useMemo, useState, type DragEvent } from 'react'
+import {
+  Circuitry,
+  Cpu,
+  DotsSixVertical,
+  Flask,
+  Lightning,
+  MagnifyingGlass,
+  SquaresFour,
+  UsersThree,
+  X,
+  type Icon,
+} from '@phosphor-icons/react'
 import { BUILD_DEFS, buildingTotalCost, getBuildDef } from '../../sim/systems/map'
 import { ECONOMY } from '../../sim/balance/economy'
 import type { BuildableKind, BuildDef } from '../../sim/types'
@@ -7,16 +18,22 @@ import { useGameStore } from '../../store/gameStore'
 import { mapTileAtAny } from '../../sim/systems/worldAccess'
 import { money, num, people } from './format'
 import { FacilityModelPreview } from './ui/FacilityModelPreview'
+import { writeBuildBlueprintDrag } from '../buildPlacement'
 
 type BuildCategoryId = 'all' | 'compute' | 'power' | 'people' | 'research' | 'silicon'
 
-const BUILD_CATEGORIES: { id: BuildCategoryId; label: string; kinds: BuildableKind[] }[] = [
-  { id: 'all', label: 'All blueprints', kinds: BUILD_DEFS.map((definition) => definition.kind) },
-  { id: 'compute', label: 'Compute', kinds: ['dc', 'dc_m', 'dc_l', 'cooling'] },
-  { id: 'power', label: 'Power', kinds: ['substation', 'solar', 'gas', 'nuclear', 'battery'] },
-  { id: 'people', label: 'People', kinds: ['hq', 'hq_m', 'hq_l'] },
-  { id: 'research', label: 'Research', kinds: ['lab'] },
-  { id: 'silicon', label: 'Silicon', kinds: ['fab'] },
+const BUILD_CATEGORIES: {
+  id: BuildCategoryId
+  label: string
+  icon: Icon
+  kinds: BuildableKind[]
+}[] = [
+  { id: 'all', label: 'All', icon: SquaresFour, kinds: BUILD_DEFS.map((definition) => definition.kind) },
+  { id: 'compute', label: 'Compute', icon: Cpu, kinds: ['dc', 'dc_m', 'dc_l', 'cooling'] },
+  { id: 'power', label: 'Power', icon: Lightning, kinds: ['substation', 'solar', 'gas', 'nuclear', 'battery'] },
+  { id: 'people', label: 'People', icon: UsersThree, kinds: ['hq', 'hq_m', 'hq_l'] },
+  { id: 'research', label: 'Research', icon: Flask, kinds: ['lab'] },
+  { id: 'silicon', label: 'Silicon', icon: Circuitry, kinds: ['fab'] },
 ]
 
 const CATEGORY_BY_KIND = new Map(
@@ -34,7 +51,6 @@ export function BuildPanel() {
   const [buildCategory, setBuildCategory] = useState<BuildCategoryId>('all')
   const [selectedKind, setSelectedKind] = useState<BuildableKind>(() => buildMode ?? 'dc')
   const [search, setSearch] = useState('')
-  const [affordableOnly, setAffordableOnly] = useState(false)
   const economyMult = state.config?.economyMult ?? 1
 
   useEffect(() => {
@@ -48,12 +64,11 @@ export function BuildPanel() {
     () =>
       BUILD_DEFS.filter((definition) => {
         if (!category.kinds.includes(definition.kind)) return false
-        if (affordableOnly && state.player.cash < definition.cash * economyMult) return false
         if (!query) return true
         const haystack = `${definition.label} ${definition.blurb} ${CATEGORY_BY_KIND.get(definition.kind) ?? ''}`.toLocaleLowerCase()
         return haystack.includes(query)
       }),
-    [affordableOnly, category.kinds, economyMult, query, state.player.cash],
+    [category.kinds, query],
   )
 
   useEffect(() => {
@@ -73,7 +88,12 @@ export function BuildPanel() {
   const estimatedPowerMw = selectedDef.rack
     ? selectedDef.rack * 0.006
     : selectedDef.mw ?? selectedDef.gen ?? 0
-  const filtersActive = Boolean(query || affordableOnly || buildCategory !== 'all')
+  const filtersActive = Boolean(query || buildCategory !== 'all')
+
+  const startPlacement = (kind: BuildableKind) => {
+    setSelectedKind(kind)
+    setBuildMode(kind)
+  }
 
   return (
     <div className="space-y-3">
@@ -131,34 +151,33 @@ export function BuildPanel() {
           ) : null}
         </label>
 
-        <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] gap-2">
-          <label className="min-w-0">
-            <span className="sr-only">Blueprint category</span>
-            <select
-              value={buildCategory}
-              onChange={(event) => setBuildCategory(event.target.value as BuildCategoryId)}
-              className="h-8 w-full rounded-lg border border-line/70 bg-panel-2 px-2 text-[0.6875rem] font-medium text-bone outline-none transition focus:border-mint/60 focus:ring-2 focus:ring-mint/15"
-              aria-label="Blueprint category"
-            >
-              {BUILD_CATEGORIES.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.label} · {item.kinds.length}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            type="button"
-            aria-pressed={affordableOnly}
-            onClick={() => setAffordableOnly((active) => !active)}
-            className={`h-8 rounded-lg border px-2.5 text-[0.625rem] font-semibold transition active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/50 ${
-              affordableOnly
-                ? 'border-mint/40 bg-mint/15 text-mint'
-                : 'border-line/70 bg-panel-2 text-muted hover:border-mint/25 hover:text-bone'
-            }`}
-          >
-            Affordable
-          </button>
+        <div
+          className="mt-2 grid grid-cols-6 gap-1.5"
+          role="group"
+          aria-label="Blueprint category"
+        >
+          {BUILD_CATEGORIES.map((item) => {
+            const Icon = item.icon
+            const active = buildCategory === item.id
+            return (
+              <button
+                key={item.id}
+                type="button"
+                aria-pressed={active}
+                aria-label={`${item.label} blueprints (${item.kinds.length})`}
+                title={`${item.label} · ${item.kinds.length} blueprints`}
+                onClick={() => setBuildCategory(item.id)}
+                className={`flex min-w-0 flex-col items-center justify-center gap-0.5 rounded-lg border px-1 py-1.5 text-[0.5rem] font-semibold transition active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/50 ${
+                  active
+                    ? 'border-mint/45 bg-mint/15 text-mint'
+                    : 'border-line/70 bg-panel-2 text-muted hover:border-mint/25 hover:text-bone'
+                }`}
+              >
+                <Icon aria-hidden="true" size={16} weight={active ? 'fill' : 'duotone'} />
+                <span className="max-w-full truncate">{item.label}</span>
+              </button>
+            )
+          })}
         </div>
       </section>
 
@@ -174,7 +193,12 @@ export function BuildPanel() {
             selected={selectedKind === definition.kind}
             cost={Math.floor(definition.cash * economyMult)}
             affordable={state.player.cash >= definition.cash * economyMult}
-            onSelect={() => setSelectedKind(definition.kind)}
+            onPlace={() => startPlacement(definition.kind)}
+            onDragStart={(event) => {
+              setSelectedKind(definition.kind)
+              setBuildMode(definition.kind)
+              writeBuildBlueprintDrag(event.dataTransfer, definition.kind)
+            }}
           />
         ))}
         {visibleDefs.length === 0 ? (
@@ -188,7 +212,6 @@ export function BuildPanel() {
                 type="button"
                 onClick={() => {
                   setSearch('')
-                  setAffordableOnly(false)
                   setBuildCategory('all')
                 }}
                 className="mt-2 text-[0.6875rem] font-semibold text-mint hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/50"
@@ -254,7 +277,7 @@ export function BuildPanel() {
             type="button"
             disabled={state.player.cash < upfrontTotal}
             title={state.player.cash < upfrontTotal ? `Requires ${money(upfrontTotal - state.player.cash)} more cash` : undefined}
-            onClick={() => setBuildMode(selectedDef.kind)}
+            onClick={() => startPlacement(selectedDef.kind)}
             className="btn-primary w-full"
           >
             {buildMode === selectedDef.kind ? `Placing ${selectedDef.label}` : `Place ${selectedDef.label} on map`}
@@ -270,37 +293,50 @@ function BlueprintRow({
   selected,
   cost,
   affordable,
-  onSelect,
+  onPlace,
+  onDragStart,
 }: {
   definition: BuildDef
   selected: boolean
   cost: number
   affordable: boolean
-  onSelect: () => void
+  onPlace: () => void
+  onDragStart: (event: DragEvent<HTMLButtonElement>) => void
 }) {
   const utility = blueprintUtility(definition)
   return (
     <button
       type="button"
+      draggable
       aria-pressed={selected}
-      onClick={onSelect}
-      className={`group w-full rounded-xl border px-2.5 py-2 text-left transition active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60 ${
+      title="Click to place, or drag this blueprint onto the map"
+      onClick={onPlace}
+      onDragStart={onDragStart}
+      className={`group w-full cursor-grab rounded-xl border px-2.5 py-2 text-left transition active:cursor-grabbing active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60 ${
         selected
           ? 'border-mint/50 bg-mint/10 shadow-[inset_3px_0_0_rgba(77,232,211,0.75)]'
           : 'border-line/65 bg-panel-2/50 hover:border-mint/25 hover:bg-panel-2/80'
       }`}
     >
       <div className="flex min-w-0 items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-1.5">
-            <span className="truncate text-[0.75rem] font-semibold text-bone">{definition.label}</span>
-            <span className="shrink-0 font-mono text-[0.5rem] uppercase tracking-wider text-muted">
-              {CATEGORY_BY_KIND.get(definition.kind)}
+        <div className="flex min-w-0 items-start gap-1.5">
+          <DotsSixVertical
+            aria-hidden="true"
+            className="mt-0.5 shrink-0 text-muted/65 transition group-hover:text-mint"
+            size={13}
+            weight="bold"
+          />
+          <div className="min-w-0">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span className="truncate text-[0.75rem] font-semibold text-bone">{definition.label}</span>
+              <span className="shrink-0 font-mono text-[0.5rem] uppercase tracking-wider text-muted">
+                {CATEGORY_BY_KIND.get(definition.kind)}
+              </span>
+            </div>
+            <span className="mt-0.5 block truncate font-mono text-[0.5625rem] text-muted">
+              {definition.days}d · {footprintLabel(definition)} · {utility}
             </span>
           </div>
-          <span className="mt-0.5 block truncate font-mono text-[0.5625rem] text-muted">
-            {definition.days}d · {footprintLabel(definition)} · {utility}
-          </span>
         </div>
         <div className="shrink-0 text-right font-mono">
           <div className={`text-[0.6875rem] font-semibold ${affordable ? 'text-mint' : 'text-danger'}`}>

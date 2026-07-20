@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Handshake, PaperPlaneTilt } from '@phosphor-icons/react'
 import {
   activeCityPowerContracts,
   activePowerExportContracts,
@@ -20,12 +21,20 @@ import { useGameStore } from '../../../store/gameStore'
 import { useUiStore } from '../../../store/uiStore'
 import { computeSnapshot } from '../../../sim/tick'
 import { money, mw } from '../format'
+import {
+  NegotiationHeader,
+  NegotiationMessage,
+  NegotiationMetric,
+  NegotiationMood,
+  NegotiationSlider,
+  type NegotiationStatus,
+} from '../ui/NegotiationRoom'
 
 type NegotiationState = {
   mode: 'import' | 'export'
   cityId: string
-  offerPrice: number
-  counterPrice?: number
+  offerPrice?: number
+  status: NegotiationStatus
   message?: string
 }
 
@@ -44,7 +53,11 @@ export function PowerPanel() {
   const cities = cityDashboard(state)
   const [contractMw, setContractMw] = useState(8)
   const [contractTerm, setContractTerm] = useState(60)
-  const [negotiation, setNegotiation] = useState<NegotiationState | null>(null)
+  const [negotiation, setNegotiation] = useState<NegotiationState>(() => ({
+    mode: 'import',
+    cityId: cities[0]?.city.id ?? '',
+    status: 'idle',
+  }))
 
   return (
     <div className="space-y-3">
@@ -56,13 +69,6 @@ export function PowerPanel() {
       </div>
 
       <PowerFlow balance={balance} bill={bill} />
-
-      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-        <Mini label="Demand" value={mw(balance.demandMw)} />
-        <Mini label="Locked import" value={mw(bill.contractMw + bill.energyContractMw)} accent="text-mint" />
-        <Mini label="Spot import" value={mw(bill.spotMw)} accent={bill.spotMw > 0 ? 'text-amber' : 'text-muted'} />
-        <Mini label="Export revenue" value={`${money(balance.exportRevenueDay)}/d`} accent="text-mint" />
-      </div>
 
       <section className="rounded-2xl border border-line bg-panel-2 p-3">
         <div className="flex items-start justify-between gap-3">
@@ -139,65 +145,80 @@ function PowerFlow({ balance, bill }: { balance: Balance; bill: Bill }) {
   const locked = bill.contractMw + bill.energyContractMw
   const served = ownUsed + locked + bill.spotMw
   const short = Math.max(0, balance.demandMw - served)
-  const parts = [
-    { id: 'owned', label: 'Owned → load', value: ownUsed, color: 'bg-mint', detail: 'On-site generation consumed by operations.' },
-    { id: 'locked', label: 'Locked → load', value: locked, color: 'bg-research', detail: 'Firm utility and PPA capacity serving operations.' },
-    { id: 'spot', label: 'Spot → load', value: bill.spotMw, color: 'bg-amber', detail: 'Uncontracted grid power purchased at today’s market rate.' },
-    { id: 'exported', label: 'Exported', value: balance.exportMw, color: 'bg-infer', detail: 'Owned surplus delivered under active city contracts.' },
-    { id: 'curtailed', label: 'Curtailed', value: balance.curtailedMw, color: 'bg-line', detail: 'Owned generation with no load or contracted buyer.' },
-    { id: 'short', label: 'Unserved', value: short, color: 'bg-danger', detail: 'Demand that cannot be reached through generation or connectors.' },
-  ]
-  const total = Math.max(0.001, parts.reduce((sum, part) => sum + part.value, 0))
-  const [selectedId, setSelectedId] = useState('owned')
-  const selected = parts.find((part) => part.id === selectedId) ?? parts[0]!
+  const demandScale = Math.max(0.001, balance.demandMw)
+  const runningCost = balance.generationCostDay + bill.totalCostDay
   return (
-    <section aria-label="Power flow" className="rounded-2xl border border-line bg-panel-2 p-3">
+    <section aria-label="Power status" className="rounded-2xl border border-line bg-panel-2 p-3">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h3 className="text-[0.8125rem] font-semibold text-bone">Power allocation</h3>
-          <p className="text-[0.625rem] text-muted">Select a segment to inspect the full system flow.</p>
+          <h3 className="text-[0.8125rem] font-semibold text-bone">Power status</h3>
+          <p className="text-[0.625rem] text-muted">What your operations need and where it comes from.</p>
         </div>
-        <span className={`font-mono text-[0.6875rem] ${short > 0.05 ? 'text-danger' : 'text-mint'}`}>{short > 0.05 ? `${mw(short)} unserved` : 'fully powered'}</span>
+        <span className={`font-mono text-[0.6875rem] ${short > 0.05 ? 'text-danger' : 'text-mint'}`}>
+          {short > 0.05 ? `${mw(short)} short` : 'fully powered'}
+        </span>
       </div>
-      <div className="mt-3 flex h-5 overflow-hidden rounded-md bg-void ring-1 ring-line/60">
-        {parts.filter((part) => part.value > 0).map((part) => (
-          <button
-            key={part.id}
-            type="button"
-            aria-label={`${part.label}: ${mw(part.value)}`}
-            aria-pressed={selected.id === part.id}
-            onClick={() => setSelectedId(part.id)}
-            className={`${part.color} min-w-1 transition hover:brightness-125 ${selected.id === part.id ? 'brightness-125 ring-2 ring-inset ring-bone/80' : ''}`}
-            style={{ width: `${(part.value / total) * 100}%` }}
-          />
-        ))}
+
+      <div className="mt-2 grid grid-cols-3 divide-x divide-line/70 rounded-lg border border-line/70 bg-void/35">
+        <PowerStat label="Need" value={mw(balance.demandMw)} />
+        <PowerStat label="Supplied" value={mw(Math.min(balance.demandMw, served))} />
+        <PowerStat label="Cost" value={`${money(runningCost)}/d`} />
       </div>
-      <div className="mt-2 grid grid-cols-2 gap-1 sm:grid-cols-3">
-        {parts.map((part) => (
-          <button
-            key={part.id}
-            type="button"
-            aria-pressed={selected.id === part.id}
-            onClick={() => setSelectedId(part.id)}
-            className={`flex items-center justify-between gap-2 rounded-md border px-2 py-1 text-left font-mono text-[0.5625rem] transition ${selected.id === part.id ? 'border-bone/50 bg-bone/10 text-bone' : 'border-line/60 text-muted hover:text-bone'}`}
-          >
-            <span className="truncate">{part.label}</span>
-            <strong>{mw(part.value)}</strong>
-          </button>
-        ))}
-      </div>
-      <div className="mt-2 rounded-lg border border-line/70 bg-void/40 px-2.5 py-2">
-        <div className="flex items-center justify-between gap-2">
-          <strong className="text-[0.6875rem] text-bone">{selected.label}</strong>
-          <span className="font-mono text-[0.625rem] text-mint">{mw(selected.value)} · {Math.round((selected.value / total) * 100)}%</span>
+
+      {balance.demandMw > 0.001 ? (
+        <>
+          <div className="mt-2 flex h-2.5 overflow-hidden rounded-full bg-void ring-1 ring-line/50">
+            {ownUsed > 0 ? (
+              <span className="bg-mint" style={{ width: `${(ownUsed / demandScale) * 100}%` }} />
+            ) : null}
+            {locked > 0 ? (
+              <span className="bg-research" style={{ width: `${(locked / demandScale) * 100}%` }} />
+            ) : null}
+            {bill.spotMw > 0 ? (
+              <span className="bg-amber" style={{ width: `${(bill.spotMw / demandScale) * 100}%` }} />
+            ) : null}
+            {short > 0 ? (
+              <span className="bg-danger" style={{ width: `${(short / demandScale) * 100}%` }} />
+            ) : null}
+          </div>
+          <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[0.625rem] text-muted">
+            <PowerKey color="bg-mint" label="On-site" value={mw(ownUsed)} />
+            <PowerKey color="bg-research" label="Contract" value={mw(locked)} />
+            <PowerKey color="bg-amber" label="Spot" value={mw(bill.spotMw)} />
+            {short > 0 ? <PowerKey color="bg-danger" label="Short" value={mw(short)} /> : null}
+          </div>
+        </>
+      ) : (
+        <p className="mt-2 rounded-lg border border-dashed border-line/70 px-2.5 py-2 text-[0.6875rem] text-muted">
+          No facilities are drawing power yet.
+        </p>
+      )}
+
+      {balance.exportMw > 0 || balance.curtailedMw > 0 ? (
+        <div className="mt-2 flex items-center justify-between gap-2 border-t border-line/60 pt-2 font-mono text-[0.625rem] text-muted">
+          <span>Surplus sold {mw(balance.exportMw)}</span>
+          <span>Unused {mw(balance.curtailedMw)}</span>
         </div>
-        <p className="mt-0.5 text-[0.625rem] leading-snug text-muted">{selected.detail}</p>
-      </div>
-      <div className="mt-2 grid grid-cols-2 gap-x-3 font-mono text-[0.625rem] text-muted">
-        <span>System flow</span><span className="text-right text-bone">{mw(total)}</span>
-        <span>Generation upkeep</span><span className="text-right text-bone">{money(balance.generationCostDay)}/d</span>
-      </div>
+      ) : null}
     </section>
+  )
+}
+
+function PowerStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 px-2 py-1.5">
+      <div className="text-[0.625rem] text-muted">{label}</div>
+      <div className="truncate font-mono text-[0.75rem] font-medium text-bone">{value}</div>
+    </div>
+  )
+}
+
+function PowerKey({ color, label, value }: { color: string; label: string; value: string }) {
+  return (
+    <span className="flex items-center gap-1">
+      <span className={`h-1.5 w-1.5 rounded-full ${color}`} />
+      {label} <strong className="text-bone">{value}</strong>
+    </span>
   )
 }
 
@@ -223,41 +244,75 @@ function ContractDesk({
   setContractMw: (mw: number) => void
   contractTerm: number
   setContractTerm: (days: number) => void
-  negotiation: NegotiationState | null
-  setNegotiation: (negotiation: NegotiationState | null) => void
+  negotiation: NegotiationState
+  setNegotiation: (negotiation: NegotiationState) => void
   gridStatus: string
   gridConstrained: boolean
 }) {
-  const importQuote = negotiation?.mode === 'import'
+  const importQuote = negotiation.mode === 'import'
     ? powerImportNegotiationQuote(state, negotiation.cityId, contractMw, contractTerm)
     : null
-  const exportQuote = negotiation?.mode === 'export'
+  const exportQuote = negotiation.mode === 'export'
     ? powerExportNegotiationQuote(state, negotiation.cityId, contractMw, contractTerm)
     : null
   const activeQuote = importQuote ?? exportQuote
+  const selectedCity = cities.find(({ city }) => city.id === negotiation.cityId)
+  const marketPrice = importQuote?.askPricePerMWh ?? exportQuote?.utilityOfferPerMWh ?? 0
+  const defaultOffer = Math.round(
+    importQuote
+      ? importQuote.askPricePerMWh * 0.94
+      : exportQuote
+        ? exportQuote.utilityOfferPerMWh * 1.05
+        : 0,
+  )
+  const offerPrice = negotiation.offerPrice ?? defaultOffer
+  const sliderMin = Math.max(
+    1,
+    Math.floor(
+      importQuote
+        ? importQuote.floorPricePerMWh * 0.82
+        : (exportQuote?.utilityOfferPerMWh ?? 1) * 0.9,
+    ),
+  )
+  const sliderMax = Math.max(
+    sliderMin + 1,
+    Math.ceil(
+      importQuote
+        ? importQuote.askPricePerMWh * 1.05
+        : (exportQuote?.ceilingPricePerMWh ?? 1) * 1.18,
+    ),
+  )
+  const canNegotiate = (activeQuote?.contractMw ?? 0) >= 1
+  const agreementScore = Math.max(
+    5,
+    Math.min(
+      95,
+      importQuote
+        ? 58 +
+            ((offerPrice - importQuote.floorPricePerMWh) /
+              Math.max(1, importQuote.askPricePerMWh - importQuote.floorPricePerMWh)) *
+              28
+        : exportQuote
+          ? 58 +
+            ((exportQuote.ceilingPricePerMWh - offerPrice) /
+              Math.max(1, exportQuote.ceilingPricePerMWh - exportQuote.utilityOfferPerMWh)) *
+              28
+          : 5,
+    ),
+  )
+  const dailyValue = (activeQuote?.contractMw ?? 0) * offerPrice * 24
 
-  const startNegotiation = (mode: 'import' | 'export', cityId: string) => {
-    if (mode === 'import') {
-      const quote = powerImportNegotiationQuote(state, cityId, contractMw, contractTerm)
-      if (!quote || quote.contractMw < 1) return
-      setNegotiation({
-        mode,
-        cityId,
-        offerPrice: Math.round(quote.askPricePerMWh * 0.94),
-      })
-      return
-    }
-    const quote = powerExportNegotiationQuote(state, cityId, contractMw, contractTerm)
-    if (!quote || quote.contractMw < 1) return
+  const resetNegotiation = (patch: Partial<Pick<NegotiationState, 'cityId' | 'mode'>> = {}) => {
     setNegotiation({
-      mode,
-      cityId,
-      offerPrice: Math.round(quote.utilityOfferPerMWh * 1.05),
+      ...negotiation,
+      ...patch,
+      offerPrice: undefined,
+      status: 'idle',
+      message: undefined,
     })
   }
 
   const commitNegotiation = (price: number) => {
-    if (!negotiation) return
     const before = negotiation.mode === 'import'
       ? state.cityPowerContracts.length
       : state.powerExportContracts.length
@@ -268,141 +323,247 @@ function ContractDesk({
       ? next.cityPowerContracts.length
       : next.powerExportContracts.length
     setState(next)
-    if (after > before) setNegotiation(null)
-    else setNegotiation({ ...negotiation, message: 'Could not sign. Check cash, generation, and connector headroom.' })
+    if (after > before) {
+      setNegotiation({
+        ...negotiation,
+        offerPrice: price,
+        status: 'signed',
+        message: `Deal accepted. ${mw(activeQuote?.contractMw ?? 0)} is live now at ${money(price)}/MWh.`,
+      })
+    } else {
+      setNegotiation({
+        ...negotiation,
+        offerPrice: price,
+        status: 'declined',
+        message: 'We could not activate this contract. Check cash, generation, and connector headroom.',
+      })
+    }
   }
 
   const submitOffer = () => {
-    if (!negotiation) return
     if (importQuote) {
-      const result = evaluatePowerImportOffer(importQuote, negotiation.offerPrice)
+      const result = evaluatePowerImportOffer(importQuote, offerPrice)
       if (result.accepted) commitNegotiation(result.agreedPricePerMWh)
-      else setNegotiation({ ...negotiation, counterPrice: result.agreedPricePerMWh, message: 'Utility declined and returned a firm counteroffer.' })
+      else setNegotiation({
+        ...negotiation,
+        offerPrice: Math.round(result.agreedPricePerMWh),
+        status: 'countered',
+        message: `That price is too low. Our firm counter is ${money(result.agreedPricePerMWh)}/MWh.`,
+      })
       return
     }
     if (exportQuote) {
-      const result = evaluatePowerExportOffer(exportQuote, negotiation.offerPrice)
+      const result = evaluatePowerExportOffer(exportQuote, offerPrice)
       if (result.accepted) commitNegotiation(result.agreedPricePerMWh)
-      else setNegotiation({ ...negotiation, counterPrice: result.agreedPricePerMWh, message: 'Utility declined your ask and returned its ceiling.' })
+      else setNegotiation({
+        ...negotiation,
+        offerPrice: Math.round(result.agreedPricePerMWh),
+        status: 'countered',
+        message: `That asking price is too high. Our firm counter is ${money(result.agreedPricePerMWh)}/MWh.`,
+      })
     }
   }
 
-  const marketPrice = importQuote?.askPricePerMWh ?? exportQuote?.utilityOfferPerMWh ?? 0
-  const sliderMin = negotiation?.mode === 'import' ? marketPrice * 0.78 : marketPrice
-  const sliderMax = negotiation?.mode === 'import'
-    ? marketPrice
-    : (exportQuote?.ceilingPricePerMWh ?? marketPrice) * 1.18
+  const providerCopy = negotiation.status === 'signed'
+    ? 'The agreement is active. Power and settlement start immediately.'
+    : importQuote
+      ? canNegotiate
+        ? `We can reserve up to ${mw(importQuote.contractMw)} at ${money(importQuote.askPricePerMWh)}/MWh. Longer terms improve the price.`
+        : `Commission a grid connector inside ${importQuote.cityName} before buying power here.`
+      : exportQuote
+        ? canNegotiate
+          ? `We can buy up to ${mw(exportQuote.contractMw)} of your surplus. Our opening price is ${money(exportQuote.utilityOfferPerMWh)}/MWh.`
+          : `Build generation inside ${exportQuote.cityName} before offering surplus power.`
+        : 'Select a city utility to open a negotiation.'
 
   return (
-    <section className="rounded-2xl border border-mint/25 bg-mint/5 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h3 className="text-[0.8125rem] font-semibold text-bone">Contract desk</h3>
-          <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">
-            Negotiate price and term. Imports require commissioned connector MW inside that city’s grid zone.
-          </p>
-        </div>
-        <span className={`font-mono text-[0.6875rem] ${gridConstrained ? 'text-danger' : 'text-mint'}`}>
-          grid {gridStatus}
-        </span>
-      </div>
-      <div className="mt-2 grid grid-cols-2 gap-2">
-        <label className="text-[0.6875rem] text-muted">
-          Requested capacity · {contractMw} MW
-          <input type="range" min={1} max={80} step={1} value={contractMw} onChange={(event) => { setContractMw(Number(event.target.value)); setNegotiation(null) }} className="mt-1 w-full" />
-        </label>
-        <label className="text-[0.6875rem] text-muted">
-          Term · {contractTerm} days
-          <input type="range" min={30} max={180} step={15} value={contractTerm} onChange={(event) => { setContractTerm(Number(event.target.value)); setNegotiation(null) }} className="mt-1 w-full" />
-        </label>
-      </div>
+    <section className="overflow-hidden rounded-2xl border border-mint/25 bg-panel-2/90">
+      <NegotiationHeader
+        title="Utility desk"
+        subtitle={`Power contract negotiation · grid ${gridStatus}${gridConstrained ? ' constrained' : ''}`}
+        status={negotiation.status}
+      />
 
-      {negotiation && activeQuote ? (
-        <div className="mt-3 rounded-xl border border-bone/25 bg-void/55 p-3">
-          <div className="flex items-start justify-between gap-2">
-            <div>
-              <span className={`text-[0.625rem] font-semibold uppercase tracking-wide ${negotiation.mode === 'import' ? 'text-research' : 'text-amber'}`}>
-                {negotiation.mode} negotiation
+      <div className="space-y-2 p-2.5">
+        <label className="flex items-center gap-2 rounded-lg border border-line/70 bg-void/55 px-2 py-1.5">
+          <span className="shrink-0 font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">
+            Chat with
+          </span>
+          <select
+            value={negotiation.cityId}
+            onChange={(event) => resetNegotiation({ cityId: event.target.value })}
+            className="min-w-0 flex-1 bg-transparent text-right text-[0.75rem] font-medium text-bone outline-none"
+            aria-label="City utility"
+          >
+            {cities.map(({ city }) => (
+              <option key={city.id} value={city.id} className="bg-void">
+                {city.name} Utility
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div className="grid grid-cols-2 rounded-lg border border-line/70 bg-void/45 p-1">
+          {(['import', 'export'] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => resetNegotiation({ mode })}
+              className={`rounded-md px-2 py-1.5 text-[0.75rem] font-medium transition ${negotiation.mode === mode ? 'bg-mint/15 text-mint' : 'text-muted hover:text-bone'}`}
+            >
+              {mode === 'import' ? 'Buy power' : 'Sell surplus'}
+            </button>
+          ))}
+        </div>
+
+        <div className="space-y-2 rounded-xl border border-line/60 bg-void/35 p-2">
+          <NegotiationMessage
+            side="provider"
+            name={`${activeQuote?.cityName ?? selectedCity?.city.name ?? 'City'} Utility`}
+          >
+            <span className="font-medium text-bone">
+              {negotiation.mode === 'import' ? 'Firm supply offer' : 'Surplus purchase offer'}
+            </span>
+            <span className="mt-0.5 block text-muted">{providerCopy}</span>
+            {selectedCity ? (
+              <span className="mt-1.5 flex flex-wrap gap-1 font-mono text-[0.625rem] text-muted">
+                <span className="rounded-full bg-void/70 px-1.5 py-0.5">
+                  {selectedCity.connectorCount} connector{selectedCity.connectorCount === 1 ? '' : 's'}
+                </span>
+                <span className="rounded-full bg-void/70 px-1.5 py-0.5">
+                  {negotiation.mode === 'import'
+                    ? `${mw(selectedCity.connectorAvailableMw)} grid room`
+                    : `${mw(selectedCity.genInZone)} generation`}
+                </span>
               </span>
-              <h4 className="text-[0.8125rem] font-medium text-bone">{activeQuote.cityName}</h4>
-            </div>
-            <button type="button" onClick={() => setNegotiation(null)} className="text-[0.6875rem] text-muted hover:text-bone">Close</button>
-          </div>
-          <div className="mt-2 grid grid-cols-3 gap-1 font-mono text-[0.625rem]">
-            <NegotiationMetric label="Capacity" value={mw(activeQuote.contractMw)} />
-            <NegotiationMetric label="Utility position" value={`${money(marketPrice)}/MWh`} />
-            <NegotiationMetric label="Term" value={`${activeQuote.termDays}d`} />
-          </div>
-          <label className="mt-2 block text-[0.6875rem] text-muted">
-            {negotiation.mode === 'import' ? 'Your bid' : 'Your asking price'} · {money(negotiation.offerPrice)}/MWh
-            <input
-              type="range"
-              min={Math.floor(sliderMin)}
-              max={Math.ceil(sliderMax)}
-              step={1}
-              value={negotiation.offerPrice}
-              onChange={(event) => setNegotiation({ ...negotiation, offerPrice: Number(event.target.value), counterPrice: undefined, message: undefined })}
-              className="mt-1 w-full"
-            />
-          </label>
-          {negotiation.message ? <p className="mt-2 rounded-lg border border-amber/30 bg-amber/10 px-2 py-1.5 text-[0.6875rem] text-amber">{negotiation.message}</p> : null}
-          <div className="mt-2 flex gap-1.5">
-            {negotiation.counterPrice != null ? (
-              <button type="button" onClick={() => commitNegotiation(negotiation.counterPrice!)} className="btn-primary flex-1">
-                Accept {money(negotiation.counterPrice)}/MWh
-              </button>
-            ) : (
-              <button type="button" onClick={submitOffer} className="btn-primary flex-1">Submit offer</button>
-            )}
-            <button type="button" onClick={() => setNegotiation(null)} className="btn-ghost">Walk away</button>
-          </div>
-        </div>
-      ) : null}
+            ) : null}
+          </NegotiationMessage>
 
-      <div className="mt-3 space-y-1.5">
-        {cities.map(({ city, distToPlayer, hallsInZone, rivalHallsInZone, genInZone, connectorCount, connectorMw, connectorAvailableMw }) => {
-          const importTerms = powerImportNegotiationQuote(state, city.id, contractMw, contractTerm)
-          const exportTerms = powerExportNegotiationQuote(state, city.id, contractMw, contractTerm)
-          const canImport = (importTerms?.contractMw ?? 0) >= 1
-          const canExport = (exportTerms?.contractMw ?? 0) >= 1
-          return (
-            <article key={city.id} className="rounded-xl border border-line/70 bg-panel-2 px-3 py-2">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <h4 className="text-[0.8125rem] font-medium text-bone">{city.name}</h4>
-                  <p className="font-mono text-[0.625rem] text-muted">{city.industry} · {hallsInZone} halls · {mw(genInZone)} gen · {rivalHallsInZone} rival halls</p>
-                </div>
-                <span className="font-mono text-[0.625rem] text-muted">{distToPlayer == null ? 'no campus' : `${distToPlayer} tiles`}</span>
+          <NegotiationMessage side="player" name="You">
+            <span className="font-medium text-bone">Here’s my proposal.</span>
+            <span className="mt-0.5 block text-muted">
+              {negotiation.mode === 'import' ? 'Buy' : 'Sell'} {contractMw} MW for {contractTerm} days at {money(offerPrice)}/MWh.
+            </span>
+          </NegotiationMessage>
+
+          {negotiation.message ? (
+            <NegotiationMessage
+              side="provider"
+              name={`${activeQuote?.cityName ?? selectedCity?.city.name ?? 'City'} Utility`}
+              status={negotiation.status}
+            >
+              {negotiation.message}
+            </NegotiationMessage>
+          ) : null}
+        </div>
+
+        {negotiation.status !== 'signed' ? (
+          <>
+            <div className="rounded-xl border border-line/70 bg-void/45 p-2">
+              <div className="mb-1.5 flex items-center justify-between gap-2">
+                <span className="font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">
+                  Your offer
+                </span>
+                <span className="text-[0.6875rem] text-muted">Drag to negotiate</span>
               </div>
-              <div className={`mt-1.5 rounded-md border px-2 py-1 font-mono text-[0.625rem] ${connectorCount > 0 ? 'border-mint/25 bg-mint/5 text-mint' : 'border-amber/25 bg-amber/5 text-amber'}`}>
-                {connectorCount > 0
-                  ? `${connectorCount} grid connector${connectorCount === 1 ? '' : 's'} · ${mw(connectorAvailableMw)} free / ${mw(connectorMw)}`
-                  : 'No grid connector in this city zone'}
+              <div className="space-y-1.5">
+                <NegotiationSlider
+                  label="Capacity"
+                  value={contractMw}
+                  min={1}
+                  max={80}
+                  suffix=" MW"
+                  onChange={(value) => {
+                    setContractMw(value)
+                    resetNegotiation()
+                  }}
+                />
+                <NegotiationSlider
+                  label="Term"
+                  value={contractTerm}
+                  min={30}
+                  max={180}
+                  step={15}
+                  suffix=" days"
+                  onChange={(value) => {
+                    setContractTerm(value)
+                    resetNegotiation()
+                  }}
+                />
+                <NegotiationSlider
+                  label={negotiation.mode === 'import' ? 'Your bid' : 'Your ask'}
+                  value={offerPrice}
+                  min={sliderMin}
+                  max={sliderMax}
+                  suffix="/MWh"
+                  onChange={(value) =>
+                    setNegotiation({
+                      ...negotiation,
+                      offerPrice: value,
+                      status: 'idle',
+                      message: undefined,
+                    })
+                  }
+                />
               </div>
-              <div className="mt-2 grid grid-cols-2 gap-1.5">
-                <button type="button" disabled={!canImport} onClick={() => startNegotiation('import', city.id)} className="rounded-lg border border-research/30 bg-research/10 px-2 py-1.5 text-left transition hover:bg-research/15 disabled:cursor-not-allowed disabled:opacity-40">
-                  <span className="block text-[0.6875rem] font-medium text-research">Negotiate import</span>
-                  <span className="font-mono text-[0.625rem] text-muted">{canImport ? `${mw(importTerms!.contractMw)} connector cap` : 'connector required'}</span>
-                </button>
-                <button type="button" disabled={!canExport} onClick={() => startNegotiation('export', city.id)} className="rounded-lg border border-amber/30 bg-amber/10 px-2 py-1.5 text-left transition hover:bg-amber/15 disabled:cursor-not-allowed disabled:opacity-40">
-                  <span className="block text-[0.6875rem] font-medium text-amber">Negotiate export</span>
-                  <span className="font-mono text-[0.625rem] text-muted">{canExport ? `${mw(exportTerms!.contractMw)} surplus` : 'generation required'}</span>
-                </button>
-              </div>
-            </article>
-          )
-        })}
+            </div>
+
+            <div className="grid grid-cols-4 gap-1 font-mono text-[0.6875rem]">
+              <NegotiationMetric label="Capacity" value={mw(activeQuote?.contractMw ?? 0)} />
+              <NegotiationMetric
+                label={negotiation.mode === 'import' ? 'Daily cost' : 'Daily revenue'}
+                value={money(dailyValue)}
+              />
+              <NegotiationMetric label="Term" value={`${activeQuote?.termDays ?? contractTerm}d`} />
+              <NegotiationMetric label="Market" value={`${money(marketPrice)}/MWh`} />
+            </div>
+
+            <NegotiationMood score={agreementScore} />
+
+            {!canNegotiate ? (
+              <p className="rounded-lg border border-amber/30 bg-amber/5 px-2 py-1.5 text-[0.75rem] text-amber">
+                {negotiation.mode === 'import'
+                  ? 'A commissioned grid connector with free capacity is required in this city.'
+                  : 'Commissioned generation with unsold surplus is required in this city.'}
+              </p>
+            ) : null}
+          </>
+        ) : null}
+
+        {negotiation.status === 'idle' || negotiation.status === 'countered' ? (
+          <button
+            type="button"
+            disabled={!canNegotiate}
+            className="btn-primary flex w-full items-center justify-center gap-1.5 py-1.5 text-[0.8125rem] disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={submitOffer}
+          >
+            <PaperPlaneTilt size={15} weight="fill" />
+            {negotiation.status === 'countered' ? 'Send counter-offer' : 'Send proposal'}
+          </button>
+        ) : null}
+        {negotiation.status === 'signed' ? (
+          <div className="flex items-center justify-between gap-2 rounded-lg border border-mint/35 bg-mint/10 px-2 py-1.5 text-[0.8125rem] font-medium text-mint">
+            <span className="flex items-center gap-1.5">
+              <Handshake size={16} weight="duotone" />
+              Contract active · power online
+            </span>
+            <button type="button" className="text-[0.6875rem] hover:underline" onClick={() => resetNegotiation()}>
+              New deal
+            </button>
+          </div>
+        ) : null}
+        {negotiation.status === 'declined' ? (
+          <button
+            type="button"
+            className="btn-ghost flex w-full items-center justify-center gap-1.5 py-1.5 text-[0.8125rem]"
+            onClick={() => resetNegotiation()}
+          >
+            <Handshake size={15} />
+            Edit proposal
+          </button>
+        ) : null}
       </div>
     </section>
-  )
-}
-
-function NegotiationMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <span className="rounded-md bg-panel-2 px-2 py-1.5 text-muted">
-      <span className="block text-[0.5625rem]">{label}</span>
-      <strong className="text-bone">{value}</strong>
-    </span>
   )
 }
 
@@ -417,8 +578,4 @@ function ContractRow({ direction, name, mwValue, price, days, onBreak }: { direc
       <button type="button" onClick={onBreak} className="shrink-0 text-[0.6875rem] text-danger hover:underline">Break</button>
     </div>
   )
-}
-
-function Mini({ label, value, accent = 'text-bone' }: { label: string; value: string; accent?: string }) {
-  return <div className="rounded-lg border border-line bg-panel-2 px-2 py-1.5"><div className="text-[0.625rem] text-muted">{label}</div><div className={`mt-0.5 font-mono text-[0.75rem] font-medium ${accent}`}>{value}</div></div>
 }

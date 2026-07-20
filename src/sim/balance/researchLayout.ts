@@ -18,17 +18,17 @@ import {
 } from './research'
 
 export const RESEARCH_LAYOUT = {
-  nodeW: 152,
-  nodeH: 66,
+  nodeW: 164,
+  nodeH: 70,
   /** Horizontal gap between trunk columns */
-  colGap: 36,
+  colGap: 64,
   /** Vertical gap between nodes in the same layer */
-  rowGap: 18,
+  rowGap: 38,
   /** Extra vertical gap after a depth layer */
-  layerGap: 26,
-  padX: 28,
-  padY: 44,
-  headerH: 26,
+  layerGap: 46,
+  padX: 42,
+  padY: 56,
+  headerH: 32,
 } as const
 
 export interface TreeLayoutNode {
@@ -132,8 +132,8 @@ export function layoutResearchTree(
   }
 
   const placed: TreeLayoutNode[] = []
-  const depthPitch = L.nodeW + 96
-  const lanePitch = L.nodeH + 72
+  const depthPitch = L.nodeW + 138
+  const lanePitch = L.nodeH + 104
 
   for (const depth of [...byDepth.keys()].sort((a, b) => a - b)) {
     const layer = (byDepth.get(depth) ?? [])
@@ -143,8 +143,8 @@ export function layoutResearchTree(
         const slotKey = `${node.trunk}:${depth}`
         const slot = layerSlots.get(slotKey) ?? 0
         layerSlots.set(slotKey, slot + 1)
-        const wave = Math.sin(depth * 1.14 + trunkIndex * 0.92) * 58
-        const jitterY = (stableUnit(node.id, 17) - 0.5) * 42
+        const wave = Math.sin(depth * 1.14 + trunkIndex * 0.92) * 68
+        const jitterY = (stableUnit(node.id, 17) - 0.5) * 46
         const desiredY =
           L.padY +
           L.headerH +

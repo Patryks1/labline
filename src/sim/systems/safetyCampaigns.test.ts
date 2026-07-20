@@ -7,7 +7,7 @@ import {
   startSafetyCampaign,
   tickSafetyCampaign,
 } from './safetyCampaigns'
-import { startTraining } from './training'
+import { startTraining, tickTraining } from './training'
 
 function campaignState(): SimState {
   const initial = createGame(819)
@@ -75,7 +75,7 @@ function campaignState(): SimState {
 }
 
 describe('repeatable safety campaigns', () => {
-  it('reports the research gate and blocks concurrent base training', () => {
+  it('reports the research gate and shares compute with concurrent base training', () => {
     const locked = createGame(818)
     const missingModel = safetyCampaignEstimate(locked, 'missing', 'targeted')
     expect(missingModel.ok).toBe(false)
@@ -84,10 +84,51 @@ describe('repeatable safety campaigns', () => {
       modelId: 'safe-model', intensity: 'targeted', researchers: 6,
     })
     expect(started.player.safetyCampaign?.modelId).toBe('safe-model')
-    const blocked = startTraining(started, {
-      name: 'Blocked', family: 'dense', paramsB: 0.4,
+    const concurrent = startTraining(started, {
+      name: 'Concurrent', family: 'dense', paramsB: 0.4,
     })
-    expect(blocked.player.trainingJob).toBeNull()
+    expect(concurrent.player.trainingJob?.name).toBe('Concurrent')
+    const advanced = tickTraining(concurrent)
+    expect(advanced.player.trainingJob?.progressPfDays).toBeGreaterThan(0)
+    expect(advanced.player.safetyCampaign?.modelId).toBe('safe-model')
+  })
+
+  it('runs multiple model jobs concurrently at an equal, slower compute share', () => {
+    const started = startTraining(campaignState(), { name: 'Alpha', family: 'dense', paramsB: 70 })
+    // Compare allocated work rather than completion-capped progress: a deliberately
+    // undertrained 70B v2 recipe can otherwise finish inside a single tick.
+    const first = {
+      ...started,
+      player: {
+        ...started.player,
+        trainingJob: started.player.trainingJob
+          ? { ...started.player.trainingJob, targetPfDays: 1_000 }
+          : null,
+        trainingJobs: started.player.trainingJobs?.map((job) => ({
+          ...job,
+          targetPfDays: 1_000,
+        })),
+      },
+    }
+    const soloProgress = tickTraining(first).player.trainingJob!.progressPfDays
+    const withSecond = startTraining(first, { name: 'Beta', family: 'dense', paramsB: 70 })
+    const parallel = {
+      ...withSecond,
+      player: {
+        ...withSecond.player,
+        trainingJob: withSecond.player.trainingJob
+          ? { ...withSecond.player.trainingJob, targetPfDays: 1_000 }
+          : null,
+        trainingJobs: withSecond.player.trainingJobs?.map((job) => ({
+          ...job,
+          targetPfDays: 1_000,
+        })),
+      },
+    }
+    expect(parallel.player.trainingJobs).toHaveLength(2)
+    const advanced = tickTraining(parallel)
+    expect(advanced.player.trainingJobs?.[0]?.progressPfDays).toBeCloseTo(advanced.player.trainingJobs?.[1]?.progressPfDays ?? -1)
+    expect(advanced.player.trainingJobs?.[0]?.progressPfDays ?? 0).toBeLessThan(soloProgress)
   })
 
   it('updates the same model id as a new revision', () => {

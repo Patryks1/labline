@@ -181,10 +181,11 @@ export const ECONOMY = {
   startingChips: 0,
   /**
    * Sub allowance MTok/user/day at usageMultiplier = 1.
-   * Light free (mult 0.1) ≈ tiny daily burn; paid tiers still scale up.
-   * Low so mass freemium seats fit early halls.
+   * The baseline Plus plan includes 20M tokens/month. A 1B dense model is
+   * efficient enough that an early H100-class rack can sustain thousands of
+   * full-allowance users, while larger models still require real fleet scale.
    */
-  basePlanUsageMTokPerDay: 0.02,
+  basePlanUsageMTokPerDay: 20 / 30,
   /**
    * API users: MTok/user/day at usageIntensity = 1.
    * Higher than subs per-user so API is the bigger token pool at equal headcount.
@@ -239,8 +240,6 @@ export const ECONOMY = {
   hireTalentWageBump: 0.35,
   dataPartnershipCost: 7_500_000,
   dataPartnershipBoost: 0.15,
-  /** Absolute safety ceiling; each lab's usable cap scales with its cash and valuation. */
-  marketingMax: 250_000_000,
   /** Daily enterprise seat value per contract (annuity only — no double lump). */
   enterpriseContractValue: 2_600_000,
   /** Max concurrent enterprise contracts (was unbounded free money). */
@@ -250,7 +249,7 @@ export const ECONOMY = {
 
   /** Training job overhead as fraction of remaining cash burn while job runs */
   trainCashBurnPerPfDay: 8_500,
-  trainUpfrontPerPfDay: 12_000,
+  trainUpfrontPerPfDay: 24_000,
   /**
    * Research burns research-pool PF *and* cash. Catalog PF-days are multiplied
    * by researchPfCostMult so most projects need a real cluster allocation.

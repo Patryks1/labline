@@ -6,8 +6,6 @@
 import type { Allocation, Model } from '../types'
 import {
   pfPerMTokForModel,
-  TOK_PER_PF_SEC,
-  tokensPerDayCapacity,
   tokensPerDayFromFlops,
 } from '../balance/tokenServe'
 import { normalizeAllocation } from './compute'
@@ -105,40 +103,18 @@ const REFERENCE_SERVE_MODEL = {
 }
 
 /**
- * Controller-neutral inference capacity in the same PF-work units consumed by
- * inferencePfDemand.  Raw accelerator PF is not a serving unit: the player
- * path converts rack tok/s into MTok/day, so rivals must make the identical
- * conversion before comparing supply with model-specific PF demand.
+ * Controller-neutral effective PF-days consumed by physical inference work.
+ * Static rack token quotes are intentionally excluded: accelerator FLOPs,
+ * utilization, allocation, derates, and engineer uplift are applied once.
  */
 export function labInferCapacityWorkPf(lab: AbstractLabCompute): number {
-  const alloc = normalizeAllocation(lab.allocation)
-  const servingEfficiency = lab.servingEfficiency ?? 1
-  const capacityMTok =
-    lab.hardwareTokPerSec == null
-      ? tokensPerDayFromFlops({
-          flopsPf: lab.flopsPf,
-          model: REFERENCE_SERVE_MODEL,
-          servingEfficiency,
-          inferenceShare: alloc.inference,
-          utilCap: lab.utilCap,
-          derate: lab.derate ?? 1,
-        }) * (1 + Math.max(0, lab.engineerServeBonus ?? 0))
-      : tokensPerDayCapacity({
-          hardwareTokPerSec: Math.max(0, lab.hardwareTokPerSec),
-          model: REFERENCE_SERVE_MODEL,
-          servingEfficiency,
-          inferenceShare: alloc.inference,
-          util: lab.utilCap,
-          powerDerate: lab.derate ?? 1,
-          engServe: lab.engineerServeBonus,
-        })
-  return (
-    capacityMTok *
-    pfPerMTokForModel(REFERENCE_SERVE_MODEL, servingEfficiency)
-  )
+  return abstractPools(lab).inferenceEffective *
+    (1 + Math.max(0, lab.engineerServeBonus ?? 0))
 }
 
-/** Standard remote-provider throughput for compatibility ledgers. */
+/** Legacy display quote. Simulation capacity never reads this conversion. */
 export function hardwareTokPerSecFromPf(flopsPf: number): number {
-  return Math.max(0, flopsPf) * TOK_PER_PF_SEC
+  const mtokPerDay =
+    Math.max(0, flopsPf) / pfPerMTokForModel(REFERENCE_SERVE_MODEL, 1)
+  return mtokPerDay * 1e6 / 86_400
 }
