@@ -25,6 +25,8 @@ import {
 } from '../../../sim/systems/worldAccess'
 import { ECONOMY } from '../../../sim/balance/economy'
 import { InfrastructureOverview } from './InfrastructureOverview'
+import { EmptyState, HudButton, PanelScaffold, StatusChip } from '../ui/HudPrimitives'
+import { BlockerList, GameCard, LiveDot, MeterBar, StatRow } from '../ui/kit'
 
 function dcSizeLabel(kind: string, size?: string): string {
   if (size === 'small' || kind === 'dc') return 'Small · 1 tile · 96 bays'
@@ -64,212 +66,192 @@ export function MapPanel() {
     isDcAnchor(tile) &&
     !constructing &&
     tile.buildingProgress >= tile.buildingTarget
-  const isDcPad =
-    tile && isDcKind(tile.kind) && tile.campusRole === 'pad'
-  const campusTiles =
-    tile?.campusId
-      ? facilityFootprintTiles(state, tile.campusId)
-      : []
+  const isDcPad = tile && isDcKind(tile.kind) && tile.campusRole === 'pad'
+  const campusTiles = tile?.campusId ? facilityFootprintTiles(state, tile.campusId) : []
+  const upgradeDef = tile && isBuildableKind(tile.kind) ? getBuildDef(tile.kind) : null
+  const upgradeCost = upgradeDef ? (upgradeDef.upgradeCash ?? upgradeDef.cash * 0.45) : 0
+  const canUpgrade =
+    Boolean(
+      isOurs &&
+        !constructing &&
+        tile &&
+        isBuildableKind(tile.kind) &&
+        (!isDcKind(tile.kind) || isDcAnchor(tile)) &&
+        tile.level < 5,
+    )
+  const upgradeBlockers = [
+    ...(state.player.cash < upgradeCost
+      ? [{ text: `Need ${money(upgradeCost - state.player.cash)} more cash`, tone: 'danger' as const }]
+      : []),
+  ]
 
   return (
-    <div className="space-y-4">
-      <div>
-        <h2 className="hud-panel-title">Overview</h2>
-        <p className="hud-panel-sub">
-          Fleet, construction, and every facility in one command view. Select the map for parcel
-          details or open a facility’s dedicated controls.
-        </p>
-      </div>
+    <PanelScaffold
+      eyebrow="Infrastructure"
+      title="Overview"
+      description="Fleet, facilities, construction, and the selected parcel."
+    >
+      <div className="space-y-3">
+        <InfrastructureOverview />
 
-      <InfrastructureOverview />
-
-      {tile && tile.kind !== 'empty' && (
-        <div
-          className={`rounded-2xl border p-3 text-xs ${
-            isOurs
-              ? 'border-mint/35 bg-mint/5'
-              : isRival
-                ? 'border-amber/30 bg-amber/5'
-                : 'border-line bg-panel-2'
-          }`}
-        >
-            <div className="flex items-start justify-between gap-2">
-              <div className="min-w-0 flex-1">
-                <div className="font-mono text-[0.75rem] text-muted">
-                  {region?.name ?? 'void'}
-                  {isBuildableKind(tile.kind) ? ` · ${tileTypeLabel(tile.kind)}` : ''}
-                </div>
-                <div className="mt-0.5">
-                  {isOurs && isBuildableKind(tile.kind) ? (
-                    <BuildingNameField tile={tile} />
-                  ) : (
-                    <div className="text-sm font-medium text-bone">
-                      {tile.name || tileTypeLabel(tile.kind)}
-                    </div>
-                  )}
-                </div>
-              </div>
-              <span
-                className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[0.75rem] ${
-                  isOurs
-                    ? 'bg-mint/20 text-mint'
-                    : isRival
-                      ? 'bg-amber/20 text-amber'
-                      : 'bg-line text-muted'
-                }`}
-              >
+        {tile && tile.kind !== 'empty' ? (
+          <GameCard
+            tone={isOurs ? 'mint' : isRival ? 'train' : undefined}
+            live={Boolean(constructing)}
+            eyebrow={region?.name ?? 'void'}
+            title={
+              isOurs && isBuildableKind(tile.kind) ? (
+                <BuildingNameField tile={tile} />
+              ) : (
+                tile.name || tileTypeLabel(tile.kind)
+              )
+            }
+            actions={
+              <StatusChip tone={isOurs ? 'positive' : isRival ? 'warning' : 'neutral'}>
                 {ownerLabel(tile.owner, state)}
-              </span>
-            </div>
-
-            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-[0.75rem] text-muted">
-              <span>Type</span>
-              <span className="text-right text-bone">{tileTypeLabel(tile.kind)}</span>
-              {isDcKind(tile.kind) && (
+              </StatusChip>
+            }
+          >
+            <div className="space-y-1">
+              <StatRow label="Type" value={tileTypeLabel(tile.kind)} />
+              {isDcKind(tile.kind) ? (
                 <>
-                  <span>Size class</span>
-                  <span className="text-right text-bone">
-                    {dcSizeLabel(tile.kind, tile.dcSize)}
-                  </span>
-                  <span>Campus role</span>
-                  <span className="text-right text-bone">
-                    {tile.campusRole === 'pad' ? 'Footprint pad' : 'Anchor (racks)'}
-                  </span>
-                  {campusTiles.length > 1 && (
-                    <>
-                      <span>Campus tiles</span>
-                      <span className="text-right text-bone">{campusTiles.length}</span>
-                    </>
-                  )}
+                  <StatRow label="Size class" value={dcSizeLabel(tile.kind, tile.dcSize)} />
+                  <StatRow
+                    label="Campus role"
+                    value={tile.campusRole === 'pad' ? 'Footprint pad' : 'Anchor (racks)'}
+                  />
+                  {campusTiles.length > 1 ? (
+                    <StatRow label="Campus tiles" value={String(campusTiles.length)} />
+                  ) : null}
                 </>
-              )}
-              {!isScenicKind(tile.kind) && (
+              ) : null}
+              {!isScenicKind(tile.kind) ? <StatRow label="Level" value={`L${tile.level}`} /> : null}
+              {isDcKind(tile.kind) && isDcAnchor(tile) ? (
                 <>
-                  <span>Level</span>
-                  <span className="text-right text-bone">L{tile.level}</span>
+                  <StatRow label="Bay slots" value={`${tile.racksUsed}/${tile.rackCapacity}`} />
+                  <StatRow
+                    label="Powered"
+                    value={tile.powered === false ? 'Down' : 'On'}
+                    tone={tile.powered === false ? 'danger' : 'positive'}
+                  />
                 </>
-              )}
-              {isDcKind(tile.kind) && isDcAnchor(tile) && (
-                <>
-                  <span>Bay slots</span>
-                  <span className="text-right text-bone">
-                    {tile.racksUsed}/{tile.rackCapacity}
-                  </span>
-                  <span>Powered</span>
-                  <span className={`text-right ${tile.powered === false ? 'text-danger' : 'text-mint'}`}>
-                    {tile.powered === false ? 'Down' : 'On'}
-                  </span>
-                </>
-              )}
-              {isDcPad && (
-                <>
-                  <span>Bays</span>
-                  <span className="text-right text-muted">On campus anchor</span>
-                </>
-              )}
+              ) : null}
+              {isDcPad ? <StatRow label="Bays" value="On campus anchor" /> : null}
               {(tile.mwCapacity > 0 || tile.mwGeneration > 0) && (
-                <>
-                  <span>Power</span>
-                  <span className="text-right text-bone">
-                    {tile.mwCapacity > 0 ? `${num(tile.mwCapacity, 1)} MW grid` : ''}
-                    {tile.mwCapacity > 0 && tile.mwGeneration > 0 ? ' · ' : ''}
-                    {tile.mwGeneration > 0 ? `${num(tile.mwGeneration, 1)} MW gen` : ''}
-                  </span>
-                </>
+                <StatRow
+                  label="Power"
+                  value={[
+                    tile.mwCapacity > 0 ? `${num(tile.mwCapacity, 1)} MW grid` : '',
+                    tile.mwGeneration > 0 ? `${num(tile.mwGeneration, 1)} MW gen` : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                />
               )}
-              {tile.capex > 0 && (
+              {tile.capex > 0 ? <StatRow label="Capex sunk" value={money(tile.capex)} /> : null}
+              {tile.opexPerDay > 0 && isOurs ? (
+                <StatRow
+                  label="Opex"
+                  value={`${money(tile.opexPerDay * (ECONOMY.facilityOpexMultiplier ?? 1))}/d`}
+                />
+              ) : null}
+              {region ? (
                 <>
-                  <span>Capex sunk</span>
-                  <span className="text-right text-bone">{money(tile.capex)}</span>
+                  <StatRow label="Energy mult" value={`×${region.energyPriceMult.toFixed(2)}`} />
+                  <StatRow
+                    label="Latency"
+                    value={`${(region.latencyToMarket * 100).toFixed(0)} (lower better)`}
+                  />
                 </>
-              )}
-              {tile.opexPerDay > 0 && isOurs && (
-                <>
-                  <span>Opex</span>
-                  <span className="text-right text-bone">
-                    {money(tile.opexPerDay * (ECONOMY.facilityOpexMultiplier ?? 1))}/d
-                  </span>
-                </>
-              )}
-              {region && (
-                <>
-                  <span>Energy mult</span>
-                  <span className="text-right text-bone">×{region.energyPriceMult.toFixed(2)}</span>
-                  <span>Latency</span>
-                  <span className="text-right text-bone">
-                    {(region.latencyToMarket * 100).toFixed(0)} (lower better)
-                  </span>
-                </>
-              )}
+              ) : null}
             </div>
 
-            {tile.note && (
+            {tile.note ? (
               <p className="mt-2 text-[0.8125rem] leading-snug text-muted">{tile.note}</p>
-            )}
+            ) : null}
 
-            {constructing && (
-              <p className="mt-2 text-[0.8125rem] text-amber">
-                Under construction — track progress in{' '}
-                <button
+            {constructing ? (
+              <div className="mt-3 space-y-2">
+                <div className="flex items-center gap-2 text-[0.8125rem] text-amber">
+                  <LiveDot className="text-amber" />
+                  <span>Under construction</span>
+                </div>
+                <MeterBar
+                  label="Build progress"
+                  value={tile.buildingProgress / Math.max(1, tile.buildingTarget)}
+                  detail={`${tile.buildingProgress}/${tile.buildingTarget}d`}
+                  tone="warning"
+                  live
+                />
+                <HudButton
                   type="button"
-                  className="text-mint"
+                  variant="ghost"
+                  className="w-full"
                   onClick={() => useGameStore.getState().openFleet()}
                 >
-                  Infrastructure → Racks
-                </button>
-                .
-              </p>
-            )}
+                  Track in fleet
+                </HudButton>
+              </div>
+            ) : null}
 
-            {isScenicKind(tile.kind) && (
-              <p className="mt-2 rounded-lg border border-line bg-void/40 px-2.5 py-2 text-[0.8125rem] leading-snug text-muted">
-                Scenic {scenicLabel(tile.kind).toLowerCase()} — not a buildable parcel. Choose open
-                land (empty plot) for data halls and power.
+            {isScenicKind(tile.kind) ? (
+              <p className="mt-3 rounded-md border border-line/70 bg-void/40 px-2.5 py-2 text-[0.8125rem] leading-snug text-muted">
+                Scenic {scenicLabel(tile.kind).toLowerCase()} — pick open land to build.
               </p>
-            )}
+            ) : null}
 
-            {isOurs &&
-              !constructing &&
-              isBuildableKind(tile.kind) &&
-              (!isDcKind(tile.kind) || isDcAnchor(tile)) &&
-              tile.level < 5 && (
-                <button
+            {canUpgrade ? (
+              <div className="mt-3 space-y-2">
+                <BlockerList items={upgradeBlockers} />
+                <HudButton
                   type="button"
-                  className="btn-ghost mt-3 w-full py-2"
+                  variant="secondary"
+                  className="w-full"
+                  disabled={state.player.cash < upgradeCost}
+                  title={
+                    state.player.cash < upgradeCost
+                      ? `Need ${money(upgradeCost - state.player.cash)} more cash`
+                      : undefined
+                  }
                   onClick={() => upgradeBuilding()}
                 >
-                  Upgrade to L{tile.level + 1}
-                  {(() => {
-                    const d = getBuildDef(tile.kind)
-                    const c = d.upgradeCash ?? d.cash * 0.45
-                    return ` · ${money(c)}`
-                  })()}
-                </button>
-              )}
+                  Upgrade to L{tile.level + 1} · {money(upgradeCost)}
+                </HudButton>
+              </div>
+            ) : null}
 
-            {isLiveDc && (
-              <button
+            {isLiveDc ? (
+              <HudButton
                 type="button"
-                className="btn-ghost mt-3 w-full py-2 text-mint"
+                variant="ghost"
+                className="mt-3 w-full text-mint"
                 onClick={() => useGameStore.getState().openFleet()}
               >
-                Order racks in Infrastructure →
-              </button>
-            )}
+                Order racks →
+              </HudButton>
+            ) : null}
 
-            {isOurs && isBuildableKind(tile.kind) && (
-              <BuildingDisposeButtons x={tile.x} y={tile.y} constructing={!!constructing} />
-            )}
+            {isOurs && isBuildableKind(tile.kind) ? (
+              <div className="mt-3">
+                <BuildingDisposeButtons x={tile.x} y={tile.y} constructing={!!constructing} />
+              </div>
+            ) : null}
 
-            {isRival && (
-              <p className="mt-2 text-[0.75rem] text-amber">
-                Rival campus — you cannot build here. Compete on models and price instead.
+            {isRival ? (
+              <p className="mt-3 text-[0.75rem] text-amber">
+                Rival campus — compete on models and price instead.
               </p>
-            )}
-        </div>
-      )}
-
-    </div>
+            ) : null}
+          </GameCard>
+        ) : (
+          <EmptyState
+            title="No parcel selected"
+            description="Click the map for parcel details, or manage facilities above."
+          />
+        )}
+      </div>
+    </PanelScaffold>
   )
 }
 
@@ -291,38 +273,47 @@ export function BuildingDisposeButtons({
     ? estimateCancelRefund(state, x, y)
     : estimateBuildingSaleValue(state, x, y)
   const fastTrack = constructing ? constructionFastTrackQuote(state, x, y) : null
-  const cls = compact
-    ? 'rounded-lg px-2 py-1 text-[0.75rem]'
-    : 'btn-ghost mt-2 w-full py-2 text-[0.8125rem]'
 
   if (constructing) {
+    const fastTrackBlocked =
+      !fastTrack?.eligible || (fastTrack != null && state.player.cash < fastTrack.cost)
+    const fastTrackReason =
+      fastTrack && !fastTrack.eligible
+        ? fastTrack.reason ?? 'Fast-track unavailable'
+        : fastTrack && state.player.cash < fastTrack.cost
+          ? `Need ${money(fastTrack.cost)} to fast-track`
+          : undefined
+
     return (
       <div className={compact ? 'flex flex-wrap gap-1.5' : 'space-y-1.5'}>
         {fastTrack ? (
-          <button
-            type="button"
-            disabled={!fastTrack.eligible || state.player.cash < fastTrack.cost}
-            title={
-              fastTrack.eligible && state.player.cash < fastTrack.cost
-                ? `Need ${money(fastTrack.cost)} to fast-track.`
-                : fastTrack.reason ?? 'Pay 50% extra capex to halve the remaining schedule.'
-            }
-            className={`${compact ? 'rounded-lg px-2 py-1 text-[0.75rem]' : 'btn-primary w-full py-2 text-[0.8125rem]'} border border-mint/35 text-mint hover:bg-mint/10 disabled:cursor-not-allowed disabled:opacity-45`}
-            onClick={(e) => {
-              e.stopPropagation()
-              setState(fastTrackConstruction(state, x, y))
-            }}
-          >
-            {fastTrack.eligible
-              ? `Fast-track +50% · ${money(fastTrack.cost)} · ${fastTrack.remainingDays}d → ${fastTrack.acceleratedDays}d`
-              : fastTrack.reason?.includes('already fast-tracked')
-                ? 'Fast-track active'
-                : 'Fast-track unavailable'}
-          </button>
+          <div className={compact ? '' : 'space-y-1.5'}>
+            {!compact && fastTrackBlocked && fastTrackReason ? (
+              <BlockerList items={[{ text: fastTrackReason, tone: 'warning' }]} />
+            ) : null}
+            <HudButton
+              type="button"
+              variant="primary"
+              disabled={fastTrackBlocked}
+              title={fastTrackReason ?? 'Pay 50% extra capex to halve the remaining schedule.'}
+              className={compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full'}
+              onClick={(e) => {
+                e.stopPropagation()
+                setState(fastTrackConstruction(state, x, y))
+              }}
+            >
+              {fastTrack.eligible
+                ? `Fast-track +50% · ${money(fastTrack.cost)} · ${fastTrack.remainingDays}d → ${fastTrack.acceleratedDays}d`
+                : fastTrack.reason?.includes('already fast-tracked')
+                  ? 'Fast-track active'
+                  : 'Fast-track unavailable'}
+            </HudButton>
+          </div>
         ) : null}
-        <button
+        <HudButton
           type="button"
-          className={`${cls} border border-amber/30 text-amber hover:bg-amber/10`}
+          variant="secondary"
+          className={`${compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full'} border border-amber/30 text-amber`}
           onClick={(e) => {
             e.stopPropagation()
             requestConfirm({
@@ -335,15 +326,16 @@ export function BuildingDisposeButtons({
           }}
         >
           Cancel build · ~{money(refund)}
-        </button>
+        </HudButton>
       </div>
     )
   }
 
   return (
-    <button
+    <HudButton
       type="button"
-      className={`${cls} border border-danger/30 text-danger hover:bg-danger/10`}
+      variant="danger"
+      className={compact ? 'px-2 py-1 text-[0.75rem]' : 'mt-2 w-full'}
       onClick={(e) => {
         e.stopPropagation()
         requestConfirm({
@@ -356,6 +348,6 @@ export function BuildingDisposeButtons({
       }}
     >
       Sell · ~{money(refund)}
-    </button>
+    </HudButton>
   )
 }

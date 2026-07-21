@@ -138,7 +138,7 @@ describe('repeatable safety campaigns', () => {
     const originalId = state.player.models[0]!.id
     const originalRevision = state.player.models[0]!.revision ?? 1
     const originalSafety = state.player.models[0]!.benchmarks.safety
-    for (let day = 0; day < 60 && state.player.safetyCampaign; day += 1) {
+    for (let day = 0; day < 120 && state.player.safetyCampaign; day += 1) {
       state = tickSafetyCampaign({ ...state, day: state.day + 1 })
     }
     expect(state.player.safetyCampaign).toBeNull()

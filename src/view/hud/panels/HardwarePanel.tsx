@@ -1,4 +1,6 @@
 import { useGameStore } from '../../../store/gameStore'
+import { PanelScaffold } from '../ui/HudPrimitives'
+import { SegmentedTabs } from '../ui/kit'
 import { ChipsPanel } from './ChipsPanel'
 import { RacksPanel } from './RacksPanel'
 
@@ -6,36 +8,29 @@ export function HardwarePanel({ view }: { view: 'racks' | 'silicon' }) {
   const setPanel = useGameStore((store) => store.setPanel)
 
   return (
-    <div className="space-y-3">
-      <div
-        className="grid grid-cols-2 gap-1 rounded-xl border border-line/70 bg-void/45 p-1"
-        role="tablist"
-        aria-label="Hardware sections"
-      >
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === 'racks'}
-          onClick={() => setPanel('racks')}
-          className={`rounded-lg px-3 py-1.5 text-[0.75rem] font-medium transition ${
-            view === 'racks' ? 'bg-bone text-void' : 'text-muted hover:bg-panel-2 hover:text-bone'
-          }`}
-        >
-          Rack fleet
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === 'silicon'}
-          onClick={() => setPanel('chips')}
-          className={`rounded-lg px-3 py-1.5 text-[0.75rem] font-medium transition ${
-            view === 'silicon' ? 'bg-bone text-void' : 'text-muted hover:bg-panel-2 hover:text-bone'
-          }`}
-        >
-          Custom silicon
-        </button>
+    <PanelScaffold
+      eyebrow="Hardware"
+      title={view === 'racks' ? 'Rack fleet' : 'Custom silicon'}
+      description={
+        view === 'racks'
+          ? 'Order racks into halls and manage blueprints.'
+          : 'Design dies and run fab campaigns.'
+      }
+    >
+      <div className="space-y-3">
+        <SegmentedTabs
+          ariaLabel="Hardware sections"
+          active={view}
+          onChange={(id) => setPanel(id === 'racks' ? 'racks' : 'chips')}
+          items={[
+            { id: 'racks', label: 'Rack fleet' },
+            { id: 'silicon', label: 'Custom silicon' },
+          ]}
+        />
+        <div key={view} className="panel-swap">
+          {view === 'racks' ? <RacksPanel /> : <ChipsPanel />}
+        </div>
       </div>
-      {view === 'racks' ? <RacksPanel /> : <ChipsPanel />}
-    </div>
+    </PanelScaffold>
   )
 }

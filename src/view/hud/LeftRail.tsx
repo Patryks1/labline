@@ -1,12 +1,21 @@
 import { useMemo } from 'react'
 import {
-  Buildings,
+  Brain,
   ChartDonut,
+  ClipboardText,
+  Cloud,
+  Database,
   Flask,
+  Gauge,
   Hammer,
+  HardDrives,
+  Lightning,
+  MapTrifold,
   Megaphone,
-  Storefront,
+  Package,
+  Users,
   UsersThree,
+  X,
 } from '@phosphor-icons/react'
 import { useGameStore } from '../../store/gameStore'
 import type { PanelId } from '../../sim/types'
@@ -28,17 +37,66 @@ import { PowerPanel } from './panels/PowerPanel'
 import { ComputeMarketPanel } from './panels/ComputeMarketPanel'
 import { FleetBuildingsPanel } from './panels/FleetBuildingsPanel'
 import { BuildPanel } from './BuildTray'
-import {
-  NAV_GROUPS,
-  defaultPanelForGroup,
-  groupForPanel,
-  type NavGroupId,
-} from './navConfig'
+import { NAV_GROUPS, groupForPanel, type NavGroupId } from './navConfig'
 
 /**
  * Floating workspace drawer over the full-bleed map.
- * Collapsed: thin icon rail only (~52px). Expanded: overlay panel, map still visible beside it.
+ * Rail: every panel is its own tab (Build pinned on top as the map action).
+ * Content swaps animate via .panel-swap keyed on the active panel.
  */
+
+interface RailTab {
+  id: PanelId
+  label: string
+  hint: string
+  group: NavGroupId
+}
+
+/** Flattened nav: every panel is a first-class tab, groups become dividers. */
+const RAIL_SECTIONS: { group: NavGroupId; tabs: RailTab[] }[] = NAV_GROUPS.filter(
+  (g) => g.id !== 'build',
+).map((g) => ({
+  group: g.id,
+  tabs: g.items.map((item) => ({
+    id: item.id,
+    label: item.label,
+    hint: item.hint,
+    group: g.id,
+  })),
+}))
+
+function panelIcon(id: PanelId) {
+  const Icon =
+    id === 'stats'
+      ? Gauge
+      : id === 'rivals'
+        ? UsersThree
+        : id === 'models'
+          ? Brain
+          : id === 'data'
+            ? Database
+            : id === 'research'
+              ? Flask
+              : id === 'benchmarks'
+                ? ClipboardText
+                : id === 'map'
+                  ? MapTrifold
+                  : id === 'computeMarket'
+                    ? Cloud
+                    : id === 'racks'
+                      ? HardDrives
+                      : id === 'power'
+                        ? Lightning
+                        : id === 'plans'
+                          ? Package
+                          : id === 'market'
+                            ? ChartDonut
+                            : id === 'marketing'
+                              ? Megaphone
+                              : Users
+  return Icon
+}
+
 export function LeftRail() {
   const active = useGameStore((s) => s.activePanel)
   const setPanel = useGameStore((s) => s.setPanel)
@@ -47,6 +105,11 @@ export function LeftRail() {
   const state = useGameStore((s) => s.state)
 
   const group = useMemo(() => groupForPanel(active), [active])
+  const activeItem = useMemo(
+    () => group.items.find((item) => item.id === active) ?? null,
+    [group, active],
+  )
+
   const badges = useMemo(() => {
     const training = !!state.player.trainingJob
     const rawData =
@@ -63,66 +126,100 @@ export function LeftRail() {
       (tile) => tile.buildingTarget > 0 && tile.buildingProgress < tile.buildingTarget,
     )
     return {
-      lab: training || rawData || research,
-      infrastructure: rackArriving || fabActive,
+      stats: state.player.finance.dayNet < 0 && state.day > 5,
+      models: training,
+      data: rawData,
+      research,
+      racks: rackArriving || fabActive,
       build: constructionActive,
-      company: alerts,
-      strategy: state.player.finance.dayNet < 0 && state.day > 5,
+      org: alerts,
       market: state.lastMarket.unservedRatio > 0.2,
-      marketing: false,
-    } as Record<NavGroupId, boolean>
+    } as Partial<Record<PanelId, boolean>>
   }, [state])
+
+  const handleTab = (id: PanelId) => {
+    if (active === id && open) {
+      setOpen(false)
+      return
+    }
+    if (id === 'map') {
+      useGameStore.getState().openSites()
+      return
+    }
+    setPanel(id)
+    setOpen(true)
+  }
 
   return (
     <div className="workspace-shell pointer-events-none">
-      {/* Icon rail — always visible, minimal map occlusion */}
+      {/* Icon rail: Build action pinned on top, then every panel as its own tab */}
       <nav
-        className="hud-surface pointer-events-auto relative col-start-1 m-1.5 mr-1 flex min-h-0 flex-col items-stretch gap-1 overflow-hidden rounded-xl p-1"
+        className="hud-surface pointer-events-auto relative col-start-1 m-1.5 mr-1 flex min-h-0 flex-col items-stretch gap-0.5 overflow-y-auto rounded-xl p-1 panel-scroll"
         aria-label="Workspaces"
       >
-        {NAV_GROUPS.map((g) => {
-          const on = group.id === g.id && open
-          return (
-            <button
-              key={g.id}
-              type="button"
-              title={`${g.label} (${g.letter}) — ${g.description}`}
-              onClick={() => {
-                if (group.id === g.id && open) {
-                  setOpen(false)
-                  return
-                }
-                if (g.id === 'infrastructure') {
-                  useGameStore.getState().openSites()
-                } else {
-                  setPanel(defaultPanelForGroup(g.id))
-                }
-                setOpen(true)
-              }}
-              className={`group relative flex min-h-12 w-full flex-col items-center justify-center gap-1 rounded-lg px-1 py-1.5 transition ${
-                on
-                  ? 'bg-panel-2 text-mint ring-1 ring-mint/25'
-                  : 'text-muted hover:bg-panel-2/80 hover:text-bone'
-              }`}
-            >
-              {on && (
-                <span className="absolute left-0 top-1/2 h-6 w-0.5 -translate-y-1/2 rounded-full bg-mint shadow-[0_0_10px_var(--color-mint)]" />
-              )}
-              <span className="relative">
-                <NavIcon id={g.id} />
-                {badges[g.id] && (
-                  <span className="absolute -right-1 -top-0.5 h-2 w-2 rounded-sm bg-amber ring-2 ring-void" />
-                )}
-              </span>
-              <span className={`max-w-full truncate text-[0.625rem] font-medium leading-none ${on ? 'text-mint' : ''}`}>
-                {g.short}
-              </span>
-            </button>
-          )
-        })}
+        <button
+          type="button"
+          title="Build (R) - place facilities and expand campus capacity"
+          onClick={() => handleTab('build')}
+          className={`group relative flex min-h-12 w-full flex-col items-center justify-center gap-1 rounded-lg border px-1 py-1.5 transition ${
+            active === 'build' && open
+              ? 'border-amber/60 bg-amber/15 text-amber'
+              : 'border-line/70 bg-panel-2/60 text-amber/90 hover:border-amber/45 hover:bg-amber/10 hover:text-amber'
+          }`}
+        >
+          <span className="relative">
+            <Hammer size="1.25rem" weight="duotone" aria-hidden />
+            {badges.build && (
+              <span className="absolute -right-1 -top-0.5 h-2 w-2 rounded-sm bg-amber ring-2 ring-void" />
+            )}
+          </span>
+          <span className="max-w-full truncate text-[0.625rem] font-semibold leading-none">
+            Build
+          </span>
+        </button>
+
+        {RAIL_SECTIONS.map((section) => (
+          <div key={section.group} className="flex flex-col gap-0.5">
+            <div aria-hidden className="mx-2 my-1 h-px bg-line/60" />
+            {section.tabs.map((tab) => {
+              const Icon = panelIcon(tab.id)
+              const on = active === tab.id || (tab.id === 'racks' && active === 'chips')
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  title={`${tab.label} - ${tab.hint}`}
+                  onClick={() => handleTab(tab.id)}
+                  className={`group relative flex min-h-11 w-full flex-col items-center justify-center gap-1 rounded-lg px-1 py-1.5 transition ${
+                    on && open
+                      ? 'bg-panel-2 text-mint ring-1 ring-mint/25'
+                      : 'text-muted hover:bg-panel-2/80 hover:text-bone'
+                  }`}
+                >
+                  {on && open && (
+                    <span className="absolute left-0 top-1/2 h-6 w-0.5 -translate-y-1/2 rounded-full bg-mint shadow-[0_0_10px_var(--color-mint)]" />
+                  )}
+                  <span className="relative">
+                    <Icon size="1.2rem" weight="duotone" aria-hidden />
+                    {badges[tab.id] && (
+                      <span className="absolute -right-1 -top-0.5 h-2 w-2 rounded-sm bg-amber ring-2 ring-void" />
+                    )}
+                  </span>
+                  <span
+                    className={`max-w-full truncate text-[0.625rem] font-medium leading-none ${
+                      on && open ? 'text-mint' : ''
+                    }`}
+                  >
+                    {tab.label}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        ))}
       </nav>
 
-      {/* Content drawer — overlays map, does not push layout */}
+      {/* Content drawer: stable header + animated panel swap */}
       <div
         className={`hud-surface pointer-events-auto relative col-start-2 m-2 ml-1 flex min-h-0 min-w-0 flex-col overflow-hidden rounded-xl transition-opacity duration-200 ease-out ${
           open ? 'opacity-100' : 'pointer-events-none opacity-0'
@@ -130,55 +227,26 @@ export function LeftRail() {
       >
         {open && (
           <>
-            <header className="relative z-10 shrink-0 border-b border-line/60 px-4 pb-3 pt-3.5">
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <p className="text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-mint/80">
-                    {group.label}
-                  </p>
-                  <p className="mt-1 truncate text-[0.75rem] text-muted/90">{group.description}</p>
-                </div>
-                <button
-                  type="button"
-                  title="Collapse ([)"
-                  onClick={() => setOpen(false)}
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[0.875rem] text-muted hover:bg-panel-2 hover:text-bone"
-                >
-                  ‹
-                </button>
+            <header className="relative z-10 flex h-14 shrink-0 items-center justify-between gap-2 border-b border-line/60 px-4">
+              <div className="flex min-w-0 items-baseline gap-2">
+                <p className="shrink-0 text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-mint/80">
+                  {group.label}
+                </p>
+                <h2 className="truncate text-sm font-semibold text-bone">
+                  {activeItem?.label ?? group.label}
+                </h2>
+                <p className="hidden truncate text-[0.75rem] text-muted/90 xl:block">
+                  {activeItem?.hint ?? group.description}
+                </p>
               </div>
-
-              {group.items.length > 1 ? (
-              <div
-                className="mt-2 grid gap-0.5 rounded-xl bg-void/50 p-0.5"
-                style={{
-                  gridTemplateColumns: `repeat(${Math.max(1, group.items.length)}, minmax(0, 1fr))`,
-                }}
-                role="tablist"
-                aria-label={`${group.label} panels`}
+              <button
+                type="button"
+                title="Collapse ([)"
+                onClick={() => setOpen(false)}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-panel-2 hover:text-bone"
               >
-                {group.items.map((item) => {
-                  const on = active === item.id || (item.id === 'racks' && active === 'chips')
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      role="tab"
-                      aria-selected={on}
-                      title={`${item.label} — ${item.hint}`}
-                      onClick={() => setPanel(item.id)}
-                      className={`min-h-8 min-w-0 rounded-lg px-2 py-1.5 text-center text-[0.75rem] font-medium leading-tight transition ${
-                        on
-                          ? 'bg-bone text-void shadow-sm'
-                          : 'text-muted hover:bg-panel-2 hover:text-bone'
-                      }`}
-                    >
-                      <span className="block truncate px-0.5">{item.label}</span>
-                    </button>
-                  )
-                })}
-              </div>
-              ) : null}
+                <X size="0.9rem" />
+              </button>
             </header>
 
             <div
@@ -186,7 +254,9 @@ export function LeftRail() {
                 active === 'research' ? 'flex flex-col overflow-hidden' : 'overflow-y-auto'
               }`}
             >
-              <PanelBody id={active} />
+              <div key={active} className="panel-swap min-h-0">
+                <PanelBody id={active} />
+              </div>
             </div>
           </>
         )}
@@ -238,22 +308,4 @@ function PanelBody({ id }: { id: PanelId }) {
     default:
       return null
   }
-}
-
-function NavIcon({ id }: { id: NavGroupId }) {
-  const Icon =
-    id === 'strategy'
-      ? ChartDonut
-      : id === 'lab'
-        ? Flask
-        : id === 'infrastructure'
-          ? Buildings
-          : id === 'build'
-            ? Hammer
-          : id === 'market'
-            ? Storefront
-            : id === 'marketing'
-              ? Megaphone
-            : UsersThree
-  return <Icon size="1.25rem" weight="duotone" aria-hidden />
 }

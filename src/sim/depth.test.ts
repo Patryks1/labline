@@ -128,6 +128,17 @@ function withCompute(s: SimState, chips = 128): SimState {
   }
 }
 
+function withCash(s: SimState, cash = 250_000_000): SimState {
+  return {
+    ...s,
+    player: {
+      ...s.player,
+      cash,
+      finance: { ...s.player.finance, cash },
+    },
+  }
+}
+
 function forceCompleteJob(state: SimState): SimState {
   let s = state
   for (let i = 0; i < 400; i++) {
@@ -247,12 +258,13 @@ describe('corpus specialists', () => {
   })
 
   it('startTraining applies domainModels only when specialists researched', () => {
-    let s = withCompute(createGame(91), 64)
+    let s = withCash(withCompute(createGame(91), 64))
     s = startTraining(s, { name: 'Coder', family: 'dense', paramsB: 1 })
     s = forceCompleteJob(s)
     s = keepInternal(s)
     const coder = s.player.models.find((m) => m.name === 'Coder')!
     // Without research — domainModels stripped
+    s = withCash(s)
     s = startTraining(s, {
       name: 'NoSpec',
       family: 'dense',
@@ -276,6 +288,7 @@ describe('corpus specialists', () => {
         researchUnlocked: [...s.player.researchUnlocked, 'data_specialists', 'data_mix', 'data_synth'],
       },
     }
+    s = withCash(s)
     s = startTraining(s, {
       name: 'WithSpec',
       family: 'dense',
@@ -362,7 +375,7 @@ describe('distill ~80% retention vs cheaper train', () => {
   })
 
   it('teacher-heavy distill lands near ~80% of teacher; own-heavy pulls less', () => {
-    let s = withCompute(createGame(88), 128)
+    let s = withCash(withCompute(createGame(88), 128))
     s = startTraining(s, { name: 'Teacher-Mix', family: 'dense', paramsB: 8 })
     s = forceCompleteJob(s)
     s = keepInternal(s)
@@ -381,6 +394,7 @@ describe('distill ~80% retention vs cheaper train', () => {
     }
     const t = s.player.models.find((m) => m.name === 'Teacher-Mix')!
 
+    s = withCash(s)
     s = startTraining(s, {
       name: 'Student-HeavyTeacher',
       family: 'dense',
@@ -398,6 +412,7 @@ describe('distill ~80% retention vs cheaper train', () => {
     expect(ratioHeavy).toBeLessThanOrEqual(0.9)
     expect(heavyT.distillTeacherShare).toBeCloseTo(0.9, 2)
 
+    s = withCash(s)
     s = startTraining(s, {
       name: 'Student-HeavyOwn',
       family: 'dense',
@@ -416,7 +431,7 @@ describe('distill ~80% retention vs cheaper train', () => {
   })
 
   it('full path: teacher pretrain then student distill via real training APIs', () => {
-    let s = withCompute(createGame(42), 256)
+    let s = withCash(withCompute(createGame(42), 256))
     s = startTraining(s, { name: 'Teacher-70', family: 'dense', paramsB: 7 })
     s = forceCompleteJob(s)
     expect(s.player.trainingJob?.progressPfDays).toBeGreaterThanOrEqual(
@@ -432,7 +447,15 @@ describe('distill ~80% retention vs cheaper train', () => {
       trainEfficiency: s.player.trainEfficiency,
       mode: 'pretrain',
     })
+    const distillCost = trainCostPfDays({
+      paramsB: 3,
+      family: 'dense',
+      trainEfficiency: s.player.trainEfficiency,
+      mode: 'distill',
+      teacherParamsB: teacher.paramsB,
+    })
 
+    s = withCash(s)
     s = startTraining(s, {
       name: 'Student-3',
       family: 'dense',
@@ -442,7 +465,9 @@ describe('distill ~80% retention vs cheaper train', () => {
       distillTeacherShare: 0.85,
     })
     expect(s.player.trainingJob?.mode).toBe('distill')
-    expect(s.player.trainingJob!.targetPfDays).toBeLessThan(pretrainCost)
+    // Raw distill cost stays cheaper than pretrain; calendar floor may enlarge targetPfDays.
+    expect(distillCost).toBeLessThan(pretrainCost)
+    expect(s.player.trainingJob!.targetPfDays).toBeGreaterThanOrEqual(distillCost)
     expect(s.player.trainingJob!.distillTeacherShare).toBeGreaterThan(0.8)
 
     s = forceCompleteJob(s)
@@ -674,7 +699,7 @@ describe('serving efficiency & capacity', () => {
   })
 
   it('no unserved complaints when demand is under capacity', () => {
-    let s = withCompute(createGame(44), 128)
+    let s = withCash(withCompute(createGame(44), 128))
     s = {
       ...s,
       player: {
@@ -765,7 +790,7 @@ describe('post-release benchmark event', () => {
   })
 
   it('releaseFromJob schedules separate delayed evaluations', () => {
-    let s = withCompute(createGame(11), 128)
+    let s = withCash(withCompute(createGame(11), 128))
     s = startTraining(s, { name: 'Pub', family: 'dense', paramsB: 1 })
     s = forceCompleteJob(s)
     s = releaseFromJob(s)
@@ -852,7 +877,7 @@ describe('rivals and supply', () => {
   })
 
   it('rivals release only through completed shared-rule training jobs', () => {
-    let s = withCompute(createGame(21), 128)
+    let s = withCash(withCompute(createGame(21), 128))
     s = startTraining(s, { name: 'PlayerSOTA', family: 'dense', paramsB: 8 })
     s = forceCompleteJob(s)
     s = releaseFromJob(s)
@@ -1079,7 +1104,7 @@ describe('rivals and supply', () => {
 
   it('one mid hall cannot casually hold double-digit share without overload', () => {
     // 96 racks ≈ one filled L1 data hall; 50% serve allocation
-    let s = withCompute(createGame(33), 96)
+    let s = withCash(withCompute(createGame(33), 96))
     s = startTraining(s, { name: 'Mid', family: 'dense', paramsB: 8 })
     s = forceCompleteJob(s)
     s = releaseFromJob(s)

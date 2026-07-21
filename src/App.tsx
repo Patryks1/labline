@@ -18,6 +18,7 @@ import { ObjectivesDock } from './view/hud/ObjectivesDock'
 import { HudFeedback } from './view/hud/HudFeedback'
 import { FULL_BLEED_MAP_STYLE } from './view/hud/layout'
 import { MapNavigator } from './view/hud/MapNavigator'
+import { ReleaseCelebration } from './view/hud/ReleaseCelebration'
 
 function GameShell() {
   const paused = useGameStore((s) => s.state.paused)
@@ -67,6 +68,7 @@ function GameShell() {
       <PauseMenu />
       <HotkeyHelp />
       <HudFeedback />
+      <ReleaseCelebration />
     </div>
   )
 }

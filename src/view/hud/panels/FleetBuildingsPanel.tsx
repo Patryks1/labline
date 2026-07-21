@@ -19,6 +19,14 @@ import { money, num } from '../format'
 import { BuildingNameField } from '../ui/BuildingNameField'
 import { BuildingDisposeButtons } from './MapPanel'
 import { ECONOMY } from '../../../sim/balance/economy'
+import {
+  EmptyState,
+  HudButton,
+  MetricTile,
+  PanelScaffold,
+  StatusChip,
+} from '../ui/HudPrimitives'
+import { GameCard, LiveDot, MeterBar, StatRow } from '../ui/kit'
 
 type GroupId = 'hq' | 'lab' | 'dc' | 'power' | 'fab' | 'other'
 
@@ -103,126 +111,130 @@ export function FleetBuildingsPanel() {
   const selKey = selected ? `${selected.x},${selected.y}` : null
 
   return (
-    <div className="space-y-4">
-      <div>
-        <h2 className="hud-panel-title">Buildings</h2>
-        <p className="hud-panel-sub">
-          HQs, labs, halls, and plants you own. Place new ones under{' '}
-          <button type="button" className="text-mint hover:underline" onClick={() => openSites()}>
-            Sites
-          </button>
-          . Staff HQs under{' '}
-          <button
-            type="button"
-            className="text-mint hover:underline"
-            onClick={() => setPanel('org')}
-          >
+    <PanelScaffold
+      eyebrow="Fleet"
+      title="Buildings"
+      description="HQs, labs, halls, and plants you own."
+      actions={
+        <div className="flex items-center gap-1.5">
+          <HudButton type="button" variant="ghost" onClick={() => setPanel('org')}>
             People
-          </button>
-          .
-        </p>
-      </div>
-
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <Mini label="Facilities" value={String(live.length)} />
-        <Mini label="Building" value={String(constructing.length)} accent="text-amber" />
-        <Mini
-          label="HQ desks"
-          value={`${staffTotal(staff)}/${hqCap}`}
-          accent={hqCap > 0 ? 'text-mint' : 'text-muted'}
-        />
-        <Mini label="Researchers" value={String(staff.researcher)} />
-      </div>
-
-      {constructing.length > 0 && (
-        <section>
-          <h3 className="mb-1.5 text-[0.8125rem] font-medium uppercase tracking-wider text-muted">
-            Under construction
-          </h3>
-          <div className="space-y-1.5">
-            {constructing.map((t) => {
-              const left = Math.max(0, t.buildingTarget - t.buildingProgress)
-              const pct = (t.buildingProgress / Math.max(1, t.buildingTarget)) * 100
-              return (
-                <BuildingRow
-                  key={`c-${t.x}-${t.y}`}
-                  tile={t}
-                  active={selKey === `${t.x},${t.y}`}
-                  badge={`${left}d left`}
-                  badgeClass="text-amber"
-                >
-                  <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-void">
-                    <div className="h-full bg-amber" style={{ width: `${pct}%` }} />
-                  </div>
-                  <div className="mt-0.5 font-mono text-[0.75rem] text-muted">
-                    {kindLabel(t.kind)} · day {t.buildingProgress}/{t.buildingTarget}
-                    {t.rackCapacity > 0 ? ` · ${t.rackCapacity} bays` : ''}
-                    {isHqKind(t.kind)
-                      ? ` · ${getBuildDef(t.kind === 'office' ? 'hq' : (t.kind as never)).staffCap ?? '—'} desks`
-                      : ''}
-                  </div>
-                  <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
-                    <BuildingDisposeButtons x={t.x} y={t.y} constructing compact />
-                  </div>
-                </BuildingRow>
-              )
-            })}
-          </div>
-        </section>
-      )}
-
-      {live.length === 0 && constructing.length === 0 ? (
-        <p className="rounded-xl border border-line bg-panel-2 px-3 py-3 text-[0.8125rem] text-muted">
-          No buildings yet — open{' '}
-          <button type="button" className="text-mint" onClick={() => openSites()}>
+          </HudButton>
+          <HudButton type="button" variant="primary" onClick={() => openSites()}>
             Sites
-          </button>{' '}
-          to place an HQ, data hall, or power plant.
-        </p>
-      ) : (
-        GROUP_ORDER.map((gid) => {
-          const list = byGroup.get(gid)
-          if (!list?.length) return null
-          return (
-            <section key={gid}>
-              <h3 className="mb-1.5 text-[0.8125rem] font-medium uppercase tracking-wider text-muted">
-                {GROUP_LABELS[gid]}
-                <span className="ml-1.5 font-mono text-[0.75rem] text-muted/80">{list.length}</span>
-              </h3>
-              <div className="space-y-1.5">
-                {list.map((t) => (
+          </HudButton>
+        </div>
+      }
+    >
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <MetricTile label="Facilities" value={String(live.length)} tone="positive" />
+          <MetricTile
+            label="Building"
+            value={String(constructing.length)}
+            tone={constructing.length > 0 ? 'warning' : 'neutral'}
+          />
+          <MetricTile
+            label="HQ desks"
+            value={`${staffTotal(staff)}/${hqCap}`}
+            tone={hqCap > 0 ? 'positive' : 'neutral'}
+          />
+          <MetricTile label="Researchers" value={String(staff.researcher)} tone="research" />
+        </div>
+
+        {constructing.length > 0 ? (
+          <GameCard eyebrow="Construction" title="Under construction" tone="train" live>
+            <div className="anim-stagger space-y-2">
+              {constructing.map((t) => {
+                const left = Math.max(0, t.buildingTarget - t.buildingProgress)
+                const pct = t.buildingProgress / Math.max(1, t.buildingTarget)
+                return (
                   <BuildingRow
-                    key={`${t.x}-${t.y}`}
+                    key={`c-${t.x}-${t.y}`}
                     tile={t}
                     active={selKey === `${t.x},${t.y}`}
-                    badge={kindLabel(t.kind)}
+                    badge={`${left}d left`}
+                    badgeTone="warning"
                   >
-                    <BuildingDetail tile={t} staffResearchers={staff.researcher} />
+                    <MeterBar
+                      label={
+                        <span className="inline-flex items-center gap-1.5">
+                          <LiveDot className="text-amber" />
+                          {kindLabel(t.kind)}
+                        </span>
+                      }
+                      value={pct}
+                      detail={`D${t.buildingProgress}/${t.buildingTarget}`}
+                      tone="train"
+                      live
+                    />
+                    <div className="mt-1.5 font-mono text-[0.75rem] tabular-nums text-muted">
+                      {t.rackCapacity > 0 ? `${t.rackCapacity} bays` : null}
+                      {isHqKind(t.kind)
+                        ? ` · ${getBuildDef(t.kind === 'office' ? 'hq' : (t.kind as never)).staffCap ?? '—'} desks`
+                        : ''}
+                    </div>
                     <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
-                      <BuildingDisposeButtons x={t.x} y={t.y} constructing={false} compact />
+                      <BuildingDisposeButtons x={t.x} y={t.y} constructing compact />
                     </div>
                   </BuildingRow>
-                ))}
-              </div>
-            </section>
-          )
-        })
-      )}
+                )
+              })}
+            </div>
+          </GameCard>
+        ) : null}
 
-      {hqCap > 0 && (
-        <div className="rounded-xl border border-line bg-panel-2 p-3">
-          <h3 className="text-[0.8125rem] font-medium text-bone">Staff roster</h3>
-          <div className="mt-1.5 grid grid-cols-2 gap-1 font-mono text-[0.75rem] text-muted">
-            {(Object.keys(STAFF_LABELS) as (keyof typeof STAFF_LABELS)[]).map((role) => (
-              <div key={role} className="flex justify-between gap-2 rounded-lg bg-void/40 px-2 py-1">
-                <span>{STAFF_LABELS[role]}</span>
-                <span className="text-bone">{staff[role]}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
+        {live.length === 0 && constructing.length === 0 ? (
+          <EmptyState
+            title="No buildings yet"
+            description="Open Sites to place an HQ, data hall, or power plant."
+            action={
+              <HudButton type="button" variant="primary" onClick={() => openSites()}>
+                Open Sites
+              </HudButton>
+            }
+          />
+        ) : (
+          GROUP_ORDER.map((gid) => {
+            const list = byGroup.get(gid)
+            if (!list?.length) return null
+            return (
+              <section key={gid} className="space-y-1.5">
+                <div className="flex items-baseline justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-bone">{GROUP_LABELS[gid]}</h3>
+                  <span className="font-mono text-[0.6875rem] tabular-nums text-muted">{list.length}</span>
+                </div>
+                <div className="anim-stagger space-y-1.5">
+                  {list.map((t) => (
+                    <BuildingRow
+                      key={`${t.x}-${t.y}`}
+                      tile={t}
+                      active={selKey === `${t.x},${t.y}`}
+                      badge={kindLabel(t.kind)}
+                    >
+                      <BuildingDetail tile={t} staffResearchers={staff.researcher} />
+                      <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
+                        <BuildingDisposeButtons x={t.x} y={t.y} constructing={false} compact />
+                      </div>
+                    </BuildingRow>
+                  ))}
+                </div>
+              </section>
+            )
+          })
+        )}
+
+        {hqCap > 0 ? (
+          <GameCard eyebrow="People" title="Staff roster">
+            <div className="grid grid-cols-2 gap-x-3">
+              {(Object.keys(STAFF_LABELS) as (keyof typeof STAFF_LABELS)[]).map((role) => (
+                <StatRow key={role} label={STAFF_LABELS[role]} value={staff[role]} />
+              ))}
+            </div>
+          </GameCard>
+        ) : null}
+      </div>
+    </PanelScaffold>
   )
 }
 
@@ -233,28 +245,26 @@ function BuildingDetail({
   tile: MapTile
   staffResearchers: number
 }) {
-  const regionNote = ''
   if (isHqKind(tile.kind)) {
-    const cap =
-      getBuildDef(tile.kind === 'office' ? 'hq' : (tile.kind as never)).staffCap ?? 12
+    const cap = getBuildDef(tile.kind === 'office' ? 'hq' : (tile.kind as never)).staffCap ?? 12
     const levelBonus = Math.max(0, tile.level - 1) * 4
     return (
-      <div className="mt-0.5 font-mono text-[0.75rem] text-muted">
+      <div className="mt-0.5 font-mono text-[0.75rem] tabular-nums text-muted">
         L{tile.level} · up to {cap + levelBonus} desks · opex {money(displayedFacilityOpex(tile))}/d
-        {staffResearchers > 0 ? ` · ${staffResearchers} researchers on payroll` : ''}
+        {staffResearchers > 0 ? ` · ${staffResearchers} researchers` : ''}
       </div>
     )
   }
   if (tile.kind === 'lab') {
     return (
-      <div className="mt-0.5 font-mono text-[0.75rem] text-muted">
-        L{tile.level} · research mult boost · opex {money(displayedFacilityOpex(tile))}/d
+      <div className="mt-0.5 font-mono text-[0.75rem] tabular-nums text-muted">
+        L{tile.level} · research boost · opex {money(displayedFacilityOpex(tile))}/d
       </div>
     )
   }
   if (isDcKind(tile.kind)) {
     return (
-      <div className="mt-0.5 font-mono text-[0.75rem] text-muted">
+      <div className="mt-0.5 font-mono text-[0.75rem] tabular-nums text-muted">
         L{tile.level} · {tile.racksUsed}/{tile.rackCapacity} bays
         {tile.powered === false ? ' · DOWN' : ''} · opex {money(displayedFacilityOpex(tile))}/d
       </div>
@@ -262,7 +272,7 @@ function BuildingDetail({
   }
   if (tile.mwCapacity > 0 || tile.mwGeneration > 0) {
     return (
-      <div className="mt-0.5 font-mono text-[0.75rem] text-muted">
+      <div className="mt-0.5 font-mono text-[0.75rem] tabular-nums text-muted">
         L{tile.level}
         {tile.mwCapacity > 0 ? ` · ${num(tile.mwCapacity, 1)} MW grid` : ''}
         {tile.mwGeneration > 0 ? ` · ${num(tile.mwGeneration, 1)} MW gen` : ''}
@@ -272,10 +282,9 @@ function BuildingDetail({
     )
   }
   return (
-    <div className="mt-0.5 font-mono text-[0.75rem] text-muted">
+    <div className="mt-0.5 font-mono text-[0.75rem] tabular-nums text-muted">
       L{tile.level}
       {tile.opexPerDay > 0 ? ` · opex ${money(displayedFacilityOpex(tile))}/d` : ''}
-      {regionNote}
     </div>
   )
 }
@@ -284,13 +293,13 @@ function BuildingRow({
   tile,
   active,
   badge,
-  badgeClass = 'text-muted',
+  badgeTone = 'neutral',
   children,
 }: {
   tile: MapTile
   active: boolean
   badge?: string
-  badgeClass?: string
+  badgeTone?: 'neutral' | 'positive' | 'warning' | 'danger' | 'serve' | 'research'
   children?: ReactNode
 }) {
   const select = () => useGameStore.getState().selectTile(tile.x, tile.y)
@@ -307,8 +316,8 @@ function BuildingRow({
           select()
         }
       }}
-      className={`w-full rounded-xl border px-3 py-2 text-left transition ${
-        active ? 'border-mint/50 bg-mint/10' : 'border-line bg-panel-2 hover:border-mint/30'
+      className={`hover-lift w-full rounded-lg border px-3 py-2 text-left transition ${
+        active ? 'border-mint/50 bg-mint/10' : 'border-line/70 bg-panel-2/70 hover:border-mint/30'
       }`}
     >
       <div className="flex items-start justify-between gap-2 text-sm">
@@ -319,28 +328,9 @@ function BuildingRow({
         >
           <BuildingNameField tile={tile} compact />
         </div>
-        {badge && (
-          <span className={`shrink-0 font-mono text-[0.75rem] ${badgeClass}`}>{badge}</span>
-        )}
+        {badge ? <StatusChip tone={badgeTone}>{badge}</StatusChip> : null}
       </div>
       {children}
-    </div>
-  )
-}
-
-function Mini({
-  label,
-  value,
-  accent = 'text-bone',
-}: {
-  label: string
-  value: string
-  accent?: string
-}) {
-  return (
-    <div className="rounded-xl border border-line bg-panel-2 px-2.5 py-2">
-      <div className="text-[0.75rem] text-muted">{label}</div>
-      <div className={`font-mono text-sm ${accent}`}>{value}</div>
     </div>
   )
 }

@@ -21,6 +21,8 @@ import { useGameStore } from '../../../store/gameStore'
 import { useUiStore } from '../../../store/uiStore'
 import { computeSnapshot } from '../../../sim/tick'
 import { money, mw } from '../format'
+import { EmptyState, HudButton, MetricTile, PanelScaffold, StatusChip } from '../ui/HudPrimitives'
+import { BlockerList, GameCard, LiveDot, MeterBar, SegmentedTabs, StatRow } from '../ui/kit'
 import {
   NegotiationHeader,
   NegotiationMessage,
@@ -38,6 +40,8 @@ type NegotiationState = {
   message?: string
 }
 
+type PowerTab = 'status' | 'contracts' | 'desk'
+
 export function PowerPanel() {
   const state = useGameStore((store) => store.state)
   const requestConfirm = useUiStore((store) => store.requestConfirm)
@@ -53,172 +57,195 @@ export function PowerPanel() {
   const cities = cityDashboard(state)
   const [contractMw, setContractMw] = useState(8)
   const [contractTerm, setContractTerm] = useState(60)
+  const [tab, setTab] = useState<PowerTab>('status')
   const [negotiation, setNegotiation] = useState<NegotiationState>(() => ({
     mode: 'import',
     cityId: cities[0]?.city.id ?? '',
     status: 'idle',
   }))
 
+  const short = Math.max(0, balance.demandMw - Math.min(balance.demandMw, Math.min(balance.demandMw, balance.genMw) + bill.contractMw + bill.energyContractMw + bill.spotMw))
+  const supplyRatio = balance.demandMw > 0.001 ? Math.min(1, (balance.demandMw - short) / balance.demandMw) : 1
+
   return (
-    <div className="space-y-3">
-      <div>
-        <h2 className="hud-panel-title">Power</h2>
-        <p className="hud-panel-sub">
-          Trace every megawatt, lock utility supply, and contract owned surplus without manual export toggles.
-        </p>
-      </div>
-
-      <PowerFlow balance={balance} bill={bill} />
-
-      <section className="rounded-2xl border border-line bg-panel-2 p-3">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h3 className="text-[0.8125rem] font-semibold text-bone">Active commitments</h3>
-            <p className="mt-0.5 text-[0.6875rem] text-muted">Firm imports are billed at the locked rate. Exports earn only on surplus delivered.</p>
-          </div>
-          <span className="font-mono text-[0.6875rem] text-muted">spot {money(wholesale)}/MWh</span>
+    <PanelScaffold
+      eyebrow="Infrastructure"
+      title="Power"
+      description="Grid MW, utility contracts, and surplus export."
+    >
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <MetricTile label="Need" value={mw(balance.demandMw)} tone="warning" />
+          <MetricTile label="On-site" value={mw(balance.genMw)} tone="positive" />
+          <MetricTile
+            label="Short"
+            value={mw(short)}
+            tone={short > 0.05 ? 'danger' : 'positive'}
+            detail={short > 0.05 ? 'Tight' : 'Covered'}
+          />
+          <MetricTile label="Spot" value={`${money(wholesale)}/MWh`} />
         </div>
-        {importContracts.length === 0 && exportContracts.length === 0 ? (
-          <p className="mt-2 rounded-lg border border-dashed border-line px-2.5 py-2 text-[0.75rem] text-muted">No active power contracts.</p>
-        ) : (
-          <div className="mt-2 space-y-1.5">
-            {importContracts.map((contract) => (
-              <ContractRow
-                key={contract.id}
-                direction="Import"
-                name={contract.cityName}
-                mwValue={contract.mw}
-                price={contract.pricePerMWh}
-                days={contract.daysLeft}
-                onBreak={() => requestConfirm({
-                  title: 'Break the utility contract?',
-                  body: `${contract.cityName} will stop supplying ${mw(contract.mw)} immediately. The remaining-term fee applies.`,
-                  actionLabel: 'Break contract',
-                  tone: 'danger',
-                  onConfirm: () => setState(cancelCityPowerContract(state, contract.id)),
-                })}
+
+        <GameCard
+          eyebrow="Supply vs demand"
+          title={short > 0.05 ? 'Power pressure' : 'Fully powered'}
+          live={short > 0.05}
+          tone={short > 0.05 ? 'danger' : 'mint'}
+          actions={short > 0.05 ? <LiveDot className="text-danger" /> : <StatusChip tone="positive">OK</StatusChip>}
+        >
+          <MeterBar
+            label="MW covered"
+            value={supplyRatio}
+            detail={`${mw(Math.max(0, balance.demandMw - short))} / ${mw(balance.demandMw)}`}
+            tone={short > 0.05 ? 'danger' : supplyRatio < 0.9 ? 'warning' : 'positive'}
+            live={short > 0.05}
+          />
+          <div className="mt-2 space-y-0.5">
+            <StatRow label="Contract import" value={mw(bill.contractMw + bill.energyContractMw)} />
+            <StatRow label="Spot draw" value={mw(bill.spotMw)} tone={bill.spotMw > 0 ? 'warning' : 'neutral'} />
+            <StatRow label="Export" value={mw(balance.exportMw)} tone="positive" />
+            <StatRow
+              label="Daily power cost"
+              value={`${money(balance.generationCostDay + bill.totalCostDay)}/d`}
+              strong
+            />
+          </div>
+        </GameCard>
+
+        <SegmentedTabs
+          ariaLabel="Power sections"
+          active={tab}
+          onChange={(id) => setTab(id as PowerTab)}
+          items={[
+            { id: 'status', label: 'Status' },
+            {
+              id: 'contracts',
+              label: `Contracts (${importContracts.length + exportContracts.length})`,
+            },
+            { id: 'desk', label: 'Utility desk' },
+          ]}
+        />
+
+        <div key={tab} className="panel-swap">
+          {tab === 'status' ? (
+            <GameCard eyebrow="Grid" title="Network pressure">
+              <StatRow
+                label="Industry DCs"
+                value={`${scarcity.industryDcCount}/${scarcity.softCap}`}
               />
-            ))}
-            {exportContracts.map((contract) => (
-              <ContractRow
-                key={contract.id}
-                direction="Export"
-                name={contract.cityName}
-                mwValue={contract.mw}
-                price={contract.pricePerMWh}
-                days={contract.daysLeft}
-                onBreak={() => requestConfirm({
-                  title: 'Break the export contract?',
-                  body: `${contract.cityName} will release the ${mw(contract.mw)} offtake commitment. The early-exit fee applies.`,
-                  actionLabel: 'Break contract',
-                  tone: 'danger',
-                  onConfirm: () => setState(cancelPowerExportContract(state, contract.id)),
-                })}
+              <StatRow
+                label="Grid demand / cap"
+                value={`${mw(scarcity.gridDemandMw)} / ${mw(scarcity.gridCapMw)}`}
+                tone={scarcity.gridDemandMw > scarcity.gridCapMw ? 'danger' : 'neutral'}
               />
-            ))}
-          </div>
-        )}
-      </section>
+              <StatRow label="Curtailment" value={mw(balance.curtailedMw)} />
+            </GameCard>
+          ) : null}
 
-      <ContractDesk
-        state={state}
-        setState={setState}
-        cities={cities}
-        contractMw={contractMw}
-        setContractMw={setContractMw}
-        contractTerm={contractTerm}
-        setContractTerm={setContractTerm}
-        negotiation={negotiation}
-        setNegotiation={setNegotiation}
-        gridStatus={`${scarcity.industryDcCount}/${scarcity.softCap}`}
-        gridConstrained={scarcity.gridDemandMw > scarcity.gridCapMw}
-      />
-    </div>
-  )
-}
+          {tab === 'contracts' ? (
+            importContracts.length === 0 && exportContracts.length === 0 ? (
+              <EmptyState
+                title="No power contracts"
+                description="Lock utility supply or export surplus from the desk."
+                action={
+                  <HudButton type="button" variant="primary" onClick={() => setTab('desk')}>
+                    Open utility desk
+                  </HudButton>
+                }
+              />
+            ) : (
+              <div className="anim-stagger space-y-2">
+                {importContracts.map((contract) => (
+                  <ContractCard
+                    key={contract.id}
+                    direction="Import"
+                    name={contract.cityName}
+                    mwValue={contract.mw}
+                    price={contract.pricePerMWh}
+                    days={contract.daysLeft}
+                    onBreak={() =>
+                      requestConfirm({
+                        title: 'Break the utility contract?',
+                        body: `${contract.cityName} will stop supplying ${mw(contract.mw)} immediately. The remaining-term fee applies.`,
+                        actionLabel: 'Break contract',
+                        tone: 'danger',
+                        onConfirm: () => setState(cancelCityPowerContract(state, contract.id)),
+                      })
+                    }
+                  />
+                ))}
+                {exportContracts.map((contract) => (
+                  <ContractCard
+                    key={contract.id}
+                    direction="Export"
+                    name={contract.cityName}
+                    mwValue={contract.mw}
+                    price={contract.pricePerMWh}
+                    days={contract.daysLeft}
+                    onBreak={() =>
+                      requestConfirm({
+                        title: 'Break the export contract?',
+                        body: `${contract.cityName} will release the ${mw(contract.mw)} offtake commitment. The early-exit fee applies.`,
+                        actionLabel: 'Break contract',
+                        tone: 'danger',
+                        onConfirm: () => setState(cancelPowerExportContract(state, contract.id)),
+                      })
+                    }
+                  />
+                ))}
+              </div>
+            )
+          ) : null}
 
-type Balance = ReturnType<typeof powerBalance>
-type Bill = ReturnType<typeof powerImportBill>
-
-function PowerFlow({ balance, bill }: { balance: Balance; bill: Bill }) {
-  const ownUsed = Math.min(balance.demandMw, balance.genMw)
-  const locked = bill.contractMw + bill.energyContractMw
-  const served = ownUsed + locked + bill.spotMw
-  const short = Math.max(0, balance.demandMw - served)
-  const demandScale = Math.max(0.001, balance.demandMw)
-  const runningCost = balance.generationCostDay + bill.totalCostDay
-  return (
-    <section aria-label="Power status" className="rounded-2xl border border-line bg-panel-2 p-3">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <h3 className="text-[0.8125rem] font-semibold text-bone">Power status</h3>
-          <p className="text-[0.625rem] text-muted">What your operations need and where it comes from.</p>
+          {tab === 'desk' ? (
+            <ContractDesk
+              state={state}
+              setState={setState}
+              cities={cities}
+              contractMw={contractMw}
+              setContractMw={setContractMw}
+              contractTerm={contractTerm}
+              setContractTerm={setContractTerm}
+              negotiation={negotiation}
+              setNegotiation={setNegotiation}
+              gridStatus={`${scarcity.industryDcCount}/${scarcity.softCap}`}
+              gridConstrained={scarcity.gridDemandMw > scarcity.gridCapMw}
+            />
+          ) : null}
         </div>
-        <span className={`font-mono text-[0.6875rem] ${short > 0.05 ? 'text-danger' : 'text-mint'}`}>
-          {short > 0.05 ? `${mw(short)} short` : 'fully powered'}
-        </span>
       </div>
-
-      <div className="mt-2 grid grid-cols-3 divide-x divide-line/70 rounded-lg border border-line/70 bg-void/35">
-        <PowerStat label="Need" value={mw(balance.demandMw)} />
-        <PowerStat label="Supplied" value={mw(Math.min(balance.demandMw, served))} />
-        <PowerStat label="Cost" value={`${money(runningCost)}/d`} />
-      </div>
-
-      {balance.demandMw > 0.001 ? (
-        <>
-          <div className="mt-2 flex h-2.5 overflow-hidden rounded-full bg-void ring-1 ring-line/50">
-            {ownUsed > 0 ? (
-              <span className="bg-mint" style={{ width: `${(ownUsed / demandScale) * 100}%` }} />
-            ) : null}
-            {locked > 0 ? (
-              <span className="bg-research" style={{ width: `${(locked / demandScale) * 100}%` }} />
-            ) : null}
-            {bill.spotMw > 0 ? (
-              <span className="bg-amber" style={{ width: `${(bill.spotMw / demandScale) * 100}%` }} />
-            ) : null}
-            {short > 0 ? (
-              <span className="bg-danger" style={{ width: `${(short / demandScale) * 100}%` }} />
-            ) : null}
-          </div>
-          <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[0.625rem] text-muted">
-            <PowerKey color="bg-mint" label="On-site" value={mw(ownUsed)} />
-            <PowerKey color="bg-research" label="Contract" value={mw(locked)} />
-            <PowerKey color="bg-amber" label="Spot" value={mw(bill.spotMw)} />
-            {short > 0 ? <PowerKey color="bg-danger" label="Short" value={mw(short)} /> : null}
-          </div>
-        </>
-      ) : (
-        <p className="mt-2 rounded-lg border border-dashed border-line/70 px-2.5 py-2 text-[0.6875rem] text-muted">
-          No facilities are drawing power yet.
-        </p>
-      )}
-
-      {balance.exportMw > 0 || balance.curtailedMw > 0 ? (
-        <div className="mt-2 flex items-center justify-between gap-2 border-t border-line/60 pt-2 font-mono text-[0.625rem] text-muted">
-          <span>Surplus sold {mw(balance.exportMw)}</span>
-          <span>Unused {mw(balance.curtailedMw)}</span>
-        </div>
-      ) : null}
-    </section>
+    </PanelScaffold>
   )
 }
 
-function PowerStat({ label, value }: { label: string; value: string }) {
+function ContractCard({
+  direction,
+  name,
+  mwValue,
+  price,
+  days,
+  onBreak,
+}: {
+  direction: 'Import' | 'Export'
+  name: string
+  mwValue: number
+  price: number
+  days: number
+  onBreak: () => void
+}) {
   return (
-    <div className="min-w-0 px-2 py-1.5">
-      <div className="text-[0.625rem] text-muted">{label}</div>
-      <div className="truncate font-mono text-[0.75rem] font-medium text-bone">{value}</div>
-    </div>
-  )
-}
-
-function PowerKey({ color, label, value }: { color: string; label: string; value: string }) {
-  return (
-    <span className="flex items-center gap-1">
-      <span className={`h-1.5 w-1.5 rounded-full ${color}`} />
-      {label} <strong className="text-bone">{value}</strong>
-    </span>
+    <GameCard
+      tone={direction === 'Import' ? 'research' : 'mint'}
+      eyebrow={direction}
+      title={name}
+      actions={<StatusChip tone={direction === 'Import' ? 'research' : 'positive'}>{days}d</StatusChip>}
+    >
+      <StatRow label="Capacity" value={mw(mwValue)} strong />
+      <StatRow label="Rate" value={`${money(price)}/MWh`} />
+      <HudButton type="button" variant="danger" className="mt-2 w-full" onClick={onBreak}>
+        Break contract
+      </HudButton>
+    </GameCard>
   )
 }
 
@@ -249,15 +276,16 @@ function ContractDesk({
   gridStatus: string
   gridConstrained: boolean
 }) {
-  const importQuote = negotiation.mode === 'import'
-    ? powerImportNegotiationQuote(state, negotiation.cityId, contractMw, contractTerm)
-    : null
-  const exportQuote = negotiation.mode === 'export'
-    ? powerExportNegotiationQuote(state, negotiation.cityId, contractMw, contractTerm)
-    : null
+  const importQuote =
+    negotiation.mode === 'import'
+      ? powerImportNegotiationQuote(state, negotiation.cityId, contractMw, contractTerm)
+      : null
+  const exportQuote =
+    negotiation.mode === 'export'
+      ? powerExportNegotiationQuote(state, negotiation.cityId, contractMw, contractTerm)
+      : null
   const activeQuote = importQuote ?? exportQuote
   const selectedCity = cities.find(({ city }) => city.id === negotiation.cityId)
-  const marketPrice = importQuote?.askPricePerMWh ?? exportQuote?.utilityOfferPerMWh ?? 0
   const defaultOffer = Math.round(
     importQuote
       ? importQuote.askPricePerMWh * 0.94
@@ -300,7 +328,6 @@ function ContractDesk({
           : 5,
     ),
   )
-  const dailyValue = (activeQuote?.contractMw ?? 0) * offerPrice * 24
 
   const resetNegotiation = (patch: Partial<Pick<NegotiationState, 'cityId' | 'mode'>> = {}) => {
     setNegotiation({
@@ -313,15 +340,18 @@ function ContractDesk({
   }
 
   const commitNegotiation = (price: number) => {
-    const before = negotiation.mode === 'import'
-      ? state.cityPowerContracts.length
-      : state.powerExportContracts.length
-    const next = negotiation.mode === 'import'
-      ? signCityPowerContract(state, negotiation.cityId, contractMw, contractTerm, price)
-      : signPowerExportContract(state, negotiation.cityId, contractMw, contractTerm, price)
-    const after = negotiation.mode === 'import'
-      ? next.cityPowerContracts.length
-      : next.powerExportContracts.length
+    const before =
+      negotiation.mode === 'import'
+        ? state.cityPowerContracts.length
+        : state.powerExportContracts.length
+    const next =
+      negotiation.mode === 'import'
+        ? signCityPowerContract(state, negotiation.cityId, contractMw, contractTerm, price)
+        : signPowerExportContract(state, negotiation.cityId, contractMw, contractTerm, price)
+    const after =
+      negotiation.mode === 'import'
+        ? next.cityPowerContracts.length
+        : next.powerExportContracts.length
     setState(next)
     if (after > before) {
       setNegotiation({
@@ -344,55 +374,67 @@ function ContractDesk({
     if (importQuote) {
       const result = evaluatePowerImportOffer(importQuote, offerPrice)
       if (result.accepted) commitNegotiation(result.agreedPricePerMWh)
-      else setNegotiation({
-        ...negotiation,
-        offerPrice: Math.round(result.agreedPricePerMWh),
-        status: 'countered',
-        message: `That price is too low. Our firm counter is ${money(result.agreedPricePerMWh)}/MWh.`,
-      })
+      else
+        setNegotiation({
+          ...negotiation,
+          offerPrice: Math.round(result.agreedPricePerMWh),
+          status: 'countered',
+          message: `That price is too low. Our firm counter is ${money(result.agreedPricePerMWh)}/MWh.`,
+        })
       return
     }
     if (exportQuote) {
       const result = evaluatePowerExportOffer(exportQuote, offerPrice)
       if (result.accepted) commitNegotiation(result.agreedPricePerMWh)
-      else setNegotiation({
-        ...negotiation,
-        offerPrice: Math.round(result.agreedPricePerMWh),
-        status: 'countered',
-        message: `That asking price is too high. Our firm counter is ${money(result.agreedPricePerMWh)}/MWh.`,
-      })
+      else
+        setNegotiation({
+          ...negotiation,
+          offerPrice: Math.round(result.agreedPricePerMWh),
+          status: 'countered',
+          message: `That asking price is too high. Our firm counter is ${money(result.agreedPricePerMWh)}/MWh.`,
+        })
     }
   }
 
-  const providerCopy = negotiation.status === 'signed'
-    ? 'The agreement is active. Power and settlement start immediately.'
-    : importQuote
-      ? canNegotiate
-        ? `We can reserve up to ${mw(importQuote.contractMw)} at ${money(importQuote.askPricePerMWh)}/MWh. Longer terms improve the price.`
-        : `Commission a grid connector inside ${importQuote.cityName} before buying power here.`
-      : exportQuote
+  const providerCopy =
+    negotiation.status === 'signed'
+      ? 'The agreement is active. Power and settlement start immediately.'
+      : importQuote
         ? canNegotiate
-          ? `We can buy up to ${mw(exportQuote.contractMw)} of your surplus. Our opening price is ${money(exportQuote.utilityOfferPerMWh)}/MWh.`
-          : `Build generation inside ${exportQuote.cityName} before offering surplus power.`
-        : 'Select a city utility to open a negotiation.'
+          ? `We can reserve up to ${mw(importQuote.contractMw)} at ${money(importQuote.askPricePerMWh)}/MWh.`
+          : `Commission a grid connector inside ${importQuote.cityName} before buying power here.`
+        : exportQuote
+          ? canNegotiate
+            ? `We can buy up to ${mw(exportQuote.contractMw)} of your surplus at ${money(exportQuote.utilityOfferPerMWh)}/MWh.`
+            : `Build generation inside ${exportQuote.cityName} before offering surplus power.`
+          : 'Select a city utility to open a negotiation.'
+
+  const blockers = !canNegotiate
+    ? [{ text: providerCopy, tone: 'warning' as const }]
+    : []
 
   return (
-    <section className="overflow-hidden rounded-2xl border border-mint/25 bg-panel-2/90">
+    <GameCard
+      tone="mint"
+      eyebrow={`Grid ${gridStatus}${gridConstrained ? ' · constrained' : ''}`}
+      title="Utility desk"
+      pad={false}
+    >
       <NegotiationHeader
         title="Utility desk"
-        subtitle={`Power contract negotiation · grid ${gridStatus}${gridConstrained ? ' constrained' : ''}`}
+        subtitle="Power contract negotiation"
         status={negotiation.status}
       />
 
-      <div className="space-y-2 p-2.5">
-        <label className="flex items-center gap-2 rounded-lg border border-line/70 bg-void/55 px-2 py-1.5">
-          <span className="shrink-0 font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">
+      <div className="space-y-2 p-3">
+        <label className="flex items-center gap-2 rounded-md border border-line/70 bg-void/55 px-2 py-1.5">
+          <span className="shrink-0 font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
             Chat with
           </span>
           <select
             value={negotiation.cityId}
             onChange={(event) => resetNegotiation({ cityId: event.target.value })}
-            className="min-w-0 flex-1 bg-transparent text-right text-[0.75rem] font-medium text-bone outline-none"
+            className="min-w-0 flex-1 bg-transparent text-right text-[0.8125rem] font-medium text-bone outline-none"
             aria-label="City utility"
           >
             {cities.map(({ city }) => (
@@ -403,20 +445,17 @@ function ContractDesk({
           </select>
         </label>
 
-        <div className="grid grid-cols-2 rounded-lg border border-line/70 bg-void/45 p-1">
-          {(['import', 'export'] as const).map((mode) => (
-            <button
-              key={mode}
-              type="button"
-              onClick={() => resetNegotiation({ mode })}
-              className={`rounded-md px-2 py-1.5 text-[0.75rem] font-medium transition ${negotiation.mode === mode ? 'bg-mint/15 text-mint' : 'text-muted hover:text-bone'}`}
-            >
-              {mode === 'import' ? 'Buy power' : 'Sell surplus'}
-            </button>
-          ))}
-        </div>
+        <SegmentedTabs
+          ariaLabel="Buy or sell power"
+          active={negotiation.mode}
+          onChange={(id) => resetNegotiation({ mode: id as 'import' | 'export' })}
+          items={[
+            { id: 'import', label: 'Buy power' },
+            { id: 'export', label: 'Sell surplus' },
+          ]}
+        />
 
-        <div className="space-y-2 rounded-xl border border-line/60 bg-void/35 p-2">
+        <div className="space-y-2 rounded-lg border border-line/60 bg-void/35 p-2">
           <NegotiationMessage
             side="provider"
             name={`${activeQuote?.cityName ?? selectedCity?.city.name ?? 'City'} Utility`}
@@ -425,24 +464,13 @@ function ContractDesk({
               {negotiation.mode === 'import' ? 'Firm supply offer' : 'Surplus purchase offer'}
             </span>
             <span className="mt-0.5 block text-muted">{providerCopy}</span>
-            {selectedCity ? (
-              <span className="mt-1.5 flex flex-wrap gap-1 font-mono text-[0.625rem] text-muted">
-                <span className="rounded-full bg-void/70 px-1.5 py-0.5">
-                  {selectedCity.connectorCount} connector{selectedCity.connectorCount === 1 ? '' : 's'}
-                </span>
-                <span className="rounded-full bg-void/70 px-1.5 py-0.5">
-                  {negotiation.mode === 'import'
-                    ? `${mw(selectedCity.connectorAvailableMw)} grid room`
-                    : `${mw(selectedCity.genInZone)} generation`}
-                </span>
-              </span>
-            ) : null}
           </NegotiationMessage>
 
           <NegotiationMessage side="player" name="You">
             <span className="font-medium text-bone">Here’s my proposal.</span>
             <span className="mt-0.5 block text-muted">
-              {negotiation.mode === 'import' ? 'Buy' : 'Sell'} {contractMw} MW for {contractTerm} days at {money(offerPrice)}/MWh.
+              {negotiation.mode === 'import' ? 'Buy' : 'Sell'} {contractMw} MW for {contractTerm}{' '}
+              days at {money(offerPrice)}/MWh.
             </span>
           </NegotiationMessage>
 
@@ -459,9 +487,9 @@ function ContractDesk({
 
         {negotiation.status !== 'signed' ? (
           <>
-            <div className="rounded-xl border border-line/70 bg-void/45 p-2">
+            <div className="rounded-lg border border-line/70 bg-void/45 p-2">
               <div className="mb-1.5 flex items-center justify-between gap-2">
-                <span className="font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">
+                <span className="font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
                   Your offer
                 </span>
                 <span className="text-[0.6875rem] text-muted">Drag to negotiate</span>
@@ -509,73 +537,50 @@ function ContractDesk({
             </div>
 
             <div className="grid grid-cols-4 gap-1 font-mono text-[0.6875rem]">
-              <NegotiationMetric label="Capacity" value={mw(activeQuote?.contractMw ?? 0)} />
+              <NegotiationMetric label="MW" value={mw(activeQuote?.contractMw ?? 0)} />
+              <NegotiationMetric label="Offer" value={`${money(offerPrice)}/MWh`} />
+              <NegotiationMetric label="Term" value={`${contractTerm}d`} />
               <NegotiationMetric
-                label={negotiation.mode === 'import' ? 'Daily cost' : 'Daily revenue'}
-                value={money(dailyValue)}
+                label="Daily"
+                value={money((activeQuote?.contractMw ?? 0) * offerPrice * 24)}
               />
-              <NegotiationMetric label="Term" value={`${activeQuote?.termDays ?? contractTerm}d`} />
-              <NegotiationMetric label="Market" value={`${money(marketPrice)}/MWh`} />
             </div>
 
             <NegotiationMood score={agreementScore} />
-
-            {!canNegotiate ? (
-              <p className="rounded-lg border border-amber/30 bg-amber/5 px-2 py-1.5 text-[0.75rem] text-amber">
-                {negotiation.mode === 'import'
-                  ? 'A commissioned grid connector with free capacity is required in this city.'
-                  : 'Commissioned generation with unsold surplus is required in this city.'}
-              </p>
-            ) : null}
+            <BlockerList items={blockers} />
           </>
         ) : null}
 
-        {negotiation.status === 'idle' || negotiation.status === 'countered' ? (
-          <button
+        {(negotiation.status === 'idle' || negotiation.status === 'countered') && (
+          <HudButton
             type="button"
+            variant="primary"
             disabled={!canNegotiate}
-            className="btn-primary flex w-full items-center justify-center gap-1.5 py-1.5 text-[0.8125rem] disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex w-full items-center justify-center gap-1.5"
             onClick={submitOffer}
           >
             <PaperPlaneTilt size={15} weight="fill" />
             {negotiation.status === 'countered' ? 'Send counter-offer' : 'Send proposal'}
-          </button>
-        ) : null}
-        {negotiation.status === 'signed' ? (
-          <div className="flex items-center justify-between gap-2 rounded-lg border border-mint/35 bg-mint/10 px-2 py-1.5 text-[0.8125rem] font-medium text-mint">
-            <span className="flex items-center gap-1.5">
-              <Handshake size={16} weight="duotone" />
-              Contract active · power online
-            </span>
-            <button type="button" className="text-[0.6875rem] hover:underline" onClick={() => resetNegotiation()}>
-              New deal
-            </button>
+          </HudButton>
+        )}
+        {negotiation.status === 'signed' && (
+          <div className="flex items-center justify-center gap-1.5 rounded-md border border-mint/35 bg-mint/10 px-2 py-1.5 text-[0.8125rem] font-medium text-mint">
+            <Handshake size={16} weight="duotone" />
+            Contract active
           </div>
-        ) : null}
-        {negotiation.status === 'declined' ? (
-          <button
+        )}
+        {negotiation.status === 'declined' && (
+          <HudButton
             type="button"
-            className="btn-ghost flex w-full items-center justify-center gap-1.5 py-1.5 text-[0.8125rem]"
+            variant="ghost"
+            className="flex w-full items-center justify-center gap-1.5"
             onClick={() => resetNegotiation()}
           >
             <Handshake size={15} />
             Edit proposal
-          </button>
-        ) : null}
+          </HudButton>
+        )}
       </div>
-    </section>
-  )
-}
-
-function ContractRow({ direction, name, mwValue, price, days, onBreak }: { direction: 'Import' | 'Export'; name: string; mwValue: number; price: number; days: number; onBreak: () => void }) {
-  return (
-    <div className="flex items-center justify-between gap-2 rounded-lg border border-line/70 bg-void/40 px-2.5 py-2">
-      <div className="min-w-0">
-        <span className={`mr-2 text-[0.625rem] font-semibold uppercase ${direction === 'Import' ? 'text-research' : 'text-mint'}`}>{direction}</span>
-        <span className="text-[0.75rem] text-bone">{name}</span>
-        <p className="font-mono text-[0.625rem] text-muted">{mw(mwValue)} · {money(price)}/MWh · {days}d left</p>
-      </div>
-      <button type="button" onClick={onBreak} className="shrink-0 text-[0.6875rem] text-danger hover:underline">Break</button>
-    </div>
+    </GameCard>
   )
 }

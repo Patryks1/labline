@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState, type DragEvent } from 'react'
 import {
   Circuitry,
   Cpu,
-  DotsSixVertical,
   Flask,
   Lightning,
   MagnifyingGlass,
@@ -19,6 +18,22 @@ import { mapTileAtAny } from '../../sim/systems/worldAccess'
 import { money, num, people } from './format'
 import { FacilityModelPreview } from './ui/FacilityModelPreview'
 import { writeBuildBlueprintDrag } from '../buildPlacement'
+import {
+  BlockerList,
+  CardGrid,
+  GameCard,
+  LiveDot,
+  MeterBar,
+  SegmentedTabs,
+  StatRow,
+} from './ui/kit'
+import {
+  EmptyState,
+  HudButton,
+  MetricTile,
+  PanelScaffold,
+  StatusChip,
+} from './ui/HudPrimitives'
 
 type BuildCategoryId = 'all' | 'compute' | 'power' | 'people' | 'research' | 'silicon'
 
@@ -41,6 +56,14 @@ const CATEGORY_BY_KIND = new Map(
     category.kinds.map((kind) => [kind, category.label] as const),
   ),
 )
+
+const CATEGORY_TONE: Record<string, 'mint' | 'train' | 'infer' | 'research' | 'gold'> = {
+  Compute: 'infer',
+  Power: 'train',
+  People: 'mint',
+  Research: 'research',
+  Silicon: 'gold',
+}
 
 /** Infrastructure-native construction catalogue. Placement continues on the map after selection. */
 export function BuildPanel() {
@@ -89,6 +112,16 @@ export function BuildPanel() {
     ? selectedDef.rack * 0.006
     : selectedDef.mw ?? selectedDef.gen ?? 0
   const filtersActive = Boolean(query || buildCategory !== 'all')
+  const canAfford = state.player.cash >= upfrontTotal
+  const canPlaceOnTile = !tile || tile.kind === 'empty'
+  const blockers = [
+    ...(!canAfford
+      ? [{ text: `Need ${money(upfrontTotal - state.player.cash)} more cash`, tone: 'danger' as const }]
+      : []),
+    ...(tile && tile.kind !== 'empty'
+      ? [{ text: 'Select open land for exact total & placement', tone: 'warning' as const }]
+      : []),
+  ]
 
   const startPlacement = (kind: BuildableKind) => {
     setSelectedKind(kind)
@@ -96,31 +129,42 @@ export function BuildPanel() {
   }
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2 className="hud-panel-title">Build</h2>
-          <p className="hud-panel-sub">Choose a blueprint, compare its footprint, then place it on open land.</p>
-        </div>
-        {buildMode ? (
-          <button
-            type="button"
-            className="shrink-0 rounded-lg border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-[0.6875rem] font-medium text-danger transition hover:bg-danger/20 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/60"
-            onClick={() => setBuildMode(null)}
-          >
+    <PanelScaffold
+      eyebrow="Construction"
+      title="Build"
+      description="Pick a blueprint, then place it on open land."
+      actions={
+        buildMode ? (
+          <HudButton type="button" variant="danger" onClick={() => setBuildMode(null)}>
             Exit placement
-          </button>
-        ) : null}
-      </div>
+          </HudButton>
+        ) : null
+      }
+    >
+      <div className="space-y-3">
+        {buildMode ? (
+          <div className="flex items-center gap-2 rounded-lg border border-mint/35 bg-mint/10 px-3 py-2 text-[0.8125rem] text-mint">
+            <LiveDot />
+            <span className="min-w-0 truncate">
+              Placing {getBuildDef(buildMode).label} — hover map, click open land, Esc to exit.
+            </span>
+          </div>
+        ) : (
+          <p className="text-[0.8125rem] text-muted">
+            Select a blueprint below, then place it on an empty parcel.
+          </p>
+        )}
 
-      <section aria-labelledby="construction-catalog-title" className="rounded-xl border border-line/70 bg-void/25 p-2.5">
-        <div className="mb-2 flex items-baseline justify-between gap-2">
-          <h3 id="construction-catalog-title" className="text-[0.75rem] font-semibold text-bone">
-            Construction catalog
-          </h3>
-          <span className="font-mono text-[0.5625rem] uppercase tracking-wider text-muted">
-            {visibleDefs.length}/{BUILD_DEFS.length} blueprints
-          </span>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <MetricTile label="Cash" value={money(state.player.cash)} tone="positive" />
+          <MetricTile label="Blueprints" value={`${visibleDefs.length}/${BUILD_DEFS.length}`} />
+          <MetricTile label="Build price" value={money(buildCash)} tone="train" />
+          <MetricTile
+            label="Upfront"
+            value={money(upfrontTotal)}
+            detail={tile?.kind === 'empty' ? 'incl. land' : 'est.'}
+            tone={canAfford ? 'neutral' : 'danger'}
+          />
         </div>
 
         <label className="relative block">
@@ -137,13 +181,13 @@ export function BuildPanel() {
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             placeholder="Search halls, power, research…"
-            className="h-9 w-full rounded-lg border border-line/80 bg-panel-2/80 pl-8 pr-8 text-[0.75rem] text-bone outline-none transition placeholder:text-muted/70 focus:border-mint/60 focus:ring-2 focus:ring-mint/15"
+            className="h-9 w-full rounded-md border border-line/80 bg-panel-2/80 pl-8 pr-8 text-[0.8125rem] text-bone outline-none transition placeholder:text-muted/70 focus:border-mint/60 focus:ring-2 focus:ring-mint/15"
           />
           {search ? (
             <button
               type="button"
               onClick={() => setSearch('')}
-              className="absolute right-1.5 top-1/2 grid size-6 -translate-y-1/2 place-items-center rounded-md text-muted transition hover:bg-mint/10 hover:text-mint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/50"
+              className="absolute right-1.5 top-1/2 grid size-6 -translate-y-1/2 place-items-center rounded-md text-muted transition hover:bg-mint/10 hover:text-mint"
               aria-label="Clear blueprint search"
             >
               <X aria-hidden="true" size={13} weight="bold" />
@@ -151,203 +195,175 @@ export function BuildPanel() {
           ) : null}
         </label>
 
-        <div
-          className="mt-2 grid grid-cols-6 gap-1.5"
-          role="group"
-          aria-label="Blueprint category"
-        >
-          {BUILD_CATEGORIES.map((item) => {
-            const Icon = item.icon
-            const active = buildCategory === item.id
-            return (
-              <button
-                key={item.id}
-                type="button"
-                aria-pressed={active}
-                aria-label={`${item.label} blueprints (${item.kinds.length})`}
-                title={`${item.label} · ${item.kinds.length} blueprints`}
-                onClick={() => setBuildCategory(item.id)}
-                className={`flex min-w-0 flex-col items-center justify-center gap-0.5 rounded-lg border px-1 py-1.5 text-[0.5rem] font-semibold transition active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/50 ${
-                  active
-                    ? 'border-mint/45 bg-mint/15 text-mint'
-                    : 'border-line/70 bg-panel-2 text-muted hover:border-mint/25 hover:text-bone'
-                }`}
-              >
-                <Icon aria-hidden="true" size={16} weight={active ? 'fill' : 'duotone'} />
-                <span className="max-w-full truncate">{item.label}</span>
-              </button>
-            )
-          })}
-        </div>
-      </section>
+        <SegmentedTabs
+          ariaLabel="Blueprint category"
+          active={buildCategory}
+          onChange={(id) => setBuildCategory(id as BuildCategoryId)}
+          items={BUILD_CATEGORIES.map((item) => ({
+            id: item.id,
+            label: item.label,
+            icon: <item.icon size={14} weight={buildCategory === item.id ? 'fill' : 'duotone'} />,
+          }))}
+        />
 
-      <div
-        className="max-h-[17rem] space-y-1.5 overflow-y-auto pr-0.5"
-        role="group"
-        aria-label="Construction blueprints"
-      >
-        {visibleDefs.map((definition) => (
-          <BlueprintRow
-            key={definition.kind}
-            definition={definition}
-            selected={selectedKind === definition.kind}
-            cost={Math.floor(definition.cash * economyMult)}
-            affordable={state.player.cash >= definition.cash * economyMult}
-            onPlace={() => startPlacement(definition.kind)}
-            onDragStart={(event) => {
-              setSelectedKind(definition.kind)
-              setBuildMode(definition.kind)
-              writeBuildBlueprintDrag(event.dataTransfer, definition.kind)
-            }}
-          />
-        ))}
-        {visibleDefs.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-line bg-panel-2/35 px-4 py-5 text-center">
-            <p className="text-[0.75rem] font-medium text-bone">No matching blueprints</p>
-            <p className="mt-1 text-[0.625rem] leading-relaxed text-muted">
-              Try another category or include projects outside the current budget.
-            </p>
-            {filtersActive ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setSearch('')
-                  setBuildCategory('all')
-                }}
-                className="mt-2 text-[0.6875rem] font-semibold text-mint hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/50"
-              >
-                Clear filters
-              </button>
+        <div key={`${buildCategory}-${query}`} className="panel-swap">
+          {visibleDefs.length === 0 ? (
+            <EmptyState
+              title="No matching blueprints"
+              description="Try another category or clear the search."
+              action={
+                filtersActive ? (
+                  <HudButton
+                    type="button"
+                    variant="ghost"
+                    onClick={() => {
+                      setSearch('')
+                      setBuildCategory('all')
+                    }}
+                  >
+                    Clear filters
+                  </HudButton>
+                ) : null
+              }
+            />
+          ) : (
+            <CardGrid min="11rem" className="anim-stagger">
+              {visibleDefs.map((definition) => {
+                const cost = Math.floor(definition.cash * economyMult)
+                const affordable = state.player.cash >= cost
+                const selected = selectedKind === definition.kind
+                const cat = CATEGORY_BY_KIND.get(definition.kind) ?? 'Facility'
+                const Icon =
+                  BUILD_CATEGORIES.find((c) => c.id !== 'all' && c.kinds.includes(definition.kind))
+                    ?.icon ?? SquaresFour
+                return (
+                  <button
+                    key={definition.kind}
+                    type="button"
+                    draggable={affordable}
+                    aria-pressed={selected}
+                    disabled={!affordable}
+                    title={
+                      affordable
+                        ? 'Click to place, or drag onto the map'
+                        : `Need ${money(cost - state.player.cash)} more`
+                    }
+                    onClick={() => {
+                      if (!affordable) return
+                      startPlacement(definition.kind)
+                    }}
+                    onDragStart={(event: DragEvent<HTMLButtonElement>) => {
+                      if (!affordable) {
+                        event.preventDefault()
+                        return
+                      }
+                      setSelectedKind(definition.kind)
+                      setBuildMode(definition.kind)
+                      writeBuildBlueprintDrag(event.dataTransfer, definition.kind)
+                    }}
+                    className={`hover-lift rounded-lg border text-left transition disabled:cursor-not-allowed disabled:opacity-55 ${
+                      selected
+                        ? 'border-mint ring-2 ring-mint/50 bg-mint/10'
+                        : 'border-line/70 bg-panel-2/70 hover:border-mint/30'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2 border-b border-line/50 px-3 pb-2 pt-2.5">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <Icon
+                          size={18}
+                          weight={selected ? 'fill' : 'duotone'}
+                          className={affordable ? 'text-mint' : 'text-danger'}
+                        />
+                        <div className="min-w-0">
+                          <p className="hud-eyebrow">{cat}</p>
+                          <h3 className="truncate text-sm font-semibold text-bone">{definition.label}</h3>
+                        </div>
+                      </div>
+                      <span
+                        className={`shrink-0 font-mono text-[0.8125rem] tabular-nums font-semibold ${
+                          affordable ? 'text-mint' : 'text-danger'
+                        }`}
+                      >
+                        {money(cost)}
+                      </span>
+                    </div>
+                    <div className="space-y-1 p-3">
+                      <div className="font-mono text-[0.6875rem] tabular-nums text-muted">
+                        {definition.days}d · {footprintLabel(definition)}
+                      </div>
+                      <div className="truncate text-[0.8125rem] text-bone">{blueprintUtility(definition)}</div>
+                      {!affordable ? (
+                        <p className="text-[0.75rem] text-danger">
+                          Short {money(cost - state.player.cash)}
+                        </p>
+                      ) : null}
+                    </div>
+                  </button>
+                )
+              })}
+            </CardGrid>
+          )}
+        </div>
+
+        <GameCard
+          tone={CATEGORY_TONE[CATEGORY_BY_KIND.get(selectedDef.kind) ?? ''] ?? 'mint'}
+          live={Boolean(buildMode === selectedDef.kind)}
+          eyebrow="Selected blueprint"
+          title={selectedDef.label}
+          actions={
+            <StatusChip tone={canAfford ? 'positive' : 'danger'}>{money(upfrontTotal)}</StatusChip>
+          }
+        >
+          <div className="grid grid-cols-[minmax(0,1fr)_7rem] gap-3">
+            <div className="min-w-0 space-y-1">
+              <StatRow label="Build price" value={money(buildCash)} />
+              <StatRow
+                label="Land"
+                value={landEstimate > 0 ? money(landEstimate) : tile?.kind === 'empty' ? money(0) : '—'}
+              />
+              <StatRow label="Build time" value={`${selectedDef.days}d`} />
+              <StatRow label="Daily ops" value={`${money(shellOpex)}/d`} tone="danger" />
+              <StatRow label="Footprint" value={footprintLabel(selectedDef)} />
+              {estimatedPowerMw > 0 ? (
+                <StatRow
+                  label={selectedDef.gen ? 'Power out' : 'Power / cap'}
+                  value={`${num(estimatedPowerMw, 1)} MW`}
+                />
+              ) : null}
+              {selectedDef.rack ? <StatRow label="Rack bays" value={num(selectedDef.rack)} /> : null}
+              {selectedDef.staffCap ? (
+                <StatRow label="Staff seats" value={people(selectedDef.staffCap)} />
+              ) : null}
+            </div>
+            <FacilityModelPreview definition={selectedDef} />
+          </div>
+
+          <div className="mt-3 space-y-2 border-t border-line/50 pt-3">
+            <div className="font-mono text-[0.6875rem] tabular-nums text-muted">
+              {tile?.kind === 'empty'
+                ? `${tile.name || 'Selected parcel'} · ${money(tile.landValue ?? 0)} land`
+                : 'Select open land for an exact total'}
+            </div>
+            <BlockerList items={blockers} />
+            <HudButton
+              type="button"
+              variant="primary"
+              className="w-full"
+              disabled={!canAfford}
+              title={!canAfford ? `Requires ${money(upfrontTotal - state.player.cash)} more cash` : undefined}
+              onClick={() => startPlacement(selectedDef.kind)}
+            >
+              {buildMode === selectedDef.kind
+                ? `Placing ${selectedDef.label}`
+                : `Place ${selectedDef.label} on map`}
+            </HudButton>
+            {!canPlaceOnTile && canAfford ? (
+              <MeterBar label="Parcel" value={0} detail="need empty land" tone="warning" />
             ) : null}
           </div>
-        ) : null}
+        </GameCard>
       </div>
-
-      <section className="overflow-hidden rounded-2xl border border-mint/25 bg-mint/5" aria-labelledby="selected-blueprint-title">
-        <div className="border-b border-line/60 bg-void/20 px-3 py-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="font-mono text-[0.5625rem] uppercase tracking-[0.16em] text-mint">Selected blueprint</span>
-            <span className="font-mono text-[0.5625rem] uppercase tracking-wider text-muted">
-              {CATEGORY_BY_KIND.get(selectedDef.kind)}
-            </span>
-          </div>
-        </div>
-        <div className="grid grid-cols-[minmax(0,1fr)_7rem] gap-3 border-b border-line/60 p-3">
-          <div className="min-w-0">
-            <div className="flex items-start justify-between gap-2">
-              <div className="min-w-0">
-                <h3 id="selected-blueprint-title" className="truncate text-[0.9375rem] font-semibold text-bone">
-                  {selectedDef.label}
-                </h3>
-                <p className="mt-0.5 line-clamp-3 text-[0.6875rem] leading-snug text-muted">{selectedDef.blurb}</p>
-              </div>
-              <span className={`shrink-0 font-mono text-[0.75rem] font-semibold ${state.player.cash < upfrontTotal ? 'text-danger' : 'text-mint'}`}>
-                {money(upfrontTotal)}
-              </span>
-            </div>
-            <div className="mt-3 grid grid-cols-2 gap-1.5 font-mono">
-              <BuildMetric label="Build price" value={money(buildCash)} />
-              <BuildMetric label="Land" value={landEstimate > 0 ? money(landEstimate) : 'select parcel'} />
-              <BuildMetric label="Build time" value={`${selectedDef.days} days`} />
-              <BuildMetric label="Daily ops" value={`${money(shellOpex)}/day`} danger />
-              <BuildMetric label="Footprint" value={footprintLabel(selectedDef)} />
-              {estimatedPowerMw > 0 ? (
-                <BuildMetric label={selectedDef.gen ? 'Power output' : 'Power / capacity'} value={`${num(estimatedPowerMw, 1)} MW`} />
-              ) : null}
-              {selectedDef.rack ? <BuildMetric label="Rack bays" value={num(selectedDef.rack)} /> : null}
-              {selectedDef.staffCap ? <BuildMetric label="Staff capacity" value={people(selectedDef.staffCap)} /> : null}
-            </div>
-          </div>
-          <FacilityModelPreview definition={selectedDef} />
-        </div>
-
-        {buildMode ? (
-          <p className="border-b border-mint/25 bg-mint/10 px-3 py-2 text-[0.6875rem] leading-snug text-mint">
-            Placement active: hover the map for the footprint, click open land to place, or press Esc to exit.
-          </p>
-        ) : null}
-
-        <div className="space-y-2 bg-panel-2/70 p-3">
-          <div className="font-mono text-[0.6875rem] text-muted">
-            {tile?.kind === 'empty'
-              ? `${tile.name || 'Selected parcel'} · ${money(tile.landValue ?? 0)} land`
-              : 'Select open land for an exact total'}
-          </div>
-          <button
-            type="button"
-            disabled={state.player.cash < upfrontTotal}
-            title={state.player.cash < upfrontTotal ? `Requires ${money(upfrontTotal - state.player.cash)} more cash` : undefined}
-            onClick={() => startPlacement(selectedDef.kind)}
-            className="btn-primary w-full"
-          >
-            {buildMode === selectedDef.kind ? `Placing ${selectedDef.label}` : `Place ${selectedDef.label} on map`}
-          </button>
-        </div>
-      </section>
-    </div>
-  )
-}
-
-function BlueprintRow({
-  definition,
-  selected,
-  cost,
-  affordable,
-  onPlace,
-  onDragStart,
-}: {
-  definition: BuildDef
-  selected: boolean
-  cost: number
-  affordable: boolean
-  onPlace: () => void
-  onDragStart: (event: DragEvent<HTMLButtonElement>) => void
-}) {
-  const utility = blueprintUtility(definition)
-  return (
-    <button
-      type="button"
-      draggable
-      aria-pressed={selected}
-      title="Click to place, or drag this blueprint onto the map"
-      onClick={onPlace}
-      onDragStart={onDragStart}
-      className={`group w-full cursor-grab rounded-xl border px-2.5 py-2 text-left transition active:cursor-grabbing active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60 ${
-        selected
-          ? 'border-mint/50 bg-mint/10 shadow-[inset_3px_0_0_rgba(77,232,211,0.75)]'
-          : 'border-line/65 bg-panel-2/50 hover:border-mint/25 hover:bg-panel-2/80'
-      }`}
-    >
-      <div className="flex min-w-0 items-start justify-between gap-2">
-        <div className="flex min-w-0 items-start gap-1.5">
-          <DotsSixVertical
-            aria-hidden="true"
-            className="mt-0.5 shrink-0 text-muted/65 transition group-hover:text-mint"
-            size={13}
-            weight="bold"
-          />
-          <div className="min-w-0">
-            <div className="flex min-w-0 items-center gap-1.5">
-              <span className="truncate text-[0.75rem] font-semibold text-bone">{definition.label}</span>
-              <span className="shrink-0 font-mono text-[0.5rem] uppercase tracking-wider text-muted">
-                {CATEGORY_BY_KIND.get(definition.kind)}
-              </span>
-            </div>
-            <span className="mt-0.5 block truncate font-mono text-[0.5625rem] text-muted">
-              {definition.days}d · {footprintLabel(definition)} · {utility}
-            </span>
-          </div>
-        </div>
-        <div className="shrink-0 text-right font-mono">
-          <div className={`text-[0.6875rem] font-semibold ${affordable ? 'text-mint' : 'text-danger'}`}>
-            {money(cost)}
-          </div>
-          <div className="mt-0.5 text-[0.5rem] text-muted">
-            {money(definition.opexPerDay * (ECONOMY.facilityOpexMultiplier ?? 1))}/d
-          </div>
-        </div>
-      </div>
-    </button>
+    </PanelScaffold>
   )
 }
 
@@ -366,13 +382,4 @@ function blueprintUtility(definition: BuildDef): string {
   if (definition.kind === 'lab') return 'research PF'
   if (definition.kind === 'fab') return 'silicon line'
   return 'campus utility'
-}
-
-function BuildMetric({ label, value, danger = false }: { label: string; value: string; danger?: boolean }) {
-  return (
-    <div className="min-w-0 rounded-lg border border-line/50 bg-void/40 px-2 py-1.5">
-      <div className="truncate text-[0.5625rem] uppercase tracking-wider text-muted">{label}</div>
-      <div className={`mt-0.5 truncate text-[0.6875rem] font-semibold ${danger ? 'text-danger' : 'text-bone'}`}>{value}</div>
-    </div>
-  )
 }

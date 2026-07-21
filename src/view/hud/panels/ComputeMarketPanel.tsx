@@ -6,11 +6,10 @@ import {
   cancelComputeLease,
   openOffers,
   rejectComputeOffer,
-  rivalHostingBalance,
 } from '../../../sim/systems/computeMarket'
 import { useGameStore } from '../../../store/gameStore'
 import { useUiStore } from '../../../store/uiStore'
-import { money, num } from '../format'
+import { money, num, pct, pf } from '../format'
 import {
   quoteComputeContract,
   signComputeContract,
@@ -26,6 +25,8 @@ import {
   NegotiationSlider,
   type NegotiationStatus,
 } from '../ui/NegotiationRoom'
+import { EmptyState, HudButton, MetricTile, PanelScaffold, StatusChip } from '../ui/HudPrimitives'
+import { BlockerList, GameCard, SegmentedTabs, StatRow } from '../ui/kit'
 
 type ProviderEvent = {
   title: string
@@ -77,8 +78,10 @@ function clamp(min: number, max: number, value: number): number {
 
 function providerEvent(day: number, providerId: string): ProviderEvent {
   const hash = [...providerId].reduce((sum, char) => sum + char.charCodeAt(0), 0)
-  return PROVIDER_EVENTS[Math.abs(hash + Math.floor(day / 5)) % PROVIDER_EVENTS.length]
+  return PROVIDER_EVENTS[Math.abs(hash + Math.floor(day / 5)) % PROVIDER_EVENTS.length]!
 }
+
+type MarketTab = 'negotiate' | 'offers' | 'leases'
 
 /**
  * Wholesale compute leases — advertise, accept rival offers, manage contracts.
@@ -87,6 +90,7 @@ export function ComputeMarketPanel() {
   const state = useGameStore((s) => s.state)
   const setState = (next: typeof state) => useGameStore.setState({ state: next })
   const requestConfirm = useUiStore((s) => s.requestConfirm)
+  const [tab, setTab] = useState<MarketTab>('negotiate')
 
   const offers = openOffers(state).filter((offer) => offer.from === 'rival')
   const active = activeLeases(state)
@@ -191,471 +195,351 @@ export function ComputeMarketPanel() {
       )
       .reduce((sum, contract) => sum + contract.pf, 0) +
     active.filter((lease) => !lease.playerSells).reduce((sum, lease) => sum + lease.pf, 0)
-  const capacityMix = [
-    {
-      id: 'owned',
-      label: 'Self-hosted',
-      value: capacitySnapshot.availableLocalPf,
-      color: '#3dffc0',
-      detail: `${capacitySnapshot.installedLocalPf.toFixed(1)} PF installed · ${capacitySnapshot.outboundCommittedPf.toFixed(1)} PF sold`,
-    },
-    {
-      id: 'provider',
-      label: 'Provider contracts',
-      value: providerBoughtPf,
-      color: '#61a7ff',
-      detail: `${providerContracts.length} provider contract${providerContracts.length === 1 ? '' : 's'} · includes cloud and colocation`,
-    },
-    {
-      id: 'rival',
-      label: 'Rival capacity',
-      value: rivalBoughtPf,
-      color: '#c884ff',
-      detail: `${active.filter((lease) => !lease.playerSells).length} live rival lease${active.filter((lease) => !lease.playerSells).length === 1 ? '' : 's'}`,
-    },
-  ]
+
+  const rentedPf = providerBoughtPf + rivalBoughtPf
+  const ownedPf = capacitySnapshot.availableLocalPf
+  const dailyRent =
+    providerContracts.reduce((sum, c) => sum + c.pf * c.pricePerPfDay, 0) +
+    active.reduce((sum, l) => sum + (l.playerSells ? 0 : l.pf * l.pricePerPfDay), 0)
+  const pricePerPfDay = rentedPf > 0 ? dailyRent / rentedPf : 0
+  const util =
+    capacitySnapshot.installedLocalPf > 0
+      ? Math.min(1, (capacitySnapshot.installedLocalPf - capacitySnapshot.availableLocalPf) / capacitySnapshot.installedLocalPf)
+      : 0
+
+  const blockers = !negotiatedQuote.canSign && negotiatedQuote.reason
+    ? [{ text: negotiatedQuote.reason, tone: 'warning' as const }]
+    : []
+
   return (
-    <div className="space-y-3">
-      <div>
-        <h2 className="hud-panel-title">Compute market</h2>
-        <p className="hud-panel-sub">
-          Cloud, reserved, spot, colocation, emergency, and rival capacity all draw from the same finite pools.
-        </p>
-      </div>
+    <PanelScaffold
+      eyebrow="Compute"
+      title="Compute market"
+      description="Cloud, reserved, spot & rival PF."
+    >
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <MetricTile label="Owned PF" value={pf(ownedPf)} tone="positive" />
+          <MetricTile label="Rented PF" value={pf(rentedPf)} tone="serve" />
+          <MetricTile
+            label="$/PF-day"
+            value={pricePerPfDay > 0 ? money(pricePerPfDay) : '—'}
+            tone="train"
+          />
+          <MetricTile label="Local util" value={pct(util, 0)} />
+        </div>
 
-      <ComputeCapacityPie entries={capacityMix} />
+        <CapacitySalesCeilingCard state={state} />
 
-      <CapacitySalesCeilingCard state={state} />
-
-      <section className="overflow-hidden rounded-2xl border border-mint/25 bg-panel-2/90">
-        <NegotiationHeader
-          title="Provider desk"
-          subtitle="Live capacity negotiation"
-          status={negotiationStatus}
+        <SegmentedTabs
+          ariaLabel="Compute market views"
+          active={tab}
+          onChange={(id) => setTab(id as MarketTab)}
+          items={[
+            { id: 'negotiate', label: 'Provider desk' },
+            { id: 'offers', label: `Offers (${offers.length})` },
+            { id: 'leases', label: `Leases (${active.length + providerContracts.length})` },
+          ]}
         />
 
-        <div className="space-y-2 p-2.5">
-          <label className="flex items-center gap-2 rounded-lg border border-line/70 bg-void/55 px-2 py-1.5">
-            <span className="shrink-0 font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">
-              Chat with
-            </span>
-            <select
-              value={cloudProviderId}
-              onChange={(event) => {
-                setCloudProviderId(event.target.value)
-                resetNegotiation()
-              }}
-              className="min-w-0 flex-1 bg-transparent text-right text-[0.75rem] font-medium text-bone outline-none"
-              aria-label="Compute provider"
-            >
-              {state.worldMarkets.cloudProviders.map((provider) => (
-                <option key={provider.id} value={provider.id} className="bg-void">
-                  {provider.name} · {provider.availablePf.toFixed(0)} PF open
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <div className="space-y-2 rounded-xl border border-line/60 bg-void/35 p-2">
-            <NegotiationMessage side="provider" name={selectedProvider?.name ?? 'Provider'}>
-              <span className="font-medium text-bone">{dealEvent.title}</span>
-              <span className="mt-0.5 block text-muted">{dealEvent.body}</span>
-              <span className="mt-1.5 flex flex-wrap gap-1 font-mono text-[0.625rem] text-muted">
-                <span className="rounded-full bg-void/70 px-1.5 py-0.5">
-                  {selectedProvider?.availablePf.toFixed(0) ?? 0} PF open
-                </span>
-                <span className="rounded-full bg-void/70 px-1.5 py-0.5">
-                  {((selectedProvider?.reliability ?? 0) * 100).toFixed(1)}% uptime
-                </span>
-              </span>
-            </NegotiationMessage>
-
-            <NegotiationMessage side="player" name="You">
-              <span className="font-medium text-bone">Here’s my proposal.</span>
-              <span className="mt-0.5 block text-muted">
-                {cloudPf.toFixed(0)} PF for {cloudTerm} days at {offerPercent}% of list.
-              </span>
-            </NegotiationMessage>
-
-            {negotiationMessage && (
-              <NegotiationMessage
-                side="provider"
-                name={selectedProvider?.name ?? 'Provider'}
+        <div key={tab} className="panel-swap">
+          {tab === 'negotiate' ? (
+            <section className="overflow-hidden rounded-lg border border-mint/25 bg-panel-2/90">
+              <NegotiationHeader
+                title="Provider desk"
+                subtitle="Live capacity negotiation"
                 status={negotiationStatus}
-              >
-                {negotiationMessage}
-              </NegotiationMessage>
-            )}
-          </div>
+              />
 
-          {negotiationStatus !== 'signed' && (
-            <>
-              <div className="rounded-xl border border-line/70 bg-void/45 p-2">
-                <div className="mb-1.5 flex items-center justify-between gap-2">
-                  <span className="font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">
-                    Your offer
+              <div className="space-y-2 p-2.5">
+                <label className="flex items-center gap-2 rounded-md border border-line/70 bg-void/55 px-2 py-1.5">
+                  <span className="shrink-0 font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+                    Chat with
                   </span>
-                  <span className="text-[0.6875rem] text-muted">Drag to negotiate</span>
-                </div>
-                <div className="space-y-1.5">
-                  <NegotiationSlider
-                    label="Compute"
-                    value={cloudPf}
-                    min={1}
-                    max={Math.max(
-                      1,
-                      Math.min(1000, Math.floor(selectedProvider?.availablePf ?? 1)),
-                    )}
-                    suffix=" PF"
-                    onChange={(value) => {
-                      setCloudPf(value)
+                  <select
+                    value={cloudProviderId}
+                    onChange={(event) => {
+                      setCloudProviderId(event.target.value)
                       resetNegotiation()
                     }}
-                  />
-                  <NegotiationSlider
-                    label="Term"
-                    value={cloudTerm}
-                    min={1}
-                    max={720}
-                    suffix=" days"
-                    onChange={(value) => {
-                      setCloudTerm(value)
-                      resetNegotiation()
-                    }}
-                  />
-                  <NegotiationSlider
-                    label="Offer"
-                    value={offerPercent}
-                    min={70}
-                    max={115}
-                    suffix="% list"
-                    onChange={(value) => {
-                      setOfferPercent(value)
-                      resetNegotiation()
-                    }}
-                  />
-                </div>
-              </div>
+                    className="min-w-0 flex-1 bg-transparent text-right text-[0.8125rem] font-medium text-bone outline-none"
+                    aria-label="Compute provider"
+                  >
+                    {state.worldMarkets.cloudProviders.map((provider) => (
+                      <option key={provider.id} value={provider.id} className="bg-void">
+                        {provider.name} · {provider.availablePf.toFixed(0)} PF open
+                      </option>
+                    ))}
+                  </select>
+                </label>
 
-              <div className="grid grid-cols-4 gap-1 font-mono text-[0.6875rem]">
-                <NegotiationMetric label="Capacity" value={`${negotiatedQuote.contract.pf.toFixed(0)} PF`} />
-                <NegotiationMetric label="Daily" value={money(negotiatedQuote.dailyCost)} />
-                <NegotiationMetric label="Term" value={`${negotiatedQuote.contract.daysTotal}d`} />
-                <NegotiationMetric
-                  label="Risk"
-                  value={`${(negotiatedQuote.contract.interruptionRisk * 100).toFixed(1)}%`}
-                />
-              </div>
+                <div className="space-y-2 rounded-lg border border-line/60 bg-void/35 p-2">
+                  <NegotiationMessage side="provider" name={selectedProvider?.name ?? 'Provider'}>
+                    <span className="font-medium text-bone">{dealEvent.title}</span>
+                    <span className="mt-0.5 block text-muted">{dealEvent.body}</span>
+                  </NegotiationMessage>
 
-              <NegotiationMood score={providerSatisfaction} />
+                  <NegotiationMessage side="player" name="You">
+                    <span className="font-medium text-bone">Here&apos;s my proposal.</span>
+                    <span className="mt-0.5 block text-muted">
+                      {cloudPf.toFixed(0)} PF for {cloudTerm} days at {offerPercent}% of list.
+                    </span>
+                  </NegotiationMessage>
 
-              {!negotiatedQuote.canSign && (
-                <p className="rounded-lg border border-amber/30 bg-amber/5 px-2 py-1.5 text-[0.75rem] text-amber">
-                  {negotiatedQuote.reason}
-                </p>
-              )}
-            </>
-          )}
-
-          {(negotiationStatus === 'idle' || negotiationStatus === 'countered') && (
-            <button
-              type="button"
-              disabled={!negotiatedQuote.canSign}
-              className="btn-primary flex w-full items-center justify-center gap-1.5 py-1.5 text-[0.8125rem] disabled:cursor-not-allowed disabled:opacity-40"
-              onClick={() => {
-                if (providerSatisfaction >= 58) {
-                  const signed = signComputeContract(state, negotiatedQuote)
-                  setState({
-                    ...signed,
-                    news: [
-                      `Day ${state.day}: ${selectedProvider?.name ?? 'Provider'} accepts and activates a negotiated ${negotiatedQuote.contract.pf.toFixed(0)} PF package after ${dealEvent.title.toLowerCase()}.`,
-                      ...signed.news,
-                    ].slice(0, 48),
-                  })
-                  setNegotiationStatus('signed')
-                  setNegotiationMessage(
-                    `Deal accepted. ${negotiatedQuote.contract.pf.toFixed(0)} PF is live now; billing starts today.`,
-                  )
-                  return
-                }
-                if (providerSatisfaction < 30) {
-                  setNegotiationStatus('declined')
-                  setNegotiationMessage(
-                    'We can’t approve that package. Reduce the capacity or improve the price.',
-                  )
-                  return
-                }
-                const counter = Math.min(
-                  115,
-                  offerPercent + Math.max(2, Math.ceil((58 - providerSatisfaction) / 2)),
-                )
-                setOfferPercent(counter)
-                setNegotiationStatus('countered')
-                setNegotiationMessage(
-                  `We can do ${counter}% of list. Send that offer or adjust the package.`,
-                )
-              }}
-            >
-              <PaperPlaneTilt size={15} weight="fill" />
-              {negotiationStatus === 'countered' ? 'Send counter-offer' : 'Send proposal'}
-            </button>
-          )}
-          {negotiationStatus === 'signed' && (
-            <div className="flex items-center justify-center gap-1.5 rounded-lg border border-mint/35 bg-mint/10 px-2 py-1.5 text-[0.8125rem] font-medium text-mint">
-              <Handshake size={16} weight="duotone" />
-              Contract active · compute online
-            </div>
-          )}
-          {negotiationStatus === 'declined' && (
-            <button
-              type="button"
-              className="btn-ghost flex w-full items-center justify-center gap-1.5 py-1.5 text-[0.8125rem]"
-              onClick={resetNegotiation}
-            >
-              <Handshake size={15} />
-              Edit proposal
-            </button>
-          )}
-        </div>
-
-        {providerContracts.length > 0 && (
-          <div className="space-y-1 border-t border-line/70 bg-void/25 px-2.5 py-2">
-            <div className="font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">
-              Active contracts
-            </div>
-            {providerContracts.map((contract) => (
-              <div key={contract.id} className="flex items-center justify-between gap-2 rounded-lg border border-line/70 bg-void/45 px-2 py-1.5">
-                <div className="min-w-0">
-                  <div className="truncate text-[0.75rem] text-bone">
-                    {contract.providerName} · {contract.pf.toFixed(0)} PF
-                  </div>
-                  <div className="font-mono text-[0.6875rem] text-muted">
-                    {money(contract.pf * contract.pricePerPfDay)}/day · {contract.daysLeft}d left ·{' '}
-                    {contract.availableDay != null && contract.availableDay > state.day
-                      ? `provisions D${contract.availableDay}`
-                      : contract.status}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  className="shrink-0 text-[0.6875rem] text-danger hover:underline"
-                  onClick={() => setState(terminateComputeContract(state, contract.id))}
-                >
-                  End
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      {/* Incoming offers */}
-      <div>
-        <h3 className="mb-1.5 text-[0.8125rem] font-semibold text-bone">
-          Offers ({offers.length})
-        </h3>
-        {offers.length === 0 ? (
-          <p className="text-[0.8125rem] text-muted">
-            No open offers. Rivals send offers when they have spare compute and need cash.
-          </p>
-        ) : (
-          <div className="space-y-1.5">
-            {offers.map((o) => {
-              const rival = state.rivals.find((r) => r.id === o.rivalId)
-              return (
-                <div
-                  key={o.id}
-                  className="rounded-xl border border-line bg-panel-2 px-2.5 py-2"
-                >
-                  <div className="text-[0.8125rem] font-medium text-bone">
-                    {rival?.name ?? o.rivalId} · approached you
-                  </div>
-                  <div className="mt-0.5 font-mono text-[0.75rem] text-muted">
-                    {o.playerSells ? 'You sell' : 'You buy'} {num(o.pf, 0)} PF · $
-                    {o.pricePerPfDay.toFixed(0)}/PF-day · {o.daysTotal}d
-                  </div>
-                  {o.note && <p className="mt-0.5 text-[0.75rem] text-muted">{o.note}</p>}
-                  <div className="mt-1.5 flex gap-1.5">
-                    <button
-                      type="button"
-                      className="btn-primary py-1 text-[0.75rem]"
-                      onClick={() => setState(acceptComputeOffer(state, o.id))}
+                  {negotiationMessage ? (
+                    <NegotiationMessage
+                      side="provider"
+                      name={selectedProvider?.name ?? 'Provider'}
+                      status={negotiationStatus}
                     >
-                      Accept
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-ghost py-1 text-[0.75rem]"
-                      onClick={() => setState(rejectComputeOffer(state, o.id))}
-                    >
-                      Decline
-                    </button>
-                  </div>
+                      {negotiationMessage}
+                    </NegotiationMessage>
+                  ) : null}
                 </div>
-              )
-            })}
-          </div>
-        )}
-      </div>
 
-      {/* Active contracts */}
-      <div>
-        <h3 className="mb-1.5 text-[0.8125rem] font-semibold text-bone">
-          Active leases ({active.length})
-        </h3>
-        {active.length === 0 ? (
-          <p className="text-[0.8125rem] text-muted">No live contracts.</p>
-        ) : (
-          <div className="space-y-1">
-            {active.map((c) => {
-              const rival = state.rivals.find((r) => r.id === c.rivalId)
-              return (
-                <div
-                  key={c.id}
-                  className="flex items-center justify-between gap-2 rounded-lg border border-line bg-panel-2 px-2 py-1.5 font-mono text-[0.75rem]"
-                >
-                  <span className="text-bone">
-                    {c.playerSells ? '→' : '←'} {rival?.name} · {num(c.pf, 0)} PF · $
-                    {c.pricePerPfDay.toFixed(0)}/d · {c.daysLeft}d left
-                  </span>
-                  <button
+                {negotiationStatus !== 'signed' ? (
+                  <>
+                    <div className="rounded-lg border border-line/70 bg-void/45 p-2">
+                      <div className="space-y-1.5">
+                        <NegotiationSlider
+                          label="Compute"
+                          value={cloudPf}
+                          min={1}
+                          max={Math.max(
+                            1,
+                            Math.min(1000, Math.floor(selectedProvider?.availablePf ?? 1)),
+                          )}
+                          suffix=" PF"
+                          onChange={(value) => {
+                            setCloudPf(value)
+                            resetNegotiation()
+                          }}
+                        />
+                        <NegotiationSlider
+                          label="Term"
+                          value={cloudTerm}
+                          min={1}
+                          max={720}
+                          suffix=" days"
+                          onChange={(value) => {
+                            setCloudTerm(value)
+                            resetNegotiation()
+                          }}
+                        />
+                        <NegotiationSlider
+                          label="Offer"
+                          value={offerPercent}
+                          min={70}
+                          max={115}
+                          suffix="% list"
+                          onChange={(value) => {
+                            setOfferPercent(value)
+                            resetNegotiation()
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-4 gap-1 font-mono text-[0.6875rem]">
+                      <NegotiationMetric label="Capacity" value={`${negotiatedQuote.contract.pf.toFixed(0)} PF`} />
+                      <NegotiationMetric label="Daily" value={money(negotiatedQuote.dailyCost)} />
+                      <NegotiationMetric label="Term" value={`${negotiatedQuote.contract.daysTotal}d`} />
+                      <NegotiationMetric
+                        label="Risk"
+                        value={`${(negotiatedQuote.contract.interruptionRisk * 100).toFixed(1)}%`}
+                      />
+                    </div>
+
+                    <NegotiationMood score={providerSatisfaction} />
+                    <BlockerList items={blockers} />
+                  </>
+                ) : null}
+
+                {(negotiationStatus === 'idle' || negotiationStatus === 'countered') && (
+                  <HudButton
                     type="button"
-                    className="text-danger hover:underline"
+                    variant="primary"
+                    disabled={!negotiatedQuote.canSign}
+                    title={!negotiatedQuote.canSign ? negotiatedQuote.reason : undefined}
+                    className="flex w-full items-center justify-center gap-1.5"
                     onClick={() => {
-                      const fee = money(c.pf * c.pricePerPfDay * 3)
-                      requestConfirm({
-                        title: 'Cancel this compute lease?',
-                        body: `Ending the contract early incurs an estimated ${fee} break fee.`,
-                        actionLabel: 'Cancel lease',
-                        tone: 'danger',
-                        onConfirm: () => setState(cancelComputeLease(state, c.id)),
-                      })
+                      if (providerSatisfaction >= 58) {
+                        const signed = signComputeContract(state, negotiatedQuote)
+                        setState({
+                          ...signed,
+                          news: [
+                            `Day ${state.day}: ${selectedProvider?.name ?? 'Provider'} accepts and activates a negotiated ${negotiatedQuote.contract.pf.toFixed(0)} PF package after ${dealEvent.title.toLowerCase()}.`,
+                            ...signed.news,
+                          ].slice(0, 48),
+                        })
+                        setNegotiationStatus('signed')
+                        setNegotiationMessage(
+                          `Deal accepted. ${negotiatedQuote.contract.pf.toFixed(0)} PF is live now; billing starts today.`,
+                        )
+                        return
+                      }
+                      if (providerSatisfaction < 30) {
+                        setNegotiationStatus('declined')
+                        setNegotiationMessage(
+                          'We can\'t approve that package. Reduce the capacity or improve the price.',
+                        )
+                        return
+                      }
+                      const counter = Math.min(
+                        115,
+                        offerPercent + Math.max(2, Math.ceil((58 - providerSatisfaction) / 2)),
+                      )
+                      setOfferPercent(counter)
+                      setNegotiationStatus('countered')
+                      setNegotiationMessage(
+                        `We can do ${counter}% of list. Send that offer or adjust the package.`,
+                      )
                     }}
                   >
-                    Cancel
-                  </button>
-                </div>
-              )
-            })}
-          </div>
-        )}
-      </div>
+                    <PaperPlaneTilt size={15} weight="fill" />
+                    {negotiationStatus === 'countered' ? 'Send counter-offer' : 'Send proposal'}
+                  </HudButton>
+                )}
+                {negotiationStatus === 'signed' && (
+                  <div className="flex items-center justify-center gap-1.5 rounded-md border border-mint/35 bg-mint/10 px-2 py-1.5 text-[0.8125rem] font-medium text-mint">
+                    <Handshake size={16} weight="duotone" />
+                    Contract active · compute online
+                  </div>
+                )}
+                {negotiationStatus === 'declined' && (
+                  <HudButton
+                    type="button"
+                    variant="ghost"
+                    className="flex w-full items-center justify-center gap-1.5"
+                    onClick={resetNegotiation}
+                  >
+                    <Handshake size={15} />
+                    Edit proposal
+                  </HudButton>
+                )}
+              </div>
+            </section>
+          ) : null}
 
-      {/* Rival load table */}
-      <div>
-        <h3 className="mb-1 text-[0.8125rem] font-semibold text-bone">Rival host load</h3>
-        <div className="space-y-0.5 font-mono text-[0.6875rem] text-muted">
-          {state.rivals.map((r) => {
-            const b = rivalHostingBalance(state, r)
-            return (
-              <div key={r.id} className="flex justify-between border-b border-line/40 py-0.5">
-                <span>{r.name}</span>
-                <span>
-                  need {num(b.needPf, 0)} / have {num(b.totalPf, 0)} · spare {num(b.sparePf, 0)}
-                  {b.sellingLocked ? ' · LOCKED' : ''}
-                </span>
+          {tab === 'offers' ? (
+            offers.length === 0 ? (
+              <EmptyState
+                title="No open offers"
+                description="Rivals send offers when they have spare compute and need cash."
+              />
+            ) : (
+              <div className="anim-stagger space-y-2">
+                {offers.map((o) => {
+                  const rival = state.rivals.find((r) => r.id === o.rivalId)
+                  return (
+                    <GameCard
+                      key={o.id}
+                      tone="infer"
+                      eyebrow={rival?.name ?? o.rivalId}
+                      title={`${o.playerSells ? 'You sell' : 'You buy'} ${num(o.pf, 0)} PF`}
+                      actions={
+                        <StatusChip tone="serve">
+                          ${o.pricePerPfDay.toFixed(0)}/PF-day
+                        </StatusChip>
+                      }
+                    >
+                      <StatRow label="Term" value={`${o.daysTotal}d`} />
+                      {o.note ? <p className="mt-1 text-[0.75rem] text-muted">{o.note}</p> : null}
+                      <div className="mt-2 flex gap-1.5">
+                        <HudButton
+                          type="button"
+                          variant="primary"
+                          onClick={() => setState(acceptComputeOffer(state, o.id))}
+                        >
+                          Accept
+                        </HudButton>
+                        <HudButton
+                          type="button"
+                          variant="ghost"
+                          onClick={() => setState(rejectComputeOffer(state, o.id))}
+                        >
+                          Decline
+                        </HudButton>
+                      </div>
+                    </GameCard>
+                  )
+                })}
               </div>
             )
-          })}
-        </div>
-      </div>
-    </div>
-  )
-}
+          ) : null}
 
-type ComputeCapacityEntry = {
-  id: string
-  label: string
-  value: number
-  color: string
-  detail: string
-}
-
-function piePoint(fraction: number): { x: number; y: number } {
-  const angle = fraction * Math.PI * 2 - Math.PI / 2
-  return { x: 50 + Math.cos(angle) * 43, y: 50 + Math.sin(angle) * 43 }
-}
-
-function piePath(start: number, end: number): string {
-  if (end - start >= 0.9999) {
-    return 'M 50 7 A 43 43 0 1 1 49.99 7 Z'
-  }
-  const first = piePoint(start)
-  const last = piePoint(end)
-  return `M 50 50 L ${first.x.toFixed(3)} ${first.y.toFixed(3)} A 43 43 0 ${end - start > 0.5 ? 1 : 0} 1 ${last.x.toFixed(3)} ${last.y.toFixed(3)} Z`
-}
-
-function ComputeCapacityPie({ entries }: { entries: ComputeCapacityEntry[] }) {
-  const total = entries.reduce((sum, entry) => sum + Math.max(0, entry.value), 0)
-  const fallback = entries.find((entry) => entry.value > 0) ?? entries[0]
-  const [pinnedId, setPinnedId] = useState(fallback?.id ?? '')
-  const active = entries.find((entry) => entry.id === pinnedId) ?? fallback
-  let cursor = 0
-  const slices = entries.flatMap((entry) => {
-    const share = total > 0 ? Math.max(0, entry.value) / total : 0
-    if (share <= 0) return []
-    const start = cursor
-    cursor += share
-    return [{ entry, start, end: cursor }]
-  })
-
-  return (
-    <section className="rounded-xl border border-line bg-panel-2 p-3">
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <h3 className="text-[0.8125rem] font-semibold text-bone">Available compute mix</h3>
-          <p className="mt-0.5 text-[0.6875rem] text-muted">Select a source to inspect owned and purchased PF available today.</p>
-        </div>
-        <span className="shrink-0 font-mono text-[0.75rem] text-bone">{num(total, 1)} PF</span>
-      </div>
-      <div className="mt-2 grid grid-cols-[7.5rem_minmax(0,1fr)] items-center gap-3">
-        <svg viewBox="0 0 100 100" className="h-[7.5rem] w-[7.5rem]" aria-label="Available compute by source">
-          {total <= 0 ? (
-            <circle cx="50" cy="50" r="43" fill="#26303a" />
-          ) : (
-            slices.map(({ entry, start, end }) => (
-              <path
-                key={entry.id}
-                d={piePath(start, end)}
-                fill={entry.color}
-                stroke="#081016"
-                strokeWidth={entry.id === pinnedId ? 2.5 : 1.2}
-                className="cursor-pointer transition-opacity hover:opacity-85 focus:outline-none"
-                tabIndex={0}
-                role="button"
-                aria-label={`${entry.label}: ${entry.value.toFixed(1)} PF`}
-                onClick={() => setPinnedId(entry.id)}
-              >
-                <title>{entry.label}: {entry.value.toFixed(1)} PF</title>
-              </path>
-            ))
-          )}
-        </svg>
-        <div className="min-w-0">
-          {active && (
-            <div className="rounded-lg border border-line/70 bg-void/45 px-2 py-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[0.75rem] font-medium text-bone">{active.label}</span>
-                <span className="font-mono text-[0.75rem]" style={{ color: active.color }}>{num(active.value, 1)} PF · {total > 0 ? ((active.value / total) * 100).toFixed(0) : 0}%</span>
-              </div>
-              <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">{active.detail}</p>
+          {tab === 'leases' ? (
+            <div className="anim-stagger space-y-2">
+              {providerContracts.map((contract) => (
+                <GameCard
+                  key={contract.id}
+                  tone="mint"
+                  eyebrow="Provider"
+                  title={`${contract.providerName} · ${contract.pf.toFixed(0)} PF`}
+                  actions={
+                    <HudButton
+                      type="button"
+                      variant="danger"
+                      onClick={() =>
+                        requestConfirm({
+                          title: 'End this contract?',
+                          body: `Terminate ${contract.providerName} ${contract.pf.toFixed(0)} PF. Termination fee may apply.`,
+                          actionLabel: 'End contract',
+                          tone: 'danger',
+                          onConfirm: () => setState(terminateComputeContract(state, contract.id)),
+                        })
+                      }
+                    >
+                      End
+                    </HudButton>
+                  }
+                >
+                  <StatRow
+                    label="Daily"
+                    value={money(contract.pf * contract.pricePerPfDay)}
+                    tone="warning"
+                  />
+                  <StatRow label="Left" value={`${contract.daysLeft}d`} />
+                  <StatRow
+                    label="Status"
+                    value={
+                      contract.availableDay != null && contract.availableDay > state.day
+                        ? `provisions D${contract.availableDay}`
+                        : contract.status
+                    }
+                  />
+                </GameCard>
+              ))}
+              {active.map((lease) => {
+                const rival = state.rivals.find((r) => r.id === lease.rivalId)
+                return (
+                  <GameCard
+                    key={lease.id}
+                    tone="infer"
+                    eyebrow={lease.playerSells ? 'You sell' : 'You buy'}
+                    title={`${rival?.name ?? lease.rivalId} · ${num(lease.pf, 0)} PF`}
+                    actions={
+                      <HudButton
+                        type="button"
+                        variant="danger"
+                        onClick={() => setState(cancelComputeLease(state, lease.id))}
+                      >
+                        Cancel
+                      </HudButton>
+                    }
+                  >
+                    <StatRow label="Rate" value={`${money(lease.pricePerPfDay)}/PF-day`} />
+                    <StatRow label="Left" value={`${lease.daysLeft}d`} />
+                  </GameCard>
+                )
+              })}
+              {providerContracts.length === 0 && active.length === 0 ? (
+                <EmptyState title="No live contracts" description="Signed provider and rival leases appear here." />
+              ) : null}
             </div>
-          )}
-          <div className="mt-1.5 space-y-1">
-            {entries.map((entry) => (
-              <button
-                key={entry.id}
-                type="button"
-                className="flex w-full items-center justify-between gap-2 rounded px-1.5 py-0.5 text-[0.6875rem] text-muted hover:bg-void/60 hover:text-bone"
-                onClick={() => setPinnedId(entry.id)}
-              >
-                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full" style={{ backgroundColor: entry.color }} />{entry.label}</span>
-                <span className="font-mono text-bone">{num(entry.value, 1)} PF</span>
-              </button>
-            ))}
-          </div>
+          ) : null}
         </div>
       </div>
-    </section>
+    </PanelScaffold>
   )
 }

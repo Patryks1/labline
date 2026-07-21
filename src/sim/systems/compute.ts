@@ -71,6 +71,8 @@ function snapshotKey(state: SimState): string {
     referenceId(player.trainingJob),
     referenceId(player.trainingJobs),
     referenceId(player.activeResearch),
+    referenceId(player.researchPrograms),
+    referenceId(player.safetyCampaign),
     referenceId(state.lastMarket),
     referenceId(player.staff),
     referenceId(player.researchUnlocked),

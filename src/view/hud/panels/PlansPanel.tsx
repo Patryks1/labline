@@ -43,7 +43,18 @@ import type {
 import { computeSnapshot } from '../../../sim/tick'
 import { SliderField } from '../ui/SliderField'
 import { ResearchUnlockLink } from '../ui/ResearchUnlockLink'
-import { ModelProductSummary } from '../ui/ModelProductSummary'
+import {
+  EmptyState,
+  HudButton,
+  MetricTile,
+  PanelScaffold,
+  StatusChip,
+} from '../ui/HudPrimitives'
+import {
+  GameCard,
+  MeterBar,
+  SegmentedTabs,
+} from '../ui/kit'
 
 function formatNumberDraft(value: number, decimals?: number): string {
   return decimals == null ? String(value) : value.toFixed(decimals)
@@ -177,6 +188,7 @@ export function PlansPanel() {
     () => state.player.pricing.plans[0]?.id ?? null,
   )
   const [creatingPlan, setCreatingPlan] = useState(false)
+  const [plansTab, setPlansTab] = useState<'tiers' | 'api' | 'usage'>('tiers')
 
   const blendedList = blendApiPrice(
     active?.apiPriceInPerMTok ??
@@ -204,531 +216,562 @@ export function PlansPanel() {
     ),
   )
 
-  return (
-    <div className="space-y-3">
-      <div>
-        <h2 className="hud-panel-title">Plans & API</h2>
-        <p className="hud-panel-sub">
-          Per-model API in/out prices · seat plans · usage & unit economics.
-        </p>
-      </div>
+  const unservedDemand = Math.max(0, state.lastMarket.playerDemandMTok - state.lastMarket.servedMTok)
+  const mtokServed = state.lastMarket.servedMTok
 
-      {/* Portfolio snapshot */}
-      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-        <BigStat label="Subscribers" value={people(totalSubs)} accent="text-bone" />
-        <BigStat
+  return (
+    <PanelScaffold
+      eyebrow="Commercial"
+      title="Plans"
+      description="Tiers, API pricing, and capacity routing."
+    >
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <MetricTile label="Subscribers" value={people(totalSubs)} detail={`${people(paidSubs)} paid`} />
+        <MetricTile
           label="Sub revenue / day"
           value={money(subRevDay)}
-          accent="text-mint"
+          detail={paidSubs > 0 ? `ARPU ${money(arpuMo)}/mo` : 'no paid seats'}
+          tone="positive"
         />
-        <BigStat
-          label="ARPU / mo"
-          value={paidSubs > 0 ? money(arpuMo) : '—'}
-          sub={paidSubs > 0 ? `${people(paidSubs)} paid` : 'no paid seats'}
+        <MetricTile
+          label="MTok served"
+          value={num(mtokServed, 1)}
+          detail={`${num(apiServed, 1)} API · ${num(subServed, 1)} seats`}
+          tone="serve"
         />
-        <BigStat
-          label="API / day"
-          value={money(state.player.finance.apiRevenue)}
-          sub={`${num(state.lastMarket.apiDayMTok, 1)} MTok`}
+        <MetricTile
+          label="Unserved demand"
+          value={num(unservedDemand, 1)}
+          detail="MTok / day"
+          tone={unservedDemand > 0.5 ? 'danger' : 'neutral'}
         />
       </div>
 
-      <ComputeAllocationChart
-        apiMTok={apiServed}
-        apiPf={Math.max(
-          0,
-          (state.lastMarket.servedPf ?? 0) -
-            stats.reduce((sum, plan) => sum + (plan.dayInferPf ?? 0), 0),
-        )}
-        apiModelUsage={state.lastMarket.apiModelUsage ?? []}
-        plans={stats}
-        ledger={state.lastMarket.computeLedger}
-        headroom={state.industryDataPack.compute.onlineHeadroom ?? 0.25}
-      >
-        <CapacityRoutingControl
-          value={pricing.apiVsSubPriority ?? 0.68}
-          autoValue={autoApiPriority}
-          apiServeFraction={apiRequested > 0 ? Math.min(1, apiServed / apiRequested) : 1}
-          subscriptionServeFraction={subRequested > 0 ? Math.min(1, subServed / subRequested) : 1}
-          apiBacklogMTok={Math.max(0, apiRequested - apiServed)}
-          subscriptionBacklogMTok={Math.max(0, subRequested - subServed)}
-          unservedRatio={
-            apiRequested + subRequested > 0
-              ? Math.min(
-                  1,
-                  (Math.max(0, apiRequested - apiServed) +
-                    Math.max(0, subRequested - subServed)) /
-                    (apiRequested + subRequested),
-                )
-              : 0
-          }
-          onChange={(apiVsSubPriority) => setPricing({ apiVsSubPriority })}
+      <div className="mt-3">
+        <SegmentedTabs
+          ariaLabel="Plans sections"
+          active={plansTab}
+          onChange={(id) => setPlansTab(id as 'tiers' | 'api' | 'usage')}
+          items={[
+            { id: 'tiers', label: `Tiers (${state.player.pricing.plans.length})` },
+            { id: 'api', label: `API (${models.length})` },
+            { id: 'usage', label: 'Usage' },
+          ]}
         />
-      </ComputeAllocationChart>
+      </div>
 
-      {/* ── Per-model API list ── */}
-      <section className="space-y-2">
-        <div>
-          <div>
-            <h3 className="text-xs font-semibold text-bone">API models</h3>
-            <p className="text-[0.75rem] text-muted">
-              List $/1M tokens · marginal baseline {money(infra.costPerMTok)}
-              /MTok · fully loaded floor shown per model
-            </p>
-          </div>
-        </div>
+      <div key={plansTab} className="panel-swap mt-3 space-y-3">
+        {plansTab === 'tiers' ? (
+          <>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-[0.8125rem] text-muted">Select a plan to edit offer and unit economics.</p>
+              <HudButton
+                type="button"
+                variant="primary"
+                className="!px-3 !py-1.5 text-[0.75rem]"
+                onClick={() => setCreatingPlan(true)}
+              >
+                New plan
+              </HudButton>
+            </div>
 
-        {models.length === 0 ? (
-          <div className="rounded-xl border border-amber/30 bg-amber/5 px-3 py-4 text-center text-[0.8125rem] text-amber">
-            Release a model first — API list prices attach to each public model.
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {models.map((m) => {
-              const fin = modelFinance.find((f) => f.modelId === m.id)
-              const isApiLive = apiModelIds.includes(m.id)
-              const apiPrecision = pricing.apiServePrecisionByModel?.[m.id] ?? 'fp16'
-              const apiPrecisionOptions = unlockedPlanPrecisions(state.player.researchUnlocked)
-              const apiServeMods = planServeModifiers(
-                apiPrecision,
-                state.player.researchUnlocked,
-              )
-              const apiServedModel = modelForServePrecision(
-                m,
-                apiPrecision,
-                state.player.researchUnlocked,
-              )
-              const pin =
-                m.apiPriceInPerMTok ??
-                m.suggestedApiPriceIn ??
-                m.costApiPriceIn ??
-                pricing.apiPriceInPerMTok
-              const pout =
-                m.apiPriceOutPerMTok ??
-                m.suggestedApiPriceOut ??
-                m.costApiPriceOut ??
-                pricing.apiPriceOutPerMTok
-              const blend = blendApiPrice(pin, pout)
-              const dayMTok = fin?.dayApiMTok ?? 0
-              const { inMTok, outMTok } = splitInOutMTok(dayMTok)
-              // Unit cost scales with model intensity vs active Cap (small models → cheap)
-              const modelUnit =
-                active != null
-                  ? Math.max(
-                      0.005,
-                      infra.costPerMTok *
-                        (modelCostMult(m) / Math.max(0.08, modelCostMult(active))),
-                    )
-                  : infra.costPerMTok
-              const liveCost = fullyLoadedApiCostFloor({
-                dayCogs: fin?.dayApiCogs,
-                dayMTok: fin?.dayApiMTok,
-                marginalCostPerMTok: modelUnit,
-              })
-              const outCheap = pout < pin
-              const pricingStatus = analyzeApiPricing({
-                price: blend,
-                marginalCost: liveCost.blended,
-                capability: apiServedModel.capability,
-                featureScore: m.modalities.length * 18,
-                tokPerSec:
-                  apiServedModel.serviceProfile?.interactiveTokPerSec ??
-                  52 * apiServedModel.tokPerSecMult,
-                peers: rivalApiPeers,
-              })
-
-              return (
-                <div
-                  key={m.id}
-                  data-testid={`api-model-card-${m.id}`}
-                  className={`rounded-2xl border p-2.5 ${
-                    isApiLive
-                      ? 'border-mint/40 bg-mint/5'
-                      : 'border-line bg-panel-2'
+            <div className="flex gap-1.5 overflow-x-auto rounded-lg bg-void/45 p-1.5">
+              {state.player.pricing.plans.map((plan) => (
+                <button
+                  key={plan.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedPlanId(plan.id)
+                    setCreatingPlan(false)
+                  }}
+                  className={`min-h-9 shrink-0 rounded-md border px-3 text-[0.75rem] font-medium ${
+                    selectedPlanId === plan.id && !creatingPlan
+                      ? 'border-mint/45 bg-mint/15 text-mint'
+                      : 'border-line/70 bg-panel-2 text-muted hover:text-bone'
                   }`}
                 >
-                  <ModelProductSummary
-                    model={m}
-                    badge={isApiLive ? 'API live' : 'API paused'}
-                    badgeTone={isApiLive ? 'mint' : 'muted'}
-                    score={apiServedModel.capability.toFixed(2)}
-                    metrics={[
-                      { label: 'price', value: `$${blend.toFixed(2)}/M` },
-                      { label: 'floor', value: `$${liveCost.blended.toFixed(2)}/M`, tone: blend < liveCost.blended ? 'text-danger' : 'text-bone' },
-                      { label: 'speed', value: `${num(m.serviceProfile?.interactiveTokPerSec ?? 52 * m.tokPerSecMult, 0)} t/s` },
-                      { label: 'traffic', value: `${num(dayMTok, 1)} MTok` },
-                    ]}
-                  >
-                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-                      <PricingPill status={pricingStatus.primary} severity={pricingStatus.severity} />
-                      <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
-                      <button
-                        type="button"
-                        className={`rounded-full px-2 py-0.5 text-[0.75rem] ring-1 ${isApiLive ? 'bg-danger/10 text-danger ring-danger/30' : 'bg-mint/10 text-mint ring-mint/30'}`}
-                        onClick={() => {
-                          const next = isApiLive
-                            ? apiModelIds.filter((id) => id !== m.id)
-                            : [...apiModelIds, m.id]
-                          setPricing({ apiModelIds: next })
-                        }}
-                      >
-                        {isApiLive ? 'Stop API' : 'Sell API'}
-                      </button>
-                      </div>
-                    </div>
-                  </ModelProductSummary>
+                  {plan.name} · {plan.enabled ? 'Live' : 'Paused'}
+                </button>
+              ))}
+            </div>
 
-                  {/* Compact live demand and unit economics */}
-                  <div className="mt-2 grid grid-cols-3 gap-1.5 font-mono text-[0.75rem]">
-                    <UsageCell
-                      label="Traffic / day"
-                      value={num(dayMTok, 2)}
-                      sub={`${num(inMTok, 2)} in · ${num(outMTok, 2)} out MTok`}
-                    />
-                    <UsageCell
-                      label="Revenue / cost"
-                      value={money(fin?.dayApiRevenue ?? 0)}
-                      sub={`${money(fin?.dayApiCogs ?? 0)} serving`}
-                      accent="text-mint"
-                    />
-                    <UsageCell
-                      label="Net / day"
-                      value={money(
-                        (fin?.dayApiRevenue ?? 0) - (fin?.dayApiCogs ?? 0),
+            <div className="anim-stagger space-y-2.5">
+              {state.player.pricing.plans
+                .filter((plan) => plan.id === selectedPlanId && !creatingPlan)
+                .map((plan) => {
+                  const st = stats.find((s) => s.planId === plan.id)
+                  const planModel = models.find((m) => plan.modelIds.includes(m.id)) ?? active
+                  return (
+                    <PlanCard
+                      key={plan.id}
+                      plan={plan}
+                      stats={st}
+                      models={models}
+                      allPlans={state.player.pricing.plans}
+                      unitCogs={state.lastMarket.marginalPerMTok || infra.costPerMTok}
+                      apiList={blendedList}
+                      modelCap={planModel?.capability ?? 40}
+                      frontierCap={Math.max(
+                        planModel?.capability ?? 40,
+                        ...models.map((m) => m.capability),
+                        ...state.rivals.flatMap((r) => r.models.map((m) => m.capability)),
+                        40,
                       )}
-                      sub={isApiLive ? 'live endpoint' : fin?.note ?? 'not listed'}
-                      accent={
-                        (fin?.dayApiRevenue ?? 0) - (fin?.dayApiCogs ?? 0) < 0
-                          ? 'text-danger'
-                          : 'text-mint'
-                      }
+                      peerPlans={rivalPlanPeers}
+                      offeringBreadth={planOfferingBreadth(state, plan)}
+                      onChange={(patch) => updatePlan(plan.id, patch)}
+                      onDelete={() => {
+                        deletePlan(plan.id)
+                        setSelectedPlanId(
+                          state.player.pricing.plans.find((candidate) => candidate.id !== plan.id)?.id ??
+                            null,
+                        )
+                      }}
                     />
-                  </div>
+                  )
+                })}
+            </div>
 
-                  <div className="mt-2 rounded-xl border border-line/60 bg-void/40 px-2.5 py-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[0.75rem] font-medium text-bone">API precision</span>
-                      <span className="font-mono text-[0.6875rem] text-muted">
-                        {apiServeMods.label} · PF ×{apiServeMods.computeMult.toFixed(2)} · cap{' '}
-                        {apiServedModel.capability.toFixed(0)}
-                      </span>
-                    </div>
-                    <div className="mt-1.5 flex flex-wrap gap-1">
-                      {apiPrecisionOptions.map((precision) => (
-                        <button
-                          key={precision}
+            {creatingPlan ? (
+              <GameCard eyebrow="Create" title="New plan" tone="mint">
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="col-span-2 text-[0.8125rem] text-muted sm:col-span-1">
+                    Name
+                    <input
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 text-[0.8125rem] text-bone outline-none"
+                    />
+                  </label>
+                  <label className="text-[0.8125rem] text-muted">
+                    Price $/mo
+                    <DraftNumberInput
+                      ariaLabel="New plan monthly price"
+                      min={0}
+                      step={1}
+                      value={price}
+                      decimals={2}
+                      onCommit={setPrice}
+                      className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 font-mono text-[0.8125rem] text-bone outline-none"
+                    />
+                  </label>
+                </div>
+                <div className="mt-2">
+                  <div className="mb-1 flex justify-between text-[0.8125rem] text-muted">
+                    <span>Included tokens / user</span>
+                    <span className="font-mono text-bone">
+                      {formatAllowance({
+                        id: '',
+                        name: '',
+                        pricePerMonth: price,
+                        usageMultiplier:
+                          included / (ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth),
+                        includedMTokPerMonth: included,
+                        usageRate: null,
+                        modelIds: [],
+                        enabled: true,
+                      })}
+                    </span>
+                  </div>
+                  <SliderField
+                    label={`${num(included, 2)} MTok/month (~${num((included * 1_000_000) / ECONOMY.daysPerMonth / 2_000, 0)} messages/day)`}
+                    value={included}
+                    min={0.06}
+                    max={60}
+                    step={0.06}
+                    onChange={setIncluded}
+                    colorClass="bg-mint"
+                    format={(v) => `${v.toFixed(1)}M`}
+                  />
+                  <DraftNumberInput
+                    ariaLabel="New plan included million tokens per month"
+                    min={0.06}
+                    max={300}
+                    step={0.06}
+                    value={included}
+                    decimals={2}
+                    onCommit={setIncluded}
+                    className="mt-1.5 w-full rounded-md border border-line bg-void px-2 py-1 font-mono text-[0.8125rem] text-bone outline-none"
+                  />
+                </div>
+                <HudButton
+                  type="button"
+                  variant="primary"
+                  className="mt-3 w-full"
+                  onClick={() => {
+                    createPlan({
+                      name,
+                      pricePerMonth: price,
+                      usageMultiplier:
+                        included / (ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth),
+                    })
+                    setName('Custom')
+                    setCreatingPlan(false)
+                  }}
+                >
+                  Create plan
+                </HudButton>
+              </GameCard>
+            ) : null}
+          </>
+        ) : null}
+
+        {plansTab === 'api' ? (
+          <section className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[0.8125rem] text-muted">
+                List $/1M tokens · marginal baseline {money(infra.costPerMTok)}/MTok
+              </p>
+              <StatusChip tone="serve">fully loaded floor per model</StatusChip>
+            </div>
+
+            {models.length === 0 ? (
+              <EmptyState
+                title="No released models"
+                description="Release a model first — API list prices attach to each public model."
+              />
+            ) : (
+              <div className="anim-stagger space-y-2">
+                {models.map((m) => {
+                  const fin = modelFinance.find((f) => f.modelId === m.id)
+                  const isApiLive = apiModelIds.includes(m.id)
+                  const apiPrecision = pricing.apiServePrecisionByModel?.[m.id] ?? 'fp16'
+                  const apiPrecisionOptions = unlockedPlanPrecisions(state.player.researchUnlocked)
+                  const apiServeMods = planServeModifiers(
+                    apiPrecision,
+                    state.player.researchUnlocked,
+                  )
+                  const apiServedModel = modelForServePrecision(
+                    m,
+                    apiPrecision,
+                    state.player.researchUnlocked,
+                  )
+                  const pin =
+                    m.apiPriceInPerMTok ??
+                    m.suggestedApiPriceIn ??
+                    m.costApiPriceIn ??
+                    pricing.apiPriceInPerMTok
+                  const pout =
+                    m.apiPriceOutPerMTok ??
+                    m.suggestedApiPriceOut ??
+                    m.costApiPriceOut ??
+                    pricing.apiPriceOutPerMTok
+                  const blend = blendApiPrice(pin, pout)
+                  const dayMTok = fin?.dayApiMTok ?? 0
+                  const { inMTok, outMTok } = splitInOutMTok(dayMTok)
+                  const modelUnit =
+                    active != null
+                      ? Math.max(
+                          0.005,
+                          infra.costPerMTok *
+                            (modelCostMult(m) / Math.max(0.08, modelCostMult(active))),
+                        )
+                      : infra.costPerMTok
+                  const liveCost = fullyLoadedApiCostFloor({
+                    dayCogs: fin?.dayApiCogs,
+                    dayMTok: fin?.dayApiMTok,
+                    marginalCostPerMTok: modelUnit,
+                  })
+                  const outCheap = pout < pin
+                  const pricingStatus = analyzeApiPricing({
+                    price: blend,
+                    marginalCost: liveCost.blended,
+                    capability: apiServedModel.capability,
+                    featureScore: m.modalities.length * 18,
+                    tokPerSec:
+                      apiServedModel.serviceProfile?.interactiveTokPerSec ??
+                      52 * apiServedModel.tokPerSecMult,
+                    peers: rivalApiPeers,
+                  })
+                  const dayNet = (fin?.dayApiRevenue ?? 0) - (fin?.dayApiCogs ?? 0)
+                  const belowFloor = blend < liveCost.blended
+
+                  return (
+                    <div key={m.id} data-testid={`api-model-card-${m.id}`}>
+                    <GameCard
+                      eyebrow={isApiLive ? 'API live' : 'API paused'}
+                      title={m.name}
+                      tone={isApiLive ? 'mint' : belowFloor ? 'danger' : 'infer'}
+                      actions={
+                        <HudButton
                           type="button"
-                          aria-label={`${m.name} API ${precision === 'fp16' ? 'Full' : precision.toUpperCase()}`}
-                          onClick={() =>
-                            setPricing({
-                              apiServePrecisionByModel: {
-                                ...(pricing.apiServePrecisionByModel ?? {}),
-                                [m.id]: precision,
-                              },
-                            })
-                          }
-                          className={`rounded-full px-2.5 py-1 text-[0.75rem] font-medium ${
-                            apiServeMods.precision === precision
-                              ? 'bg-infer/25 text-infer ring-1 ring-infer/40'
-                              : 'bg-void text-muted hover:text-bone'
-                          }`}
+                          variant={isApiLive ? 'danger' : 'primary'}
+                          className="!px-2.5 !py-1 text-[0.75rem]"
+                          onClick={() => {
+                            const next = isApiLive
+                              ? apiModelIds.filter((id) => id !== m.id)
+                              : [...apiModelIds, m.id]
+                            setPricing({ apiModelIds: next })
+                          }}
                         >
-                          {precision === 'fp16' ? 'Full' : precision.toUpperCase()}
-                        </button>
-                      ))}
-                    </div>
-                    {apiPrecisionOptions.length === 1 ? (
-                      <ResearchUnlockLink className="mt-1.5" nodeId="sys_quant" label="Unlock API quantization" />
-                    ) : null}
-                    <div className="mt-2 grid grid-cols-4 gap-1 font-mono text-[0.625rem]">
-                      {(['mmlu', 'coding', 'math', 'agents'] as const).map((benchmarkId) => (
-                        <div key={benchmarkId} className="rounded-md border border-line/40 px-1.5 py-1">
-                          <div className="uppercase text-muted">{benchmarkId}</div>
-                          <div className={apiServeMods.precision === 'int4' ? 'text-danger' : 'text-bone'}>
-                            {(apiServedModel.benchmarks[benchmarkId] ?? 0).toFixed(0)}
-                            {apiServeMods.benchmarkDeltas[benchmarkId] ? (
-                              <span className="ml-0.5 text-muted">
-                                ({apiServeMods.benchmarkDeltas[benchmarkId]})
-                              </span>
-                            ) : null}
+                          {isApiLive ? 'Stop API' : 'Sell API'}
+                        </HudButton>
+                      }
+                    >
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                        <div>
+                          <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">Price</div>
+                          <div className="font-mono text-[0.8125rem] tabular-nums text-bone">
+                            ${blend.toFixed(2)}/M
                           </div>
                         </div>
-                      ))}
-                    </div>
-                    {apiServeMods.brandRisk > 0 ? (
-                      <p className={`mt-1.5 text-[0.6875rem] leading-snug ${apiServeMods.brandRisk >= 0.1 ? 'text-danger' : 'text-amber'}`}>
-                        Public API eval loss reduces endpoint demand and sustained traffic damages brand trust.
-                      </p>
-                    ) : null}
-                  </div>
-
-                  {/* Editable in / out */}
-                  <div className="mt-2 grid grid-cols-2 gap-2">
-                    <label className="text-[0.75rem] text-muted">
-                      Input $/1M tok
-                      <DraftNumberInput
-                        ariaLabel={`${m.name} input price per million tokens`}
-                        min={0}
-                        step={0.01}
-                        value={pin}
-                        decimals={2}
-                        onCommit={(nextIn) => {
-                          // Keep output at least as expensive as input
-                          const nextOut = Math.max(pout, nextIn)
-                          setModelApiInOut(m.id, nextIn, nextOut)
-                        }}
-                        className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 font-mono text-sm text-bone outline-none"
-                      />
-                    </label>
-                    <label className="text-[0.75rem] text-muted">
-                      Output $/1M tok
-                      <DraftNumberInput
-                        ariaLabel={`${m.name} output price per million tokens`}
-                        min={0}
-                        step={0.01}
-                        value={pout}
-                        decimals={2}
-                        onCommit={(committedOut) => {
-                          let nextOut = committedOut
-                          // Output should be ≥ input
-                          if (nextOut < pin) nextOut = pin
-                          setModelApiInOut(m.id, pin, nextOut)
-                        }}
-                        className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 font-mono text-sm text-bone outline-none"
-                      />
-                    </label>
-                  </div>
-                  {outCheap && (
-                    <p className="mt-1 text-[0.75rem] text-amber">
-                      Output raised to match input — generation costs more than prefill.
-                    </p>
-                  )}
-
-                  <div className="mt-2 rounded-xl border border-line/60 bg-void/40 px-2.5 py-2">
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <div className="text-[0.75rem] font-medium text-bone">Price margin</div>
-                        <p className="mt-0.5 text-[0.6875rem] text-muted">
-                          -50% to +500% over this model's live cost floor.
-                        </p>
+                        <div>
+                          <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">Floor</div>
+                          <div
+                            className={`font-mono text-[0.8125rem] tabular-nums ${
+                              belowFloor ? 'text-danger' : 'text-bone'
+                            }`}
+                          >
+                            ${liveCost.blended.toFixed(2)}/M
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">Speed</div>
+                          <div className="font-mono text-[0.8125rem] tabular-nums text-bone">
+                            {num(
+                              m.serviceProfile?.interactiveTokPerSec ?? 52 * m.tokPerSecMult,
+                              0,
+                            )}{' '}
+                            t/s
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">Traffic</div>
+                          <div className="font-mono text-[0.8125rem] tabular-nums text-bone">
+                            {num(dayMTok, 1)} MTok
+                          </div>
+                        </div>
                       </div>
-                      <label className="flex shrink-0 items-center gap-1.5 text-[0.75rem] text-muted">
-                        <DraftNumberInput
-                          ariaLabel={`${m.name} API margin percent`}
-                          min={-50}
-                          max={500}
-                          step={1}
-                          value={
-                            Math.max(
-                              -50,
-                              Math.min(
-                                500,
-                                (blend /
-                                  Math.max(
-                                    0.001,
-                                    blendApiPrice(
-                                      liveCost.costIn,
-                                      liveCost.costOut,
-                                    ),
-                                  ) -
-                                  1) *
-                                  100,
-                              ),
-                            )
-                          }
-                          decimals={1}
-                          onCommit={(marginPct) => {
-                            const priceMultiplier = Math.max(0.5, 1 + marginPct / 100)
-                            const costIn = liveCost.costIn
-                            const costOut = liveCost.costOut
-                            const nextIn = costIn * priceMultiplier
-                            const nextOut = Math.max(nextIn, costOut * priceMultiplier)
-                            setModelApiInOut(m.id, nextIn, nextOut)
-                          }}
-                          className="w-20 rounded-md border border-mint/35 bg-void px-2 py-1 font-mono text-sm text-bone outline-none focus:border-mint"
+
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <PricingPill status={pricingStatus.primary} severity={pricingStatus.severity} />
+                        {belowFloor ? <StatusChip tone="danger">Losing money / MTok</StatusChip> : null}
+                        <StatusChip tone="serve">cap {apiServedModel.capability.toFixed(2)}</StatusChip>
+                      </div>
+
+                      <div className="mt-2 grid grid-cols-3 gap-1.5">
+                        <UsageCell
+                          label="Traffic / day"
+                          value={num(dayMTok, 2)}
+                          sub={`${num(inMTok, 2)} in · ${num(outMTok, 2)} out MTok`}
                         />
-                        <span className="font-mono text-bone">%</span>
-                      </label>
+                        <UsageCell
+                          label="Revenue / cost"
+                          value={money(fin?.dayApiRevenue ?? 0)}
+                          sub={`${money(fin?.dayApiCogs ?? 0)} serving`}
+                          accent="text-mint"
+                        />
+                        <UsageCell
+                          label="Net / day"
+                          value={money(dayNet)}
+                          sub={isApiLive ? 'live endpoint' : fin?.note ?? 'not listed'}
+                          accent={dayNet < 0 ? 'text-danger' : 'text-mint'}
+                        />
+                      </div>
+
+                      <div className="mt-2 rounded-md border border-line/60 bg-void/40 px-2.5 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[0.8125rem] font-medium text-bone">API precision</span>
+                          <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
+                            {apiServeMods.label} · PF ×{apiServeMods.computeMult.toFixed(2)} · cap{' '}
+                            {apiServedModel.capability.toFixed(0)}
+                          </span>
+                        </div>
+                        <div className="mt-1.5 flex flex-wrap gap-1">
+                          {apiPrecisionOptions.map((precision) => (
+                            <button
+                              key={precision}
+                              type="button"
+                              aria-label={`${m.name} API ${precision === 'fp16' ? 'Full' : precision.toUpperCase()}`}
+                              onClick={() =>
+                                setPricing({
+                                  apiServePrecisionByModel: {
+                                    ...(pricing.apiServePrecisionByModel ?? {}),
+                                    [m.id]: precision,
+                                  },
+                                })
+                              }
+                              className={`rounded-full px-2.5 py-1 text-[0.75rem] font-medium ${
+                                apiServeMods.precision === precision
+                                  ? 'bg-infer/25 text-infer ring-1 ring-infer/40'
+                                  : 'bg-void text-muted hover:text-bone'
+                              }`}
+                            >
+                              {precision === 'fp16' ? 'Full' : precision.toUpperCase()}
+                            </button>
+                          ))}
+                        </div>
+                        {apiPrecisionOptions.length === 1 ? (
+                          <ResearchUnlockLink
+                            className="mt-1.5"
+                            nodeId="sys_quant"
+                            label="Unlock API quantization"
+                          />
+                        ) : null}
+                        <div className="mt-2 grid grid-cols-4 gap-1 font-mono text-[0.6875rem]">
+                          {(['mmlu', 'coding', 'math', 'agents'] as const).map((benchmarkId) => (
+                            <div
+                              key={benchmarkId}
+                              className="rounded-md border border-line/40 px-1.5 py-1"
+                            >
+                              <div className="uppercase tracking-[0.12em] text-muted">{benchmarkId}</div>
+                              <div
+                                className={
+                                  apiServeMods.precision === 'int4' ? 'text-danger' : 'text-bone'
+                                }
+                              >
+                                {(apiServedModel.benchmarks[benchmarkId] ?? 0).toFixed(0)}
+                                {apiServeMods.benchmarkDeltas[benchmarkId] ? (
+                                  <span className="ml-0.5 text-muted">
+                                    ({apiServeMods.benchmarkDeltas[benchmarkId]})
+                                  </span>
+                                ) : null}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        {apiServeMods.brandRisk > 0 ? (
+                          <p
+                            className={`mt-1.5 text-[0.75rem] leading-snug ${
+                              apiServeMods.brandRisk >= 0.1 ? 'text-danger' : 'text-amber'
+                            }`}
+                          >
+                            Public API eval loss reduces endpoint demand and sustained traffic damages
+                            brand trust.
+                          </p>
+                        ) : null}
+                      </div>
+
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        <label className="text-[0.8125rem] text-muted">
+                          Input $/1M tok
+                          <DraftNumberInput
+                            ariaLabel={`${m.name} input price per million tokens`}
+                            min={0}
+                            step={0.01}
+                            value={pin}
+                            decimals={2}
+                            onCommit={(nextIn) => {
+                              const nextOut = Math.max(pout, nextIn)
+                              setModelApiInOut(m.id, nextIn, nextOut)
+                            }}
+                            className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 font-mono text-[0.8125rem] text-bone outline-none"
+                          />
+                        </label>
+                        <label className="text-[0.8125rem] text-muted">
+                          Output $/1M tok
+                          <DraftNumberInput
+                            ariaLabel={`${m.name} output price per million tokens`}
+                            min={0}
+                            step={0.01}
+                            value={pout}
+                            decimals={2}
+                            onCommit={(committedOut) => {
+                              let nextOut = committedOut
+                              if (nextOut < pin) nextOut = pin
+                              setModelApiInOut(m.id, pin, nextOut)
+                            }}
+                            className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 font-mono text-[0.8125rem] text-bone outline-none"
+                          />
+                        </label>
+                      </div>
+                      {outCheap ? (
+                        <p className="mt-1 text-[0.75rem] text-amber">
+                          Output raised to match input — generation costs more than prefill.
+                        </p>
+                      ) : null}
+
+                      <div className="mt-2 rounded-md border border-line/60 bg-void/40 px-2.5 py-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-[0.8125rem] font-medium text-bone">Price margin</div>
+                            <p className="mt-0.5 text-[0.75rem] text-muted">
+                              −50% to +500% over this model&apos;s live cost floor.
+                            </p>
+                          </div>
+                          <label className="flex shrink-0 items-center gap-1.5 text-[0.75rem] text-muted">
+                            <DraftNumberInput
+                              ariaLabel={`${m.name} API margin percent`}
+                              min={-50}
+                              max={500}
+                              step={1}
+                              value={Math.max(
+                                -50,
+                                Math.min(
+                                  500,
+                                  (blend /
+                                    Math.max(
+                                      0.001,
+                                      blendApiPrice(liveCost.costIn, liveCost.costOut),
+                                    ) -
+                                    1) *
+                                    100,
+                                ),
+                              )}
+                              decimals={1}
+                              onCommit={(marginPct) => {
+                                const priceMultiplier = Math.max(0.5, 1 + marginPct / 100)
+                                const costIn = liveCost.costIn
+                                const costOut = liveCost.costOut
+                                const nextIn = costIn * priceMultiplier
+                                const nextOut = Math.max(nextIn, costOut * priceMultiplier)
+                                setModelApiInOut(m.id, nextIn, nextOut)
+                              }}
+                              className="w-20 rounded-md border border-mint/35 bg-void px-2 py-1 font-mono text-[0.8125rem] text-bone outline-none focus:border-mint"
+                            />
+                            <span className="font-mono text-bone">%</span>
+                          </label>
+                        </div>
+                      </div>
+                    </GameCard>
                     </div>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        )}
+                  )
+                })}
+              </div>
+            )}
+          </section>
+        ) : null}
 
-      </section>
-
-      <div className="border-t border-line/60 pt-1">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h3 className="text-xs font-semibold text-bone">Subscription plans</h3>
-            <p className="text-[0.75rem] text-muted">Select a plan to edit its offer and live unit economics.</p>
-          </div>
-          <button
-            type="button"
-            className="hud-button border border-mint/45 bg-mint/15 text-mint hover:bg-mint/25"
-            onClick={() => setCreatingPlan(true)}
-          >
-            New plan
-          </button>
-        </div>
-      </div>
-
-      <div className="flex gap-1.5 overflow-x-auto rounded-lg bg-void/45 p-1.5">
-        {state.player.pricing.plans.map((plan) => (
-          <button
-            key={plan.id}
-            type="button"
-            onClick={() => {
-              setSelectedPlanId(plan.id)
-              setCreatingPlan(false)
-            }}
-            className={`min-h-9 shrink-0 rounded-md border px-3 text-[0.75rem] font-medium ${selectedPlanId === plan.id && !creatingPlan ? 'border-mint/45 bg-mint/15 text-mint' : 'border-line/70 bg-panel-2 text-muted hover:text-bone'}`}
-          >
-            {plan.name} · {plan.enabled ? 'Live' : 'Paused'}
-          </button>
-        ))}
-      </div>
-
-      {/* Plan cards */}
-      <div className="space-y-2.5">
-        {state.player.pricing.plans.filter((plan) => plan.id === selectedPlanId && !creatingPlan).map((plan) => {
-          const st = stats.find((s) => s.planId === plan.id)
-          const planModel =
-            models.find((m) => plan.modelIds.includes(m.id)) ?? active
-          return (
-            <PlanCard
-              key={plan.id}
-              plan={plan}
-              stats={st}
-              models={models}
-              allPlans={state.player.pricing.plans}
-              unitCogs={state.lastMarket.marginalPerMTok || infra.costPerMTok}
-              apiList={blendedList}
-              modelCap={planModel?.capability ?? 40}
-              frontierCap={Math.max(
-                planModel?.capability ?? 40,
-                ...models.map((m) => m.capability),
-                ...state.rivals.flatMap((r) => r.models.map((m) => m.capability)),
-                40,
+        {plansTab === 'usage' ? (
+          <div className="space-y-3">
+            <ComputeAllocationChart
+              apiMTok={apiServed}
+              apiPf={Math.max(
+                0,
+                (state.lastMarket.servedPf ?? 0) -
+                  stats.reduce((sum, plan) => sum + (plan.dayInferPf ?? 0), 0),
               )}
-              peerPlans={rivalPlanPeers}
-              offeringBreadth={planOfferingBreadth(state, plan)}
-              onChange={(patch) => updatePlan(plan.id, patch)}
-              onDelete={() => {
-                deletePlan(plan.id)
-                setSelectedPlanId(state.player.pricing.plans.find((candidate) => candidate.id !== plan.id)?.id ?? null)
-              }}
-            />
-          )
-        })}
-      </div>
-
-      {/* New plan */}
-      {creatingPlan ? <div className="rounded-2xl border border-mint/25 bg-mint/5 p-3 space-y-2.5">
-        <h3 className="text-xs font-medium text-mint">New plan</h3>
-        <div className="grid grid-cols-2 gap-2">
-          <label className="col-span-2 text-[0.75rem] text-muted sm:col-span-1">
-            Name
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 text-sm text-bone outline-none"
-            />
-          </label>
-          <label className="text-[0.75rem] text-muted">
-            Price $/mo
-            <DraftNumberInput
-              ariaLabel="New plan monthly price"
-              min={0}
-              step={1}
-              value={price}
-              decimals={2}
-              onCommit={setPrice}
-              className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 font-mono text-sm text-bone outline-none"
-            />
-          </label>
-        </div>
-        <div>
-          <div className="mb-1 flex justify-between text-[0.75rem] text-muted">
-            <span>Included tokens / user</span>
-            <span className="font-mono text-bone">
-              {formatAllowance({
-                id: '',
-                name: '',
-                pricePerMonth: price,
-                usageMultiplier:
-                  included / (ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth),
-                includedMTokPerMonth: included,
-                usageRate: null,
-                modelIds: [],
-                enabled: true,
-              })}
-            </span>
+              apiModelUsage={state.lastMarket.apiModelUsage ?? []}
+              plans={stats}
+              ledger={state.lastMarket.computeLedger}
+              headroom={state.industryDataPack.compute.onlineHeadroom ?? 0.25}
+            >
+              <CapacityRoutingControl
+                value={pricing.apiVsSubPriority ?? 0.68}
+                autoValue={autoApiPriority}
+                apiServeFraction={apiRequested > 0 ? Math.min(1, apiServed / apiRequested) : 1}
+                subscriptionServeFraction={
+                  subRequested > 0 ? Math.min(1, subServed / subRequested) : 1
+                }
+                apiBacklogMTok={Math.max(0, apiRequested - apiServed)}
+                subscriptionBacklogMTok={Math.max(0, subRequested - subServed)}
+                unservedRatio={
+                  apiRequested + subRequested > 0
+                    ? Math.min(
+                        1,
+                        (Math.max(0, apiRequested - apiServed) +
+                          Math.max(0, subRequested - subServed)) /
+                          (apiRequested + subRequested),
+                      )
+                    : 0
+                }
+                onChange={(apiVsSubPriority) => setPricing({ apiVsSubPriority })}
+              />
+            </ComputeAllocationChart>
           </div>
-          <SliderField
-            label={`${num(included, 2)} MTok/month (~${num((included * 1_000_000) / ECONOMY.daysPerMonth / 2_000, 0)} messages/day)`}
-            value={included}
-            min={0.06}
-            max={60}
-            step={0.06}
-            onChange={setIncluded}
-            colorClass="bg-mint"
-            format={(v) => `${v.toFixed(1)}M`}
-          />
-          <DraftNumberInput
-            ariaLabel="New plan included million tokens per month"
-            min={0.06}
-            max={300}
-            step={0.06}
-            value={included}
-            decimals={2}
-            onCommit={setIncluded}
-            className="mt-1.5 w-full rounded-md border border-line bg-void px-2 py-1 font-mono text-xs text-bone outline-none"
-          />
-        </div>
-        <button
-          type="button"
-          className="btn-primary w-full"
-          onClick={() => {
-            createPlan({
-              name,
-              pricePerMonth: price,
-              usageMultiplier:
-                included / (ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth),
-            })
-            setName('Custom')
-            setCreatingPlan(false)
-          }}
-        >
-          Create plan
-        </button>
-      </div> : null}
-
-    </div>
-  )
-}
-
-function BigStat({
-  label,
-  value,
-  sub,
-  accent = 'text-bone',
-}: {
-  label: string
-  value: string
-  sub?: string
-  accent?: string
-}) {
-  return (
-    <div className="rounded-xl border border-line bg-panel-2 px-2.5 py-2">
-      <div className="text-[0.6875rem] uppercase tracking-wider text-muted">{label}</div>
-      <div className={`mt-0.5 truncate font-mono text-sm font-semibold tabular-nums ${accent}`}>
-        {value}
+        ) : null}
       </div>
-      {sub && <div className="mt-0.5 truncate font-mono text-[0.6875rem] text-muted">{sub}</div>}
-    </div>
+    </PanelScaffold>
   )
 }
 
@@ -1394,7 +1437,7 @@ function PlanCard({
   return (
     <div
       data-testid={`subscription-plan-card-${plan.id}`}
-      className={`overflow-hidden rounded-2xl border ${
+      className={`overflow-hidden rounded-lg border ${
         free
           ? 'border-amber/30 bg-amber/5'
           : plan.enabled
@@ -1415,10 +1458,9 @@ function PlanCard({
           </span>
         )}
         <PricingPill status={planStatus.primary} severity={planStatus.severity} />
+        {marginBad ? <StatusChip tone="danger">Losing money / sub</StatusChip> : null}
         {dissatisfaction > 0.05 ? (
-          <span className="shrink-0 rounded-full border border-danger/35 bg-danger/10 px-1.5 py-0.5 font-mono text-[0.625rem] text-danger">
-            {Math.round(dissatisfaction * 100)}% DISSATISFIED
-          </span>
+          <StatusChip tone="danger">{Math.round(dissatisfaction * 100)}% dissatisfied</StatusChip>
         ) : null}
         <label className="flex shrink-0 items-center gap-1 text-[0.75rem] text-muted">
           <input
@@ -1473,6 +1515,28 @@ function PlanCard({
 
       {/* Token include + pricing controls */}
       <div className="space-y-2.5 px-3 py-2.5">
+        <div className="grid gap-2 sm:grid-cols-2">
+          <MeterBar
+            label="Usage vs include"
+            value={Math.min(1, fill)}
+            detail={subs > 0.5 ? `${Math.round(fill * 100)}%` : formatAllowance(plan)}
+            tone={fill > 1 ? 'warning' : 'serve'}
+            live={plan.enabled && subs > 0.5}
+          />
+          <MeterBar
+            label="Seat fill"
+            value={Math.min(1, seatFill ?? 0)}
+            detail={
+              seatCap != null && seatCap < 1e8
+                ? `${people(subs)} / ${people(seatCap)}`
+                : people(subs)
+            }
+            tone={marginBad ? 'danger' : 'positive'}
+          />
+        </div>
+        {marginBad ? (
+          <StatusChip tone="danger">Losing money per sub</StatusChip>
+        ) : null}
         <div className="grid grid-cols-2 gap-2">
           <label className="text-[0.75rem] text-muted">
             Price $/mo

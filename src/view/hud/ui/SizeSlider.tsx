@@ -12,6 +12,8 @@ export function SizeSlider({
   min = 0.007,
   max = 30_000,
   stops,
+  disabled = false,
+  disabledReason,
 }: {
   label: string
   value: number
@@ -19,6 +21,8 @@ export function SizeSlider({
   min?: number
   max?: number
   stops?: { label: string; paramsB: number }[]
+  disabled?: boolean
+  disabledReason?: string
 }) {
   const marks = useMemo(() => {
     const base =
@@ -58,7 +62,7 @@ export function SizeSlider({
   const logMax = Math.log10(marks[marks.length - 1]?.paramsB ?? max)
 
   return (
-    <div className="space-y-2">
+    <div className={`space-y-2 ${disabled ? 'opacity-70' : ''}`}>
       <div className="flex items-center justify-between gap-3">
         <span className="text-[0.8125rem] text-muted">{label}</span>
         <div className={`flex overflow-hidden rounded-md border bg-void ${invalid ? 'border-danger' : 'border-line focus-within:border-mint/50'}`}>
@@ -66,6 +70,7 @@ export function SizeSlider({
             type="text"
             inputMode="decimal"
             value={box}
+            disabled={disabled}
             onChange={(event) => {
               setBox(event.target.value)
               setInvalid(false)
@@ -90,12 +95,13 @@ export function SizeSlider({
           />
           <select
             value={unit}
+            disabled={disabled}
             onChange={(event) => {
               const nextUnit = event.target.value as SizeUnit
               setUnit(nextUnit)
               commit(box, nextUnit)
             }}
-            className="border-l border-line bg-panel-2 px-1.5 font-mono text-[0.6875rem] text-mint outline-none"
+            className="border-l border-line bg-panel-2 px-1.5 font-mono text-[0.6875rem] text-mint outline-none disabled:cursor-not-allowed"
             aria-label={`${label} unit`}
           >
             <option value="M">M</option>
@@ -112,12 +118,13 @@ export function SizeSlider({
           max={logMax}
           step={0.001}
           value={Math.log10(marks[idx]?.paramsB ?? value)}
+          disabled={disabled}
           onChange={(event) => {
             const target = 10 ** Number(event.target.value)
             const mark = marks[nearestIndex(marks, target)]
             if (mark) onChange(mark.paramsB)
           }}
-          className="model-size-timeline w-full"
+          className="model-size-timeline w-full disabled:cursor-not-allowed"
           aria-label={label}
           aria-valuetext={formatParams(value)}
         />
@@ -141,6 +148,11 @@ export function SizeSlider({
         </div>
       </div>
       {invalid && <p className="text-[0.6875rem] text-danger">Enter a positive size using M, B, or T.</p>}
+      {disabled && disabledReason ? (
+        <p className="rounded-md border border-amber/30 bg-amber/8 px-2 py-1.5 text-[0.75rem] text-amber">
+          {disabledReason}
+        </p>
+      ) : null}
     </div>
   )
 }

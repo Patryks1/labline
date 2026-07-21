@@ -3,9 +3,9 @@ import type { DataDomain, LabData, Model } from '../../../sim/types'
 import { DATA_DOMAINS, DATA_DOMAIN_META, formatTokens, normalizeWeights } from '../../../sim/balance/data'
 import { rebalanceTrainingDataDomain } from './trainingDataRadarMath'
 
-const SIZE = 340
+const SIZE = 380
 const CENTER = SIZE / 2
-const RADIUS = 112
+const RADIUS = 128
 
 function point(index: number, value: number) {
   const angle = -Math.PI / 2 + (index / DATA_DOMAINS.length) * Math.PI * 2
@@ -94,6 +94,8 @@ export function TrainingDataRadar({
   const selectedShortfall = Math.max(0, selectedNeed - selectedReal - (includeSynthHQ ? selectedStock.fromSynthHQ : 0) - (includeSynthLQ ? selectedStock.fromSynthLQ : 0))
   const selectedTeacher = teachers.find((teacher) => teacher.id === syntheticTeacherIds[selected])
   const estimatedQuality = selectedTeacher ? Math.min(92, 48 + selectedTeacher.capability * 0.55) : null
+  void onIncludeSynthHQChange
+  void onIncludeSynthLQChange
 
   return (
     <section className="mt-2 overflow-hidden rounded-xl border border-line/80 bg-void/35" aria-labelledby="training-data-mix-title">
@@ -111,7 +113,7 @@ export function TrainingDataRadar({
           <svg
             ref={svgRef}
             viewBox={`0 0 ${SIZE} ${SIZE}`}
-            className="mx-auto block h-auto w-full max-w-[360px] touch-none overflow-visible"
+            className="mx-auto block h-auto w-full max-w-[420px] touch-none overflow-visible"
             role="group"
             aria-label="Draggable radar chart for training data domains"
             onPointerMove={(event) => {
@@ -227,10 +229,6 @@ export function TrainingDataRadar({
             </select>
           </label>
           <p className="mt-1 min-h-8 text-[0.625rem] leading-snug text-muted">{selectedTeacher ? `Predicted ${estimatedQuality && estimatedQuality >= 58 ? 'high' : 'low'} quality · Q${estimatedQuality?.toFixed(0)} from ${selectedTeacher.name}.` : 'Auto chooses the strongest eligible teacher for this domain.'}</p>
-          <div className="mt-3 grid grid-cols-2 gap-1.5">
-            <button type="button" aria-pressed={includeSynthHQ} onClick={() => onIncludeSynthHQChange(!includeSynthHQ)} className={`rounded-md border px-2 py-1.5 text-[0.6875rem] ${includeSynthHQ ? 'border-sky/50 bg-sky/10 text-sky' : 'border-line text-muted'}`}>HQ synth {includeSynthHQ ? 'on' : 'off'}</button>
-            <button type="button" aria-pressed={includeSynthLQ} onClick={() => onIncludeSynthLQChange(!includeSynthLQ)} className={`rounded-md border px-2 py-1.5 text-[0.6875rem] ${includeSynthLQ ? 'border-research/50 bg-research/10 text-research' : 'border-line text-muted'}`}>LQ synth {includeSynthLQ ? 'on' : 'off'}</button>
-          </div>
         </aside>
       </div>
     </section>

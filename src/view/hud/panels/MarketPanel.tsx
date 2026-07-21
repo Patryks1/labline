@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { SEGMENTS, WORLD_POPULATION } from '../../../sim/balance/economy'
 import {
   deriveProductPortfolio,
@@ -7,6 +7,20 @@ import {
 import type { ProductChannel, ProductOffer } from '../../../sim/types'
 import { useGameStore } from '../../../store/gameStore'
 import { audience, money, num, pct, people } from '../format'
+import {
+  EmptyState,
+  HudButton,
+  MetricTile,
+  PanelScaffold,
+  StatusChip,
+} from '../ui/HudPrimitives'
+import {
+  CardGrid,
+  GameCard,
+  MeterBar,
+  SegmentedTabs,
+  StatRow,
+} from '../ui/kit'
 
 const PRODUCT_CHANNEL_LABELS: Record<ProductChannel, string> = {
   free_assistant: 'Free assistant',
@@ -16,6 +30,8 @@ const PRODUCT_CHANNEL_LABELS: Record<ProductChannel, string> = {
   reserved_throughput_api: 'Reserved throughput',
   enterprise_dedicated: 'Enterprise dedicated',
 }
+
+type MarketTab = 'share' | 'segments' | 'products'
 
 function formatProductOfferPrice(offer: ProductOffer): string {
   const price = offer.pricing
@@ -32,340 +48,381 @@ export function MarketPanel() {
   const setPanel = useGameStore((s) => s.setPanel)
   const portfolio = deriveProductPortfolio(state)
   const shares = state.lastMarket.sharesByLab
-  const labs = [
-    { id: 'player', name: 'You' },
-    ...state.rivals.map((r) => ({ id: r.id, name: r.name })),
-  ]
-  const colors = [
-    'var(--color-mint)',
-    'var(--color-infer)',
-    'var(--color-amber)',
-    'var(--color-research)',
-    'var(--color-danger)',
-    'color-mix(in srgb, var(--color-bone) 48%, transparent)',
-  ]
-  const shareRows = labs.map((lab, index) => ({
-    ...lab,
-    value: Math.max(0, shares[lab.id] ?? 0),
-    color: colors[index % colors.length]!,
-  }))
-  const shareTotal = Math.max(0.0001, shareRows.reduce((sum, row) => sum + row.value, 0))
-  const [activeLabId, setActiveLabId] = useState('player')
-  const activeShare = shareRows.find((row) => row.id === activeLabId) ?? shareRows[0]!
-  const circumference = 2 * Math.PI * 42
+  const [tab, setTab] = useState<MarketTab>('share')
+
+  const labs = useMemo(
+    () => [
+      { id: 'player', name: 'You' },
+      ...state.rivals.map((r) => ({ id: r.id, name: r.name })),
+    ],
+    [state.rivals],
+  )
+
+  const shareRows = useMemo(
+    () =>
+      labs
+        .map((lab) => ({
+          ...lab,
+          value: Math.max(0, shares[lab.id] ?? 0),
+        }))
+        .sort((a, b) => b.value - a.value),
+    [labs, shares],
+  )
+
+  const playerShare = shares.player ?? 0
   const aiUsers = state.segments.reduce((sum, segment) => sum + Math.max(0, segment.size), 0)
   const peopleToConvert = Math.max(0, WORLD_POPULATION - aiUsers)
-  let cumulativeShare = 0
+  const demandMTok = state.lastMarket.playerDemandMTok
+  const servedMTok = state.lastMarket.servedMTok
+  const serveRatio = demandMTok > 0 ? Math.min(1, servedMTok / demandMTok) : 1
+  const unserved = state.lastMarket.unservedRatio
+  const demandPf = state.lastMarket.demandPf ?? 0
+  const capacityPf = state.lastMarket.capacityPf ?? 0
+  const overloaded = unserved > 0.08 && demandPf > capacityPf * 1.02
+  const paidSubs =
+    state.lastMarket.planStats
+      ?.filter((p) => !p.isFree)
+      .reduce((s, p) => s + p.subscribers, 0) ?? 0
+  const freeSubs =
+    state.lastMarket.planStats
+      ?.filter((p) => p.isFree)
+      .reduce((s, p) => s + p.subscribers, 0) ?? 0
 
   return (
-    <div className="space-y-4">
-      <div>
-        <h2 className="hud-panel-title">Market</h2>
-        <p className="hud-panel-sub">
-          Share and billing settle from tokens actually served after compute capacity. Rivals use
-          the same rule. Intel is also on the right dock (F3).
-        </p>
+    <PanelScaffold
+      eyebrow="Commercial"
+      title="Market"
+      description="Share, segments, and promoted surfaces."
+      actions={
+        <HudButton type="button" variant="ghost" onClick={() => setPanel('stats')}>
+          Command
+        </HudButton>
+      }
+    >
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <MetricTile label="Your share" value={pct(playerShare, 1)} tone="positive" />
+        <MetricTile
+          label="Served / demand"
+          value={`${num(servedMTok, 0)}/${num(demandMTok, 0)}`}
+          detail="MTok/d"
+          tone={serveRatio < 0.92 ? 'danger' : 'serve'}
+        />
+        <MetricTile
+          label="Unserved"
+          value={pct(unserved, 0)}
+          tone={unserved > 0.08 ? 'danger' : unserved > 0.03 ? 'warning' : 'neutral'}
+        />
+        <MetricTile
+          label="Paid / free"
+          value={`${people(paidSubs)}`}
+          detail={`${people(freeSubs)} free`}
+        />
       </div>
 
-      <section className="rounded-2xl border border-line bg-panel-2 p-3">
-        <div className="flex items-start justify-between gap-2">
-          <div>
-            <h3 className="text-xs font-semibold text-bone">Promoted endpoints</h3>
-            <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">
-              Six public surfaces share your released model fleet and serving capacity.
-            </p>
-          </div>
-          <span className="font-mono text-[0.75rem] text-mint">
-            {portfolio.promoted.length}/6 live
-          </span>
-        </div>
-        <div className="mt-2 grid grid-cols-2 gap-1.5">
-          {PRODUCT_CHANNELS.map((channel) => {
-            const offer = portfolio.byChannel[channel]
-            const model = offer
-              ? state.player.models.find((candidate) => candidate.id === offer.primaryModelId)
-              : undefined
+      <div className="mt-3">
+        <SegmentedTabs
+          ariaLabel="Market sections"
+          active={tab}
+          onChange={(id) => setTab(id as MarketTab)}
+          items={[
+            { id: 'share', label: 'Share' },
+            { id: 'segments', label: 'Segments' },
+            { id: 'products', label: `Surfaces (${portfolio.promoted.length}/6)` },
+          ]}
+        />
+      </div>
+
+      <div key={tab} className="panel-swap mt-3">
+        {tab === 'share' && (
+          <ShareView
+            shareRows={shareRows}
+            playerShare={playerShare}
+            serveRatio={serveRatio}
+            demandMTok={demandMTok}
+            servedMTok={servedMTok}
+            demandPf={demandPf}
+            capacityPf={capacityPf}
+            unserved={unserved}
+            overloaded={overloaded}
+            aiUsers={aiUsers}
+            peopleToConvert={peopleToConvert}
+            dayNet={state.player.finance.dayNet ?? 0}
+            marginPerMTok={state.player.finance.marginPerMTok}
+            marginPerSub={state.player.finance.marginPerSub}
+            latencyScore={state.lastMarket.latencyScore}
+            effectiveLatency={state.lastMarket.effectiveLatencyScore ?? state.lastMarket.latencyScore}
+            servicePain={state.lastMarket.servicePain ?? state.player.servicePain ?? 0}
+            industryDemand={state.lastMarket.industryDemandMTok ?? state.lastMarket.demandMTok}
+            industryServed={state.lastMarket.industryServedMTok ?? state.lastMarket.servedMTok}
+            capacityMTok={state.lastMarket.capacityMTok ?? 0}
+            servedPf={state.lastMarket.servedPf ?? 0}
+          />
+        )}
+        {tab === 'segments' && <SegmentsView segments={state.segments} />}
+        {tab === 'products' && (
+          <ProductsView
+            portfolio={portfolio}
+            models={state.player.models}
+          />
+        )}
+      </div>
+    </PanelScaffold>
+  )
+}
+
+function ShareView({
+  shareRows,
+  playerShare,
+  serveRatio,
+  demandMTok,
+  servedMTok,
+  demandPf,
+  capacityPf,
+  unserved,
+  overloaded,
+  aiUsers,
+  peopleToConvert,
+  dayNet,
+  marginPerMTok,
+  marginPerSub,
+  latencyScore,
+  effectiveLatency,
+  servicePain,
+  industryDemand,
+  industryServed,
+  capacityMTok,
+  servedPf,
+}: {
+  shareRows: { id: string; name: string; value: number }[]
+  playerShare: number
+  serveRatio: number
+  demandMTok: number
+  servedMTok: number
+  demandPf: number
+  capacityPf: number
+  unserved: number
+  overloaded: boolean
+  aiUsers: number
+  peopleToConvert: number
+  dayNet: number
+  marginPerMTok: number
+  marginPerSub: number
+  latencyScore: number
+  effectiveLatency: number
+  servicePain: number
+  industryDemand: number
+  industryServed: number
+  capacityMTok: number
+  servedPf: number
+}) {
+  const maxShare = Math.max(0.0001, ...shareRows.map((row) => row.value))
+
+  return (
+    <div className="space-y-3">
+      <GameCard eyebrow="Battlefield" title="Market share" tone="mint">
+        <div className="anim-stagger space-y-2.5">
+          {shareRows.map((row) => {
+            const isYou = row.id === 'player'
             return (
-              <div
-                key={channel}
-                className={`rounded-lg border px-2 py-1.5 ${
-                  offer ? 'border-mint/30 bg-mint/5' : 'border-line/70 bg-void/35'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="truncate text-[0.6875rem] font-medium text-bone">
-                    {PRODUCT_CHANNEL_LABELS[channel]}
+              <MeterBar
+                key={row.id}
+                label={
+                  <span className={isYou ? 'font-semibold text-mint' : undefined}>
+                    {row.name}
                   </span>
-                  <span className={`font-mono text-[0.625rem] uppercase ${offer ? 'text-mint' : 'text-muted'}`}>
-                    {offer ? 'live' : 'missing'}
-                  </span>
-                </div>
-                <div className="mt-0.5 truncate font-mono text-[0.625rem] text-muted">
-                  {offer
-                    ? `${model?.name ?? 'Model'} · ${formatProductOfferPrice(offer)}`
-                    : 'Release and package a compatible model'}
-                </div>
-              </div>
+                }
+                value={row.value / maxShare}
+                detail={pct(row.value, 1)}
+                tone={isYou ? 'positive' : 'serve'}
+                live={isYou && playerShare > 0}
+              />
             )
           })}
         </div>
-      </section>
-
-      <div className="rounded-2xl border border-line bg-panel-2 p-3">
-        <div className="flex items-center justify-between gap-3">
+        <div className="mt-3 grid grid-cols-2 gap-2 border-t border-line/50 pt-3 sm:grid-cols-4">
           <div>
-            <h3 className="text-[0.8125rem] text-muted">Market share</h3>
-            <p className="mt-0.5 text-[0.6875rem] text-muted/80">Hover or focus a slice</p>
+            <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">You</div>
+            <div className="font-mono text-xl font-semibold tabular-nums text-mint">
+              {pct(playerShare, 1)}
+            </div>
           </div>
-          <div className="relative h-32 w-32 shrink-0" aria-label="Interactive market share chart">
-            <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90 overflow-visible">
-              <circle
-                cx="50"
-                cy="50"
-                r="42"
-                fill="none"
-                stroke="color-mix(in srgb, var(--color-line) 70%, transparent)"
-                strokeWidth="16"
-              />
-              {shareRows.map((row) => {
-                const arcShare = row.value / shareTotal
-                const dash = arcShare * circumference
-                const offset = -cumulativeShare * circumference
-                cumulativeShare += arcShare
-                if (dash < 0.1) return null
-                return (
-                  <circle
-                    key={row.id}
-                    cx="50"
-                    cy="50"
-                    r="42"
-                    fill="none"
-                    stroke={row.color}
-                    strokeWidth={activeShare.id === row.id ? 19 : 16}
-                    strokeDasharray={`${dash} ${circumference - dash}`}
-                    strokeDashoffset={offset}
-                    className="cursor-pointer transition-[stroke-width,opacity] duration-150 focus:outline-none"
-                    opacity={activeShare.id === row.id ? 1 : 0.74}
-                    tabIndex={0}
-                    role="button"
-                    aria-label={`${row.name}: ${pct(row.value, 1)} market share`}
-                    onMouseEnter={() => setActiveLabId(row.id)}
-                    onFocus={() => setActiveLabId(row.id)}
-                    onClick={() => setActiveLabId(row.id)}
-                  >
-                    <title>{`${row.name}: ${pct(row.value, 1)}`}</title>
-                  </circle>
-                )
-              })}
-            </svg>
-            <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
-              <span className="max-w-16 truncate text-[0.6875rem] text-muted">{activeShare.name}</span>
-              <strong className="font-mono text-[0.9375rem] text-bone">
-                {pct(activeShare.value, 1)}
-              </strong>
+          <div>
+            <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">Industry</div>
+            <div className="font-mono text-[0.8125rem] tabular-nums text-bone">
+              {num(industryDemand, 0)}/{num(industryServed, 0)}
+            </div>
+            <div className="text-[0.6875rem] text-muted">MTok demand/served</div>
+          </div>
+          <div>
+            <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">AI users</div>
+            <div className="font-mono text-[0.8125rem] tabular-nums text-bone">
+              {audience(aiUsers)}
+            </div>
+            <div className="text-[0.6875rem] text-muted">
+              {pct(aiUsers / WORLD_POPULATION, 0)} of world
+            </div>
+          </div>
+          <div>
+            <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">To convert</div>
+            <div className="font-mono text-[0.8125rem] tabular-nums text-bone">
+              {audience(peopleToConvert)}
             </div>
           </div>
         </div>
-        <div className="mt-2 max-h-40 space-y-1 overflow-y-auto font-mono text-[0.75rem]">
-          {shareRows.map((row) => (
-            <button
-              type="button"
-              key={row.id}
-              className={`flex w-full items-center justify-between rounded-md border px-2 py-1.5 text-left transition ${
-                activeShare.id === row.id
-                  ? 'border-line bg-void/55 text-bone'
-                  : 'border-transparent text-muted hover:bg-void/30 hover:text-bone'
-              }`}
-              onMouseEnter={() => setActiveLabId(row.id)}
-              onFocus={() => setActiveLabId(row.id)}
-              onClick={() => setActiveLabId(row.id)}
-            >
-              <span className="flex min-w-0 items-center gap-2">
-                <span
-                  className="h-2 w-2 shrink-0 rounded-full"
-                  style={{ background: row.color }}
-                />
-                <span className="truncate">{row.name}</span>
-              </span>
-              <span className="text-bone">{pct(row.value, 1)}</span>
-            </button>
-          ))}
-        </div>
-      </div>
+      </GameCard>
 
-      <div className="rounded-2xl border border-line bg-panel-2 p-3 font-mono text-xs">
-        <div className="flex justify-between">
-          <span className="text-muted">Industry demand / served</span>
-          <span className="text-bone">
-            {num(state.lastMarket.industryDemandMTok ?? state.lastMarket.demandMTok, 0)} /{' '}
-            {num(state.lastMarket.industryServedMTok ?? state.lastMarket.servedMTok, 0)} MTok
-          </span>
+      <GameCard
+        eyebrow="Capacity"
+        title="Demand vs inference"
+        tone={overloaded ? 'danger' : unserved > 0.03 ? 'train' : 'infer'}
+        actions={
+          overloaded ? <StatusChip tone="danger">Overloaded</StatusChip> : undefined
+        }
+      >
+        <MeterBar
+          label="Your demand served"
+          value={serveRatio}
+          detail={`${num(servedMTok, 1)} / ${num(demandMTok, 1)} MTok`}
+          tone={serveRatio < 0.92 ? 'danger' : serveRatio < 0.98 ? 'warning' : 'positive'}
+          live={serveRatio < 1}
+        />
+        <div className="mt-2.5">
+          <MeterBar
+            label="Inference PF"
+            value={capacityPf > 0 ? Math.min(1, demandPf / capacityPf) : demandPf > 0 ? 1 : 0}
+            detail={`${num(demandPf, 2)} / ${num(capacityPf, 2)} PF`}
+            tone={demandPf > capacityPf * 1.02 ? 'danger' : 'serve'}
+          />
         </div>
-        <div className="mt-1 flex justify-between">
-          <span className="text-muted">AI users / world</span>
-          <span className="text-bone">
-            {audience(aiUsers)} / {audience(WORLD_POPULATION)}
-          </span>
+        <div className="mt-2 space-y-0.5 border-t border-line/50 pt-2">
+          <StatRow label="Admitted inference" value={`${num(servedPf, 2)} PF`} />
+          <StatRow label="Token capacity" value={`${num(capacityMTok, 1)} MTok/d`} />
+          <StatRow
+            label="Unserved"
+            value={pct(unserved, 0)}
+            tone={unserved > 0.08 ? 'danger' : unserved > 0.03 ? 'warning' : 'neutral'}
+            strong
+          />
+          <StatRow
+            label="Felt latency"
+            value={`${num(effectiveLatency, 0)} (campus ${num(latencyScore, 0)})`}
+            tone={effectiveLatency < 40 ? 'danger' : effectiveLatency < 55 ? 'warning' : 'neutral'}
+          />
+          <StatRow
+            label="Service pain"
+            value={pct(servicePain, 0)}
+            tone={servicePain > 0.2 ? 'danger' : servicePain > 0.08 ? 'warning' : 'neutral'}
+          />
         </div>
-        <div className="mt-1 flex justify-between">
-          <span className="text-muted">Remaining to convert</span>
-          <span className="text-bone">
-            {audience(peopleToConvert)} · {pct(aiUsers / WORLD_POPULATION, 0)} active
-          </span>
-        </div>
-        <div className="mt-1 flex justify-between">
-          <span className="text-muted">Paid / free subs</span>
-          <span className="text-bone">
-            {people(
-              state.lastMarket.planStats
-                ?.filter((p) => !p.isFree)
-                .reduce((s, p) => s + p.subscribers, 0) ?? 0,
-            )}
-            {' / '}
-            {people(
-              state.lastMarket.planStats
-                ?.filter((p) => p.isFree)
-                .reduce((s, p) => s + p.subscribers, 0) ?? 0,
-            )}
-          </span>
-        </div>
-        <div className="mt-1 flex justify-between">
-          <span className="text-muted">Your demand</span>
-          <span>{num(state.lastMarket.playerDemandMTok, 1)} MTok/d</span>
-        </div>
-        <div className="mt-1 flex justify-between">
-          <span className="text-muted">Served</span>
-          <span>{num(state.lastMarket.servedMTok, 1)} MTok/d</span>
-        </div>
-        <div className="mt-1 flex justify-between">
-          <span className="text-muted">Inference need / pool</span>
-          <span
-            className={
-              (state.lastMarket.demandPf ?? 0) > (state.lastMarket.capacityPf ?? 0) * 1.02
-                ? 'text-danger'
-                : 'text-bone'
-            }
-          >
-            {num(state.lastMarket.demandPf ?? 0, 2)} / {num(state.lastMarket.capacityPf ?? 0, 2)} PF
-          </span>
-        </div>
-        <div className="mt-1 flex justify-between">
-          <span className="text-muted">Admitted inference</span>
-          <span className="text-bone">{num(state.lastMarket.servedPf ?? 0, 2)} PF</span>
-        </div>
-        <div className="mt-1 flex justify-between">
-          <span className="text-muted">Token capacity (equiv.)</span>
-          <span className="text-bone">
-            {num(state.lastMarket.capacityMTok ?? 0, 1)} MTok/d
-          </span>
-        </div>
-        <div className="mt-1 flex justify-between">
-          <span className="text-muted">Unserved</span>
-          <span className={state.lastMarket.unservedRatio > 0.08 ? 'text-danger' : ''}>
-            {pct(state.lastMarket.unservedRatio, 0)}
-          </span>
-        </div>
-        <div className="mt-1 flex justify-between">
-          <span className="text-muted">Campus latency</span>
-          <span>{num(state.lastMarket.latencyScore, 0)}</span>
-        </div>
-        <div className="mt-1 flex justify-between">
-          <span className="text-muted">Felt latency (w/ load)</span>
-          <span
-            className={
-              (state.lastMarket.effectiveLatencyScore ?? state.lastMarket.latencyScore) < 40
-                ? 'text-danger'
-                : (state.lastMarket.effectiveLatencyScore ?? 99) < 55
-                  ? 'text-amber'
-                  : 'text-bone'
-            }
-          >
-            {num(state.lastMarket.effectiveLatencyScore ?? state.lastMarket.latencyScore, 0)}
-          </span>
-        </div>
-        <div className="mt-1 flex justify-between">
-          <span className="text-muted">Service pain</span>
-          <span
-            className={
-              (state.lastMarket.servicePain ?? state.player.servicePain ?? 0) > 0.2
-                ? 'text-danger'
-                : (state.lastMarket.servicePain ?? 0) > 0.08
-                  ? 'text-amber'
-                  : 'text-bone'
-            }
-          >
-            {pct(state.lastMarket.servicePain ?? state.player.servicePain ?? 0, 0)}
-          </span>
-        </div>
-        {state.lastMarket.unservedRatio > 0.08 &&
-          (state.lastMarket.demandPf ?? 0) > (state.lastMarket.capacityPf ?? 0) * 1.02 && (
-          <p className="mt-2 rounded-lg border border-danger/30 bg-danger/10 px-2 py-1.5 text-[0.75rem] leading-snug text-danger">
-            Overload: demand exceeds inference PF (need {num(state.lastMarket.demandPf ?? 0, 1)} /
-            have {num(state.lastMarket.capacityPf ?? 0, 1)}). Add racks, power, Serve %, or ship
-            serving-efficiency research.
+        {overloaded ? (
+          <p className="mt-2 text-[0.8125rem] leading-snug text-danger">
+            Demand exceeds inference PF. Add racks, power, Serve %, or serving-efficiency research.
           </p>
-        )}
-        <div className="mt-1 flex justify-between">
-          <span className="text-muted">Margin / MTok</span>
-          <span
-            className={state.player.finance.marginPerMTok < 0 ? 'text-danger' : 'text-mint'}
-          >
-            {money(state.player.finance.marginPerMTok)}
-          </span>
-        </div>
-        <div className="mt-1 flex justify-between">
-          <span className="text-muted">Margin / sub</span>
-          <span className={state.player.finance.marginPerSub < 0 ? 'text-danger' : 'text-mint'}>
-            {money(state.player.finance.marginPerSub)}
-          </span>
-        </div>
-        <div className="mt-1 flex justify-between">
-          <span className="text-muted">Day net</span>
-          <span
-            className={
-              (state.player.finance.dayNet ?? 0) < 0 ? 'text-danger' : 'text-mint'
-            }
-          >
-            {money(state.player.finance.dayNet ?? 0)}
-          </span>
-        </div>
-        <button
-          type="button"
-          className="mt-2 text-[0.8125rem] text-mint hover:underline"
-          onClick={() => setPanel('stats')}
-        >
-          Full financial breakdown →
-        </button>
-      </div>
+        ) : null}
+      </GameCard>
 
-      <div>
-        <h3 className="mb-1.5 text-[0.8125rem] font-medium uppercase tracking-wider text-muted">
-          Segments
-        </h3>
-        <div className="space-y-1.5">
-          {SEGMENTS.map((s) => {
-            const st = state.segments.find((x) => x.id === s.id)
-            return (
-              <div key={s.id} className="rounded-xl border border-line px-2.5 py-2">
-                <div className="flex justify-between text-sm">
-                  <span className="text-bone">{s.name}</span>
-                  <span className="font-mono text-[0.8125rem] text-muted">
-                    {st ? audience(st.size) : ''}
-                  </span>
-                </div>
-                <p className="mt-0.5 text-[0.75rem] text-muted">
-                  floor {s.qualityFloor} · cares{' '}
-                  {Object.entries(s.benchmarkWeights)
-                    .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
-                    .slice(0, 3)
-                    .map(([k]) => k)
-                    .join(', ')}
-                </p>
-              </div>
-            )
-          })}
+      <GameCard eyebrow="Unit economics" title="Margins" tone={dayNet < 0 ? 'danger' : 'mint'}>
+        <div className="space-y-0.5">
+          <StatRow
+            label="Margin / MTok"
+            value={money(marginPerMTok)}
+            tone={marginPerMTok < 0 ? 'danger' : 'positive'}
+            strong
+          />
+          <StatRow
+            label="Margin / sub"
+            value={money(marginPerSub)}
+            tone={marginPerSub < 0 ? 'danger' : 'positive'}
+            strong
+          />
+          <StatRow
+            label="Day net"
+            value={money(dayNet)}
+            tone={dayNet < 0 ? 'danger' : 'positive'}
+            strong
+          />
         </div>
+      </GameCard>
+    </div>
+  )
+}
+
+function SegmentsView({
+  segments,
+}: {
+  segments: { id: string; size: number }[]
+}) {
+  return (
+    <CardGrid min="14rem" className="anim-stagger">
+      {SEGMENTS.map((s) => {
+        const st = segments.find((x) => x.id === s.id)
+        const cares = Object.entries(s.benchmarkWeights)
+          .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
+          .slice(0, 3)
+          .map(([k]) => k)
+          .join(', ')
+        return (
+          <GameCard key={s.id} title={s.name} tone="research">
+            <div className="font-mono text-xl font-semibold tabular-nums text-bone">
+              {st ? audience(st.size) : '—'}
+            </div>
+            <div className="mt-2 space-y-0.5">
+              <StatRow label="Quality floor" value={String(s.qualityFloor)} />
+              <StatRow label="Cares about" value={cares || '—'} />
+            </div>
+          </GameCard>
+        )
+      })}
+    </CardGrid>
+  )
+}
+
+function ProductsView({
+  portfolio,
+  models,
+}: {
+  portfolio: ReturnType<typeof deriveProductPortfolio>
+  models: { id: string; name: string }[]
+}) {
+  if (PRODUCT_CHANNELS.length === 0) {
+    return <EmptyState title="No surfaces" description="Product channels will appear here." />
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[0.8125rem] text-muted">Six public surfaces share your released fleet.</p>
+        <StatusChip tone={portfolio.promoted.length === 6 ? 'positive' : 'warning'}>
+          {portfolio.promoted.length}/6 live
+        </StatusChip>
       </div>
+      <CardGrid min="13rem" className="anim-stagger">
+        {PRODUCT_CHANNELS.map((channel) => {
+          const offer = portfolio.byChannel[channel]
+          const model = offer
+            ? models.find((candidate) => candidate.id === offer.primaryModelId)
+            : undefined
+          return (
+            <GameCard
+              key={channel}
+              eyebrow={offer ? 'Live' : 'Missing'}
+              title={PRODUCT_CHANNEL_LABELS[channel]}
+              tone={offer ? 'mint' : undefined}
+              actions={
+                <StatusChip tone={offer ? 'positive' : 'neutral'}>
+                  {offer ? 'live' : 'gap'}
+                </StatusChip>
+              }
+            >
+              <div className="truncate font-mono text-[0.8125rem] tabular-nums text-bone">
+                {offer
+                  ? `${model?.name ?? 'Model'} · ${formatProductOfferPrice(offer)}`
+                  : 'Release a compatible model'}
+              </div>
+            </GameCard>
+          )
+        })}
+      </CardGrid>
     </div>
   )
 }

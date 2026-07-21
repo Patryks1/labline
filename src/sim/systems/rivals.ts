@@ -28,6 +28,7 @@ import {
 } from '../balance/data'
 import { buildScaledModel } from '../balance/modelBuild'
 import { trainCostPfDays } from '../balance/training'
+import { enforceMinTrainingDuration, MIN_TRAINING_DAYS } from './trainingDuration'
 import { ECONOMY } from '../balance/economy'
 import { getResearchNode } from '../balance/research'
 import { analyzeTrainingData } from '../balance/trainingV3'
@@ -1685,7 +1686,22 @@ export function tickRivals(state: SimState): SimState {
           modalityComputeMult: dataAnalysis.modalityComputeMult,
         })
 
-        const cashSunk = Math.floor(targetPf * ECONOMY.trainUpfrontPerPfDay)
+        const formatThroughputPreview = trainingFormatThroughput(
+          rivalTrainingHardwareGeneration(next),
+          trainingNumerics,
+        )
+        const dailyThroughput = Math.max(
+          0,
+          rivalTrainPf(next, state, effectiveFlopsPf) *
+            pace.researchSpeed *
+            formatThroughputPreview,
+        )
+        const scaledTargetPf = enforceMinTrainingDuration(
+          Math.max(3, targetPf),
+          dailyThroughput,
+          MIN_TRAINING_DAYS,
+        )
+        const cashSunk = Math.floor(scaledTargetPf * ECONOMY.trainUpfrontPerPfDay)
         const cashBurnPerDay = Math.floor(
           ECONOMY.trainCashBurnPerPfDay * Math.sqrt(Math.max(1, paramsB)),
         )
@@ -1703,7 +1719,7 @@ export function tickRivals(state: SimState): SimState {
           family,
           paramsB,
           activeParamsB,
-          targetPfDays: Math.max(3, targetPf),
+          targetPfDays: scaledTargetPf,
           progressPfDays: 0,
           modalities,
           dataCoverage: recipe.coverage,

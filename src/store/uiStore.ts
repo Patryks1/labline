@@ -18,12 +18,19 @@ export interface HudToast {
   tone: 'positive' | 'warning' | 'danger'
 }
 
+export interface ReleaseEvent {
+  id: number
+  name: string
+  capability: number
+}
+
 interface UiPreferences {
   interfaceScale: InterfaceScale
   reducedMotion: boolean
   objectivesOpen: boolean
   confirmRequest: ConfirmRequest | null
   toast: HudToast | null
+  releaseEvent: ReleaseEvent | null
   setInterfaceScale: (scale: InterfaceScale) => void
   setReducedMotion: (reduced: boolean) => void
   setObjectivesOpen: (open: boolean) => void
@@ -31,6 +38,8 @@ interface UiPreferences {
   clearConfirm: () => void
   pushToast: (message: string, tone?: HudToast['tone']) => void
   clearToast: () => void
+  announceRelease: (event: { name: string; capability: number }) => void
+  clearRelease: () => void
 }
 
 export function resolveAutoScale(viewportHeight: number): number {
@@ -48,6 +57,7 @@ export const useUiStore = create<UiPreferences>()(
       objectivesOpen: false,
       confirmRequest: null,
       toast: null,
+      releaseEvent: null,
       setInterfaceScale: (interfaceScale) => set({ interfaceScale }),
       setReducedMotion: (reducedMotion) => set({ reducedMotion }),
       setObjectivesOpen: (objectivesOpen) => set({ objectivesOpen }),
@@ -56,6 +66,9 @@ export const useUiStore = create<UiPreferences>()(
       pushToast: (message, tone = 'positive') =>
         set({ toast: { id: Date.now(), message, tone } }),
       clearToast: () => set({ toast: null }),
+      announceRelease: (event) =>
+        set({ releaseEvent: { id: Date.now(), name: event.name, capability: event.capability } }),
+      clearRelease: () => set({ releaseEvent: null }),
     }),
     {
       name: 'labline-ui-v1',

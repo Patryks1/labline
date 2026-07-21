@@ -14,7 +14,7 @@ import * as THREE from 'three'
 
 describe('e2e play — automated bot', () => {
   it('starts each follow-up generation from the newest release cadence', () => {
-    const report = runPlayBot({ seed: 1, maxDays: 155 })
+    const report = runPlayBot({ seed: 1, maxDays: 220 })
     const releaseDays = report.final.player.models
       .filter((model) => model.release === 'released' || model.shipped)
       .map((model) => model.releaseDay)

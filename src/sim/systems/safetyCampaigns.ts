@@ -4,6 +4,7 @@ import type {
 } from '../types'
 import { normalizeModelEvaluations } from '../balance/evaluationSuites'
 import { computeSnapshot } from './compute'
+import { enforceMinTrainingDuration, MIN_TRAINING_DAYS } from './trainingDuration'
 import { playerStaff } from './staff'
 import { seededId } from '../rng'
 
@@ -56,7 +57,20 @@ export function safetyCampaignEstimate(
   }
   const mult = INTENSITY_MULT[intensity]
   const scale = Math.log10(Math.max(1, model.paramsB) + 1)
-  const totalPfDays = (4 + scale * 4) * mult
+  let totalPfDays = (4 + scale * 4) * mult
+  // Safety campaigns are day-based training jobs: scale the training lane so
+  // estimated duration is at least 30 days at current shared training throughput.
+  const snap = computeSnapshot(state)
+  const activeTrainingJobs = state.player.trainingJobs?.length ?? (state.player.trainingJob ? 1 : 0)
+  const sharedTrainingPool = snap.pools.training / Math.max(1, activeTrainingJobs + 1)
+  const dailyTrainingThroughput = sharedTrainingPool * 0.6
+  const trainingShare = 0.6
+  const trainingTarget = enforceMinTrainingDuration(
+    totalPfDays * trainingShare,
+    dailyTrainingThroughput,
+    MIN_TRAINING_DAYS,
+  )
+  totalPfDays = trainingTarget / trainingShare
   const minimumResearchers = Math.max(1, Math.ceil(scale * 4))
   const qualityInputs = ['chat', 'law', 'health'] as const
   const qualityValues = qualityInputs.map(
@@ -168,7 +182,7 @@ export function tickSafetyCampaign(state: SimState): SimState {
     )
   }
   const snap = computeSnapshot(state)
-  if (snap.pools.training <= 0.001 || snap.pools.research <= 0.001) {
+  if (snap.pools.training <= 0.001 && snap.pools.research <= 0.001) {
     if (state.day % 4 !== 0) return state
     return withAlert(state, 'warn', 'Safety campaign stalled — allocate both training and research compute.')
   }

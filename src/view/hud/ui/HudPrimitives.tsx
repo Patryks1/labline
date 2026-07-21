@@ -1,5 +1,15 @@
 import type { ButtonHTMLAttributes, ReactNode } from 'react'
 
+export type HudTone =
+  | 'neutral'
+  | 'positive'
+  | 'warning'
+  | 'danger'
+  | 'serve'
+  | 'research'
+  | 'train'
+  | 'gold'
+
 export function PanelScaffold({
   title,
   eyebrow,
@@ -37,7 +47,7 @@ export function MetricTile({
   label: string
   value: ReactNode
   detail?: ReactNode
-  tone?: 'neutral' | 'positive' | 'warning' | 'danger' | 'serve' | 'research'
+  tone?: HudTone
 }) {
   return (
     <div className={`metric-tile metric-tile--${tone}`}>

@@ -6,6 +6,7 @@
   --color-void: #071117;
   --color-panel: #0c1820;
   --color-panel-2: #10242d;
+  --color-panel-3: #163038;
   --color-line: #24404a;
   --color-bone: #e8f2f2;
   --color-muted: #91a6ad;
@@ -15,6 +16,7 @@
   --color-infer: #5fa7e8;
   --color-train: #e8ad56;
   --color-research: #a58be0;
+  --color-gold: #ffd166;
 }
 
 :root {
@@ -661,6 +663,8 @@ input[type='range'] {
 .metric-tile--danger .metric-tile__value { color: var(--color-danger); }
 .metric-tile--serve .metric-tile__value { color: var(--color-infer); }
 .metric-tile--research .metric-tile__value { color: var(--color-research); }
+.metric-tile--train .metric-tile__value { color: var(--color-train); }
+.metric-tile--gold .metric-tile__value { color: var(--color-gold); }
 
 .status-chip {
   display: inline-flex;
@@ -742,6 +746,209 @@ input[type='range'] {
 .research-edge-selected {
   animation: research-edge-flow 1.2s linear infinite;
   filter: drop-shadow(0 0 3px color-mix(in srgb, var(--color-research) 85%, transparent));
+}
+
+/* ── UI Revamp: gamified motion kit ─────────────────────────────── */
+
+/* Panel / tab content swap: fade + slight rise. Apply to a keyed wrapper. */
+@keyframes panel-swap-in {
+  from { opacity: 0; transform: translate3d(0, 8px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+.panel-swap {
+  animation: panel-swap-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Staggered cascade for lists/grids of cards. */
+@keyframes anim-stagger-in {
+  from { opacity: 0; transform: translate3d(0, 10px, 0) scale(0.99); }
+  to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+.anim-stagger > * {
+  animation: anim-stagger-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.anim-stagger > *:nth-child(2) { animation-delay: 35ms; }
+.anim-stagger > *:nth-child(3) { animation-delay: 70ms; }
+.anim-stagger > *:nth-child(4) { animation-delay: 105ms; }
+.anim-stagger > *:nth-child(5) { animation-delay: 140ms; }
+.anim-stagger > *:nth-child(6) { animation-delay: 175ms; }
+.anim-stagger > *:nth-child(7) { animation-delay: 210ms; }
+.anim-stagger > *:nth-child(8) { animation-delay: 245ms; }
+.anim-stagger > *:nth-child(n+9) { animation-delay: 280ms; }
+
+/* Live activity: soft pulsing glow ring (training, construction, research). */
+@keyframes live-glow-pulse {
+  0%, 100% {
+    border-color: color-mix(in srgb, var(--live-glow-color, var(--color-mint)) 55%, var(--color-line));
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--live-glow-color, var(--color-mint)) 30%, transparent);
+  }
+  50% {
+    border-color: color-mix(in srgb, var(--live-glow-color, var(--color-mint)) 85%, var(--color-line));
+    box-shadow: 0 0 18px 0 color-mix(in srgb, var(--live-glow-color, var(--color-mint)) 22%, transparent);
+  }
+}
+
+.live-glow {
+  animation: live-glow-pulse 2.2s ease-in-out infinite;
+}
+
+/* Clickable card micro-interaction. */
+.hover-lift {
+  transition: transform 160ms ease, border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+.hover-lift:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--color-mint) 40%, var(--color-line));
+  box-shadow: 0 6px 18px rgba(2, 12, 17, 0.35);
+}
+.hover-lift:active {
+  transform: translateY(0);
+}
+
+/* Pulsing live dot. */
+@keyframes live-dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.8); }
+}
+
+.live-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: live-dot-pulse 1.6s ease-in-out infinite;
+}
+
+/* SegmentedTabs sliding indicator */
+.seg-tabs {
+  position: relative;
+  display: grid;
+  gap: 0.25rem;
+  border-radius: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--color-line) 70%, transparent);
+  background: color-mix(in srgb, var(--color-void) 55%, transparent);
+  padding: 0.25rem;
+}
+
+.seg-tabs__indicator {
+  position: absolute;
+  top: 0.25rem;
+  bottom: 0.25rem;
+  border-radius: 0.375rem;
+  background: var(--color-panel-3);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-mint) 45%, var(--color-line)),
+    0 0 14px color-mix(in srgb, var(--color-mint) 14%, transparent);
+  transition: left 220ms cubic-bezier(0.22, 1, 0.36, 1), width 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+}
+
+.seg-tabs__tab {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  min-width: 0;
+  height: 2rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  border-radius: 0.375rem;
+  padding: 0 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 550;
+  color: var(--color-muted);
+  white-space: nowrap;
+  transition: color 180ms ease;
+}
+
+.seg-tabs__tab:hover {
+  color: var(--color-bone);
+}
+
+.seg-tabs__tab[aria-selected='true'] {
+  color: var(--color-mint);
+}
+
+/* Model release celebration overlay */
+@keyframes release-burst-ring {
+  0% { opacity: 0.9; transform: translate(-50%, -50%) scale(0.15); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(1.6); }
+}
+
+@keyframes release-card-in {
+  0% { opacity: 0; transform: translate3d(0, 26px, 0) scale(0.92); }
+  60% { opacity: 1; transform: translate3d(0, -4px, 0) scale(1.02); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@keyframes release-particle {
+  0% { opacity: 1; transform: translate3d(0, 0, 0) rotate(0deg); }
+  100% { opacity: 0; transform: translate3d(var(--px), var(--py), 0) rotate(var(--pr)); }
+}
+
+@keyframes release-shine {
+  0% { transform: translateX(-120%) skewX(-18deg); }
+  100% { transform: translateX(240%) skewX(-18deg); }
+}
+
+.release-burst__ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  border-radius: 9999px;
+  border: 2px solid color-mix(in srgb, var(--color-gold) 70%, transparent);
+  animation: release-burst-ring 900ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.release-card {
+  animation: release-card-in 480ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.release-card__shine {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.release-card__shine::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 34%;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--color-gold) 24%, transparent), transparent);
+  animation: release-shine 1100ms ease-out 260ms both;
+}
+
+.release-particle {
+  position: absolute;
+  left: 50%;
+  top: 42%;
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 1px;
+  animation: release-particle 950ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Animated meter shimmer for in-progress bars */
+@keyframes meter-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.meter-live {
+  background-image: linear-gradient(
+    100deg,
+    transparent 20%,
+    rgba(255, 255, 255, 0.22) 50%,
+    transparent 80%
+  );
+  background-size: 200% 100%;
+  animation: meter-shimmer 1.8s linear infinite;
 }
 
 [data-reduced-motion='true'] *,

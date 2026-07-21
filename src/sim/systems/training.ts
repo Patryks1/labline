@@ -46,6 +46,7 @@ import {
   serviceProfileForModel,
 } from '../balance/trainingV3'
 import { createRng, hashSeed, seededId } from '../rng'
+import { enforceMinTrainingDuration, MIN_TRAINING_DAYS } from './trainingDuration'
 import { suggestApiInOut } from '../balance/pricing'
 import { DATA_DOMAIN_META, DATA_DOMAINS } from '../balance/data'
 import { ECONOMY } from '../balance/economy'
@@ -204,27 +205,82 @@ export function trainingStageFailurePlan(
   return { willFail, atFraction: 0.18 + rng.next() * 0.7 }
 }
 
-function trainingLoss(
+function estimateJobDailyThroughput(
+  state: SimState,
+  opts: {
+    numerics: NonNullable<TrainingJob['trainingNumerics']>
+    computePriority: number
+    reservedPf?: number
+    concurrentJobs: number
+  },
+): number {
+  const snap = computeSnapshot(state)
+  const concurrent = Math.max(1, opts.concurrentJobs)
+  const hardwarePools = playerTrainingHardwarePools(state, snap.pools.training)
+  const allocations = allocateTrainingHardwarePools(hardwarePools, [
+    {
+      id: '__new_job__',
+      weight: opts.computePriority,
+      eligible: true,
+      numerics: opts.numerics,
+    },
+    ...Array.from({ length: concurrent - 1 }, (_, index) => ({
+      id: `__peer_${index}__`,
+      weight: 50,
+      eligible: true,
+      numerics: DEFAULT_TRAINING_NUMERICS,
+    })),
+  ])
+  return Math.max(0, allocations.__new_job__?.effectivePf ?? 0)
+}
+
+/**
+ * Observed training loss: exponential decay toward a floor (fast early, slow
+ * late) plus mean-reverting noise with occasional 2–6% upward spikes.
+ * Deterministic per (job, stage, day) via seeded RNG — never Math.random.
+ */
+export function trainingLoss(
   job: Pick<TrainingJob, 'id' | 'outcomeSeed' | 'targetParamsB'>,
   stage: TrainableStage,
   progress: number,
   day: number,
+  previousObservedLoss?: number,
 ): number {
   const p = Math.max(0, Math.min(1, progress))
   const stageFloor = stage === 'base' ? 1.15 : 0.72
-  const stageStart = stage === 'base' ? 8.4 + Math.log10(Math.max(1, job.targetParamsB)) * 0.4 : 2.1
-  const jitter = createRng(hashSeed(job.outcomeSeed ?? 0, job.id, stage, day, 'loss-v1')).range(-0.08, 0.08)
-  return Math.max(0.05, Math.round((stageFloor + (stageStart - stageFloor) * Math.exp(-4.2 * p) + jitter) * 1000) / 1000)
+  const stageStart =
+    stage === 'base' ? 8.4 + Math.log10(Math.max(1, job.targetParamsB)) * 0.4 : 2.1
+  // Steeper early drop, then hard diminishing returns into the floor.
+  const trend = stageFloor + (stageStart - stageFloor) * Math.exp(-3.1 * p - 1.4 * p * p)
+
+  const rng = createRng(hashSeed(job.outcomeSeed ?? 0, job.id, stage, day, 'loss-v2'))
+  const prev =
+    previousObservedLoss == null || !Number.isFinite(previousObservedLoss)
+      ? trend
+      : previousObservedLoss
+  // Mean-revert toward today's trend; residual carries day-to-day wobble.
+  const residual = (prev - trend) * 0.62 + rng.range(-0.045, 0.045)
+  let observed = trend + residual
+  // Occasional upward spike (~12% of days) of roughly 2–6%.
+  if (rng.next() < 0.12) {
+    observed *= 1 + rng.range(0.02, 0.06)
+  }
+  const floor = stageFloor * 0.92
+  return Math.max(floor, Math.round(observed * 1000) / 1000)
 }
 
-function appendLossPoint(
+export function appendLossPoint(
   job: TrainingJob,
   stage: TrainableStage,
   progress: number,
   day: number,
 ): TrainingJob['lossHistory'] {
   const history = job.lossHistory ?? []
-  const next = [...history, { day, stage, progress, loss: trainingLoss(job, stage, progress, day) }]
+  const previous = [...history].reverse().find((point) => point.stage === stage)?.loss
+  const next = [
+    ...history,
+    { day, stage, progress, loss: trainingLoss(job, stage, progress, day, previous) },
+  ]
   return next.slice(-64)
 }
 
@@ -536,6 +592,18 @@ export function startTraining(state: SimState, opts: StartTrainingOpts): SimStat
     )
   }
 
+  const computePriority = Math.max(10, Math.min(100, opts.computePriority ?? 50))
+  const reservedPf = Math.max(0, opts.reservedPf ?? 0)
+  const dailyThroughput = estimateJobDailyThroughput(state, {
+    numerics,
+    computePriority,
+    reservedPf,
+    concurrentJobs: existingJobs.filter((job) => !job.paused && !job.failed).length + 1,
+  })
+  // Floor calendar duration at 30 days by scaling PF-day work at creation so
+  // ETA / progress forecasts remain honest under the allocated throughput.
+  target = enforceMinTrainingDuration(target, dailyThroughput)
+
   // Even tiny runs incur cluster setup, checkpointing, orchestration and eval
   // overhead. Preserve physical PF scaling while preventing zero-cost jobs.
   const cashSunk =
@@ -610,8 +678,8 @@ export function startTraining(state: SimState, opts: StartTrainingOpts): SimStat
     syntheticProvenance: consume.syntheticProvenance,
     trainingFormulaVersion: 2,
     trainingNumerics: numerics,
-    computePriority: Math.max(10, Math.min(100, opts.computePriority ?? 50)),
-    reservedPf: Math.max(0, opts.reservedPf ?? 0),
+    computePriority,
+    reservedPf,
     minimumDevices: Math.max(1, Math.ceil(needVram / 80)),
     preemptible: true,
     failed: false,
@@ -1759,3 +1827,4 @@ export function tickTraining(state: SimState): SimState {
 }
 
 export { formatParams, trainCostPfDays }
+export { enforceMinTrainingDuration, MIN_TRAINING_DAYS }

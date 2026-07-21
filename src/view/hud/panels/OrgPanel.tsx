@@ -52,6 +52,19 @@ import { useGameStore } from '../../../store/gameStore'
 import { money, num, pct } from '../format'
 import { SliderField } from '../ui/SliderField'
 import {
+  BlockerList,
+  CardGrid,
+  GameCard,
+  MeterBar,
+  SegmentedTabs,
+} from '../ui/kit'
+import {
+  HudButton,
+  MetricTile,
+  PanelScaffold,
+  StatusChip,
+} from '../ui/HudPrimitives'
+import {
   facilityAnchorTiles,
   mapTileAtAny,
 } from '../../../sim/systems/worldAccess'
@@ -179,48 +192,203 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
     null
 
   const cityPool = hireCity?.talentAvailable ?? emptyStaff()
+  const headcount = staffTotal(staff)
+  const runwayLabel =
+    Number.isFinite(p.finance.runwayDays) && p.finance.runwayDays < 9000
+      ? `${Math.max(0, Math.floor(p.finance.runwayDays))}d`
+      : '∞'
+  const companyTabs = [
+    { id: 'staff', label: 'Team' },
+    { id: 'funding', label: 'Capital' },
+    { id: 'governance', label: 'Policy' },
+  ] as const
+
+  if (marketingWorkspace) {
+    return (
+      <PanelScaffold
+        eyebrow="Growth"
+        title="Marketing"
+        description="Budget, channels, reach, and brand."
+      >
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <MetricTile label="Brand trust" value={num(p.brandTrust, 0)} tone="gold" />
+          <MetricTile
+            label="Spend / day"
+            value={money(p.marketingSpendPerDay)}
+            detail={`${pct(marketingMultiple, 0)} of revenue`}
+            tone="positive"
+          />
+          <MetricTile
+            label="Demand equiv."
+            value={money(reach.demandEquivalentSpend)}
+            detail="/ day"
+            tone="serve"
+          />
+          <MetricTile
+            label="Web visits"
+            value={num(reach.webVisits, 0)}
+            detail="/ day"
+          />
+        </div>
+
+        <div className="mt-3 space-y-3 anim-stagger">
+          <GameCard eyebrow="Budget" title="Revenue allocation" tone="mint">
+            <SliderField
+              label="Revenue allocated"
+              value={marketingMultiple}
+              min={0}
+              max={MARKETING_MAX_REVENUE_MULTIPLE}
+              step={0.01}
+              format={(value) =>
+                value <= 0
+                  ? 'Off'
+                  : `${pct(value, 0)} · ${money(marketingBasis * value)}/d`
+              }
+              colorClass="bg-mint"
+              accentClass="text-mint"
+              onChange={(value) => setMarketing(marketingBasis * value)}
+            />
+            <ChannelMixBar channels={channelSpend} total={p.marketingSpendPerDay} />
+          </GameCard>
+
+          <CardGrid min="11rem" className="anim-stagger">
+            <GameCard eyebrow="Reach" title="Web traffic" tone="mint">
+              <div className="font-mono text-xl font-semibold tabular-nums text-bone">
+                {num(reach.webVisits, 0)}
+              </div>
+              <p className="mt-1 text-[0.8125rem] text-muted">visits / day</p>
+            </GameCard>
+            <GameCard eyebrow="Reach" title="Billboards" tone="infer">
+              <div className="font-mono text-xl font-semibold tabular-nums text-bone">
+                {num(reach.billboardImpressions, 0)}
+              </div>
+              <p className="mt-1 text-[0.8125rem] text-muted">views / day</p>
+            </GameCard>
+            <GameCard eyebrow="Reach" title="Restaurant trials" tone="train">
+              <div className="font-mono text-xl font-semibold tabular-nums text-bone">
+                {num(reach.restaurantTrials, 0)}
+              </div>
+              <p className="mt-1 text-[0.8125rem] text-muted">users / day</p>
+            </GameCard>
+            <GameCard eyebrow="Reach" title="Enterprise events" tone="research">
+              <div className="font-mono text-xl font-semibold tabular-nums text-bone">
+                {num(reach.enterpriseLeads, 0)}
+              </div>
+              <p className="mt-1 text-[0.8125rem] text-muted">leads / day</p>
+            </GameCard>
+          </CardGrid>
+
+          <GameCard eyebrow="Channels" title="Channel spend" tone="mint">
+            <div className="space-y-2">
+              {(
+                [
+                  ['web', 'Web acquisition', channelSpend.web],
+                  ['billboards', 'Billboards & transit', channelSpend.billboards],
+                  ['restaurants', 'Restaurant partnerships', channelSpend.restaurants],
+                  ['enterprise', 'Enterprise field events', channelSpend.enterprise],
+                ] as const
+              ).map(([channel, label, spend]) => (
+                <div key={channel} className="rounded-md border border-line/60 bg-void/35 p-2">
+                  <SliderField
+                    label={label}
+                    value={spend}
+                    min={0}
+                    max={marketingMax}
+                    step={Math.max(10_000, Math.round(marketingMax / 1000))}
+                    format={(value) => `${money(value)}/d`}
+                    colorClass="bg-mint"
+                    accentClass="text-mint"
+                    onChange={(value) => setMarketingChannel(channel, value)}
+                  />
+                  <MeterBar
+                    label="Share of budget"
+                    value={p.marketingSpendPerDay > 0 ? spend / p.marketingSpendPerDay : 0}
+                    detail={
+                      p.marketingSpendPerDay > 0
+                        ? pct(spend / p.marketingSpendPerDay, 0)
+                        : '—'
+                    }
+                    tone="positive"
+                  />
+                </div>
+              ))}
+            </div>
+          </GameCard>
+
+          <GameCard eyebrow="Competition" title="Spend race">
+            <SpendRace
+              playerSpend={p.marketingSpendPerDay}
+              rivals={rivalMarketing.map((rival) => ({
+                id: rival.id,
+                name: rival.name,
+                spend: rival.marketingSpendPerDay ?? 0,
+              }))}
+            />
+          </GameCard>
+        </div>
+      </PanelScaffold>
+    )
+  }
+
   return (
-    <div className="space-y-3">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2 className="hud-panel-title">{marketingWorkspace ? 'Marketing command' : 'Company command'}</h2>
-          <p className="hud-panel-sub">
-            {marketingWorkspace
-              ? 'Reach, acquisition channels, brand, and competitive spend.'
-              : 'People, capital, ownership, and operating control.'}
-          </p>
-        </div>
-        <div className="text-right">
-          <div className="font-mono text-lg text-mint">{marketingWorkspace ? num(p.brandTrust, 0) : companyHealth}</div>
-          <div className="text-[0.625rem] uppercase tracking-wider text-muted">{marketingWorkspace ? 'brand' : 'health'}</div>
-        </div>
+    <PanelScaffold
+      eyebrow="Operations"
+      title="Company"
+      description="People, capital, ownership, and policy."
+      actions={
+        <StatusChip tone={companyHealth >= 70 ? 'positive' : companyHealth >= 40 ? 'warning' : 'danger'}>
+          Health {companyHealth}
+        </StatusChip>
+      }
+    >
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <MetricTile label="Headcount" value={`${headcount}/${seats}`} detail={`${openSeats} open`} />
+        <MetricTile
+          label="Ownership"
+          value={pct(capital.founderOwnership, 1)}
+          tone={capital.founderOwnership < 0.1 ? 'danger' : 'positive'}
+        />
+        <MetricTile
+          label="Cash runway"
+          value={runwayLabel}
+          tone={
+            Number.isFinite(p.finance.runwayDays) && p.finance.runwayDays < 30
+              ? 'danger'
+              : Number.isFinite(p.finance.runwayDays) && p.finance.runwayDays < 90
+                ? 'warning'
+                : 'neutral'
+          }
+        />
+        <MetricTile
+          label="Brand trust"
+          value={num(p.brandTrust, 0)}
+          detail={`Net ${money(p.finance.dayNet)}/d`}
+          tone={p.finance.dayNet < 0 ? 'danger' : 'gold'}
+        />
       </div>
 
-      {!marketingWorkspace && <CompanyPulse
-        cash={p.cash}
-        net={p.finance.dayNet}
-        brand={p.brandTrust}
-        control={capital.founderOwnership}
-        team={staffTotal(staff)}
-        seats={seats}
-        history={state.financeHistory}
-      />}
+      <div className="mt-3">
+        <CompanyPulse
+          cash={p.cash}
+          net={p.finance.dayNet}
+          brand={p.brandTrust}
+          control={capital.founderOwnership}
+          team={headcount}
+          seats={seats}
+          history={state.financeHistory}
+        />
+      </div>
 
-      {!marketingWorkspace && <div className="grid grid-cols-3 gap-1 rounded-lg bg-void/50 p-1" role="tablist" aria-label="Company sections">
-        {([['staff', 'Team'], ['funding', 'Capital'], ['governance', 'Policy']] as const).map(([id, label]) => (
-          <button
-            key={id}
-            type="button"
-            role="tab"
-            aria-selected={companyTab === id}
-            onClick={() => setCompanyTab(id)}
-            className={`min-h-8 rounded-md px-2 text-[0.6875rem] font-medium uppercase tracking-wide ${companyTab === id ? 'bg-panel-2 text-bone ring-1 ring-line' : 'text-muted hover:text-bone'}`}
-          >
-            {label}
-          </button>
-        ))}
-      </div>}
+      <div className="mt-3">
+        <SegmentedTabs
+          ariaLabel="Company sections"
+          active={companyTab === 'marketing' ? 'staff' : companyTab}
+          onChange={(id) => setCompanyTab(id as 'staff' | 'funding' | 'governance')}
+          items={[...companyTabs]}
+        />
+      </div>
 
+      <div key={companyTab} className="panel-swap mt-3 space-y-3">
       {companyTab === 'staff' ? <>
         <TeamBoard
           staff={staff}
@@ -231,15 +399,18 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
         />
 
         {seats <= 0 ? (
-          <button type="button" className="w-full rounded-xl border border-amber/30 bg-amber/5 p-3 text-left text-[0.75rem] text-amber" onClick={() => openSites()}>
-            Build an HQ to unlock hiring →
-          </button>
+          <GameCard tone="train" eyebrow="Blocked" title="No HQ seats">
+            <p className="mb-2 text-[0.8125rem] text-muted">Build an HQ to unlock hiring.</p>
+            <HudButton type="button" variant="secondary" onClick={() => openSites()}>
+              Open sites
+            </HudButton>
+          </GameCard>
         ) : hireCity ? (() => {
           const free = cityPool[selectedHireRole] ?? 0
           const cost = hireStaffCost(state, selectedHireRole, hireCount, hireCity.id)
           const blocked = state.player.cash < cost || free < hireCount || openSeats < hireCount
           return (
-            <section className="overflow-hidden rounded-xl border border-line bg-panel-2">
+            <section className="overflow-hidden rounded-lg border border-line bg-panel-2">
               <div className="flex items-center justify-between border-b border-line/70 px-3 py-2">
                 <div>
                   <h3 className="text-[0.75rem] font-medium text-bone">Hire {STAFF_LABELS[selectedHireRole].toLowerCase()}</h3>
@@ -262,20 +433,38 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
                     />
                   </label>
                 </div>
-                <button
-                  type="button"
-                  disabled={blocked}
-                  className={`min-w-28 rounded-lg px-3 py-2 text-[0.75rem] font-medium transition active:translate-y-px ${blocked ? 'bg-line/40 text-muted' : 'bg-mint/20 text-mint hover:bg-mint/30'}`}
-                  onClick={() => setState(hireStaff(state, hireCity.id, selectedHireRole, hireCount))}
-                >
-                  Hire · {money(cost)}
-                </button>
+                <div className="space-y-2">
+                  {blocked ? (
+                    <BlockerList
+                      items={[
+                        ...(state.player.cash < cost
+                          ? [{ text: `Need ${money(cost)} cash`, tone: 'danger' as const }]
+                          : []),
+                        ...(free < hireCount
+                          ? [{ text: `Only ${free} talent ready in ${hireCity.name}`, tone: 'warning' as const }]
+                          : []),
+                        ...(openSeats < hireCount
+                          ? [{ text: `Only ${openSeats} seats open`, tone: 'warning' as const }]
+                          : []),
+                      ]}
+                    />
+                  ) : null}
+                  <HudButton
+                    type="button"
+                    variant="primary"
+                    disabled={blocked}
+                    title={blocked ? 'Resolve blockers to hire' : `Hire ${hireCount} ${STAFF_LABELS[selectedHireRole].toLowerCase()}`}
+                    onClick={() => setState(hireStaff(state, hireCity.id, selectedHireRole, hireCount))}
+                  >
+                    Hire · {money(cost)}
+                  </HudButton>
+                </div>
               </div>
             </section>
           )
         })() : null}
 
-        <details className="group rounded-xl border border-line bg-void/30">
+        <details className="group rounded-lg border border-line bg-void/30">
           <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2 text-[0.75rem] text-bone">
             <span>Poach rival talent</span>
             <span className="font-mono text-[0.625rem] text-muted group-open:text-mint">premium market +</span>
@@ -309,7 +498,7 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
       </> : null}
 
       {companyTab === 'funding' ? (
-      <div className="rounded-2xl border border-line bg-panel-2 p-3 space-y-3">
+      <div className="rounded-lg border border-line bg-panel-2 p-3 space-y-3">
         <div className="grid grid-cols-2 gap-1 rounded-lg bg-void/50 p-1" role="tablist" aria-label="Capital actions">
           {([
             ['ownership', 'Ownership'],
@@ -469,7 +658,7 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
         <p className="text-[0.6875rem] text-muted">Borrow against company value. Higher leverage raises rates.</p>
 
         {pendingApplication && (
-          <div className="rounded-xl border border-amber/30 bg-amber/10 px-2.5 py-2 text-[0.75rem] text-amber">
+          <div className="rounded-lg border border-amber/30 bg-amber/10 px-2.5 py-2 text-[0.75rem] text-amber">
             <span className="block font-medium">Credit review pending</span>
             <span className="mt-0.5 block font-mono text-[0.6875rem] text-muted">
               {money(pendingApplication.principal)} · {pendingApplication.termDays}d requested · decision next day
@@ -478,7 +667,7 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
         )}
 
         {firmOffer && (
-          <div className="space-y-2 rounded-xl border border-mint/35 bg-mint/5 p-3">
+          <div className="space-y-2 rounded-lg border border-mint/35 bg-mint/5 p-3">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h4 className="text-[0.8125rem] font-medium text-bone">Credit offer ready</h4>
@@ -521,7 +710,7 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
           />
         </div>
 
-        <div className="rounded-xl border border-line/80 bg-void/30 p-2.5">
+        <div className="rounded-lg border border-line/80 bg-void/30 p-2.5">
           <div className="flex items-center justify-between gap-2">
             <h4 className="text-[0.6875rem] font-medium uppercase tracking-wider text-muted">Live valuation bridge</h4>
             <span className={`font-mono text-[0.6875rem] ${valueDrivers.sota >= 0.95 ? 'text-mint' : 'text-amber'}`}>
@@ -542,7 +731,7 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
           </p>
         </div>
 
-        <div className="rounded-xl border border-line/80 bg-void/30 px-2.5 py-2">
+        <div className="rounded-lg border border-line/80 bg-void/30 px-2.5 py-2">
           <div className="mb-1 flex justify-between font-mono text-[0.75rem] text-muted">
             <span>LTV used</span>
             <span>
@@ -567,7 +756,7 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
             {loans.map((l) => (
               <div
                 key={l.id}
-                className="flex items-center justify-between gap-2 rounded-xl border border-line bg-void/40 px-2.5 py-2"
+                className="flex items-center justify-between gap-2 rounded-lg border border-line bg-void/40 px-2.5 py-2"
               >
                 <div className="min-w-0">
                   <div className="truncate text-xs font-medium text-bone">{l.label}</div>
@@ -589,7 +778,7 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
         )}
 
         {isBailoutEligible(state) && (
-          <div className="rounded-xl border border-danger/40 bg-danger/10 p-2.5 space-y-1.5">
+          <div className="rounded-lg border border-danger/40 bg-danger/10 p-2.5 space-y-1.5">
             <div className="text-[0.8125rem] font-medium text-danger">Cash stress — bailout available</div>
             <p className="text-[0.6875rem] leading-snug text-muted">
               Expensive short-term facility. Use only to avoid a crash; repay as soon as you can.
@@ -642,7 +831,7 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
           </div>
         )}
 
-        {!creditRequestOpen && <div className="space-y-2 rounded-xl border border-mint/20 bg-mint/5 p-3">
+        {!creditRequestOpen && <div className="space-y-2 rounded-lg border border-mint/20 bg-mint/5 p-3">
           <div className="flex items-baseline justify-between gap-2">
             <h4 className="text-[0.8125rem] font-medium text-bone">Custom draw</h4>
             <span className="font-mono text-[0.75rem] text-muted">
@@ -699,7 +888,7 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
               <button
                 type="button"
                 disabled={!canDraw}
-                className={`w-full rounded-xl py-2 text-[0.8125rem] font-medium ${
+                className={`w-full rounded-lg py-2 text-[0.8125rem] font-medium ${
                   canDraw
                     ? 'bg-mint/25 text-mint hover:bg-mint/35'
                     : 'bg-line/40 text-muted cursor-not-allowed'
@@ -719,103 +908,14 @@ export function OrgPanel({ workspace = 'company' }: { workspace?: 'company' | 'm
       </div>
       ) : null}
 
-      {companyTab === 'marketing' ? (
-      <div className="space-y-3 rounded-2xl border border-mint/20 bg-panel-2 p-3">
-        <div className="flex items-baseline justify-between gap-3">
-          <div>
-            <h3 className="text-[0.9375rem] font-semibold text-bone">Growth console</h3>
-            <p className="mt-1 text-[0.6875rem] leading-relaxed text-muted">Buy reach, tune the mix, and defend share. Spend is billed daily.</p>
-          </div>
-          <div className="text-right">
-            <span className="block font-mono text-[1.25rem] text-mint">{num(p.brandTrust, 0)}</span>
-            <span className="text-[0.5625rem] uppercase text-muted">brand</span>
-          </div>
-        </div>
-        <SliderField
-          label="Revenue allocated"
-          value={marketingMultiple}
-          min={0}
-          max={MARKETING_MAX_REVENUE_MULTIPLE}
-          step={0.01}
-          format={(value) => value <= 0
-            ? 'Off'
-            : `${pct(value, 0)} · ${money(marketingBasis * value)}/d`}
-          colorClass="bg-mint"
-          accentClass="text-mint"
-          onChange={(value) => setMarketing(marketingBasis * value)}
-        />
-        <p className="-mt-1 text-[0.625rem] leading-snug text-muted">
-          Your allocation stays fixed as revenue changes. The range runs from off to 5× daily
-          revenue, with no fixed dollar ceiling.
-        </p>
-
-        <ChannelMixBar channels={channelSpend} total={p.marketingSpendPerDay} />
-
-        <div className="grid grid-cols-2 gap-1.5">
-          <ReachCard label="Web traffic" value={`${num(reach.webVisits, 0)} visits/d`} note="Fast subscription consideration" />
-          <ReachCard label="Billboards" value={`${num(reach.billboardImpressions, 0)} views/d`} note="Broad awareness and brand" />
-          <ReachCard label="Restaurant trials" value={`${num(reach.restaurantTrials, 0)} users/d`} note="Low-cost product sampling" />
-          <ReachCard label="Enterprise events" value={`${num(reach.enterpriseLeads, 0)} leads/d`} note="Slower, high-value pipeline" />
-        </div>
-
-        <div className="space-y-2 rounded-xl border border-line/70 bg-void/35 p-2.5">
-          {([
-            ['web', 'Web acquisition', channelSpend.web, 'Traffic, search, affiliates, and conversion retargeting.'],
-            ['billboards', 'Billboards & transit', channelSpend.billboards, 'Mass reach; strongest pure brand lift.'],
-            ['restaurants', 'Restaurant partnerships', channelSpend.restaurants, 'Sponsored free trials and table-side product usage.'],
-            ['enterprise', 'Enterprise field events', channelSpend.enterprise, 'Decision-maker leads, workshops, and account trust.'],
-          ] as const).map(([channel, label, spend, description]) => (
-            <div key={channel} className="rounded-lg border border-line/60 bg-panel-2/60 p-2">
-              <SliderField
-                label={label}
-                value={spend}
-                min={0}
-                max={marketingMax}
-                step={Math.max(10_000, Math.round(marketingMax / 1000))}
-                format={(value) => `${money(value)}/d`}
-                colorClass="bg-mint"
-                accentClass="text-mint"
-                onChange={(value) => setMarketingChannel(channel, value)}
-              />
-              <p className="mt-1 text-[0.625rem] leading-snug text-muted">{description}</p>
-            </div>
-          ))}
-        </div>
-
-        <div className="rounded-xl border border-line/70 bg-void/35 p-2.5">
-          <div className="mb-2 flex items-center justify-between">
-            <h4 className="text-[0.6875rem] font-medium uppercase tracking-wider text-muted">Competitive spend</h4>
-            <span className="font-mono text-[0.625rem] text-muted">updates daily</span>
-          </div>
-          <SpendRace
-            playerSpend={p.marketingSpendPerDay}
-            rivals={rivalMarketing.map((rival) => ({
-              id: rival.id,
-              name: rival.name,
-              spend: rival.marketingSpendPerDay ?? 0,
-            }))}
-          />
-        </div>
-
-        <div className="rounded-lg border border-line/70 bg-void/35 p-3 text-[0.75rem] leading-relaxed text-muted">
-          <div className="flex justify-between gap-3">
-            <span>Effective demand spend</span>
-            <strong className="font-mono text-mint">{money(reach.demandEquivalentSpend)}/d</strong>
-          </div>
-          <p className="mt-1 text-[0.625rem]">
-            {pct(marketingMultiple, 0)} of a {money(marketingBasis)}/d revenue basis. Returns
-            diminish, and overspending can turn growth into a severe daily loss.
-          </p>
-        </div>
-      </div>
-      ) : null}
-
       {companyTab === 'governance' ? (
         <GovernanceSummary state={state} />
       ) : null}
-    </div>
+      </div>
+    </PanelScaffold>
   )
 }
+
 
 const FEATURED_BANK_KINDS = ['revolver', 'equipment', 'venture_debt'] as const
 type FeaturedBankKind = (typeof FEATURED_BANK_KINDS)[number]
@@ -939,7 +1039,7 @@ function TeamBoard({
     ['ops', 'Operations', 'bg-violet-400', 'text-violet-400'],
   ] as const
   return (
-    <section className="rounded-xl border border-line bg-void/35 p-3">
+    <section className="rounded-lg border border-line bg-void/35 p-3">
       <div className="flex items-end justify-between gap-3">
         <div>
           <div className="font-mono text-xl text-bone">{total}<span className="text-sm text-muted">/{seats}</span></div>
@@ -1032,7 +1132,7 @@ function CompanyPulse({
         ? `${change >= 0 ? '+' : ''}${change.toFixed(0)} / 30d`
         : `${change >= 0 ? '+' : ''}${money(change)} / 30d`
   return (
-    <section className="overflow-hidden rounded-xl border border-line bg-void/35">
+    <section className="overflow-hidden rounded-lg border border-line bg-void/35">
       <div className="grid grid-cols-4 divide-x divide-line/70">
         <PulseStat label="Cash" value={money(cash)} />
         <PulseStat label="Day net" value={money(net)} tone={net < 0 ? 'danger' : 'mint'} />
@@ -1150,7 +1250,7 @@ function GovernanceSummary({ state }: { state: SimState }) {
   )
 
   return (
-    <div className="space-y-3 rounded-2xl border border-line bg-panel-2 p-3">
+    <div className="space-y-3 rounded-lg border border-line bg-panel-2 p-3">
       <div className="flex items-start justify-between gap-3">
         <div>
           <h3 className="text-[0.9375rem] font-semibold text-bone">Governance & externalities</h3>
@@ -1258,22 +1358,13 @@ function Stat({
   accent?: string
 }) {
   return (
-    <div className="rounded-xl border border-line bg-panel-2 px-2.5 py-2">
+    <div className="rounded-lg border border-line bg-panel-2 px-2.5 py-2">
       <div className="text-[0.75rem] text-muted">{label}</div>
       <div className={`font-mono text-sm ${accent}`}>{value}</div>
     </div>
   )
 }
 
-function ReachCard({ label, value, note }: { label: string; value: string; note: string }) {
-  return (
-    <div className="rounded-xl border border-line bg-void/35 px-2.5 py-2">
-      <div className="text-[0.6875rem] text-muted">{label}</div>
-      <div className="font-mono text-[0.8125rem] text-bone">{value}</div>
-      <div className="mt-0.5 text-[0.5625rem] leading-snug text-muted">{note}</div>
-    </div>
-  )
-}
 
 function BridgeRow({ label, value }: { label: string; value: number }) {
   return (
