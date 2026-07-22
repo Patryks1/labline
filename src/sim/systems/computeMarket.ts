@@ -13,18 +13,55 @@ import { computeLabSnapshot, getLab, updateLab } from './labEngine'
 const MIN_PF = 2
 const MAX_PF = 400
 
+/** Proxy MW draw for one PF of wholesale compute (≈ H-class rack density). */
+export function mwPerPf(): number {
+  return ECONOMY.mwPerPfProxy ?? 0.011
+}
+
+/** Convert PF capacity into MW using the shared economy proxy. */
+export function pfToMw(pf: number): number {
+  return Math.max(0, pf) * mwPerPf()
+}
+
+/** Convert MW capacity back into PF for internal storage/quotes. */
+export function mwToPf(mw: number): number {
+  const rate = mwPerPf()
+  return rate > 0 ? Math.max(0, mw) / rate : 0
+}
+
+/** Compact MW/GW label for negotiation copy and alerts. */
+export function formatComputeMw(pf: number, digits = 2): string {
+  const value = pfToMw(pf)
+  if (!Number.isFinite(value)) return '—'
+  if (value >= 1000) return `${(value / 1000).toFixed(Math.max(digits, 2))} GW`
+  if (value >= 10) return `${value.toFixed(1)} MW`
+  if (value >= 1) return `${value.toFixed(digits)} MW`
+  if (value > 0) return `${(value * 1000).toFixed(0)} kW`
+  return '0 MW'
+}
+
+/** $/MW-day from an internal $/PF-day lease rate. */
+export function pricePerMwDayFromPfDay(pricePerPfDay: number): number {
+  const rate = mwPerPf()
+  return rate > 0 ? pricePerPfDay / rate : 0
+}
+
 /** Energy $/day to run 1 PF (proxy MW × PUE × 24 × $/MWh). */
 export function computeEnergyCostPerPfDay(state: SimState): number {
   const price = energyPriceForState(state)
   const pue = Math.max(1.05, state.player.pue ?? 1.35)
-  const mwPerPf = ECONOMY.mwPerPfProxy ?? 0.011
-  return mwPerPf * pue * 24 * price
+  return mwPerPf() * pue * 24 * price
 }
 
 /** Minimum lease $/PF-day so seller covers energy × markup (default 1.5×). */
 export function minComputeLeasePricePerPfDay(state: SimState): number {
   const markup = ECONOMY.computeLeaseEnergyMarkup ?? 1.5
   return Math.max(80, computeEnergyCostPerPfDay(state) * markup)
+}
+
+/** Minimum lease $/MW-day using the shared MW-per-PF proxy. */
+export function minComputeLeasePricePerMwDay(state: SimState): number {
+  return pricePerMwDayFromPfDay(minComputeLeasePricePerPfDay(state))
 }
 
 export function clampLeasePricePerPfDay(state: SimState, price: number): number {
@@ -172,7 +209,7 @@ export function setComputeListing(
     return alert(
       state,
       'warn',
-      `Only ~${playerSparePf(state).toFixed(0)} PF spare to lease out (need headroom).`,
+      `Only ~${formatComputeMw(playerSparePf(state))} spare to lease out (need headroom).`,
     )
   }
   const pricePerPfDay = clampLeasePricePerPfDay(state, listing.pricePerPfDay)
@@ -192,8 +229,8 @@ export function setComputeListing(
         severity: 'info' as const,
         message:
           listing.side === 'sell'
-            ? `Listing ${pf.toFixed(0)} PF for lease @ $${pricePerPfDay.toFixed(0)}/PF-day (floor $${floor.toFixed(0)} = energy×${ECONOMY.computeLeaseEnergyMarkup ?? 1.5}) · ${listing.termDays}d`
-            : `Seeking ${pf.toFixed(0)} PF lease @ ≥$${pricePerPfDay.toFixed(0)}/PF-day · ${listing.termDays}d`,
+            ? `Listing ${formatComputeMw(pf)} for lease @ $${pricePerMwDayFromPfDay(pricePerPfDay).toFixed(0)}/MW-day (floor $${pricePerMwDayFromPfDay(floor).toFixed(0)} = energy×${ECONOMY.computeLeaseEnergyMarkup ?? 1.5}) · ${listing.termDays}d`
+            : `Seeking ${formatComputeMw(pf)} lease @ ≥$${pricePerMwDayFromPfDay(pricePerPfDay).toFixed(0)}/MW-day · ${listing.termDays}d`,
       },
       ...state.alerts,
     ].slice(0, 40),
@@ -211,7 +248,7 @@ export function acceptComputeOffer(state: SimState, leaseId: string): SimState {
     c = { ...c, pricePerPfDay: floor }
   }
   if (c.playerSells && c.pf > playerSparePf(state) + 2) {
-    return alert(state, 'warn', 'You no longer have spare PF for this deal.')
+    return alert(state, 'warn', 'You no longer have spare capacity for this deal.')
   }
   if (!c.playerSells) {
     const rival = state.rivals.find((r) => r.id === c.rivalId)
@@ -238,9 +275,9 @@ export function acceptComputeOffer(state: SimState, leaseId: string): SimState {
     computeLeases: leases,
     computeListing: null,
     news: [
-      `Day ${state.day}: Compute deal live with ${rival?.name ?? c.rivalId} — ${c.pf.toFixed(0)} PF ${
+      `Day ${state.day}: Compute deal live with ${rival?.name ?? c.rivalId} — ${formatComputeMw(c.pf)} ${
         c.playerSells ? 'sold' : 'bought'
-      } @ $${c.pricePerPfDay.toFixed(0)}/PF-day (${c.daysTotal}d).`,
+      } @ $${pricePerMwDayFromPfDay(c.pricePerPfDay).toFixed(0)}/MW-day (${c.daysTotal}d).`,
       ...state.news,
     ].slice(0, 20),
     alerts: [
@@ -248,7 +285,7 @@ export function acceptComputeOffer(state: SimState, leaseId: string): SimState {
         id: `acc-${leaseId}`,
         day: state.day,
         severity: 'info' as const,
-        message: `Lease active: ${c.pf.toFixed(0)} PF ${c.playerSells ? 'to' : 'from'} ${
+        message: `Lease active: ${formatComputeMw(c.pf)} ${c.playerSells ? 'to' : 'from'} ${
           rival?.name ?? 'rival'
         }.`,
       },
@@ -301,7 +338,7 @@ export function signPlayerComputeSale(
     return alert(
       state,
       'warn',
-      `Only ~${sparePf.toFixed(0)} PF is spare. Reduce the package before signing.`,
+      `Only ~${formatComputeMw(sparePf)} is spare. Reduce the package before signing.`,
     )
   }
   if (activeLeases(state).some((lease) => lease.rivalId === rival.id && lease.playerSells)) {
@@ -336,7 +373,7 @@ export function signPlayerComputeSale(
     computeLeases: [...(state.computeLeases ?? []), lease],
     computeListing: null,
     news: [
-      `Day ${state.day}: ${rival.name} signs for ${pf.toFixed(0)} PF from ${state.player.name} @ $${pricePerPfDay.toFixed(0)}/PF-day (${termDays}d).`,
+      `Day ${state.day}: ${rival.name} signs for ${formatComputeMw(pf)} from ${state.player.name} @ $${pricePerMwDayFromPfDay(pricePerPfDay).toFixed(0)}/MW-day (${termDays}d).`,
       ...state.news,
     ].slice(0, 24),
     alerts: [
@@ -344,7 +381,7 @@ export function signPlayerComputeSale(
         id: `sale-${lease.id}`,
         day: state.day,
         severity: 'info' as const,
-        message: `Capacity sale live: ${pf.toFixed(0)} PF to ${rival.name} · $${(pf * pricePerPfDay).toFixed(0)}/day.`,
+        message: `Capacity sale live: ${formatComputeMw(pf)} to ${rival.name} · $${(pf * pricePerPfDay).toFixed(0)}/day.`,
       },
       ...state.alerts,
     ].slice(0, 40),
@@ -434,7 +471,7 @@ export function tickComputeMarket(state: SimState): SimState {
     const buyer = getLab(s, buyerLabId)
     if (buyer.cash < dayCash) {
       news.push(
-        `Day ${s.day}: Compute lease (${c.pf.toFixed(0)} PF) lapsed — buyer could not settle.`,
+        `Day ${s.day}: Compute lease (${formatComputeMw(c.pf)}) lapsed — buyer could not settle.`,
       )
       continue
     }
@@ -451,7 +488,7 @@ export function tickComputeMarket(state: SimState): SimState {
     const daysLeft = c.daysLeft - 1
     if (daysLeft <= 0) {
       news.push(
-        `Day ${s.day}: Compute lease (${c.pf.toFixed(0)} PF) with ${
+        `Day ${s.day}: Compute lease (${formatComputeMw(c.pf)}) with ${
           s.rivals.find((r) => r.id === c.rivalId)?.name ?? 'rival'
         } expired.`,
       )
@@ -518,7 +555,7 @@ export function tickComputeMarket(state: SimState): SimState {
         status: 'offer',
         from: 'rival',
         dayStarted: s.day,
-        note: `${r.name} is raising cash from spare compute — offering ${pf} PF`,
+        note: `${r.name} is raising cash from spare compute — offering ${formatComputeMw(pf)}`,
       }
       leases = [...(s.computeLeases ?? []), offer]
       s = {
@@ -529,7 +566,7 @@ export function tickComputeMarket(state: SimState): SimState {
             id: `r-offer-${offer.id}`,
             day: s.day,
             severity: 'info' as const,
-            message: `${r.name} offers to lease you ${pf} PF @ $${price.toFixed(0)}/PF-day (${term}d).`,
+            message: `${r.name} offers to lease you ${formatComputeMw(pf)} @ $${pricePerMwDayFromPfDay(price).toFixed(0)}/MW-day (${term}d).`,
           },
           ...s.alerts,
         ].slice(0, 40),
@@ -560,7 +597,7 @@ export function tickComputeMarket(state: SimState): SimState {
           daysTotal: listing.termDays,
           status: 'offer',
           from: 'rival',
-          note: `${r.name} needs PF for hosting — wants your listing`,
+          note: `${r.name} needs compute for hosting — wants your listing`,
         }
         s = {
           ...s,
@@ -570,7 +607,7 @@ export function tickComputeMarket(state: SimState): SimState {
               id: `r-buy-${offer.id}`,
               day: s.day,
               severity: 'info' as const,
-              message: `${r.name} wants to lease ${pf.toFixed(0)} PF from your listing @ $${offer.pricePerPfDay.toFixed(0)}/PF-day.`,
+              message: `${r.name} wants to lease ${formatComputeMw(pf)} from your listing @ $${pricePerMwDayFromPfDay(offer.pricePerPfDay).toFixed(0)}/MW-day.`,
             },
             ...s.alerts,
           ].slice(0, 40),

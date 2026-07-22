@@ -1,3 +1,5 @@
+import { ECONOMY } from '../../sim/balance/economy'
+
 /** Currency — humanized K/M/B/T */
 export function money(n: number): string {
   const abs = Math.abs(n)
@@ -56,8 +58,25 @@ export function gb(n: number): string {
 }
 
 export function mw(n: number): string {
-  if (n >= 1) return `${n.toFixed(1)} MW`
-  return `${(n * 1000).toFixed(0)} kW`
+  if (!Number.isFinite(n)) return '—'
+  const a = Math.abs(n)
+  const sign = n < 0 ? '-' : ''
+  if (a >= 1000) return `${sign}${(a / 1000).toFixed(2)} GW`
+  if (a >= 1) return `${sign}${a.toFixed(1)} MW`
+  if (a > 0) return `${sign}${(a * 1000).toFixed(0)} kW`
+  return '0 MW'
+}
+
+/** Compact MW amount without unit, for sliders/inputs. */
+export function mwAmount(n: number, digits = 2): string {
+  if (!Number.isFinite(n)) return '—'
+  const a = Math.abs(n)
+  const sign = n < 0 ? '-' : ''
+  if (a >= 1000) return `${sign}${(a / 1000).toFixed(Math.max(digits, 2))}`
+  if (a >= 10) return `${sign}${a.toFixed(Math.min(digits, 1))}`
+  if (a >= 1) return `${sign}${a.toFixed(digits)}`
+  if (a > 0) return `${sign}${a.toFixed(Math.max(digits, 2))}`
+  return '0'
 }
 
 /** PF / FLOPS display */
@@ -67,3 +86,49 @@ export function pf(n: number): string {
   if (n >= 10) return `${n.toFixed(1)} PF`
   return `${n.toFixed(2)} PF`
 }
+
+/** MW of compute capacity corresponding to PF (shared ECONOMY.mwPerPfProxy). */
+export const MW_PER_PF_PROXY = ECONOMY.mwPerPfProxy ?? 0.011
+
+export function pfToMw(pfValue: number): number {
+  return pfValue * MW_PER_PF_PROXY
+}
+
+export function mwToPf(mwValue: number): number {
+  return mwValue / MW_PER_PF_PROXY
+}
+
+/**
+ * Compute capacity expressed as electrical proxy MW/GW.
+ * Prefer this over `pf()` for wholesale compute / lease UX.
+ */
+export function computeMw(n: number): string {
+  if (!Number.isFinite(n)) return '—'
+  const a = Math.abs(n)
+  const sign = n < 0 ? '-' : ''
+  if (a >= 1000) return `${sign}${(a / 1000).toFixed(2)} GW`
+  if (a >= 10) return `${sign}${a.toFixed(1)} MW`
+  if (a >= 1) return `${sign}${a.toFixed(2)} MW`
+  if (a >= 0.01) return `${sign}${a.toFixed(3)} MW`
+  if (a > 0) return `${sign}${(a * 1000).toFixed(0)} kW`
+  return '0 MW'
+}
+
+/** Compact MW/GW without unit for slider values (unit via suffix). */
+export function computeMwValue(n: number, digits = 2): string {
+  if (!Number.isFinite(n)) return '—'
+  const a = Math.abs(n)
+  const sign = n < 0 ? '-' : ''
+  if (a >= 1000) return `${sign}${(a / 1000).toFixed(Math.max(digits, 2))}`
+  if (a >= 10) return `${sign}${a.toFixed(1)}`
+  if (a >= 1) return `${sign}${a.toFixed(digits)}`
+  if (a >= 0.01) return `${sign}${a.toFixed(Math.max(digits, 3))}`
+  if (a > 0) return `${sign}${a.toFixed(Math.max(digits, 3))}`
+  return '0'
+}
+
+/** $/MW-day from a $/PF-day price using the shared proxy. */
+export function pricePerMwDayFromPf(pricePerPfDay: number): number {
+  return pricePerPfDay / MW_PER_PF_PROXY
+}
+

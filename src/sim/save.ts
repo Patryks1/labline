@@ -14,6 +14,7 @@ import type {
   RivalTrainJob,
   SimState,
   SubPlan,
+  TrainingBenchmarkSnapshot,
   TrainingJob,
   TrainingNumerics,
 } from './types'
@@ -413,6 +414,13 @@ const LEGACY_TRAINING_NUMERICS: TrainingNumerics = {
 
 function normalizeTrainingJob(job: TrainingJob): TrainingJob {
   const trainingNumerics = job.trainingNumerics ?? job.numerics ?? LEGACY_TRAINING_NUMERICS
+  const recommendedPfDays = Math.max(0, job.recommendedPfDays ?? job.targetPfDays)
+  const setupCost = Math.max(0, job.economics?.setupCost ?? Math.max(0, (job.cashSunk ?? 0) - Math.max(0, job.cashBurnPerDay ?? 0)))
+  const dataCost = Math.max(0, job.economics?.dataCost ?? 0)
+  const trainingCostAccrued = Math.max(
+    0,
+    job.economics?.trainingCostAccrued ?? Math.max(0, (job.cashSunk ?? 0) - setupCost - dataCost),
+  )
   return {
     ...job,
     trainingFormulaVersion: job.trainingFormulaVersion ?? 1,
@@ -425,6 +433,15 @@ function normalizeTrainingJob(job: TrainingJob): TrainingJob {
     stallReason: job.stallReason ?? null,
     failed: job.failed ?? false,
     lossHistory: ensureArray<NonNullable<TrainingJob['lossHistory']>[number]>(job.lossHistory).slice(-64),
+    recommendedPfDays,
+    extensionDays: Math.max(0, job.extensionDays ?? 0),
+    awaitingDecision: job.awaitingDecision ?? false,
+    economics: {
+      setupCost,
+      dataCost,
+      trainingCostAccrued,
+    },
+    benchmarkSnapshots: ensureArray<TrainingBenchmarkSnapshot>(job.benchmarkSnapshots).slice(-32),
   }
 }
 

@@ -78,6 +78,9 @@ import {
   marketOfferCanCompeteForSegment,
 } from './modelEligibility'
 
+/** Fraction of a provider's reachable audience that converts into an active seat. */
+export const PLAN_SEAT_CONVERSION = 0.0125
+
 export { offerUtility, scoreOfferFactors, segmentShares } from './marketScore'
 
 export const OUTSIDE_OPTION_PROVIDER_ID = 'outside'
@@ -587,7 +590,7 @@ export function settleRivalOfferDemand(
     const subDelivery = bucket.subscriptionMTok > 1e-9
       ? subServed / bucket.subscriptionMTok
       : 1
-    const keptSeats = bucket.subscriptionUsers * 0.00075 * subKeep
+    const keptSeats = bucket.subscriptionUsers * PLAN_SEAT_CONVERSION * subKeep
     apiServedMTok += apiServed
     subscriptionServedMTok += subServed
     keptSubscriptionUsers += keptSeats
@@ -953,7 +956,10 @@ export function tickMarket(state: SimState): SimState {
   // Natural sub segments + freemium funnel into plan seat demand
   // Segment sizes are total category audience; only a small fraction converts
   // into an active paid/free seat in one lab's current acquisition window.
-  const planAddressable = (playerSubUsers + freemiumPool) * 0.00075
+  // Absolute users = segment population × provider share × an explicit seat
+  // conversion. 1.25% keeps billion-person audiences legible as tens of
+  // millions of seats without making subscriptions consume the whole economy.
+  const planAddressable = (playerSubUsers + freemiumPool) * PLAN_SEAT_CONVERSION
 
   const planUtils = enabledPlans.map((p) => {
     let u = planAttractiveness(state, p)

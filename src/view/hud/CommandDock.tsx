@@ -10,8 +10,10 @@ import { competitiveCatchUpSnapshot } from '../../sim/systems/sharedMarkets'
 import { useGameStore } from '../../store/gameStore'
 import { money, num, pct } from './format'
 import { COMMAND_VIEWS, type CommandViewId } from './navConfig'
-import { GameCard, MeterBar, SegmentedTabs, StatRow } from './ui/kit'
+import { MeterBar, SegmentedTabs, StatRow } from './ui/kit'
 import { EmptyState, HudButton, StatusChip } from './ui/HudPrimitives'
+import { FeedPost } from './ui/FeedPost'
+import { useUiStore } from '../../store/uiStore'
 
 /**
  * Floating right intelligence dock over the map.
@@ -83,10 +85,13 @@ export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boole
               {view === 'rivals' && (
                 <RivalsView
                   onOpenMarket={() => setPanel('market')}
-                  onInspect={() => setPanel('rivals')}
+                  onInspect={(rivalId) => {
+                    useUiStore.getState().setSelectedRivalId(rivalId)
+                    setPanel('rivals')
+                  }}
                 />
               )}
-              {view === 'feed' && <FeedView onOpenEvents={() => setPanel('events')} />}
+              {view === 'feed' && <FeedView />}
             </div>
           </div>
         </aside>
@@ -296,7 +301,7 @@ function RivalsView({
   onInspect,
 }: {
   onOpenMarket: () => void
-  onInspect: () => void
+  onInspect: (rivalId: string) => void
 }) {
   const state = useGameStore((s) => s.state)
   const share = state.player.finance.totalShare
@@ -367,7 +372,7 @@ function RivalsView({
                 </div>
               ) : null}
               {!row.isPlayer ? (
-                <HudButton type="button" variant="secondary" className="mt-2 w-full" onClick={onInspect}>
+                <HudButton type="button" variant="secondary" className="mt-2 w-full" onClick={() => onInspect(row.id)}>
                   Inspect
                 </HudButton>
               ) : null}
@@ -379,10 +384,18 @@ function RivalsView({
   )
 }
 
-function FeedView({ onOpenEvents }: { onOpenEvents: () => void }) {
+function FeedView() {
   const state = useGameStore((s) => s.state)
   const alerts = state.alerts.slice(0, 8)
-  const news = state.news.slice(0, 6)
+  const news = state.news.slice(0, 8)
+  const announcements = state.rivals
+    .filter((rival) => rival.publicEstimate?.announcedProject)
+    .slice(0, 3)
+    .map((rival) => ({
+      id: rival.id,
+      name: rival.name,
+      project: rival.publicEstimate!.announcedProject!,
+    }))
 
   return (
     <div className="space-y-3">
@@ -391,47 +404,65 @@ function FeedView({ onOpenEvents }: { onOpenEvents: () => void }) {
           <p className="hud-eyebrow">World feed</p>
           <div className="mt-0.5 text-sm font-semibold text-bone">Day {state.day}</div>
         </div>
-        <HudButton type="button" variant="ghost" onClick={onOpenEvents}>
-          Full feed
-        </HudButton>
+        <StatusChip tone="serve">Live</StatusChip>
       </div>
 
-      {state.activeEvents[0] ? (
-        <GameCard eyebrow="Active event" title={state.activeEvents[0].title} tone="train">
-          <div className="font-mono text-[0.8125rem] tabular-nums text-amber">
-            {state.activeEvents[0].duration}d remaining
-          </div>
-        </GameCard>
-      ) : null}
-
       <div className="anim-stagger space-y-2">
+        {state.activeEvents.map((event) => (
+          <FeedPost
+            key={`${event.id}-${event.day}`}
+            source="World Event"
+            dayLabel={`D${event.day}`}
+            timeLabel={`${event.duration}d left`}
+            tone="warning"
+            pinned
+            body={
+              <>
+                <strong className="text-bone">{event.title}</strong>
+                <span className="mt-1 block text-muted">{event.body}</span>
+              </>
+            }
+          />
+        ))}
+
+        {announcements.map((entry) => (
+          <FeedPost
+            key={entry.id}
+            source={entry.name}
+            dayLabel={`D${state.day}`}
+            timeLabel="Announcement"
+            tone="research"
+            body={
+              <>
+                <strong className="text-bone">{entry.project}</strong>
+                <span className="mt-1 block text-muted">Publicly disclosed project from rival intelligence.</span>
+              </>
+            }
+          />
+        ))}
+
         {alerts.map((alert) => (
-          <article
+          <FeedPost
             key={alert.id}
-            className={`rounded-lg border px-3 py-2.5 text-[0.8125rem] leading-snug ${
-              alert.severity === 'danger'
-                ? 'border-danger/35 bg-danger/8 text-danger'
-                : alert.severity === 'warn'
-                  ? 'border-amber/35 bg-amber/8 text-amber'
-                  : 'border-line/70 bg-panel-2/70 text-muted'
-            }`}
-          >
-            <div className="mb-1 font-mono text-[0.6875rem] tabular-nums opacity-80">D{alert.day}</div>
-            <div className={alert.severity === 'info' ? 'text-bone' : undefined}>{alert.message}</div>
-          </article>
+            source="Ops"
+            dayLabel={`D${alert.day}`}
+            tone={alert.severity === 'danger' ? 'danger' : alert.severity === 'warn' ? 'warning' : 'neutral'}
+            body={alert.message}
+          />
         ))}
 
         {news.map((line, index) => (
-          <article key={`${line}-${index}`} className="rounded-lg border border-line/70 bg-panel-2/70 px-3 py-2.5">
-            <div className="mb-1 font-mono text-[0.6875rem] tabular-nums text-muted">
-              D{Math.max(0, state.day - index)}
-            </div>
-            <div className="text-[0.8125rem] leading-snug text-bone">{line}</div>
-          </article>
+          <FeedPost
+            key={`${line}-${index}`}
+            source="Wire"
+            dayLabel={`D${Math.max(0, state.day - index)}`}
+            tone="neutral"
+            body={line}
+          />
         ))}
       </div>
 
-      {alerts.length === 0 && news.length === 0 && !state.activeEvents[0] ? (
+      {alerts.length === 0 && news.length === 0 && state.activeEvents.length === 0 && announcements.length === 0 ? (
         <EmptyState title="Quiet wire" description="No alerts or headlines yet." />
       ) : null}
     </div>

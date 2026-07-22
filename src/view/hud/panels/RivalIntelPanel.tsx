@@ -1,49 +1,154 @@
-import { useMemo, useState } from 'react'
-import { blendApiPrice } from '../../../sim/balance/pricing'
-import { planAllowanceMTokPerMonth } from '../../../sim/systems/plans'
-import { competitiveCatchUpSnapshot } from '../../../sim/systems/sharedMarkets'
-import { useGameStore } from '../../../store/gameStore'
-import { money, num, pct } from '../format'
-import { GameCard, MeterBar, StatRow } from '../ui/kit'
-import {
-  EmptyState,
-  HudButton,
-  MetricTile,
-  PanelScaffold,
-  StatusChip,
-} from '../ui/HudPrimitives'
+import { useEffect, useMemo } from "react";
+import { blendApiPrice } from "../../../sim/balance/pricing";
+import { planAllowanceMTokPerMonth } from "../../../sim/systems/plans";
+import { competitiveCatchUpSnapshot } from "../../../sim/systems/sharedMarkets";
+import { useGameStore } from "../../../store/gameStore";
+import { useUiStore } from "../../../store/uiStore";
+import { money, num, pct } from "../format";
+import { FeedPost } from "../ui/FeedPost";
+import { GameCard, MeterBar, StatRow } from "../ui/kit";
+import { EmptyState, PanelScaffold, StatusChip } from "../ui/HudPrimitives";
 
-function range(values: [number, number] | undefined, format: (value: number) => string): string {
-  if (!values) return '—'
-  return `${format(values[0])}–${format(values[1])}`
+function RangeBar({
+  label,
+  values,
+  format,
+}: {
+  label: string;
+  values: [number, number] | undefined;
+  format: (value: number) => string;
+}) {
+  if (!values) {
+    return (
+      <div className="rounded-lg border border-line/60 bg-void/35 px-3 py-2.5">
+        <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+          {label}
+        </div>
+        <div className="mt-1 font-mono text-[0.875rem] text-muted">—</div>
+      </div>
+    );
+  }
+  const [min, max] = values;
+  const mid = (min + max) / 2;
+  const span = Math.max(1e-9, max - min);
+  const left = 12;
+  const width = Math.max(
+    18,
+    Math.min(76, (span / Math.max(Math.abs(max), Math.abs(min), 1)) * 100),
+  );
+  return (
+    <div className="rounded-lg border border-line/60 bg-void/35 px-3 py-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+          {label}
+        </div>
+        <div className="font-mono text-[0.8125rem] tabular-nums text-bone">
+          {format(min)} – {format(max)}
+        </div>
+      </div>
+      <div className="relative mt-2 h-2 overflow-hidden rounded-full bg-panel">
+        <div
+          className="absolute inset-y-0 rounded-full bg-research/55"
+          style={{ left: `${left}%`, width: `${width}%` }}
+        />
+        <div
+          className="absolute top-1/2 size-2 -translate-y-1/2 rounded-full bg-research"
+          style={{ left: `calc(${left + width / 2}% - 0.25rem)` }}
+          title={format(mid)}
+        />
+      </div>
+    </div>
+  );
 }
 
 /** Public-only rival intelligence. Exact private bids, cash, recipes, and research stay hidden. */
 export function RivalIntelPanel() {
-  const state = useGameStore((store) => store.state)
-  const rivals = state.rivals
+  const state = useGameStore((store) => store.state);
+  const selectedRivalId = useUiStore((store) => store.selectedRivalId);
+  const setSelectedRivalId = useUiStore((store) => store.setSelectedRivalId);
+  const rivals = state.rivals;
   const rankedRivals = useMemo(
-    () => rivals.toSorted((left, right) => right.marketShare - left.marketShare),
+    () =>
+      rivals.toSorted((left, right) => right.marketShare - left.marketShare),
     [rivals],
-  )
-  const [selectedId, setSelectedId] = useState(() => rankedRivals[0]?.id ?? '')
-  const rival = rankedRivals.find((entry) => entry.id === selectedId) ?? rankedRivals[0]
+  );
 
-  if (!rival) {
-    return (
-      <PanelScaffold title="Rival intelligence" description="No rival labs in this campaign.">
-        <EmptyState title="Empty field" description="This campaign has no rival labs to inspect." />
-      </PanelScaffold>
+  useEffect(() => {
+    if (selectedRivalId === "player" || !rankedRivals.length) return;
+    if (
+      selectedRivalId &&
+      rankedRivals.some((entry) => entry.id === selectedRivalId)
     )
+      return;
+    setSelectedRivalId(rankedRivals[0]!.id);
+  }, [rankedRivals, selectedRivalId, setSelectedRivalId]);
+
+  const isPlayerSelected = selectedRivalId === "player";
+  const rival =
+    rankedRivals.find((entry) => entry.id === selectedRivalId) ??
+    rankedRivals[0];
+
+  if (!rival && !isPlayerSelected) {
+    return (
+      <PanelScaffold
+        title="Rival intelligence"
+        description="No rival labs in this campaign."
+      >
+        <EmptyState
+          title="Empty field"
+          description="This campaign has no rival labs to inspect."
+        />
+      </PanelScaffold>
+    );
   }
 
-  const estimate = rival.publicEstimate
-  const publicModels = rival.models.filter((model) => model.release === 'released' || model.shipped)
-  const competitiveResponse = competitiveCatchUpSnapshot(state)
+  const estimate = rival?.publicEstimate;
+  const publicModels =
+    rival?.models.filter(
+      (model) => model.release === "released" || model.shipped,
+    ) ?? [];
+  const competitiveResponse = competitiveCatchUpSnapshot(state);
   const marketRows = [
-    { id: 'player', name: 'You', share: state.player.finance.totalShare },
-    ...rankedRivals.map((entry) => ({ id: entry.id, name: entry.name, share: entry.marketShare })),
-  ].toSorted((left, right) => right.share - left.share)
+    { id: "player", name: "You", share: state.player.finance.totalShare },
+    ...rankedRivals.map((entry) => ({
+      id: entry.id,
+      name: entry.name,
+      share: entry.marketShare,
+    })),
+  ].toSorted((left, right) => right.share - left.share);
+
+  const announcementPosts = [
+    rival && estimate?.announcedProject
+      ? {
+          id: `${rival.id}-announced`,
+          source: rival.name,
+          dayLabel: `D${state.day}`,
+          body: estimate.announcedProject,
+          tone: "train" as const,
+        }
+      : null,
+    ...state.news
+      .filter(
+        (line) =>
+          rival && line.toLowerCase().includes(rival.name.toLowerCase()),
+      )
+      .slice(0, 3)
+      .map((line, index) => ({
+        id: `${rival?.id ?? "player"}-news-${index}`,
+        source: rival?.name ?? state.player.name,
+        dayLabel: `D${Math.max(0, state.day - index)}`,
+        body: line,
+        tone: "serve" as const,
+      })),
+  ]
+    .filter(Boolean)
+    .slice(0, 3) as Array<{
+    id: string;
+    source: string;
+    dayLabel: string;
+    body: string;
+    tone: "train" | "serve";
+  }>;
 
   return (
     <PanelScaffold
@@ -55,26 +160,30 @@ export function RivalIntelPanel() {
         <GameCard eyebrow="Field" title="Market position" tone="research">
           <div className="anim-stagger space-y-1.5">
             {marketRows.map((entry) => {
-              const selected = entry.id === rival.id
-              const isPlayer = entry.id === 'player'
+              const selected =
+                entry.id === (isPlayerSelected ? "player" : rival?.id);
+              const isPlayer = entry.id === "player";
               return (
                 <button
                   key={entry.id}
                   type="button"
-                  disabled={isPlayer}
                   aria-pressed={selected}
-                  onClick={() => setSelectedId(entry.id)}
+                  onClick={() => setSelectedRivalId(entry.id)}
                   className={`flex min-h-11 w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left transition ${
                     selected
-                      ? 'bg-research/10 ring-1 ring-research/35'
+                      ? "bg-research/10 ring-1 ring-research/35"
                       : isPlayer
-                        ? 'cursor-default bg-mint/8'
-                        : 'hover-lift hover:bg-void/55'
+                        ? "hover-lift bg-mint/8 hover:bg-mint/12"
+                        : "hover-lift hover:bg-void/55"
                   }`}
                 >
                   <span
                     className={`min-w-0 flex-1 truncate text-[0.875rem] font-medium ${
-                      selected ? 'text-research' : isPlayer ? 'text-mint' : 'text-bone'
+                      selected
+                        ? "text-research"
+                        : isPlayer
+                          ? "text-mint"
+                          : "text-bone"
                     }`}
                   >
                     {entry.name}
@@ -82,157 +191,402 @@ export function RivalIntelPanel() {
                   <div className="w-[42%] min-w-[7rem]">
                     <MeterBar
                       value={entry.share}
-                      tone={isPlayer ? 'positive' : selected ? 'research' : 'warning'}
+                      tone={
+                        isPlayer
+                          ? "positive"
+                          : selected
+                            ? "research"
+                            : "warning"
+                      }
                       detail={pct(entry.share, 0)}
                     />
                   </div>
                   <span
                     className={`w-14 shrink-0 text-right font-mono text-lg font-semibold tabular-nums ${
-                      isPlayer ? 'text-mint' : selected ? 'text-research' : 'text-bone'
+                      isPlayer
+                        ? "text-mint"
+                        : selected
+                          ? "text-research"
+                          : "text-bone"
                     }`}
                   >
                     {pct(entry.share, 0)}
                   </span>
                 </button>
-              )
+              );
             })}
           </div>
         </GameCard>
 
-        <GameCard
-          eyebrow={rival.name}
-          title="Estimated range"
-          tone="research"
-          actions={<StatusChip tone="research">{estimate ? `${pct(estimate.confidence, 0)} conf.` : '—'}</StatusChip>}
-        >
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            <MetricTile
-              label="Compute"
-              value={range(estimate?.computePf, (value) => `${num(value, 0)} PF`)}
-              tone="research"
-            />
-            <MetricTile
-              label="Training data"
-              value={range(estimate?.dataMTok, (value) => `${num(value, 0)} MTok`)}
-              tone="research"
-            />
-            <MetricTile
-              label="Runway"
-              value={range(estimate?.runwayDays, (value) => `${num(value, 0)}d`)}
-              tone="research"
-            />
-            <MetricTile label="Cash" value={range(estimate?.cash, money)} tone="research" />
-          </div>
-          <div className="mt-3 space-y-0.5">
-            <StatRow label="Debt" value={range(estimate?.debt, money)} />
-            <StatRow
-              label="Service"
-              value={(rival.lastUnserved ?? 0) > 0.05 ? `${pct(rival.lastUnserved ?? 0, 0)} short` : 'Healthy'}
-              tone={(rival.lastUnserved ?? 0) > 0.05 ? 'danger' : 'positive'}
-            />
-          </div>
-        </GameCard>
+        {isPlayerSelected ? (
+          <>
+            <GameCard
+              eyebrow={state.player.name || "Your company"}
+              title="Company performance"
+              tone="mint"
+              actions={<StatusChip tone="positive">Exact</StatusChip>}
+            >
+              <div className="grid gap-x-5 sm:grid-cols-2">
+                <StatRow
+                  label="Cash"
+                  value={money(state.player.cash)}
+                  tone={state.player.cash < 0 ? "danger" : "positive"}
+                />
+                <StatRow
+                  label="Runway"
+                  value={
+                    Number.isFinite(state.player.finance.runwayDays)
+                      ? `${num(state.player.finance.runwayDays, 0)}d`
+                      : "Profitable"
+                  }
+                />
+                <StatRow
+                  label="Revenue / day"
+                  value={money(state.player.finance.dayRevenue)}
+                />
+                <StatRow
+                  label="Net / day"
+                  value={money(state.player.finance.dayNet)}
+                  tone={state.player.finance.dayNet < 0 ? "danger" : "positive"}
+                />
+                <StatRow
+                  label="Lifetime revenue"
+                  value={money(state.player.finance.lifetimeRevenue)}
+                />
+                <StatRow
+                  label="Lifetime net"
+                  value={money(state.player.finance.lifetimeNet)}
+                  tone={
+                    state.player.finance.lifetimeNet < 0 ? "danger" : "positive"
+                  }
+                />
+                <StatRow
+                  label="Company value"
+                  value={money(state.player.finance.valuation)}
+                />
+                <StatRow
+                  label="Debt"
+                  value={money(state.player.finance.debtOutstanding)}
+                />
+              </div>
+            </GameCard>
 
-        {estimate?.announcedProject ? (
-          <GameCard tone="train" title="Announced project">
-            <p className="text-[0.8125rem] text-amber">
-              <strong className="text-bone">{estimate.announcedProject}</strong>
-            </p>
-          </GameCard>
-        ) : null}
-
-        {competitiveResponse.active && competitiveResponse.rivalId === rival.id ? (
-          <GameCard tone="mint" title="Lead challenger">
-            <p className="text-[0.8125rem] text-mint">
-              Capital markets are funding accelerator purchases against a{' '}
-              {(competitiveResponse.shareGap * 100).toFixed(0)}-point share gap
-              {competitiveResponse.capabilityGap >= 1
-                ? ` and ${competitiveResponse.capabilityGap.toFixed(0)} capability-point gap.`
-                : '.'}
-            </p>
-          </GameCard>
-        ) : null}
-
-        <GameCard eyebrow="Public fleet" title="Released models & API" tone="infer">
-          <div className="overflow-x-auto rounded-lg border border-line/60">
-            <table className="w-full min-w-[42rem] text-left text-[0.8125rem]">
-              <thead className="bg-void/60 font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
-                <tr>
-                  <th className="px-3 py-2.5">Model</th>
-                  <th className="px-3 py-2.5">Capability</th>
-                  <th className="px-3 py-2.5">Price in / out</th>
-                  <th className="px-3 py-2.5">Speed</th>
-                  <th className="px-3 py-2.5">Features</th>
-                </tr>
-              </thead>
-              <tbody className="anim-stagger">
-                {publicModels.map((model) => {
-                  const input = model.apiPriceInPerMTok ?? rival.pricing.apiPriceInPerMTok
-                  const output = model.apiPriceOutPerMTok ?? rival.pricing.apiPriceOutPerMTok
-                  return (
-                    <tr key={model.id} className="border-t border-line/70 text-bone">
-                      <td className="px-3 py-3">
-                        <strong className="text-[0.875rem]">{model.name}</strong>
-                        <span className="mt-0.5 block text-[0.75rem] text-muted">
-                          {model.backbone ?? model.family} · {num(model.paramsB, 1)}B
-                        </span>
-                      </td>
-                      <td className="px-3 py-3 font-mono tabular-nums">{model.capability.toFixed(0)}</td>
-                      <td className="px-3 py-3 font-mono tabular-nums">
-                        ${input.toFixed(2)} / ${output.toFixed(2)}
-                        <span className="mt-0.5 block text-[0.75rem] text-muted">
-                          ${blendApiPrice(input, output).toFixed(2)} blend
-                        </span>
-                      </td>
-                      <td className="px-3 py-3 font-mono tabular-nums">
-                        {num(model.serviceProfile?.interactiveTokPerSec ?? 52 * model.tokPerSecMult, 0)} tok/s
-                      </td>
-                      <td className="px-3 py-3 text-muted">{model.modalities.join(', ')}</td>
-                    </tr>
-                  )
-                })}
-                {publicModels.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="px-3 py-6 text-center text-muted">
-                      No public release.
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
-        </GameCard>
-
-        <GameCard eyebrow="Offers" title="Subscription offers" tone="mint">
-          {(rival.pricing.plans ?? []).filter((plan) => plan.enabled).length === 0 ? (
-            <EmptyState title="No public plans" description="This rival has not disclosed consumer subscription offers." />
-          ) : (
-            <div className="anim-stagger grid gap-2 sm:grid-cols-2">
-              {(rival.pricing.plans ?? [])
-                .filter((plan) => plan.enabled)
-                .map((plan) => (
-                  <div key={plan.id} className="rounded-lg border border-line/70 bg-void/35 px-3 py-2.5">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <strong className="truncate text-[0.875rem] text-bone">{plan.name}</strong>
-                      <span className="shrink-0 font-mono text-[0.875rem] tabular-nums text-mint">
-                        {money(plan.pricePerMonth)}/mo
-                      </span>
+            <GameCard
+              eyebrow="Operations"
+              title="Models & service"
+              tone="infer"
+            >
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {[
+                  [
+                    "Released",
+                    state.player.models.filter(
+                      (model) => model.release === "released" || model.shipped,
+                    ).length,
+                  ],
+                  [
+                    "Internal",
+                    state.player.models.filter(
+                      (model) => model.release !== "released" && !model.shipped,
+                    ).length,
+                  ],
+                  [
+                    "Training",
+                    state.player.trainingJobs?.length ??
+                      (state.player.trainingJob ? 1 : 0),
+                  ],
+                  [
+                    "Subscribers",
+                    state.lastMarket.planStats.reduce(
+                      (sum, plan) => sum + plan.subscribers,
+                      0,
+                    ),
+                  ],
+                ].map(([label, value]) => (
+                  <div
+                    key={label}
+                    className="rounded-lg border border-line/60 bg-void/35 px-3 py-2.5"
+                  >
+                    <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+                      {label}
                     </div>
-                    <div className="mt-1 font-mono text-[0.8125rem] text-muted">
-                      {num(planAllowanceMTokPerMonth(plan), 2)} MTok · {plan.servePrecision ?? 'fp16'}
-                    </div>
+                    <strong className="mt-1 block font-mono text-lg tabular-nums text-bone">
+                      {num(Number(value), 0)}
+                    </strong>
                   </div>
                 ))}
-            </div>
-          )}
-        </GameCard>
+              </div>
+              <div className="mt-3 space-y-0.5">
+                <StatRow
+                  label="API traffic"
+                  value={`${num(state.lastMarket.apiDayMTok, 2)} MTok/d`}
+                />
+                <StatRow
+                  label="Service"
+                  value={
+                    state.lastMarket.unservedRatio > 0.05
+                      ? `${pct(state.lastMarket.unservedRatio, 0)} unserved`
+                      : "Healthy"
+                  }
+                  tone={
+                    state.lastMarket.unservedRatio > 0.05
+                      ? "danger"
+                      : "positive"
+                  }
+                />
+                <StatRow
+                  label="Brand trust"
+                  value={num(state.player.brandTrust, 0)}
+                />
+              </div>
+            </GameCard>
 
-        <div className="flex justify-end">
-          <HudButton variant="ghost" onClick={() => useGameStore.getState().setPanel('market')}>
-            Open market →
-          </HudButton>
-        </div>
+            <GameCard eyebrow="Fleet" title="Your released models" tone="mint">
+              {state.player.models.filter(
+                (model) => model.release === "released" || model.shipped,
+              ).length === 0 ? (
+                <EmptyState
+                  title="No public release"
+                  description="Release a trained model to begin competing for demand."
+                />
+              ) : (
+                <div className="anim-stagger space-y-2">
+                  {state.player.models
+                    .filter(
+                      (model) => model.release === "released" || model.shipped,
+                    )
+                    .toSorted(
+                      (left, right) => right.capability - left.capability,
+                    )
+                    .slice(0, 5)
+                    .map((model) => (
+                      <div
+                        key={model.id}
+                        className="flex items-center gap-3 rounded-lg border border-line/60 bg-void/35 px-3 py-2.5"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <strong className="block truncate text-[0.875rem] text-bone">
+                            {model.name}
+                          </strong>
+                          <span className="text-[0.75rem] text-muted">
+                            {model.backbone ?? model.family} ·{" "}
+                            {num(model.paramsB, 1)}B
+                          </span>
+                        </div>
+                        <div className="text-right">
+                          <strong className="font-mono text-base tabular-nums text-mint">
+                            {model.capability.toFixed(1)}
+                          </strong>
+                          <span className="block text-[0.6875rem] text-muted">
+                            capability
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )}
+            </GameCard>
+          </>
+        ) : rival ? (
+          <>
+            <GameCard
+              eyebrow={rival.name}
+              title="Estimated range"
+              tone="research"
+              actions={
+                <StatusChip tone="research">
+                  {estimate ? `${pct(estimate.confidence, 0)} conf.` : "—"}
+                </StatusChip>
+              }
+            >
+              <div className="grid gap-2 sm:grid-cols-2">
+                <RangeBar
+                  label="Compute"
+                  values={estimate?.computePf}
+                  format={(value) => `${num(value, 0)} PF`}
+                />
+                <RangeBar
+                  label="Training data"
+                  values={estimate?.dataMTok}
+                  format={(value) => `${num(value, 0)} MTok`}
+                />
+                <RangeBar
+                  label="Runway"
+                  values={estimate?.runwayDays}
+                  format={(value) => `${num(value, 0)}d`}
+                />
+                <RangeBar label="Cash" values={estimate?.cash} format={money} />
+              </div>
+              <div className="mt-3 space-y-0.5">
+                <StatRow
+                  label="Debt"
+                  value={
+                    estimate
+                      ? `${money(estimate.debt[0])} – ${money(estimate.debt[1])}`
+                      : "—"
+                  }
+                />
+                <StatRow
+                  label="Service"
+                  value={
+                    (rival.lastUnserved ?? 0) > 0.05
+                      ? `${pct(rival.lastUnserved ?? 0, 0)} short`
+                      : "Healthy"
+                  }
+                  tone={
+                    (rival.lastUnserved ?? 0) > 0.05 ? "danger" : "positive"
+                  }
+                />
+              </div>
+            </GameCard>
+
+            <GameCard eyebrow="Wire" title="Recent announcements" tone="train">
+              {announcementPosts.length === 0 ? (
+                <EmptyState
+                  title="No public posts"
+                  description="Announced projects and rival headlines will appear here."
+                />
+              ) : (
+                <div className="anim-stagger space-y-2">
+                  {announcementPosts.map((post) => (
+                    <FeedPost
+                      key={post.id}
+                      source={post.source}
+                      dayLabel={post.dayLabel}
+                      body={post.body}
+                      tone={post.tone === "train" ? "warning" : "serve"}
+                    />
+                  ))}
+                </div>
+              )}
+            </GameCard>
+
+            {competitiveResponse.active &&
+            competitiveResponse.rivalId === rival.id ? (
+              <GameCard tone="mint" title="Lead challenger">
+                <p className="text-[0.8125rem] text-mint">
+                  Capital markets are funding accelerator purchases against a{" "}
+                  {(competitiveResponse.shareGap * 100).toFixed(0)}-point share
+                  gap
+                  {competitiveResponse.capabilityGap >= 1
+                    ? ` and ${competitiveResponse.capabilityGap.toFixed(0)} capability-point gap.`
+                    : "."}
+                </p>
+              </GameCard>
+            ) : null}
+
+            <GameCard
+              eyebrow="Public fleet"
+              title="Released models & API"
+              tone="infer"
+            >
+              <div className="overflow-x-auto rounded-lg border border-line/60">
+                <table className="w-full min-w-[42rem] text-left text-[0.8125rem]">
+                  <thead className="bg-void/60 font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+                    <tr>
+                      <th className="px-3 py-2.5">Model</th>
+                      <th className="px-3 py-2.5">Capability</th>
+                      <th className="px-3 py-2.5">Price in / out</th>
+                      <th className="px-3 py-2.5">Speed</th>
+                      <th className="px-3 py-2.5">Features</th>
+                    </tr>
+                  </thead>
+                  <tbody className="anim-stagger">
+                    {publicModels.map((model) => {
+                      const input =
+                        model.apiPriceInPerMTok ??
+                        rival.pricing.apiPriceInPerMTok;
+                      const output =
+                        model.apiPriceOutPerMTok ??
+                        rival.pricing.apiPriceOutPerMTok;
+                      return (
+                        <tr
+                          key={model.id}
+                          className="border-t border-line/70 text-bone"
+                        >
+                          <td className="px-3 py-3">
+                            <strong className="text-[0.875rem]">
+                              {model.name}
+                            </strong>
+                            <span className="mt-0.5 block text-[0.75rem] text-muted">
+                              {model.backbone ?? model.family} ·{" "}
+                              {num(model.paramsB, 1)}B
+                            </span>
+                          </td>
+                          <td className="px-3 py-3 font-mono tabular-nums">
+                            {model.capability.toFixed(0)}
+                          </td>
+                          <td className="px-3 py-3 font-mono tabular-nums">
+                            ${input.toFixed(2)} / ${output.toFixed(2)}
+                            <span className="mt-0.5 block text-[0.75rem] text-muted">
+                              ${blendApiPrice(input, output).toFixed(2)} blend
+                            </span>
+                          </td>
+                          <td className="px-3 py-3 font-mono tabular-nums">
+                            {num(
+                              model.serviceProfile?.interactiveTokPerSec ??
+                                52 * model.tokPerSecMult,
+                              0,
+                            )}{" "}
+                            tok/s
+                          </td>
+                          <td className="px-3 py-3 text-muted">
+                            {model.modalities.join(", ")}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {publicModels.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={5}
+                          className="px-3 py-6 text-center text-muted"
+                        >
+                          No public release.
+                        </td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              </div>
+            </GameCard>
+
+            <GameCard eyebrow="Offers" title="Subscription offers" tone="mint">
+              {(rival.pricing.plans ?? []).filter((plan) => plan.enabled)
+                .length === 0 ? (
+                <EmptyState
+                  title="No public plans"
+                  description="This rival has not disclosed consumer subscription offers."
+                />
+              ) : (
+                <div className="anim-stagger grid gap-2 sm:grid-cols-2">
+                  {(rival.pricing.plans ?? [])
+                    .filter((plan) => plan.enabled)
+                    .map((plan) => (
+                      <div
+                        key={plan.id}
+                        className="rounded-lg border border-line/70 bg-void/35 px-3 py-2.5"
+                      >
+                        <div className="flex items-baseline justify-between gap-2">
+                          <strong className="truncate text-[0.875rem] text-bone">
+                            {plan.name}
+                          </strong>
+                          <span className="shrink-0 font-mono text-[0.875rem] tabular-nums text-mint">
+                            {money(plan.pricePerMonth)}/mo
+                          </span>
+                        </div>
+                        <div className="mt-1 font-mono text-[0.8125rem] text-muted">
+                          {num(planAllowanceMTokPerMonth(plan), 2)} MTok ·{" "}
+                          {plan.servePrecision ?? "fp16"}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )}
+            </GameCard>
+          </>
+        ) : null}
       </div>
     </PanelScaffold>
-  )
+  );
 }

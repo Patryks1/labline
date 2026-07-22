@@ -374,15 +374,48 @@ export function scoreDesign(design: RackDesign): RackDesignStats {
  * MoE: experts mostly resident (total) + hot active path / activations.
  * Hosting *compute* (PF) uses active only — see modelHostNeed.
  */
-export function modelVramGb(paramsB: number, activeParamsB?: number, family?: string): number {
-  if (family === 'moe' && activeParamsB != null) {
-    const active = Math.max(0.01, activeParamsB)
-    const total = Math.max(active, paramsB)
-    // Most expert weights in VRAM; active path adds activation headroom
-    return total * 1.15 + active * 1.1 + 10
+/** Bytes per parameter for a serving precision. */
+export function servePrecisionBytes(precision: string = 'fp16'): number {
+  switch (precision) {
+    case 'fp32':
+      return 4
+    case 'bf16':
+    case 'fp16':
+      return 2
+    case 'fp8':
+    case 'int8':
+      return 1
+    case 'nvfp4':
+    case 'int4':
+      return 0.5
+    case 'ternary_1_58':
+      return 0.2
+    default:
+      return 2
   }
-  // dense FP16 + activations headroom
-  return paramsB * 2.15 + Math.max(4, paramsB * 0.4)
+}
+
+/**
+ * Rough VRAM need for a model (GB).
+ * Dense uses total params; MoE uses active + 0.5*(total-active) resident experts.
+ * Precision scales bytes/weight; KV-cache + workspace are shared headroom.
+ */
+export function modelVramGb(
+  paramsB: number,
+  activeParamsB?: number,
+  family?: string,
+  precision: string = 'fp16',
+): number {
+  const bytes = servePrecisionBytes(precision)
+  const total = Math.max(0.01, paramsB)
+  const active = Math.max(0.01, activeParamsB ?? total)
+  const isMoe = family === 'moe' && activeParamsB != null
+  // MoE: offloaded experts count half toward resident memory.
+  const residentB = isMoe ? active + 0.5 * Math.max(0, total - active) : total
+  const weightGb = (residentB * 1e9 * bytes) / (1024 ** 3)
+  const kvCacheGb = Math.max(2, active * 0.35 * (bytes / 2))
+  const workspaceGb = Math.max(4, active * 0.25)
+  return weightGb + kvCacheGb + workspaceGb
 }
 
 export function modelTrainVramGb(

@@ -155,6 +155,14 @@ export function buildLabStats(state: SimState): LabStats {
   const inferCostDay = energy * inferShare + amort * inferShare
   const researchCostDay = energy * researchShare + amort * researchShare
 
+  const powerExportIncome = Math.max(
+    0,
+    (state.powerExportContracts ?? [])
+      .filter((contract) => contract.daysLeft > 0)
+      .reduce((sum, contract) => sum + contract.mw * contract.pricePerMWh * 24, 0),
+  )
+  const leaseIncome = Math.max(0, state.player.computeLeaseIncomeToday ?? 0)
+
   const income: MoneyLine[] = [
     {
       id: 'api',
@@ -178,6 +186,24 @@ export function buildLabStats(state: SimState): LabStats {
       hint: `${state.player.enterpriseContracts} contracts`,
     },
   ]
+  if (powerExportIncome > 0) {
+    income.push({
+      id: 'power-export',
+      label: 'Power exports',
+      amount: powerExportIncome,
+      kind: 'in',
+      hint: 'Active grid export contracts',
+    })
+  }
+  if (leaseIncome > 0) {
+    income.push({
+      id: 'lease-income',
+      label: 'Compute lease income',
+      amount: leaseIncome,
+      kind: 'in',
+      hint: 'PF sold on the compute market',
+    })
+  }
 
   const productCosts: MoneyLine[] = [
     {

@@ -16,13 +16,15 @@ import { MANUAL_SLOTS, type SaveSlotId } from '../../sim/save'
 import { useGameStore } from '../../store/gameStore'
 import { money } from './format'
 import { formatLastPlayed } from './menuTime'
-import { useUiStore } from '../../store/uiStore'
+import { RENDER_PRESETS, type RenderPreset, useUiStore } from '../../store/uiStore'
+import { FeedPost } from './ui/FeedPost'
 import {
   ArrowRight,
   Atom,
   ArrowLeft,
   Database,
   DiceFive,
+  GearSix,
   GlobeHemisphereWest,
   Lock,
   Newspaper,
@@ -57,7 +59,7 @@ const SCENARIOS: { id: ScenarioId; label: string; blurb: string }[] = [
   },
 ]
 
-type MenuTab = 'home' | 'new' | 'load' | 'news'
+type MenuTab = 'home' | 'new' | 'load' | 'news' | 'settings'
 
 const COMPANY_MARKS: { id: CompanyMarkId; label: string }[] = [
   { id: 'orbit', label: 'Orbit' },
@@ -113,6 +115,12 @@ export function NewGameMenu() {
   const lifecycleError = useGameStore((s) => s.lifecycleError)
   const clearLifecycleError = useGameStore((s) => s.clearLifecycleError)
   const requestConfirm = useUiStore((s) => s.requestConfirm)
+  const interfaceScale = useUiStore((s) => s.interfaceScale)
+  const setInterfaceScale = useUiStore((s) => s.setInterfaceScale)
+  const renderPreset = useUiStore((s) => s.renderPreset)
+  const setRenderPreset = useUiStore((s) => s.setRenderPreset)
+  const reducedMotion = useUiStore((s) => s.reducedMotion)
+  const setReducedMotion = useUiStore((s) => s.setReducedMotion)
 
   const [tab, setTab] = useState<MenuTab>('home')
   const [status, setStatus] = useState<string | null>(null)
@@ -277,7 +285,9 @@ export function NewGameMenu() {
                       ? 'Saved Sandboxes'
                       : tab === 'news'
                         ? 'News / Changelog'
-                        : 'Command'}
+                        : tab === 'settings'
+                          ? 'Settings'
+                          : 'Command'}
                 </p>
                 <h1 className="mt-2 text-[2rem] font-semibold leading-none tracking-[-0.045em] text-bone">
                   {tab === 'new'
@@ -286,7 +296,9 @@ export function NewGameMenu() {
                       ? 'Choose a save'
                       : tab === 'news'
                         ? 'What changed'
-                        : 'Build the frontier'}
+                        : tab === 'settings'
+                          ? 'Display & motion'
+                          : 'Build the frontier'}
                 </h1>
               </div>
               {tab === 'new' ? (
@@ -300,7 +312,13 @@ export function NewGameMenu() {
                 </button>
               ) : (
                 <span className="mt-0.5 grid size-11 shrink-0 place-items-center border border-line bg-void/65 text-mint">
-                  {tab === 'load' ? <Database size="1.35rem" weight="duotone" /> : tab === 'news' ? <Newspaper size="1.35rem" weight="duotone" /> : <Play size="1.35rem" weight="duotone" />}
+                  {tab === 'load'
+                    ? <Database size="1.35rem" weight="duotone" />
+                    : tab === 'news'
+                      ? <Newspaper size="1.35rem" weight="duotone" />
+                      : tab === 'settings'
+                        ? <GearSix size="1.35rem" weight="duotone" />
+                        : <Play size="1.35rem" weight="duotone" />}
                 </span>
               )}
             </div>
@@ -308,7 +326,8 @@ export function NewGameMenu() {
               {tab === 'home' && 'Continue, start fresh, or manage saves.'}
               {tab === 'new' && 'Name the company, choose its mark, then set the market.'}
               {tab === 'load' && 'Autosave plus eight manual slots.'}
-              {tab === 'news' && 'Recent simulation and interface updates.'}
+              {tab === 'news' && 'Changelog posts and simulation notes.'}
+              {tab === 'settings' && 'Render quality, interface scale, and motion.'}
             </p>
           </div>
 
@@ -333,7 +352,7 @@ export function NewGameMenu() {
         {tab !== 'new' && (
           <nav
             aria-label="Main menu sections"
-            className="grid grid-cols-3 border border-line/80 bg-void/50 p-1"
+            className="grid grid-cols-4 border border-line/80 bg-void/50 p-1"
           >
             <TabChip active={tab === 'home'} onClick={() => selectTab('home')}>
               Command
@@ -343,6 +362,9 @@ export function NewGameMenu() {
             </TabChip>
             <TabChip active={tab === 'load'} onClick={() => selectTab('load')}>
               Saves
+            </TabChip>
+            <TabChip active={tab === 'settings'} onClick={() => selectTab('settings')}>
+              Settings
             </TabChip>
           </nav>
         )}
@@ -405,10 +427,112 @@ export function NewGameMenu() {
         )}
 
         {tab === 'news' && (
-          <div className="mt-5 space-y-2">
-            <NewsEntry version="Sandbox update" date="Today" title="Company identity" body="Name your company and choose a mark before launch." />
-            <NewsEntry version="Simulation update" date="Recent" title="Infrastructure economy" body="Expanded facilities, silicon and compute management." />
-            <NewsEntry version="Interface update" date="Recent" title="Command clarity" body="Lean menus, clearer saves and actionable recovery errors." />
+          <div className="anim-stagger mt-5 space-y-2">
+            <FeedPost
+              source="Labline Ops"
+              dayLabel="Today"
+              timeLabel="Changelog"
+              tone="positive"
+              body={<><strong className="text-bone">Company identity</strong> — name your company and choose a mark before launch.</>}
+            />
+            <FeedPost
+              source="Simulation"
+              dayLabel="Recent"
+              timeLabel="Changelog"
+              tone="research"
+              body={<><strong className="text-bone">Infrastructure economy</strong> — expanded facilities, silicon, and compute management.</>}
+            />
+            <FeedPost
+              source="Interface"
+              dayLabel="Recent"
+              timeLabel="Changelog"
+              tone="serve"
+              body={<><strong className="text-bone">Command clarity</strong> — lean menus, clearer saves, and actionable recovery errors.</>}
+            />
+            <FeedPost
+              source="World Feed"
+              dayLabel="Live"
+              timeLabel="Note"
+              tone="warning"
+              body="In-game World posts reuse this same feed layout for alerts, rival announcements, and live events."
+            />
+          </div>
+        )}
+
+        {tab === 'settings' && (
+          <div className="mt-5 space-y-3">
+            <section className="rounded-lg border border-line/70 bg-panel-2/70 p-3.5">
+              <h3 className="text-sm font-semibold text-bone">Render preset</h3>
+              <p className="mt-1 text-[0.75rem] text-muted">Controls pixel ratio, decorative traffic, and LOD transition speed.</p>
+              <div className="mt-3 grid grid-cols-3 gap-1.5">
+                {([
+                  ['performance', 'Performance'],
+                  ['balanced', 'Balanced'],
+                  ['quality', 'Quality'],
+                ] as const).map(([id, label]) => {
+                  const preset = RENDER_PRESETS[id as RenderPreset]
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      aria-pressed={renderPreset === id}
+                      onClick={() => setRenderPreset(id)}
+                      className={`rounded-md border px-2 py-2 text-left transition ${
+                        renderPreset === id
+                          ? 'border-mint/50 bg-mint/15 text-mint'
+                          : 'border-line bg-void/35 text-muted hover:text-bone'
+                      }`}
+                    >
+                      <strong className="block text-[0.75rem]">{label}</strong>
+                      <span className="mt-1 block font-mono text-[0.625rem] tabular-nums opacity-80">
+                        {preset.pixelRatio}× · {preset.decorativeTraffic ? 'traffic' : 'no traffic'} · {preset.lodTransitionMs}ms
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            </section>
+
+            <section className="rounded-lg border border-line/70 bg-panel-2/70 p-3.5">
+              <h3 className="text-sm font-semibold text-bone">Interface scale</h3>
+              <div className="mt-3 grid grid-cols-4 gap-1.5">
+                {([
+                  ['auto', 'Auto'],
+                  [0.8, '80%'],
+                  [0.9, '90%'],
+                  [1, '100%'],
+                  [1.1, '110%'],
+                  [1.25, '125%'],
+                  [1.5, '150%'],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={String(value)}
+                    type="button"
+                    onClick={() => setInterfaceScale(value)}
+                    className={`min-h-9 rounded-md border px-2 font-mono text-[0.6875rem] transition ${
+                      interfaceScale === value
+                        ? 'border-mint/50 bg-mint/15 text-mint'
+                        : 'border-line bg-void/35 text-muted hover:text-bone'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <button
+              type="button"
+              aria-pressed={reducedMotion}
+              onClick={() => setReducedMotion(!reducedMotion)}
+              className="flex w-full items-center justify-between gap-3 rounded-lg border border-line/70 bg-panel-2/70 px-3.5 py-3 text-left hover:border-mint/30"
+            >
+              <span>
+                <strong className="block text-[0.875rem] text-bone">Reduce motion</strong>
+                <span className="mt-1 block text-[0.75rem] text-muted">Disable panel transitions and animated status changes.</span>
+              </span>
+              <span className={`status-chip ${reducedMotion ? 'status-chip--positive' : ''}`}>{reducedMotion ? 'On' : 'Off'}</span>
+            </button>
           </div>
         )}
 
@@ -842,29 +966,6 @@ function CompanyMark({ mark }: { mark: CompanyMarkId }) {
         </>
       )}
     </svg>
-  )
-}
-
-function NewsEntry({
-  version,
-  date,
-  title,
-  body,
-}: {
-  version: string
-  date: string
-  title: string
-  body: string
-}) {
-  return (
-    <div className="border border-line bg-panel-2/70 px-4 py-3.5">
-      <div className="flex items-center justify-between gap-3 font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">
-        <span className="text-mint">{version}</span>
-        <span>{date}</span>
-      </div>
-      <strong className="mt-2 block text-[0.875rem] text-bone">{title}</strong>
-      <p className="mt-1 text-[0.75rem] leading-5 text-muted">{body}</p>
-    </div>
   )
 }
 

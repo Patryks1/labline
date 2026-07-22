@@ -14,7 +14,7 @@ import { facilityAnchorTiles } from '../../../sim/systems/worldAccess'
 import type { MapTile, PanelId, SimState } from '../../../sim/types'
 import { useGameStore } from '../../../store/gameStore'
 import { computeSnapshot } from '../../../sim/tick'
-import { gb, mw, num, pf } from '../format'
+import { computeMw, gb, mw, num, pfToMw } from '../format'
 import { BuildingNameField } from '../ui/BuildingNameField'
 import {
   EmptyState,
@@ -91,7 +91,7 @@ export function InfrastructureOverview() {
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <MetricTile label="Sites" value={String(live.length)} detail={`${construction.length} building`} />
-        <MetricTile label="Fleet PF" value={pf(fleet.flopsPf)} tone="positive" />
+        <MetricTile label="Fleet compute" value={computeMw(pfToMw(fleet.flopsPf))} tone="positive" />
         <MetricTile
           label="Power"
           value={mw(snap.mwDemand)}
@@ -117,7 +117,7 @@ export function InfrastructureOverview() {
       >
         <div className="grid grid-cols-2 gap-x-4">
           <StatRow label="VRAM" value={gb(fleet.vramGb)} />
-          <StatRow label="Host need" value={pf(host.pfNeed)} tone={host.shortOn !== 'ok' ? 'warning' : 'neutral'} />
+          <StatRow label="Host need" value={computeMw(pfToMw(host.pfNeed))} tone={host.shortOn !== 'ok' ? 'warning' : 'neutral'} />
           <StatRow label="Fleet draw" value={mw(fleet.mw)} />
           <StatRow
             label="Grid pressure"

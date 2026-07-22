@@ -1,5 +1,9 @@
 import { useState } from 'react'
 import type { PostTrainStage, TrainingJob } from '../../../../sim/types'
+import {
+  canReleaseTrainingJob,
+  type TrainingResourceAllocation,
+} from '../../../../sim/systems/training'
 import { formatParams } from '../../../../sim/balance/training'
 import { formatTokens, DATA_DOMAINS, DATA_DOMAIN_META } from '../../../../sim/balance/data'
 import { money, num } from '../../format'
@@ -13,6 +17,7 @@ import type { Model, SafetyCampaign, SafetyCampaignIntensity } from '../../../..
 export function ActiveTrainingCard({
   job,
   trainingPoolPf,
+  resources,
   jobs,
   unlocked,
   day,
@@ -22,11 +27,13 @@ export function ActiveTrainingCard({
   onRelease,
   onBenchmark,
   onKeepInternal,
+  onExtend,
   onSelectPostTrain,
   safetyProps,
 }: {
   job: TrainingJob
   trainingPoolPf: number
+  resources?: TrainingResourceAllocation
   jobs: TrainingJob[]
   unlocked: string[]
   day: number
@@ -36,6 +43,7 @@ export function ActiveTrainingCard({
   onRelease: (jobId: string) => void
   onBenchmark: (jobId: string) => void
   onKeepInternal: (jobId: string) => void
+  onExtend?: (jobId: string) => void
   onSelectPostTrain: (jobId: string, stage: Exclude<PostTrainStage, 'none'>) => void
   safetyProps?: {
     model: Model | null
@@ -58,13 +66,26 @@ export function ActiveTrainingCard({
     jobs.reduce((sum, candidate) => sum + (candidate.paused || candidate.failed ? 0 : candidate.computePriority ?? 50), 0),
   )
   const allocatedPf =
-    job.failed || job.paused
+    resources
+      ? resources.effectivePf
+      : job.failed || job.paused
       ? 0
       : trainingPoolPf * ((job.computePriority ?? 50) / prioritySum)
   const remainingPf = Math.max(0, job.targetPfDays - job.progressPfDays)
   const etaDays = allocatedPf > 0.05 ? remainingPf / allocatedPf : Infinity
   const currentLoss = job.lossHistory?.at(-1)?.loss
+  const recommended = job.recommendedPfDays ?? job.targetPfDays
+  const atRecommended = job.progressPfDays + 1e-9 >= recommended
+  const recommendedProgress = recommended > 0 ? job.progressPfDays / recommended : progress
+  const releaseGate = canReleaseTrainingJob(job)
+  const economics = job.economics
+  const snapshots = job.benchmarkSnapshots ?? []
+  const canBenchmarkMid = !job.failed && progress >= 0.1 && (job.lastBenchmarkDay == null || day - job.lastBenchmarkDay >= 7)
   const done = !job.failed && job.progressPfDays >= job.targetPfDays
+  const ramBlocked = Boolean(
+    resources && !resources.ramReady && !job.failed && !job.paused && !done,
+  )
+  const awaiting = Boolean(job.awaitingDecision)
   const modeLabel =
     job.mode === 'distill'
       ? `Distill · teacher ${Math.round((job.distillTeacherShare ?? 0.72) * 100)}%`
@@ -77,17 +98,17 @@ export function ActiveTrainingCard({
       eyebrow="Live training"
       title={
         <span className="flex items-center gap-2">
-          <LiveDot className={job.failed ? 'text-danger' : job.paused ? 'text-amber' : 'text-train'} />
+          <LiveDot className={job.failed || ramBlocked ? 'text-danger' : job.paused ? 'text-amber' : 'text-train'} />
           <span className="truncate">{job.name}</span>
         </span>
       }
-      tone={job.failed ? 'danger' : 'train'}
-      live={!job.failed && !job.paused && !done}
-      className={!job.failed && !done ? 'live-glow' : ''}
+      tone={job.failed || ramBlocked ? 'danger' : 'train'}
+      live={!job.failed && !job.paused && !done && !ramBlocked}
+      className={!job.failed && !done && !ramBlocked ? 'live-glow' : ''}
       actions={
         <div className="flex items-center gap-1.5">
-          <StatusChip tone={job.failed ? 'danger' : job.paused ? 'warning' : done ? 'positive' : 'warning'}>
-            {job.failed ? 'Failed' : job.paused ? 'Paused' : done ? 'Ready' : 'Training'}
+          <StatusChip tone={job.failed || ramBlocked ? 'danger' : job.paused ? 'warning' : done ? 'positive' : 'warning'}>
+            {job.failed ? 'Failed' : ramBlocked ? 'RAM blocked' : job.paused ? 'Paused' : done ? 'Ready' : 'Training'}
           </StatusChip>
         </div>
       }
@@ -100,9 +121,16 @@ export function ActiveTrainingCard({
               ? ` · ${formatParams(job.targetParamsB)} / ${formatParams(job.activeParamsB ?? 0)} active`
               : ` · ${formatParams(job.targetParamsB)}`}
           </p>
-          <p className="font-mono text-[0.8125rem] tabular-nums text-train">
-            {num(allocatedPf, 1)} PF/d · priority {job.computePriority ?? 50}
-          </p>
+          <div className="text-right font-mono text-[0.75rem] tabular-nums">
+            <p className="text-train">
+              {num(allocatedPf, 1)} PF/d · priority {job.computePriority ?? 50}
+            </p>
+            {resources ? (
+              <p className={resources.ramReady ? 'text-muted' : 'text-danger'}>
+                RAM {num(resources.ramAllocatedGb, 0)} / {num(resources.ramRequiredGb, 0)} GB
+              </p>
+            ) : null}
+          </div>
         </div>
 
         <MeterBar
@@ -110,7 +138,7 @@ export function ActiveTrainingCard({
           value={progress}
           detail={`${pct}% · ${etaDays === Infinity ? 'stalled' : `~${etaDays.toFixed(0)}d left`}`}
           tone="train"
-          live={!job.failed && !job.paused && !done}
+          live={!job.failed && !job.paused && !done && !ramBlocked}
         />
 
         <div className="grid grid-cols-3 gap-2">
@@ -141,6 +169,11 @@ export function ActiveTrainingCard({
         ) : null}
 
         {job.stallReason ? <p className="text-[0.75rem] text-amber">{job.stallReason}</p> : null}
+        {ramBlocked && !job.stallReason ? (
+          <p className="text-[0.75rem] text-danger">
+            Training RAM is a hard limit. Raise Training allocation, add memory, or pause another run.
+          </p>
+        ) : null}
 
         {job.dataPlan ? (
           <p className="truncate text-[0.75rem] text-muted">
@@ -158,6 +191,36 @@ export function ActiveTrainingCard({
             detail={`${num(job.postTrainProgress, 1)} / ${num(job.postTrainTarget, 1)}`}
             tone="research"
           />
+        ) : null}
+
+        {(economics || snapshots.length > 0) ? (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {economics ? (
+              <>
+                <StatRow label="Setup" value={money(economics.setupCost)} />
+                <StatRow label="Data" value={money(economics.dataCost)} />
+                <StatRow label="Training" value={money(economics.trainingCostAccrued)} tone="warning" />
+              </>
+            ) : null}
+            <StatRow
+              label="Recommended"
+              value={`${Math.round(Math.min(100, recommendedProgress * 100))}%`}
+            />
+          </div>
+        ) : null}
+
+        {snapshots.length ? (
+          <div className="rounded-md border border-line/50 bg-void/25 p-2.5">
+            <p className="hud-eyebrow mb-1.5">Benchmarks during training</p>
+            <div className="space-y-1">
+              {snapshots.slice(-4).map((snap, index) => (
+                <div key={`${snap.day}-${index}`} className="flex items-center justify-between gap-2 font-mono text-[0.6875rem] tabular-nums">
+                  <span className="text-muted">D{snap.day} · {(snap.progress * 100).toFixed(0)}%</span>
+                  <span className="text-bone">cap {snap.capability.toFixed(1)} · safety {snap.safety.toFixed(1)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
         ) : null}
 
         <TrainingLossChart history={job.lossHistory ?? []} failed={job.failed ?? false} />
@@ -182,16 +245,23 @@ export function ActiveTrainingCard({
             <HudButton variant="danger" onClick={() => onCancel(job.id)}>
               Delete failed run
             </HudButton>
-          ) : done ? (
+          ) : done || awaiting ? (
             <>
               <HudButton
                 variant="primary"
+                disabled={!releaseGate.ok}
+                title={!releaseGate.ok ? releaseGate.reason : undefined}
                 onClick={() => onRelease(job.id)}
               >
                 Release
               </HudButton>
               <HudButton onClick={() => onBenchmark(job.id)}>Run benchmarks</HudButton>
               <HudButton onClick={() => onKeepInternal(job.id)}>Keep internal</HudButton>
+              {onExtend && (awaiting || atRecommended) ? (
+                <HudButton variant="secondary" onClick={() => onExtend(job.id)}>
+                  Extend 10 days
+                </HudButton>
+              ) : null}
               <HudButton
                 variant={cancelConfirm ? 'danger' : 'ghost'}
                 onClick={() => {
@@ -201,12 +271,27 @@ export function ActiveTrainingCard({
               >
                 {cancelConfirm ? 'Confirm delete' : 'Delete run'}
               </HudButton>
+              {!releaseGate.ok ? (
+                <p className="basis-full text-[0.75rem] text-amber">{releaseGate.reason}</p>
+              ) : null}
             </>
           ) : (
             <>
               <HudButton onClick={() => onPause(job.id, !job.paused)}>
                 {job.paused ? 'Resume' : 'Pause'}
               </HudButton>
+              <HudButton
+                disabled={!canBenchmarkMid}
+                title={!canBenchmarkMid ? 'Benchmarks unlock after 10% progress, then every 7 days.' : undefined}
+                onClick={() => onBenchmark(job.id)}
+              >
+                Benchmark
+              </HudButton>
+              {onExtend && atRecommended ? (
+                <HudButton variant="secondary" onClick={() => onExtend(job.id)}>
+                  Extend 10 days
+                </HudButton>
+              ) : null}
               <HudButton
                 variant={cancelConfirm ? 'danger' : 'ghost'}
                 onClick={() => {

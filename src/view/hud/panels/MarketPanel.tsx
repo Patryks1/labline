@@ -350,30 +350,59 @@ function ShareView({
 function SegmentsView({
   segments,
 }: {
-  segments: { id: string; size: number }[]
+  segments: Array<{ id: string; size: number; providerShares?: Record<string, number> }>
 }) {
+  const maxSize = Math.max(1, ...segments.map((segment) => Math.max(0, segment.size)))
+
   return (
-    <CardGrid min="14rem" className="anim-stagger">
-      {SEGMENTS.map((s) => {
-        const st = segments.find((x) => x.id === s.id)
-        const cares = Object.entries(s.benchmarkWeights)
-          .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
-          .slice(0, 3)
-          .map(([k]) => k)
-          .join(', ')
-        return (
-          <GameCard key={s.id} title={s.name} tone="research">
-            <div className="font-mono text-xl font-semibold tabular-nums text-bone">
-              {st ? audience(st.size) : '—'}
+    <GameCard eyebrow="Demographics" title="Audience scale" tone="research">
+      <p className="mb-3 text-[0.8125rem] text-muted">
+        Population bars with quality floor, your share, and estimated users.
+      </p>
+      <div className="anim-stagger space-y-3">
+        {SEGMENTS.map((s) => {
+          const st = segments.find((x) => x.id === s.id)
+          const size = Math.max(0, st?.size ?? 0)
+          const playerShare = Math.max(0, st?.providerShares?.player ?? 0)
+          const estimatedUsers = size * playerShare
+          const cares = Object.entries(s.benchmarkWeights)
+            .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
+            .slice(0, 3)
+            .map(([k]) => k)
+            .join(', ')
+          return (
+            <div key={s.id} className="rounded-md border border-line/70 bg-void/30 p-2.5">
+              <div className="flex items-baseline justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="truncate text-[0.8125rem] font-medium text-bone">{s.name}</div>
+                  <div className="mt-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
+                    floor {s.qualityFloor} · {cares || 'general'}
+                  </div>
+                </div>
+                <div className="shrink-0 text-right font-mono text-[0.8125rem] tabular-nums">
+                  <div className="text-bone">{audience(size)}</div>
+                  <div className="text-mint">{pct(playerShare, 0)} · {audience(estimatedUsers)}</div>
+                </div>
+              </div>
+              <div className="mt-2 h-3 overflow-hidden rounded-sm bg-line/50">
+                <div
+                  className="h-full bg-research/80"
+                  style={{ width: `${(size / maxSize) * 100}%` }}
+                  title={`${s.name}: ${audience(size)}`}
+                />
+              </div>
+              <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-line/40">
+                <div
+                  className="h-full bg-mint"
+                  style={{ width: `${Math.min(100, playerShare * 100)}%` }}
+                  title={`Your share ${pct(playerShare, 1)}`}
+                />
+              </div>
             </div>
-            <div className="mt-2 space-y-0.5">
-              <StatRow label="Quality floor" value={String(s.qualityFloor)} />
-              <StatRow label="Cares about" value={cares || '—'} />
-            </div>
-          </GameCard>
-        )
-      })}
-    </CardGrid>
+          )
+        })}
+      </div>
+    </GameCard>
   )
 }
 

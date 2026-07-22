@@ -92,7 +92,11 @@ function compactRegions(world: StaticWorld): MapRegion[] {
   }))
 }
 
-function findRivalStart(world: DynamicWorld, rivalIndex: number): TileId | undefined {
+function findRivalStart(
+  world: DynamicWorld,
+  rivalIndex: number,
+  reserved: ReadonlySet<TileId> = new Set(),
+): TileId | undefined {
   const city = world.staticWorld.cities[(rivalIndex + 1) % world.staticWorld.cities.length]
   if (!city) return world.staticWorld.starterPads[rivalIndex]
   for (let radius = city.radius + 2; radius <= city.radius + 24; radius++) {
@@ -104,20 +108,23 @@ function findRivalStart(world: DynamicWorld, rivalIndex: number): TileId | undef
       const y = side === 0 ? city.cy - radius : side === 1 ? city.cy + offset : side === 2 ? city.cy + radius : city.cy - offset
       if (x < 0 || y < 0 || x >= world.descriptor.width || y >= world.descriptor.height) continue
       const id = tileId(x, y, world.descriptor.width, world.descriptor.height)
-      if (world.getFacilityAt(id) || world.getOwner(id) !== 'neutral') continue
+      if (reserved.has(id) || world.getFacilityAt(id) || world.getOwner(id) !== 'neutral') continue
       const kind = world.getKind(id)
       if (kind === TERRAIN_KIND.empty || kind === TERRAIN_KIND.forest) return id
     }
   }
-  return world.staticWorld.starterPads[rivalIndex]
+  return world.staticWorld.starterPads.find(
+    (id) => !reserved.has(id) && !world.getFacilityAt(id) && world.getOwner(id) === 'neutral',
+  )
 }
 
 function seedCompactRivalFacilities(world: DynamicWorld, rivals: RivalLab[]): void {
   const batch = world.beginBatch()
+  const reserved = new Set<TileId>()
   let added = 0
   for (let index = 0; index < rivals.length; index++) {
     const rival = rivals[index]!
-    const anchor = findRivalStart(world, index)
+    const anchor = findRivalStart(world, index, reserved)
     if (anchor === undefined || world.getFacilityAt(anchor)) continue
     const facility: Facility = {
       id: `rival-start-${rival.id}`,
@@ -141,6 +148,7 @@ function seedCompactRivalFacilities(world: DynamicWorld, rivals: RivalLab[]): vo
       },
     }
     batch.addFacility(facility)
+    for (const tile of facility.footprint) reserved.add(tile)
     added++
   }
   if (added > 0) batch.commit()
@@ -344,6 +352,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       trainingJobs: [],
       trainingJob: null,
       safetyCampaign: null,
+      dataSupplierContracts: [],
       pricing: {
         apiPricePerMTok: 2.4,
         apiPriceInPerMTok: 0.8,

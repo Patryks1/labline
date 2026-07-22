@@ -1,8 +1,9 @@
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { canPlaceBuilding, dcFootprint } from '../../sim/systems/map'
-import type { BuildableKind, MapRegion, SimState } from '../../sim/types'
+import type { BuildableKind, MapOverlayMode, MapRegion, SimState } from '../../sim/types'
 import { useGameStore } from '../../store/gameStore'
+import { resolveRenderSettings, useUiStore } from '../../store/uiStore'
 import {
   hasBuildBlueprintDrag,
   placementCostAt,
@@ -10,6 +11,7 @@ import {
   readBuildBlueprintDrag,
 } from '../buildPlacement'
 import { money } from '../hud/format'
+import { regionOverlayFill } from '../hud/mapNavigatorData'
 import { currentInteraction, createMapPerfSession, type MapPerfSession } from './integration/perfSession'
 import { createArtDirectedArchetypeRegistry } from './integration/artDirectedRegistry'
 import { enforceCloseUpNearOnly } from './integration/lodPolicy'
@@ -58,6 +60,14 @@ const MAX_FRUSTUM = 30
 // loading an unnecessary half-chunk around every close-up viewport.
 const MAX_PROP_HEIGHT_WORLD = 4
 
+function activePixelRatio(): number {
+  const preset = useUiStore.getState().renderPreset
+  const settings = resolveRenderSettings(preset)
+  const device = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1
+  return Math.max(0.5, Math.min(settings.pixelRatio, device * (settings.pixelRatio >= 1.5 ? 1.5 : 1)))
+}
+
+
 type SelectedTile = { x: number; y: number } | null
 
 interface DragState {
@@ -95,6 +105,7 @@ export function GameMap() {
   // This primitive subscription exists only for the cursor class. All map and
   // simulation updates are consumed imperatively inside the Three lifecycle.
   const buildMode = useGameStore((store) => store.buildMode)
+  const mapTool = useGameStore((store) => store.mapTool)
 
   useEffect(() => {
     const mount = mountRef.current
@@ -110,7 +121,7 @@ export function GameMap() {
     })
     renderer.domElement.className = 'game-map-canvas'
     renderer.domElement.style.touchAction = 'none'
-    renderer.setPixelRatio(1)
+    renderer.setPixelRatio(activePixelRatio())
     renderer.setSize(initialWidth, initialHeight, false)
     renderer.setClearColor(SKY, 1)
     renderer.toneMapping = THREE.ACESFilmicToneMapping
@@ -156,6 +167,9 @@ export function GameMap() {
     const labels = new THREE.Group()
     labels.name = 'map-region-labels'
     scene.add(labels)
+    const regionOverlays = new THREE.Group()
+    regionOverlays.name = 'map-region-overlays'
+    scene.add(regionOverlays)
     const rivalLabels = new THREE.Group()
     rivalLabels.name = 'rival-facility-labels'
     scene.add(rivalLabels)
@@ -302,6 +316,7 @@ export function GameMap() {
       lastJournalBacklog = 0
       warmupPending = true
       rebuildRegionLabels(labels, projection.regions)
+      rebuildRegionOverlays(regionOverlays, projection.regions, useGameStore.getState().mapOverlay)
       centerCamera(state)
       moveSelectionMarker(selected)
       viewportDirty = true
@@ -485,16 +500,35 @@ export function GameMap() {
 
     function reconcileViewport(now: number): void {
       const pixels = pixelsPerTile()
+      const bounds = viewportBounds()
       projection.source.consumeChunkPreparationMs()
       lastViewportUpdate = enforceCloseUpNearOnly(
         projection.registry,
-        projection.viewport.updateViewport(viewportBounds(), pixels, now),
+        projection.viewport.updateViewport(bounds, pixels, now),
         pixels,
       )
       frameChunkWorkMs =
         projection.viewport.metrics.snapshot().chunkBuildMs +
         projection.source.consumeChunkPreparationMs()
       viewportDirty = lastViewportUpdate.lod.transitioning || lastViewportUpdate.prewarming
+      // Publish camera rectangle for the world navigator minimap.
+      const store = useGameStore.getState()
+      const next = {
+        x: bounds.minX,
+        y: bounds.minY,
+        w: Math.max(1, bounds.maxX - bounds.minX),
+        h: Math.max(1, bounds.maxY - bounds.minY),
+      }
+      const prev = store.mapViewport
+      if (
+        !prev ||
+        Math.abs(prev.x - next.x) > 0.25 ||
+        Math.abs(prev.y - next.y) > 0.25 ||
+        Math.abs(prev.w - next.w) > 0.25 ||
+        Math.abs(prev.h - next.h) > 0.25
+      ) {
+        store.setMapViewport(next)
+      }
     }
 
     function applyReplayFrame(): void {
@@ -645,7 +679,7 @@ export function GameMap() {
       drag.anchorX = hit.x
       drag.anchorZ = hit.z
       drag.moved = false
-      renderer.setPixelRatio(1)
+      renderer.setPixelRatio(activePixelRatio())
       markInteraction()
     }
 
@@ -675,12 +709,21 @@ export function GameMap() {
       drag.active = false
       drag.onMap = false
       drag.moved = false
-      renderer.setPixelRatio(1)
+      renderer.setPixelRatio(activePixelRatio())
       markInteraction()
       if (startedOnMap && !moved && event.button === 0) {
         const tile = pickTileAt(event.clientX, event.clientY)
-        if (tile) useGameStore.getState().selectTile(tile.x, tile.y)
-        else useGameStore.getState().selectTile(0, null)
+        const store = useGameStore.getState()
+        if (tile) {
+          store.selectTile(tile.x, tile.y)
+          // Destroy tool: select the owned facility so the inspector sell/cancel
+          // confirmation is the only mutation path (no instant deletion).
+          if (store.mapTool === 'destroy') {
+            store.setLeftRailOpen(false)
+          }
+        } else {
+          store.selectTile(0, null)
+        }
       }
       updateBuildPreview(event.clientX, event.clientY)
     }
@@ -803,7 +846,10 @@ export function GameMap() {
     const unsubscribeStore = useGameStore.subscribe((next, previous) => {
       const stateChanged = next.state !== previous.state
       const uiChanged =
-        next.selectedTile !== previous.selectedTile || next.buildMode !== previous.buildMode
+        next.selectedTile !== previous.selectedTile ||
+        next.buildMode !== previous.buildMode ||
+        next.mapOverlay !== previous.mapOverlay ||
+        next.mapTool !== previous.mapTool
       const focusChanged = next.mapFocusRequest !== previous.mapFocusRequest
       let visualChange = false
 
@@ -830,6 +876,7 @@ export function GameMap() {
           if (next.state.map.regions !== projection.regions) {
             projection.regions = next.state.map.regions
             rebuildRegionLabels(labels, projection.regions)
+            rebuildRegionOverlays(regionOverlays, projection.regions, next.mapOverlay)
             visualChange = true
           }
           const loadedEarlierDay = next.state.day < previous.state.day
@@ -845,6 +892,11 @@ export function GameMap() {
         if (delta.surfaceTileIds.length > 0) projection.viewport.updateSurface(delta.surfaceTileIds)
         moveSelectionMarker(next.selectedTile)
         if (!next.buildMode) clearBuildPreview()
+        if (next.mapOverlay !== previous.mapOverlay || next.state.map.regions !== previous.state.map.regions) {
+          rebuildRegionOverlays(regionOverlays, projection.regions, next.mapOverlay)
+        }
+        // Destroy tool uses red selection marker so eligible sells are obvious.
+        selectionMaterial.color.setHex(next.mapTool === 'destroy' ? PREVIEW_BAD : PREVIEW_OK)
         visualChange = true
       }
       if (focusChanged && next.mapFocusRequest) {
@@ -882,6 +934,7 @@ export function GameMap() {
     updateProjectionMatrix()
     centerCamera(initialStore.state)
     rebuildRegionLabels(labels, projection.regions)
+    rebuildRegionOverlays(regionOverlays, projection.regions, initialStore.mapOverlay)
     syncRivalLabels(initialStore.state)
     moveSelectionMarker(initialStore.selectedTile)
     reconcileViewport(performance.now())
@@ -910,6 +963,7 @@ export function GameMap() {
       projection.viewport.dispose()
       projection.registry.dispose()
       disposeRegionLabels(labels)
+      disposeRegionOverlays(regionOverlays)
       disposeRivalFacilityLabels(rivalLabels)
       disposeBuildPreview(preview)
       selectionGeometry.dispose()
@@ -924,7 +978,7 @@ export function GameMap() {
     <div
       ref={mountRef}
       tabIndex={0}
-      className={`absolute inset-0 outline-none ${buildMode ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
+      className={`absolute inset-0 outline-none ${buildMode || mapTool === 'destroy' ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
       title="WASD / arrows to pan · drag · scroll zoom"
     >
       <div
@@ -1001,6 +1055,48 @@ function disposeBuildPreview(preview: PreviewState): void {
   preview.badMaterial.dispose()
   preview.volume.geometry.dispose()
   preview.volume.material.dispose()
+}
+
+
+function rebuildRegionOverlays(
+  group: THREE.Group,
+  regions: readonly MapRegion[],
+  overlay: MapOverlayMode,
+): void {
+  disposeRegionOverlays(group)
+  if (overlay === 'none') return
+  for (let index = 0; index < regions.length; index++) {
+    const region = regions[index]!
+    const color = new THREE.Color(regionOverlayFill(region, regions, overlay, index))
+    const geometry = new THREE.PlaneGeometry(region.width * MAP_TILE_SIZE, region.height * MAP_TILE_SIZE)
+    const material = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: overlay === 'zones' ? 0.18 : 0.28,
+      depthWrite: false,
+    })
+    const mesh = new THREE.Mesh(geometry, material)
+    mesh.name = `region-overlay-${region.id}`
+    mesh.rotation.x = -Math.PI / 2
+    mesh.position.set(
+      (region.originX + region.width / 2 - 0.5) * MAP_TILE_SIZE,
+      0.04,
+      (region.originY + region.height / 2 - 0.5) * MAP_TILE_SIZE,
+    )
+    mesh.renderOrder = 2
+    group.add(mesh)
+  }
+}
+
+function disposeRegionOverlays(group: THREE.Group): void {
+  for (const child of [...group.children]) {
+    group.remove(child)
+    if (!(child instanceof THREE.Mesh)) continue
+    child.geometry.dispose()
+    const material = child.material
+    if (Array.isArray(material)) material.forEach((entry) => entry.dispose())
+    else material.dispose()
+  }
 }
 
 function rebuildRegionLabels(group: THREE.Group, regions: readonly MapRegion[]): void {

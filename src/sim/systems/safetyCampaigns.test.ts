@@ -20,8 +20,8 @@ function campaignState(): SimState {
     dataCoverage: 2,
     dataQuality: 75,
     postTrain: 'rlhf',
-    shipped: true,
-    release: 'released',
+    shipped: false,
+    release: 'internal',
   })
   const tiles = initial.map.tiles.map((tile) => {
     if (tile.x === 2 && tile.y === 2) {

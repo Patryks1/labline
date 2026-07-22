@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Handshake, PaperPlaneTilt } from '@phosphor-icons/react'
+import { useState } from "react";
+import { Handshake, PaperPlaneTilt } from "@phosphor-icons/react";
 import {
   activeCityPowerContracts,
   activePowerExportContracts,
@@ -14,58 +14,88 @@ import {
   powerImportBill,
   signCityPowerContract,
   signPowerExportContract,
-} from '../../../sim/systems/facilities'
-import type { SimState } from '../../../sim/types'
-import { energyPriceForState, gridScarcity, resolvePlayerPowerMw } from '../../../sim/systems/map'
-import { useGameStore } from '../../../store/gameStore'
-import { useUiStore } from '../../../store/uiStore'
-import { computeSnapshot } from '../../../sim/tick'
-import { money, mw } from '../format'
-import { EmptyState, HudButton, MetricTile, PanelScaffold, StatusChip } from '../ui/HudPrimitives'
-import { BlockerList, GameCard, LiveDot, MeterBar, SegmentedTabs, StatRow } from '../ui/kit'
+} from "../../../sim/systems/facilities";
+import type { SimState } from "../../../sim/types";
+import {
+  energyPriceForState,
+  gridScarcity,
+  resolvePlayerPowerMw,
+} from "../../../sim/systems/map";
+import { useGameStore } from "../../../store/gameStore";
+import { useUiStore } from "../../../store/uiStore";
+import { computeSnapshot } from "../../../sim/tick";
+import { money, mw } from "../format";
+import {
+  EmptyState,
+  HudButton,
+  MetricTile,
+  PanelScaffold,
+  StatusChip,
+} from "../ui/HudPrimitives";
+import {
+  BlockerList,
+  GameCard,
+  LiveDot,
+  MeterBar,
+  SegmentedTabs,
+  StatRow,
+} from "../ui/kit";
 import {
   NegotiationHeader,
   NegotiationMessage,
   NegotiationMetric,
-  NegotiationMood,
   NegotiationSlider,
   type NegotiationStatus,
-} from '../ui/NegotiationRoom'
+} from "../ui/NegotiationRoom";
 
 type NegotiationState = {
-  mode: 'import' | 'export'
-  cityId: string
-  offerPrice?: number
-  status: NegotiationStatus
-  message?: string
-}
+  mode: "import" | "export";
+  cityId: string;
+  offerPrice?: number;
+  status: NegotiationStatus;
+  message?: string;
+};
 
-type PowerTab = 'status' | 'contracts' | 'desk'
+type PowerTab = "status" | "contracts" | "desk";
 
 export function PowerPanel() {
-  const state = useGameStore((store) => store.state)
-  const requestConfirm = useUiStore((store) => store.requestConfirm)
-  const setState = (next: typeof state) => useGameStore.setState({ state: next })
-  const balance = powerBalance(state)
-  const scarcity = gridScarcity(state)
-  const wholesale = energyPriceForState(state)
-  const snap = computeSnapshot(state)
-  const resolved = resolvePlayerPowerMw(state, snap.mwDemand)
-  const bill = powerImportBill(state, resolved.mwGridImport)
-  const importContracts = activeCityPowerContracts(state)
-  const exportContracts = activePowerExportContracts(state)
-  const cities = cityDashboard(state)
-  const [contractMw, setContractMw] = useState(8)
-  const [contractTerm, setContractTerm] = useState(60)
-  const [tab, setTab] = useState<PowerTab>('status')
+  const state = useGameStore((store) => store.state);
+  const requestConfirm = useUiStore((store) => store.requestConfirm);
+  const setState = (next: typeof state) =>
+    useGameStore.setState({ state: next });
+  const balance = powerBalance(state);
+  const scarcity = gridScarcity(state);
+  const wholesale = energyPriceForState(state);
+  const snap = computeSnapshot(state);
+  const resolved = resolvePlayerPowerMw(state, snap.mwDemand);
+  const bill = powerImportBill(state, resolved.mwGridImport);
+  const importContracts = activeCityPowerContracts(state);
+  const exportContracts = activePowerExportContracts(state);
+  const cities = cityDashboard(state);
+  const [contractMw, setContractMw] = useState(8);
+  const [contractTerm, setContractTerm] = useState(60);
+  const [tab, setTab] = useState<PowerTab>("status");
   const [negotiation, setNegotiation] = useState<NegotiationState>(() => ({
-    mode: 'import',
-    cityId: cities[0]?.city.id ?? '',
-    status: 'idle',
-  }))
+    mode: "import",
+    cityId: cities[0]?.city.id ?? "",
+    status: "idle",
+  }));
 
-  const short = Math.max(0, balance.demandMw - Math.min(balance.demandMw, Math.min(balance.demandMw, balance.genMw) + bill.contractMw + bill.energyContractMw + bill.spotMw))
-  const supplyRatio = balance.demandMw > 0.001 ? Math.min(1, (balance.demandMw - short) / balance.demandMw) : 1
+  const short = Math.max(
+    0,
+    balance.demandMw -
+      Math.min(
+        balance.demandMw,
+        Math.min(balance.demandMw, balance.genMw) +
+          bill.contractMw +
+          bill.energyContractMw +
+          bill.spotMw,
+      ),
+  );
+  const supplyRatio =
+    balance.demandMw > 0.001
+      ? Math.min(1, (balance.demandMw - short) / balance.demandMw)
+      : 1;
 
   return (
     <PanelScaffold
@@ -75,35 +105,66 @@ export function PowerPanel() {
     >
       <div className="space-y-3">
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <MetricTile label="Need" value={mw(balance.demandMw)} tone="warning" />
-          <MetricTile label="On-site" value={mw(balance.genMw)} tone="positive" />
+          <MetricTile
+            label="Need"
+            value={mw(balance.demandMw)}
+            tone="warning"
+          />
+          <MetricTile
+            label="On-site"
+            value={mw(balance.genMw)}
+            tone="positive"
+          />
           <MetricTile
             label="Short"
             value={mw(short)}
-            tone={short > 0.05 ? 'danger' : 'positive'}
-            detail={short > 0.05 ? 'Tight' : 'Covered'}
+            tone={short > 0.05 ? "danger" : "positive"}
+            detail={short > 0.05 ? "Tight" : "Covered"}
           />
           <MetricTile label="Spot" value={`${money(wholesale)}/MWh`} />
         </div>
 
         <GameCard
           eyebrow="Supply vs demand"
-          title={short > 0.05 ? 'Power pressure' : 'Fully powered'}
+          title={short > 0.05 ? "Power pressure" : "Fully powered"}
           live={short > 0.05}
-          tone={short > 0.05 ? 'danger' : 'mint'}
-          actions={short > 0.05 ? <LiveDot className="text-danger" /> : <StatusChip tone="positive">OK</StatusChip>}
+          tone={short > 0.05 ? "danger" : "mint"}
+          actions={
+            short > 0.05 ? (
+              <LiveDot className="text-danger" />
+            ) : (
+              <StatusChip tone="positive">OK</StatusChip>
+            )
+          }
         >
           <MeterBar
             label="MW covered"
             value={supplyRatio}
             detail={`${mw(Math.max(0, balance.demandMw - short))} / ${mw(balance.demandMw)}`}
-            tone={short > 0.05 ? 'danger' : supplyRatio < 0.9 ? 'warning' : 'positive'}
+            tone={
+              short > 0.05
+                ? "danger"
+                : supplyRatio < 0.9
+                  ? "warning"
+                  : "positive"
+            }
             live={short > 0.05}
           />
           <div className="mt-2 space-y-0.5">
-            <StatRow label="Contract import" value={mw(bill.contractMw + bill.energyContractMw)} />
-            <StatRow label="Spot draw" value={mw(bill.spotMw)} tone={bill.spotMw > 0 ? 'warning' : 'neutral'} />
-            <StatRow label="Export" value={mw(balance.exportMw)} tone="positive" />
+            <StatRow
+              label="Contract import"
+              value={mw(bill.contractMw + bill.energyContractMw)}
+            />
+            <StatRow
+              label="Spot draw"
+              value={mw(bill.spotMw)}
+              tone={bill.spotMw > 0 ? "warning" : "neutral"}
+            />
+            <StatRow
+              label="Export"
+              value={mw(balance.exportMw)}
+              tone="positive"
+            />
             <StatRow
               label="Daily power cost"
               value={`${money(balance.generationCostDay + bill.totalCostDay)}/d`}
@@ -117,17 +178,17 @@ export function PowerPanel() {
           active={tab}
           onChange={(id) => setTab(id as PowerTab)}
           items={[
-            { id: 'status', label: 'Status' },
+            { id: "status", label: "Status" },
             {
-              id: 'contracts',
+              id: "contracts",
               label: `Contracts (${importContracts.length + exportContracts.length})`,
             },
-            { id: 'desk', label: 'Utility desk' },
+            { id: "desk", label: "Utility desk" },
           ]}
         />
 
         <div key={tab} className="panel-swap">
-          {tab === 'status' ? (
+          {tab === "status" ? (
             <GameCard eyebrow="Grid" title="Network pressure">
               <StatRow
                 label="Industry DCs"
@@ -136,19 +197,27 @@ export function PowerPanel() {
               <StatRow
                 label="Grid demand / cap"
                 value={`${mw(scarcity.gridDemandMw)} / ${mw(scarcity.gridCapMw)}`}
-                tone={scarcity.gridDemandMw > scarcity.gridCapMw ? 'danger' : 'neutral'}
+                tone={
+                  scarcity.gridDemandMw > scarcity.gridCapMw
+                    ? "danger"
+                    : "neutral"
+                }
               />
               <StatRow label="Curtailment" value={mw(balance.curtailedMw)} />
             </GameCard>
           ) : null}
 
-          {tab === 'contracts' ? (
+          {tab === "contracts" ? (
             importContracts.length === 0 && exportContracts.length === 0 ? (
               <EmptyState
                 title="No power contracts"
                 description="Lock utility supply or export surplus from the desk."
                 action={
-                  <HudButton type="button" variant="primary" onClick={() => setTab('desk')}>
+                  <HudButton
+                    type="button"
+                    variant="primary"
+                    onClick={() => setTab("desk")}
+                  >
                     Open utility desk
                   </HudButton>
                 }
@@ -165,11 +234,12 @@ export function PowerPanel() {
                     days={contract.daysLeft}
                     onBreak={() =>
                       requestConfirm({
-                        title: 'Break the utility contract?',
+                        title: "Break the utility contract?",
                         body: `${contract.cityName} will stop supplying ${mw(contract.mw)} immediately. The remaining-term fee applies.`,
-                        actionLabel: 'Break contract',
-                        tone: 'danger',
-                        onConfirm: () => setState(cancelCityPowerContract(state, contract.id)),
+                        actionLabel: "Break contract",
+                        tone: "danger",
+                        onConfirm: () =>
+                          setState(cancelCityPowerContract(state, contract.id)),
                       })
                     }
                   />
@@ -184,11 +254,14 @@ export function PowerPanel() {
                     days={contract.daysLeft}
                     onBreak={() =>
                       requestConfirm({
-                        title: 'Break the export contract?',
+                        title: "Break the export contract?",
                         body: `${contract.cityName} will release the ${mw(contract.mw)} offtake commitment. The early-exit fee applies.`,
-                        actionLabel: 'Break contract',
-                        tone: 'danger',
-                        onConfirm: () => setState(cancelPowerExportContract(state, contract.id)),
+                        actionLabel: "Break contract",
+                        tone: "danger",
+                        onConfirm: () =>
+                          setState(
+                            cancelPowerExportContract(state, contract.id),
+                          ),
                       })
                     }
                   />
@@ -197,7 +270,7 @@ export function PowerPanel() {
             )
           ) : null}
 
-          {tab === 'desk' ? (
+          {tab === "desk" ? (
             <ContractDesk
               state={state}
               setState={setState}
@@ -215,7 +288,7 @@ export function PowerPanel() {
         </div>
       </div>
     </PanelScaffold>
-  )
+  );
 }
 
 function ContractCard({
@@ -226,30 +299,39 @@ function ContractCard({
   days,
   onBreak,
 }: {
-  direction: 'Import' | 'Export'
-  name: string
-  mwValue: number
-  price: number
-  days: number
-  onBreak: () => void
+  direction: "Import" | "Export";
+  name: string;
+  mwValue: number;
+  price: number;
+  days: number;
+  onBreak: () => void;
 }) {
   return (
     <GameCard
-      tone={direction === 'Import' ? 'research' : 'mint'}
+      tone={direction === "Import" ? "research" : "mint"}
       eyebrow={direction}
       title={name}
-      actions={<StatusChip tone={direction === 'Import' ? 'research' : 'positive'}>{days}d</StatusChip>}
+      actions={
+        <StatusChip tone={direction === "Import" ? "research" : "positive"}>
+          {days}d
+        </StatusChip>
+      }
     >
       <StatRow label="Capacity" value={mw(mwValue)} strong />
       <StatRow label="Rate" value={`${money(price)}/MWh`} />
-      <HudButton type="button" variant="danger" className="mt-2 w-full" onClick={onBreak}>
+      <HudButton
+        type="button"
+        variant="danger"
+        className="mt-2 w-full"
+        onClick={onBreak}
+      >
         Break contract
       </HudButton>
     </GameCard>
-  )
+  );
 }
 
-type CityRows = ReturnType<typeof cityDashboard>
+type CityRows = ReturnType<typeof cityDashboard>;
 
 function ContractDesk({
   state,
@@ -264,36 +346,54 @@ function ContractDesk({
   gridStatus,
   gridConstrained,
 }: {
-  state: SimState
-  setState: (state: SimState) => void
-  cities: CityRows
-  contractMw: number
-  setContractMw: (mw: number) => void
-  contractTerm: number
-  setContractTerm: (days: number) => void
-  negotiation: NegotiationState
-  setNegotiation: (negotiation: NegotiationState) => void
-  gridStatus: string
-  gridConstrained: boolean
+  state: SimState;
+  setState: (state: SimState) => void;
+  cities: CityRows;
+  contractMw: number;
+  setContractMw: (mw: number) => void;
+  contractTerm: number;
+  setContractTerm: (days: number) => void;
+  negotiation: NegotiationState;
+  setNegotiation: (negotiation: NegotiationState) => void;
+  gridStatus: string;
+  gridConstrained: boolean;
 }) {
+  const [utilityFailures, setUtilityFailures] = useState<
+    Record<string, number>
+  >({});
+  const [utilityCooldowns, setUtilityCooldowns] = useState<
+    Record<string, number>
+  >({});
   const importQuote =
-    negotiation.mode === 'import'
-      ? powerImportNegotiationQuote(state, negotiation.cityId, contractMw, contractTerm)
-      : null
+    negotiation.mode === "import"
+      ? powerImportNegotiationQuote(
+          state,
+          negotiation.cityId,
+          contractMw,
+          contractTerm,
+        )
+      : null;
   const exportQuote =
-    negotiation.mode === 'export'
-      ? powerExportNegotiationQuote(state, negotiation.cityId, contractMw, contractTerm)
-      : null
-  const activeQuote = importQuote ?? exportQuote
-  const selectedCity = cities.find(({ city }) => city.id === negotiation.cityId)
+    negotiation.mode === "export"
+      ? powerExportNegotiationQuote(
+          state,
+          negotiation.cityId,
+          contractMw,
+          contractTerm,
+        )
+      : null;
+  const activeQuote = importQuote ?? exportQuote;
+  const selectedCity = cities.find(
+    ({ city }) => city.id === negotiation.cityId,
+  );
   const defaultOffer = Math.round(
     importQuote
       ? importQuote.askPricePerMWh * 0.94
       : exportQuote
         ? exportQuote.utilityOfferPerMWh * 1.05
         : 0,
-  )
-  const offerPrice = negotiation.offerPrice ?? defaultOffer
+  );
+  const offerPrice = negotiation.offerPrice ?? defaultOffer;
   const sliderMin = Math.max(
     1,
     Math.floor(
@@ -301,7 +401,7 @@ function ContractDesk({
         ? importQuote.floorPricePerMWh * 0.82
         : (exportQuote?.utilityOfferPerMWh ?? 1) * 0.9,
     ),
-  )
+  );
   const sliderMax = Math.max(
     sliderMin + 1,
     Math.ceil(
@@ -309,96 +409,137 @@ function ContractDesk({
         ? importQuote.askPricePerMWh * 1.05
         : (exportQuote?.ceilingPricePerMWh ?? 1) * 1.18,
     ),
-  )
-  const canNegotiate = (activeQuote?.contractMw ?? 0) >= 1
-  const agreementScore = Math.max(
-    5,
-    Math.min(
-      95,
-      importQuote
-        ? 58 +
-            ((offerPrice - importQuote.floorPricePerMWh) /
-              Math.max(1, importQuote.askPricePerMWh - importQuote.floorPricePerMWh)) *
-              28
-        : exportQuote
-          ? 58 +
-            ((exportQuote.ceilingPricePerMWh - offerPrice) /
-              Math.max(1, exportQuote.ceilingPricePerMWh - exportQuote.utilityOfferPerMWh)) *
-              28
-          : 5,
-    ),
-  )
-
-  const resetNegotiation = (patch: Partial<Pick<NegotiationState, 'cityId' | 'mode'>> = {}) => {
+  );
+  const contactAgainDay = utilityCooldowns[negotiation.cityId] ?? 0;
+  const contactLocked = state.day < contactAgainDay;
+  const canNegotiate = (activeQuote?.contractMw ?? 0) >= 1 && !contactLocked;
+  const resetNegotiation = (
+    patch: Partial<Pick<NegotiationState, "cityId" | "mode">> = {},
+  ) => {
     setNegotiation({
       ...negotiation,
       ...patch,
       offerPrice: undefined,
-      status: 'idle',
+      status: "idle",
       message: undefined,
-    })
-  }
+    });
+  };
 
   const commitNegotiation = (price: number) => {
     const before =
-      negotiation.mode === 'import'
+      negotiation.mode === "import"
         ? state.cityPowerContracts.length
-        : state.powerExportContracts.length
+        : state.powerExportContracts.length;
     const next =
-      negotiation.mode === 'import'
-        ? signCityPowerContract(state, negotiation.cityId, contractMw, contractTerm, price)
-        : signPowerExportContract(state, negotiation.cityId, contractMw, contractTerm, price)
+      negotiation.mode === "import"
+        ? signCityPowerContract(
+            state,
+            negotiation.cityId,
+            contractMw,
+            contractTerm,
+            price,
+          )
+        : signPowerExportContract(
+            state,
+            negotiation.cityId,
+            contractMw,
+            contractTerm,
+            price,
+          );
     const after =
-      negotiation.mode === 'import'
+      negotiation.mode === "import"
         ? next.cityPowerContracts.length
-        : next.powerExportContracts.length
-    setState(next)
+        : next.powerExportContracts.length;
+    setState(next);
     if (after > before) {
       setNegotiation({
         ...negotiation,
         offerPrice: price,
-        status: 'signed',
+        status: "signed",
         message: `Deal accepted. ${mw(activeQuote?.contractMw ?? 0)} is live now at ${money(price)}/MWh.`,
-      })
+      });
     } else {
       setNegotiation({
         ...negotiation,
         offerPrice: price,
-        status: 'declined',
-        message: 'We could not activate this contract. Check cash, generation, and connector headroom.',
-      })
+        status: "declined",
+        message:
+          "We could not activate this contract. Check cash, generation, and connector headroom.",
+      });
     }
-  }
+  };
 
   const submitOffer = () => {
     if (importQuote) {
-      const result = evaluatePowerImportOffer(importQuote, offerPrice)
-      if (result.accepted) commitNegotiation(result.agreedPricePerMWh)
-      else
+      const result = evaluatePowerImportOffer(importQuote, offerPrice);
+      if (result.accepted)
+        setNegotiation({
+          ...negotiation,
+          offerPrice: result.agreedPricePerMWh,
+          status: "agreed",
+          message: `We agree at ${money(result.agreedPricePerMWh)}/MWh. Accept to activate or decline to reset.`,
+        });
+      else {
+        const failures = (utilityFailures[negotiation.cityId] ?? 0) + 1;
+        setUtilityFailures((current) => ({
+          ...current,
+          [negotiation.cityId]: failures,
+        }));
+        if (failures >= 3) {
+          setUtilityCooldowns((current) => ({
+            ...current,
+            [negotiation.cityId]: state.day + 30,
+          }));
+        }
         setNegotiation({
           ...negotiation,
           offerPrice: Math.round(result.agreedPricePerMWh),
-          status: 'countered',
-          message: `That price is too low. Our firm counter is ${money(result.agreedPricePerMWh)}/MWh.`,
-        })
-      return
+          status: "countered",
+          message:
+            failures >= 3
+              ? `That is the third failed offer. Contact us again on day ${state.day + 30}.`
+              : `That price is too low. Our firm counter is ${money(result.agreedPricePerMWh)}/MWh.`,
+        });
+      }
+      return;
     }
     if (exportQuote) {
-      const result = evaluatePowerExportOffer(exportQuote, offerPrice)
-      if (result.accepted) commitNegotiation(result.agreedPricePerMWh)
-      else
+      const result = evaluatePowerExportOffer(exportQuote, offerPrice);
+      if (result.accepted)
+        setNegotiation({
+          ...negotiation,
+          offerPrice: result.agreedPricePerMWh,
+          status: "agreed",
+          message: `We agree at ${money(result.agreedPricePerMWh)}/MWh. Accept to activate or decline to reset.`,
+        });
+      else {
+        const failures = (utilityFailures[negotiation.cityId] ?? 0) + 1;
+        setUtilityFailures((current) => ({
+          ...current,
+          [negotiation.cityId]: failures,
+        }));
+        if (failures >= 3) {
+          setUtilityCooldowns((current) => ({
+            ...current,
+            [negotiation.cityId]: state.day + 30,
+          }));
+        }
         setNegotiation({
           ...negotiation,
           offerPrice: Math.round(result.agreedPricePerMWh),
-          status: 'countered',
-          message: `That asking price is too high. Our firm counter is ${money(result.agreedPricePerMWh)}/MWh.`,
-        })
+          status: "countered",
+          message:
+            failures >= 3
+              ? `That is the third failed offer. Contact us again on day ${state.day + 30}.`
+              : `That asking price is too high. Our firm counter is ${money(result.agreedPricePerMWh)}/MWh.`,
+        });
+      }
     }
-  }
+  };
 
   const providerCopy =
-    negotiation.status === 'signed'
-      ? 'The agreement is active. Power and settlement start immediately.'
+    negotiation.status === "signed"
+      ? "The agreement is active. Power and settlement start immediately."
       : importQuote
         ? canNegotiate
           ? `We can reserve up to ${mw(importQuote.contractMw)} at ${money(importQuote.askPricePerMWh)}/MWh.`
@@ -407,16 +548,16 @@ function ContractDesk({
           ? canNegotiate
             ? `We can buy up to ${mw(exportQuote.contractMw)} of your surplus at ${money(exportQuote.utilityOfferPerMWh)}/MWh.`
             : `Build generation inside ${exportQuote.cityName} before offering surplus power.`
-          : 'Select a city utility to open a negotiation.'
+          : "Select a city utility to open a negotiation.";
 
   const blockers = !canNegotiate
-    ? [{ text: providerCopy, tone: 'warning' as const }]
-    : []
+    ? [{ text: providerCopy, tone: "warning" as const }]
+    : [];
 
   return (
     <GameCard
       tone="mint"
-      eyebrow={`Grid ${gridStatus}${gridConstrained ? ' · constrained' : ''}`}
+      eyebrow={`Grid ${gridStatus}${gridConstrained ? " · constrained" : ""}`}
       title="Utility desk"
       pad={false}
     >
@@ -433,7 +574,9 @@ function ContractDesk({
           </span>
           <select
             value={negotiation.cityId}
-            onChange={(event) => resetNegotiation({ cityId: event.target.value })}
+            onChange={(event) =>
+              resetNegotiation({ cityId: event.target.value })
+            }
             className="min-w-0 flex-1 bg-transparent text-right text-[0.8125rem] font-medium text-bone outline-none"
             aria-label="City utility"
           >
@@ -448,20 +591,24 @@ function ContractDesk({
         <SegmentedTabs
           ariaLabel="Buy or sell power"
           active={negotiation.mode}
-          onChange={(id) => resetNegotiation({ mode: id as 'import' | 'export' })}
+          onChange={(id) =>
+            resetNegotiation({ mode: id as "import" | "export" })
+          }
           items={[
-            { id: 'import', label: 'Buy power' },
-            { id: 'export', label: 'Sell surplus' },
+            { id: "import", label: "Buy power" },
+            { id: "export", label: "Sell surplus" },
           ]}
         />
 
         <div className="space-y-2 rounded-lg border border-line/60 bg-void/35 p-2">
           <NegotiationMessage
             side="provider"
-            name={`${activeQuote?.cityName ?? selectedCity?.city.name ?? 'City'} Utility`}
+            name={`${activeQuote?.cityName ?? selectedCity?.city.name ?? "City"} Utility`}
           >
             <span className="font-medium text-bone">
-              {negotiation.mode === 'import' ? 'Firm supply offer' : 'Surplus purchase offer'}
+              {negotiation.mode === "import"
+                ? "Firm supply offer"
+                : "Surplus purchase offer"}
             </span>
             <span className="mt-0.5 block text-muted">{providerCopy}</span>
           </NegotiationMessage>
@@ -469,15 +616,15 @@ function ContractDesk({
           <NegotiationMessage side="player" name="You">
             <span className="font-medium text-bone">Here’s my proposal.</span>
             <span className="mt-0.5 block text-muted">
-              {negotiation.mode === 'import' ? 'Buy' : 'Sell'} {contractMw} MW for {contractTerm}{' '}
-              days at {money(offerPrice)}/MWh.
+              {negotiation.mode === "import" ? "Buy" : "Sell"} {contractMw} MW
+              for {contractTerm} days at {money(offerPrice)}/MWh.
             </span>
           </NegotiationMessage>
 
           {negotiation.message ? (
             <NegotiationMessage
               side="provider"
-              name={`${activeQuote?.cityName ?? selectedCity?.city.name ?? 'City'} Utility`}
+              name={`${activeQuote?.cityName ?? selectedCity?.city.name ?? "City"} Utility`}
               status={negotiation.status}
             >
               {negotiation.message}
@@ -485,14 +632,16 @@ function ContractDesk({
           ) : null}
         </div>
 
-        {negotiation.status !== 'signed' ? (
+        {negotiation.status !== "signed" && negotiation.status !== "agreed" ? (
           <>
             <div className="rounded-lg border border-line/70 bg-void/45 p-2">
               <div className="mb-1.5 flex items-center justify-between gap-2">
                 <span className="font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
                   Your offer
                 </span>
-                <span className="text-[0.6875rem] text-muted">Drag to negotiate</span>
+                <span className="text-[0.6875rem] text-muted">
+                  Drag to negotiate
+                </span>
               </div>
               <div className="space-y-1.5">
                 <NegotiationSlider
@@ -502,8 +651,8 @@ function ContractDesk({
                   max={80}
                   suffix=" MW"
                   onChange={(value) => {
-                    setContractMw(value)
-                    resetNegotiation()
+                    setContractMw(value);
+                    resetNegotiation();
                   }}
                 />
                 <NegotiationSlider
@@ -514,12 +663,14 @@ function ContractDesk({
                   step={15}
                   suffix=" days"
                   onChange={(value) => {
-                    setContractTerm(value)
-                    resetNegotiation()
+                    setContractTerm(value);
+                    resetNegotiation();
                   }}
                 />
                 <NegotiationSlider
-                  label={negotiation.mode === 'import' ? 'Your bid' : 'Your ask'}
+                  label={
+                    negotiation.mode === "import" ? "Your bid" : "Your ask"
+                  }
                   value={offerPrice}
                   min={sliderMin}
                   max={sliderMax}
@@ -528,7 +679,7 @@ function ContractDesk({
                     setNegotiation({
                       ...negotiation,
                       offerPrice: value,
-                      status: 'idle',
+                      status: "idle",
                       message: undefined,
                     })
                   }
@@ -537,8 +688,14 @@ function ContractDesk({
             </div>
 
             <div className="grid grid-cols-4 gap-1 font-mono text-[0.6875rem]">
-              <NegotiationMetric label="MW" value={mw(activeQuote?.contractMw ?? 0)} />
-              <NegotiationMetric label="Offer" value={`${money(offerPrice)}/MWh`} />
+              <NegotiationMetric
+                label="MW"
+                value={mw(activeQuote?.contractMw ?? 0)}
+              />
+              <NegotiationMetric
+                label="Offer"
+                value={`${money(offerPrice)}/MWh`}
+              />
               <NegotiationMetric label="Term" value={`${contractTerm}d`} />
               <NegotiationMetric
                 label="Daily"
@@ -546,12 +703,11 @@ function ContractDesk({
               />
             </div>
 
-            <NegotiationMood score={agreementScore} />
             <BlockerList items={blockers} />
           </>
         ) : null}
 
-        {(negotiation.status === 'idle' || negotiation.status === 'countered') && (
+        {negotiation.status === "idle" && (
           <HudButton
             type="button"
             variant="primary"
@@ -560,16 +716,43 @@ function ContractDesk({
             onClick={submitOffer}
           >
             <PaperPlaneTilt size={15} weight="fill" />
-            {negotiation.status === 'countered' ? 'Send counter-offer' : 'Send proposal'}
+            Send proposal
           </HudButton>
         )}
-        {negotiation.status === 'signed' && (
+        {negotiation.status === "countered" && (
+          <div className="grid grid-cols-2 gap-2">
+            <HudButton
+              variant="primary"
+              disabled={!canNegotiate}
+              onClick={() => commitNegotiation(offerPrice)}
+            >
+              Accept counter
+            </HudButton>
+            <HudButton variant="ghost" onClick={() => resetNegotiation()}>
+              Decline
+            </HudButton>
+          </div>
+        )}
+        {negotiation.status === "agreed" && (
+          <div className="grid grid-cols-2 gap-2">
+            <HudButton
+              variant="primary"
+              onClick={() => commitNegotiation(offerPrice)}
+            >
+              Accept agreement
+            </HudButton>
+            <HudButton variant="ghost" onClick={() => resetNegotiation()}>
+              Decline
+            </HudButton>
+          </div>
+        )}
+        {negotiation.status === "signed" && (
           <div className="flex items-center justify-center gap-1.5 rounded-md border border-mint/35 bg-mint/10 px-2 py-1.5 text-[0.8125rem] font-medium text-mint">
             <Handshake size={16} weight="duotone" />
             Contract active
           </div>
         )}
-        {negotiation.status === 'declined' && (
+        {negotiation.status === "declined" && (
           <HudButton
             type="button"
             variant="ghost"
@@ -582,5 +765,5 @@ function ContractDesk({
         )}
       </div>
     </GameCard>
-  )
+  );
 }

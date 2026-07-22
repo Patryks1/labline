@@ -17,7 +17,6 @@ const SECTIONS: { id: StatsSectionId; label: string }[] = [
   { id: 'pnl', label: 'P&L' },
   { id: 'models', label: 'Models' },
   { id: 'compute', label: 'Compute' },
-  { id: 'facilities', label: 'Sites' },
 ]
 
 export function StatsPanel() {
@@ -80,7 +79,6 @@ export function StatsPanel() {
         {section === 'pnl' && <PnlSection stats={stats} setPanel={setPanel} />}
         {section === 'models' && <ModelsSection stats={stats} setPanel={setPanel} />}
         {section === 'compute' && <ComputeSection stats={stats} setPanel={setPanel} />}
-        {section === 'facilities' && <FacilitiesSection stats={stats} />}
       </div>
     </PanelScaffold>
   )
@@ -113,7 +111,39 @@ function PnlSection({
         <StatRow label="Total" value={money(stats.finance.dayRevenue)} tone="positive" strong />
         <div className="anim-stagger mt-1 border-t border-line/50 pt-1">
           {stats.income.map((line) => (
-            <StatRow key={line.id} label={line.label} value={money(line.amount)} hint={line.hint} tone="positive" />
+            <div key={line.id}>
+              <StatRow label={line.label} value={money(line.amount)} hint={line.hint} tone="positive" />
+              {line.id === 'api' ? (
+                <div className="mb-1 ml-2 space-y-0.5 border-l border-line/40 pl-2">
+                  {stats.models
+                    .filter((m) => m.dayApiRevenue > 0)
+                    .map((m) => (
+                      <StatRow
+                        key={`api-${m.modelId}`}
+                        label={m.name}
+                        value={money(m.dayApiRevenue)}
+                        hint={`${num(m.dayApiMTok, 2)} MTok`}
+                        tone="positive"
+                      />
+                    ))}
+                </div>
+              ) : null}
+              {line.id === 'sub' ? (
+                <div className="mb-1 ml-2 space-y-0.5 border-l border-line/40 pl-2">
+                  {stats.plans
+                    .filter((p) => p.dayRevenue > 0)
+                    .map((p) => (
+                      <StatRow
+                        key={`sub-${p.planId}`}
+                        label={p.name}
+                        value={money(p.dayRevenue)}
+                        hint={`${Math.round(p.subscribers).toLocaleString()} subs`}
+                        tone="positive"
+                      />
+                    ))}
+                </div>
+              ) : null}
+            </div>
           ))}
         </div>
       </GameCard>
@@ -474,68 +504,7 @@ function ComputeSection({
         <HudButton variant="ghost" className="!px-0 text-[0.8125rem]" onClick={() => setPanel('chips')}>
           Fab →
         </HudButton>
-        <HudButton
-          variant="ghost"
-          className="!px-0 text-[0.8125rem]"
-          onClick={() => useGameStore.getState().openSites()}
-        >
-          Sites →
-        </HudButton>
       </div>
-    </div>
-  )
-}
-
-function FacilitiesSection({ stats }: { stats: ReturnType<typeof buildLabStats> }) {
-  const t = stats.facilityTotals
-  return (
-    <div className="space-y-3">
-      <GameCard eyebrow="Campus" title="Totals">
-        <StatRow label="Facility opex / day" value={money(t.opex)} tone="danger" />
-        <StatRow label="Capex sunk" value={money(t.capex)} />
-        <StatRow label="Rack slots" value={`${t.racksUsed} / ${t.rackCap}`} />
-        <StatRow label="Grid MW" value={num(t.mwGrid, 1)} />
-        <StatRow label="Generation MW" value={num(t.mwGen, 1)} />
-      </GameCard>
-
-      {stats.facilities.length === 0 ? (
-        <EmptyState title="No buildings yet" description="Construct sites to expand rack and power capacity." />
-      ) : (
-        <GameCard eyebrow="Sites" title="Buildings">
-          <div className="anim-stagger space-y-2">
-            {stats.facilities.map((f) => (
-              <div key={f.key} className="rounded-md border border-line/70 bg-void/25 px-2.5 py-2">
-                <div className="flex items-baseline justify-between gap-2">
-                  <span className="truncate text-[0.8125rem] font-medium text-bone">{f.name}</span>
-                  <span className="shrink-0 font-mono text-[0.8125rem] tabular-nums text-muted">L{f.level}</span>
-                </div>
-                <div className="mt-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
-                  {f.kind} · {f.region}
-                  {!f.complete ? ' · building…' : ''}
-                </div>
-                <div className="mt-1 space-y-0.5">
-                  <StatRow label="Opex" value={`${money(f.opexPerDay)}/d`} tone="danger" />
-                  <StatRow label="Capex" value={money(f.capex)} />
-                  {f.rackCapacity > 0 ? (
-                    <StatRow label="Racks" value={`${f.racksUsed}/${f.rackCapacity}`} />
-                  ) : null}
-                  {f.mwCapacity > 0 || f.mwGeneration > 0 ? (
-                    <StatRow
-                      label="Power"
-                      value={[
-                        f.mwCapacity > 0 ? `${num(f.mwCapacity, 1)} grid` : '',
-                        f.mwGeneration > 0 ? `${num(f.mwGeneration, 1)} gen` : '',
-                      ]
-                        .filter(Boolean)
-                        .join(' · ')}
-                    />
-                  ) : null}
-                </div>
-              </div>
-            ))}
-          </div>
-        </GameCard>
-      )}
     </div>
   )
 }

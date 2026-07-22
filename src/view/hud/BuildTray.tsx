@@ -345,18 +345,6 @@ export function BuildPanel() {
                 : 'Select open land for an exact total'}
             </div>
             <BlockerList items={blockers} />
-            <HudButton
-              type="button"
-              variant="primary"
-              className="w-full"
-              disabled={!canAfford}
-              title={!canAfford ? `Requires ${money(upfrontTotal - state.player.cash)} more cash` : undefined}
-              onClick={() => startPlacement(selectedDef.kind)}
-            >
-              {buildMode === selectedDef.kind
-                ? `Placing ${selectedDef.label}`
-                : `Place ${selectedDef.label} on map`}
-            </HudButton>
             {!canPlaceOnTile && canAfford ? (
               <MeterBar label="Parcel" value={0} detail="need empty land" tone="warning" />
             ) : null}

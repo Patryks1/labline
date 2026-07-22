@@ -1,17 +1,23 @@
-import { isDcKind, isDcAnchor } from '../systems/map'
+import { isDcKind, isDcAnchor, placeBuilding, upgradeBuilding } from '../systems/map'
 /**
  * Automated play bot — drives pure sim actions for e2e / balance tests.
  * Deterministic given seed + policy.
  */
 import { createGame } from '../createGame'
 import { tickDay } from '../tick'
-import { placeBuilding, upgradeBuilding } from '../systems/map'
 import { orderRacksIntoDc } from '../systems/dcRacks'
-import { startTraining, advancePostTrain, releaseFromJob, keepInternal } from '../systems/training'
+import {
+  startTraining,
+  advancePostTrain,
+  canReleaseTrainingJob,
+  extendTraining,
+  releaseFromJob,
+  keepInternal,
+} from '../systems/training'
 import { enqueueResearch, availableResearch } from '../systems/research'
 import { setModelApiInOut } from '../systems/training'
 import { computeSnapshot } from '../systems/compute'
-import type { BuildableKind, SimState } from '../types'
+import type { BuildableKind, MapTile, SimState } from '../types'
 import type { DifficultyId } from '../balance/gameConfig'
 import { tickSharedMarkets } from '../systems/sharedMarkets'
 import {
@@ -28,6 +34,12 @@ import {
   quoteComputeContract,
   signComputeContract,
 } from '../systems/computeContracts'
+import {
+  facilityAnchorTiles,
+  mapTileAtAny,
+  usesCompactWorld,
+} from '../systems/worldAccess'
+import { tileCoords } from '../world/ids'
 
 export interface Milestone {
   day: number
@@ -49,25 +61,64 @@ export interface PlayReport {
   minCash: number
 }
 
-function findEmpty(
-  state: SimState,
-  preferRegion?: string,
-): { x: number; y: number } | null {
-  const regionOk = (id: string) =>
+function regionOk(id: string, preferRegion?: string): boolean {
+  return (
     !preferRegion ||
     id === preferRegion ||
     // Legacy region names OR procedural city_* ids
     (preferRegion === 'west' && (id === 'west' || id.startsWith('city_'))) ||
     (preferRegion === 'heartland' && (id === 'heartland' || id.startsWith('city_'))) ||
-    (preferRegion === 'north' && (id === 'north' || id.startsWith('city_')))
-
-  const tiles = state.map.tiles.filter(
-    (t) =>
-      t.kind === 'empty' &&
-      (t.owner === 'neutral' || t.owner === 'player') &&
-      t.regionId !== 'void' &&
-      regionOk(t.regionId),
+    (preferRegion === 'north' && (id === 'north' || id.startsWith('city_')) )
   )
+}
+
+function isBuildableEmpty(tile: MapTile | undefined, preferRegion?: string): tile is MapTile {
+  return (
+    !!tile &&
+    tile.kind === 'empty' &&
+    (tile.owner === 'neutral' || tile.owner === 'player') &&
+    tile.regionId !== 'void' &&
+    regionOk(tile.regionId, preferRegion)
+  )
+}
+
+function findEmpty(
+  state: SimState,
+  preferRegion?: string,
+): { x: number; y: number } | null {
+  if (usesCompactWorld(state) && state.map.world) {
+    const world = state.map.world
+    const pads = world.staticWorld.starterPads
+      .map((id) => {
+        const { x, y } = tileCoords(id, world.descriptor.width)
+        return mapTileAtAny(state, x, y)
+      })
+      .filter((tile): tile is MapTile => isBuildableEmpty(tile, preferRegion))
+    const namedPad = pads.find((tile) => tile.name && tile.name.includes('Build-ready'))
+    if (namedPad) return { x: namedPad.x, y: namedPad.y }
+    if (pads[0]) return { x: pads[0].x, y: pads[0].y }
+
+    // Scan around cities for empty land without materializing the full map.
+    for (const city of state.map.cities ?? []) {
+      for (let radius = city.radius + 1; radius <= city.radius + 24; radius++) {
+        for (let offset = -radius; offset <= radius; offset++) {
+          const candidates = [
+            [city.cx + offset, city.cy - radius],
+            [city.cx + offset, city.cy + radius],
+            [city.cx - radius, city.cy + offset],
+            [city.cx + radius, city.cy + offset],
+          ] as const
+          for (const [x, y] of candidates) {
+            const tile = mapTileAtAny(state, x, y)
+            if (isBuildableEmpty(tile, preferRegion)) return { x, y }
+          }
+        }
+      }
+    }
+    return null
+  }
+
+  const tiles = state.map.tiles.filter((t) => isBuildableEmpty(t, preferRegion))
   // Prefer named pads / cheaper land
   const named = tiles.find((t) => t.name && t.name.includes('Build-ready'))
   if (named) return { x: named.x, y: named.y }
@@ -75,16 +126,19 @@ function findEmpty(
   return cheapest ? { x: cheapest.x, y: cheapest.y } : null
 }
 
+function playerFacilities(state: SimState): MapTile[] {
+  return facilityAnchorTiles(state, { ownerId: 'player' })
+}
+
 function countKind(state: SimState, kind: BuildableKind): number {
-  return state.map.tiles.filter(
-    (t) => t.owner === 'player' && t.kind === kind && t.buildingProgress >= t.buildingTarget,
+  return playerFacilities(state).filter(
+    (t) => t.kind === kind && t.buildingProgress >= t.buildingTarget,
   ).length
 }
 
 function buildingInProgress(state: SimState, kind: BuildableKind): boolean {
-  return state.map.tiles.some(
+  return playerFacilities(state).some(
     (t) =>
-      t.owner === 'player' &&
       t.kind === kind &&
       t.buildingTarget > 0 &&
       t.buildingProgress < t.buildingTarget,
@@ -104,10 +158,10 @@ function orderedRackCount(state: SimState): number {
 }
 
 function firstLiveDc(state: SimState): { x: number; y: number } | null {
-  const t = state.map.tiles.find(
+  const t = playerFacilities(state).find(
     (tile) =>
-      tile.owner === 'player' &&
-      (isDcKind(tile.kind) && isDcAnchor(tile)) &&
+      isDcKind(tile.kind) &&
+      isDcAnchor(tile) &&
       tile.buildingProgress >= tile.buildingTarget,
   )
   return t ? { x: t.x, y: t.y } : null
@@ -297,10 +351,14 @@ export function botAct(state: SimState): SimState {
     })
   }
 
-  // 5) Post-train SFT then release
+  // 5) Handle milestone pause, then post-train SFT / release.
   if (s.player.trainingJob) {
     const job = s.player.trainingJob
-    if (job.progressPfDays >= job.targetPfDays) {
+    if (job.awaitingDecision) {
+      s = canReleaseTrainingJob(job).ok
+        ? releaseFromJob(s)
+        : extendTraining(s, job.id)
+    } else if (job.progressPfDays >= job.targetPfDays) {
       if (job.postTrain === 'none') {
         s = advancePostTrain(s)
       } else if (job.postTrainProgress >= job.postTrainTarget) {
@@ -520,17 +578,48 @@ export function runPlayBot(opts: {
 /** Force-complete constructions / rack deliveries for short smoke tests. */
 export function cheatFastForwardBuild(state: SimState): SimState {
   const cleared = tickSharedMarkets(state)
-  const tiles = cleared.map.tiles.map((t) =>
-    t.owner === 'player' && t.buildingTarget > 0
-      ? { ...t, buildingProgress: t.buildingTarget }
-      : t,
-  )
-  const chips = cleared.player.chips.map((c) => {
+  let next: SimState = cleared
+  if (usesCompactWorld(cleared) && cleared.map.world) {
+    const world = cleared.map.world
+    const batch = world.beginBatch()
+    let changed = false
+    world.forEachFacility({ ownerId: 'player', underConstruction: true }, (facility) => {
+      if (facility.constructionTarget <= 0) return
+      if (facility.constructionProgress >= facility.constructionTarget) return
+      batch.updateFacility(facility.id, {
+        constructionProgress: facility.constructionTarget,
+      })
+      changed = true
+    })
+    if (changed) {
+      const result = batch.commit()
+      next = {
+        ...cleared,
+        map: {
+          ...cleared.map,
+          worldRevision: result.revision,
+        },
+      }
+    } else {
+      batch.rollback()
+    }
+  } else {
+    const tiles = cleared.map.tiles.map((t) =>
+      t.owner === 'player' && t.buildingTarget > 0
+        ? { ...t, buildingProgress: t.buildingTarget }
+        : t,
+    )
+    next = {
+      ...cleared,
+      map: { ...cleared.map, tiles },
+    }
+  }
+  const chips = next.player.chips.map((c) => {
     const count = c.count + c.arriving.reduce((s, a) => s + a.count, 0)
     return { ...c, count, arriving: [] }
   })
   // Deliver all ordered racks immediately
-  const rackFleet = (cleared.player.rackFleet ?? []).map((r) =>
+  const rackFleet = (next.player.rackFleet ?? []).map((r) =>
     r.status === 'ordered' ? { ...r, status: 'live' as const, daysLeft: 0 } : { ...r },
   )
   // Merge same-sku live groups on same hall
@@ -547,9 +636,8 @@ export function cheatFastForwardBuild(state: SimState): SimState {
     else merged.push({ ...r })
   }
   return {
-    ...cleared,
-    map: { ...cleared.map, tiles },
-    player: { ...cleared.player, chips, rackFleet: merged },
+    ...next,
+    player: { ...next.player, chips, rackFleet: merged },
   }
 }
 
@@ -582,15 +670,25 @@ export function runSmokeBootstrap(seed = 7): PlayReport {
     days++
     // Finish train instantly if stalled on cash burn
     if (s.player.trainingJob) {
-      const job = s.player.trainingJob
+      let job = s.player.trainingJob
+      if (job.awaitingDecision) {
+        s = releaseFromJob(s)
+        milestones.push({ day: s.day, id: 'release', detail: 'smoke release' })
+        continue
+      }
       if (job.progressPfDays < job.targetPfDays) {
         s = {
           ...s,
           player: {
             ...s.player,
-            trainingJob: { ...job, progressPfDays: job.targetPfDays },
+            trainingJob: {
+              ...job,
+              progressPfDays: job.targetPfDays,
+              awaitingDecision: false,
+            },
           },
         }
+        job = s.player.trainingJob!
       }
       if (job.postTrain === 'none') s = advancePostTrain(s)
       const j2 = s.player.trainingJob
@@ -602,6 +700,7 @@ export function runSmokeBootstrap(seed = 7): PlayReport {
             trainingJob: {
               ...j2,
               postTrainProgress: j2.postTrainTarget,
+              awaitingDecision: false,
             },
           },
         }

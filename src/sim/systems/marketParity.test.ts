@@ -18,6 +18,7 @@ import {
   collectOffers,
   dominantCapacitySalesGate,
   marketingUtilityBonus,
+  PLAN_SEAT_CONVERSION,
   perceivedServiceReliability,
   settleRivalOfferDemand,
   tickMarket,
@@ -257,7 +258,7 @@ describe('player and rival product-market parity', () => {
     expect(settled.subscriptionServedMTok).toBeCloseTo(9, 12)
     expect(settled.apiRevenue).toBeCloseTo(13 * 2 + 2 * 18, 12)
     expect(settled.subscriptionRevenue).toBeCloseTo(
-      (4_000 * 0.00075 * 60) / 30,
+      (4_000 * PLAN_SEAT_CONVERSION * 60) / 30,
       12,
     )
 

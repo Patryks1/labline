@@ -1,5 +1,5 @@
-import { ECONOMY } from '../balance/economy'
-import { blendApiPrice } from '../balance/pricing'
+import { ECONOMY } from "../balance/economy";
+import { blendApiPrice } from "../balance/pricing";
 import type {
   BenchmarkId,
   Model,
@@ -11,26 +11,30 @@ import type {
   SegmentId,
   SimState,
   SubPlan,
-} from '../types'
-import { inferencePfDemand, planActualMTokPerUser } from '../balance/serveCompute'
-import { seededId } from '../rng'
+} from "../types";
+import {
+  inferencePfDemand,
+  planActualMTokPerUser,
+} from "../balance/serveCompute";
+import { seededId } from "../rng";
 import {
   normalizeModelEvaluations,
   suiteComposite,
-} from '../balance/evaluationSuites'
+} from "../balance/evaluationSuites";
 
 export function defaultPlans(): SubPlan[] {
   return [
     {
-      id: 'plan-free',
-      name: 'Free',
+      id: "plan-free",
+      name: "Free",
       pricePerMonth: 0,
       usageMultiplier: 0.1,
-      includedMTokPerMonth: ECONOMY.basePlanUsageMTokPerDay * 0.1 * ECONOMY.daysPerMonth,
+      includedMTokPerMonth:
+        ECONOMY.basePlanUsageMTokPerDay * 0.1 * ECONOMY.daysPerMonth,
       usageRate: null,
       modelIds: [],
       computePriority: 20,
-      servePrecision: 'fp16',
+      servePrecision: "fp16",
       servePrecisionByModel: {},
       steadyUsageTarget: 0.1,
       modalityRoutes: {},
@@ -38,15 +42,16 @@ export function defaultPlans(): SubPlan[] {
       enabled: true,
     },
     {
-      id: 'plan-plus',
-      name: 'Plus',
+      id: "plan-plus",
+      name: "Plus",
       pricePerMonth: 20,
       usageMultiplier: 1,
-      includedMTokPerMonth: ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth,
+      includedMTokPerMonth:
+        ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth,
       usageRate: null,
       modelIds: [],
       computePriority: 55,
-      servePrecision: 'fp16',
+      servePrecision: "fp16",
       servePrecisionByModel: {},
       steadyUsageTarget: 0.3,
       modalityRoutes: {},
@@ -54,22 +59,23 @@ export function defaultPlans(): SubPlan[] {
       enabled: true,
     },
     {
-      id: 'plan-pro',
-      name: 'Pro',
+      id: "plan-pro",
+      name: "Pro",
       pricePerMonth: 60,
       usageMultiplier: 5,
-      includedMTokPerMonth: ECONOMY.basePlanUsageMTokPerDay * 5 * ECONOMY.daysPerMonth,
+      includedMTokPerMonth:
+        ECONOMY.basePlanUsageMTokPerDay * 5 * ECONOMY.daysPerMonth,
       usageRate: null,
       modelIds: [],
       computePriority: 75,
-      servePrecision: 'fp16',
+      servePrecision: "fp16",
       servePrecisionByModel: {},
       steadyUsageTarget: 0.48,
       modalityRoutes: {},
       demandShocks: [],
       enabled: true,
     },
-  ]
+  ];
 }
 
 const MODALITY_TRAFFIC_SHARE: Record<ModelIOModality, number> = {
@@ -77,26 +83,26 @@ const MODALITY_TRAFFIC_SHARE: Record<ModelIOModality, number> = {
   image: 0.1,
   audio: 0.05,
   video: 0.07,
-}
+};
 
 export function defaultPremiumRouteShare(pricePerMonth: number): number {
-  if (pricePerMonth <= 0) return 0.05
-  if (pricePerMonth <= 30) return 0.3
-  if (pricePerMonth <= 100) return 0.65
-  return 0.9
+  if (pricePerMonth <= 0) return 0.05;
+  if (pricePerMonth <= 30) return 0.3;
+  if (pricePerMonth <= 100) return 0.65;
+  return 0.9;
 }
 
 export function defaultSteadyPlanUsage(pricePerMonth: number): number {
-  if (pricePerMonth <= 0) return 0.1
-  if (pricePerMonth <= 30) return 0.3
-  if (pricePerMonth <= 100) return 0.48
-  return 0.65
+  if (pricePerMonth <= 0) return 0.1;
+  if (pricePerMonth <= 30) return 0.3;
+  if (pricePerMonth <= 100) return 0.48;
+  return 0.65;
 }
 
 function modelSupportsOutput(model: Model, modality: ModelIOModality): boolean {
-  if ((model.io?.outputs[modality] ?? 0) > 0) return true
-  if (modality === 'text') return model.modalities.includes('text')
-  return model.modalities.includes(modality)
+  if ((model.io?.outputs[modality] ?? 0) > 0) return true;
+  if (modality === "text") return model.modalities.includes("text");
+  return model.modalities.includes(modality);
 }
 
 /**
@@ -104,64 +110,85 @@ function modelSupportsOutput(model: Model, modality: ModelIOModality): boolean {
  * roster. New routes intentionally have no fallback: model selection and
  * precision now live on the plan's compact model roster.
  */
-export function normalizedPlanRoutes(state: SimState, plan: SubPlan): Partial<Record<ModelIOModality, PlanModalityRoute>> {
-  const routes: Partial<Record<ModelIOModality, PlanModalityRoute>> = {}
+export function normalizedPlanRoutes(
+  state: SimState,
+  plan: SubPlan,
+): Partial<Record<ModelIOModality, PlanModalityRoute>> {
+  const routes: Partial<Record<ModelIOModality, PlanModalityRoute>> = {};
   const released = state.player.models.filter(
-    (model) => (model.release === 'released' || model.shipped) && plan.modelIds.includes(model.id),
-  )
-  for (const modality of Object.keys(MODALITY_TRAFFIC_SHARE) as ModelIOModality[]) {
+    (model) =>
+      (model.release === "released" || model.shipped) &&
+      plan.modelIds.includes(model.id),
+  );
+  for (const modality of Object.keys(
+    MODALITY_TRAFFIC_SHARE,
+  ) as ModelIOModality[]) {
     const eligible = released
       .filter((model) => modelSupportsOutput(model, modality))
-      .toSorted((a, b) => b.capability - a.capability)
-    if (eligible.length === 0) continue
+      .toSorted((a, b) => b.capability - a.capability);
+    if (eligible.length === 0) continue;
     routes[modality] = {
       modality,
       primaryModelId: eligible[0]?.id ?? null,
       fallbackModelId: null,
       premiumShare: defaultPremiumRouteShare(plan.pricePerMonth),
-      precision: planModelServePrecision(plan, eligible[0]!, state.player.researchUnlocked),
-    }
+      precision: planModelServePrecision(
+        plan,
+        eligible[0]!,
+        state.player.researchUnlocked,
+      ),
+    };
   }
-  return routes
+  return routes;
 }
 
 export function planDemandShockMultiplier(plan: SubPlan, day: number): number {
-  let multiplier = 1
+  let multiplier = 1;
   for (const shock of plan.demandShocks ?? []) {
-    const age = Math.max(0, day - shock.startedDay)
-    multiplier += shock.amplitude * Math.pow(0.5, age / Math.max(1, shock.halfLifeDays))
+    const age = Math.max(0, day - shock.startedDay);
+    multiplier +=
+      shock.amplitude * Math.pow(0.5, age / Math.max(1, shock.halfLifeDays));
   }
-  return Math.max(0.5, Math.min(2.25, multiplier))
+  return Math.max(0.5, Math.min(2.25, multiplier));
 }
 
 function appendPlanShock(
   shocks: readonly PlanDemandShock[] | undefined,
   shock: PlanDemandShock,
 ): PlanDemandShock[] {
-  return [...(shocks ?? []).filter((item) => shock.startedDay - item.startedDay <= 84), shock].slice(-12)
+  return [
+    ...(shocks ?? []).filter(
+      (item) => shock.startedDay - item.startedDay <= 84,
+    ),
+    shock,
+  ].slice(-12);
 }
 
 /** Which quant levels the lab can assign on plans. */
-export function unlockedPlanPrecisions(unlocked: string[]): PlanServePrecision[] {
-  const out: PlanServePrecision[] = ['fp16', 'bf16']
-  if (unlocked.includes('sys_quant')) out.push('int8')
-  if (unlocked.includes('sys_fp8')) out.push('fp8')
-  if (unlocked.includes('sys_int4') || unlocked.includes('sys_fp8')) out.push('int4')
-  if (unlocked.includes('sys_nvfp4_runtime')) out.push('nvfp4')
-  if (unlocked.includes('sys_bitnet_runtime')) out.push('ternary_1_58')
-  return out
+export function unlockedPlanPrecisions(
+  unlocked: string[],
+): PlanServePrecision[] {
+  const out: PlanServePrecision[] = ["fp16", "bf16"];
+  if (unlocked.includes("sys_quant")) out.push("int8");
+  if (unlocked.includes("sys_fp8")) out.push("fp8");
+  if (unlocked.includes("sys_int4") || unlocked.includes("sys_fp8"))
+    out.push("int4");
+  if (unlocked.includes("sys_nvfp4_runtime")) out.push("nvfp4");
+  if (unlocked.includes("sys_bitnet_runtime")) out.push("ternary_1_58");
+  return out;
 }
 
 export function clampServePrecision(
   p: PlanServePrecision | undefined,
   unlocked: string[],
 ): PlanServePrecision {
-  const allowed = unlockedPlanPrecisions(unlocked)
-  const want = p ?? 'fp16'
-  if (allowed.includes(want)) return want
-  if ((want === 'int4' || want === 'nvfp4') && allowed.includes('int8')) return 'int8'
-  if (want === 'fp8' && allowed.includes('bf16')) return 'bf16'
-  return 'fp16'
+  const allowed = unlockedPlanPrecisions(unlocked);
+  const want = p ?? "fp16";
+  if (allowed.includes(want)) return want;
+  if ((want === "int4" || want === "nvfp4") && allowed.includes("int8"))
+    return "int8";
+  if (want === "fp8" && allowed.includes("bf16")) return "bf16";
+  return "fp16";
 }
 
 /** Research- and checkpoint-compatible formats shown for one plan model. */
@@ -171,9 +198,9 @@ export function availablePlanPrecisionsForModel(
 ): PlanServePrecision[] {
   return unlockedPlanPrecisions(unlocked).filter(
     (precision) =>
-      precision !== 'ternary_1_58' ||
-      model.trainingNumerics?.nativeWeightFormat === 'ternary_1_58',
-  )
+      precision !== "ternary_1_58" ||
+      model.trainingNumerics?.nativeWeightFormat === "ternary_1_58",
+  );
 }
 
 export function clampModelServePrecision(
@@ -181,10 +208,10 @@ export function clampModelServePrecision(
   precision: PlanServePrecision | undefined,
   unlocked: string[],
 ): PlanServePrecision {
-  const available = availablePlanPrecisionsForModel(model, unlocked)
-  const clamped = clampServePrecision(precision, unlocked)
-  if (available.includes(clamped)) return clamped
-  return available.includes('bf16') ? 'bf16' : 'fp16'
+  const available = availablePlanPrecisionsForModel(model, unlocked);
+  const clamped = clampServePrecision(precision, unlocked);
+  if (available.includes(clamped)) return clamped;
+  return available.includes("bf16") ? "bf16" : "fp16";
 }
 
 /** Resolve an individual roster model's format with legacy-save fallbacks. */
@@ -195,12 +222,14 @@ export function planModelServePrecision(
 ): PlanServePrecision {
   const legacyRoute = Object.values(plan.modalityRoutes ?? {}).find(
     (route) => route?.primaryModelId === model.id,
-  )
+  );
   return clampModelServePrecision(
     model,
-    plan.servePrecisionByModel?.[model.id] ?? legacyRoute?.precision ?? plan.servePrecision,
+    plan.servePrecisionByModel?.[model.id] ??
+      legacyRoute?.precision ??
+      plan.servePrecision,
     unlocked,
-  )
+  );
 }
 
 function normalizedPlanModelPrecisions(
@@ -209,12 +238,23 @@ function normalizedPlanModelPrecisions(
 ): Record<string, PlanServePrecision> {
   return Object.fromEntries(
     plan.modelIds.flatMap((modelId) => {
-      const model = state.player.models.find((candidate) => candidate.id === modelId)
+      const model = state.player.models.find(
+        (candidate) => candidate.id === modelId,
+      );
       return model
-        ? [[modelId, planModelServePrecision(plan, model, state.player.researchUnlocked)] as const]
-        : []
+        ? [
+            [
+              modelId,
+              planModelServePrecision(
+                plan,
+                model,
+                state.player.researchUnlocked,
+              ),
+            ] as const,
+          ]
+        : [];
     }),
-  )
+  );
 }
 
 /**
@@ -225,21 +265,21 @@ export function planServeModifiers(
   precision: PlanServePrecision | undefined,
   unlocked: string[],
 ): {
-  precision: PlanServePrecision
+  precision: PlanServePrecision;
   /** Multiplies model.inferCostMult for PF demand (lower = cheaper) */
-  computeMult: number
+  computeMult: number;
   /** Multiplies perceived quality for demand */
-  qualityMult: number
+  qualityMult: number;
   /** Added to capability for plan scoring / SOTA */
-  capabilityDelta: number
+  capabilityDelta: number;
   /** Absolute score-point changes shown in plan eval previews. */
-  benchmarkDeltas: Partial<Record<BenchmarkId, number>>
+  benchmarkDeltas: Partial<Record<BenchmarkId, number>>;
   /** Daily brand risk at meaningful traffic; market scales this by usage. */
-  brandRisk: number
-  label: string
+  brandRisk: number;
+  label: string;
 } {
-  const p = clampServePrecision(precision, unlocked)
-  if (p === 'ternary_1_58') {
+  const p = clampServePrecision(precision, unlocked);
+  if (p === "ternary_1_58") {
     return {
       precision: p,
       computeMult: 0.22,
@@ -247,10 +287,10 @@ export function planServeModifiers(
       capabilityDelta: 0,
       benchmarkDeltas: {},
       brandRisk: 0.006,
-      label: 'Native 1.58-bit',
-    }
+      label: "Native 1.58-bit",
+    };
   }
-  if (p === 'nvfp4') {
+  if (p === "nvfp4") {
     return {
       precision: p,
       computeMult: 0.28,
@@ -258,10 +298,10 @@ export function planServeModifiers(
       capabilityDelta: -0.5,
       benchmarkDeltas: {},
       brandRisk: 0.018,
-      label: 'NVFP4 artifact',
-    }
+      label: "NVFP4 artifact",
+    };
   }
-  if (p === 'int4') {
+  if (p === "int4") {
     return {
       precision: p,
       computeMult: 0.34,
@@ -280,10 +320,10 @@ export function planServeModifiers(
         safety: -1,
       },
       brandRisk: 0.08,
-      label: 'INT4 quant',
-    }
+      label: "INT4 quant",
+    };
   }
-  if (p === 'int8') {
+  if (p === "int8") {
     return {
       precision: p,
       computeMult: 0.58,
@@ -295,10 +335,10 @@ export function planServeModifiers(
         agents: -1,
       },
       brandRisk: 0.012,
-      label: 'INT8 quant',
-    }
+      label: "INT8 quant",
+    };
   }
-  if (p === 'fp8') {
+  if (p === "fp8") {
     return {
       precision: p,
       computeMult: 0.55,
@@ -306,18 +346,18 @@ export function planServeModifiers(
       capabilityDelta: 0,
       benchmarkDeltas: {},
       brandRisk: 0.004,
-      label: 'FP8 runtime',
-    }
+      label: "FP8 runtime",
+    };
   }
   return {
-    precision: p === 'bf16' ? 'bf16' : 'fp16',
+    precision: p === "bf16" ? "bf16" : "fp16",
     computeMult: 1,
     qualityMult: 1,
     capabilityDelta: 0,
     benchmarkDeltas: {},
     brandRisk: 0,
-    label: 'Full precision',
-  }
+    label: "Full precision",
+  };
 }
 
 /** Model shape after applying one serving precision policy. */
@@ -327,11 +367,11 @@ export function modelForServePrecision(
   unlocked: string[],
 ): Model {
   const requested =
-    precision === 'ternary_1_58' &&
-    model.trainingNumerics?.nativeWeightFormat !== 'ternary_1_58'
-      ? 'fp16'
-      : precision
-  const m = planServeModifiers(requested, unlocked)
+    precision === "ternary_1_58" &&
+    model.trainingNumerics?.nativeWeightFormat !== "ternary_1_58"
+      ? "fp16"
+      : precision;
+  const m = planServeModifiers(requested, unlocked);
   return {
     ...model,
     inferCostMult: (model.inferCostMult ?? 1) * m.computeMult,
@@ -341,15 +381,16 @@ export function modelForServePrecision(
       reasoning: model.quality.reasoning * m.qualityMult,
       coding: model.quality.coding * m.qualityMult,
       chat: model.quality.chat * m.qualityMult,
-      reliability: model.quality.reliability * Math.min(1, m.qualityMult + 0.05),
+      reliability:
+        model.quality.reliability * Math.min(1, m.qualityMult + 0.05),
     },
     benchmarks: Object.fromEntries(
       Object.entries(model.benchmarks).map(([id, score]) => [
         id,
         Math.max(0, score + (m.benchmarkDeltas[id as BenchmarkId] ?? 0)),
       ]),
-    ) as Model['benchmarks'],
-  }
+    ) as Model["benchmarks"],
+  };
 }
 
 /** Model shape for plan traffic after quant modifiers. */
@@ -362,29 +403,29 @@ export function modelForPlanServe(
     model,
     planModelServePrecision(plan, model, unlocked),
     unlocked,
-  )
+  );
 }
 
 export interface PlanModelTraffic {
-  model: Model
-  share: number
+  model: Model;
+  share: number;
 }
 
 export function defaultPlanComputePriority(
-  plan: Pick<SubPlan, 'pricePerMonth'>,
+  plan: Pick<SubPlan, "pricePerMonth">,
 ): number {
-  if (plan.pricePerMonth <= 0) return 20
-  if (plan.pricePerMonth <= 25) return 55
-  if (plan.pricePerMonth <= 100) return 75
-  if (plan.pricePerMonth <= 180) return 85
-  return 95
+  if (plan.pricePerMonth <= 0) return 20;
+  if (plan.pricePerMonth <= 25) return 55;
+  if (plan.pricePerMonth <= 100) return 75;
+  if (plan.pricePerMonth <= 180) return 85;
+  return 95;
 }
 
 export function planComputePriority(
-  plan: Pick<SubPlan, 'pricePerMonth' | 'computePriority'>,
+  plan: Pick<SubPlan, "pricePerMonth" | "computePriority">,
 ): number {
-  const value = plan.computePriority ?? defaultPlanComputePriority(plan)
-  return Math.max(10, Math.min(100, Number.isFinite(value) ? value : 50))
+  const value = plan.computePriority ?? defaultPlanComputePriority(plan);
+  return Math.max(10, Math.min(100, Number.isFinite(value) ? value : 50));
 }
 
 /**
@@ -392,55 +433,61 @@ export function planComputePriority(
  * service in proportion to configured priority, with unused PF redistributed
  * when a smaller plan becomes fully served.
  */
-export function allocatePlanCompute<T extends { plan: SubPlan; demandPf: number }>(
-  buckets: readonly T[],
-  capacityPf: number,
-): Map<string, number> {
-  const fractions = new Map<string, number>()
-  const remaining = new Map<string, number>()
+export function allocatePlanCompute<
+  T extends { plan: SubPlan; demandPf: number },
+>(buckets: readonly T[], capacityPf: number): Map<string, number> {
+  const fractions = new Map<string, number>();
+  const remaining = new Map<string, number>();
   for (const bucket of buckets) {
-    const demand = Math.max(0, bucket.demandPf)
-    remaining.set(bucket.plan.id, demand)
-    fractions.set(bucket.plan.id, demand <= 1e-9 ? 1 : 0)
+    const demand = Math.max(0, bucket.demandPf);
+    remaining.set(bucket.plan.id, demand);
+    fractions.set(bucket.plan.id, demand <= 1e-9 ? 1 : 0);
   }
-  let pool = Math.max(0, capacityPf)
-  const totalDemand = [...remaining.values()].reduce((sum, demand) => sum + demand, 0)
+  let pool = Math.max(0, capacityPf);
+  const totalDemand = [...remaining.values()].reduce(
+    (sum, demand) => sum + demand,
+    0,
+  );
   if (totalDemand <= pool * 1.02) {
-    for (const bucket of buckets) fractions.set(bucket.plan.id, 1)
-    return fractions
+    for (const bucket of buckets) fractions.set(bucket.plan.id, 1);
+    return fractions;
   }
 
   for (let pass = 0; pass < buckets.length + 2 && pool > 1e-9; pass += 1) {
-    const active = buckets.filter((bucket) => (remaining.get(bucket.plan.id) ?? 0) > 1e-9)
-    if (active.length === 0) break
+    const active = buckets.filter(
+      (bucket) => (remaining.get(bucket.plan.id) ?? 0) > 1e-9,
+    );
+    if (active.length === 0) break;
     const totalWeight = active.reduce(
       (sum, bucket) => sum + planComputePriority(bucket.plan),
       0,
-    )
-    if (totalWeight <= 0) break
-    const passPool = pool
-    let spent = 0
+    );
+    if (totalWeight <= 0) break;
+    const passPool = pool;
+    let spent = 0;
     for (const bucket of active) {
-      const id = bucket.plan.id
-      const need = remaining.get(id) ?? 0
-      const share = passPool * (planComputePriority(bucket.plan) / totalWeight)
-      const allocation = Math.min(need, share)
-      remaining.set(id, Math.max(0, need - allocation))
-      spent += allocation
+      const id = bucket.plan.id;
+      const need = remaining.get(id) ?? 0;
+      const share = passPool * (planComputePriority(bucket.plan) / totalWeight);
+      const allocation = Math.min(need, share);
+      remaining.set(id, Math.max(0, need - allocation));
+      spent += allocation;
     }
-    if (spent <= 1e-12) break
-    pool = Math.max(0, pool - spent)
+    if (spent <= 1e-12) break;
+    pool = Math.max(0, pool - spent);
   }
 
   for (const bucket of buckets) {
-    const demand = Math.max(0, bucket.demandPf)
-    const unserved = remaining.get(bucket.plan.id) ?? 0
+    const demand = Math.max(0, bucket.demandPf);
+    const unserved = remaining.get(bucket.plan.id) ?? 0;
     fractions.set(
       bucket.plan.id,
-      demand <= 1e-9 ? 1 : Math.max(0, Math.min(1, (demand - unserved) / demand)),
-    )
+      demand <= 1e-9
+        ? 1
+        : Math.max(0, Math.min(1, (demand - unserved) / demand)),
+    );
   }
-  return fractions
+  return fractions;
 }
 
 /**
@@ -449,86 +496,128 @@ export function allocatePlanCompute<T extends { plan: SubPlan; demandPf: number 
  * Legacy primary/fallback fields are intentionally ignored here so a removed
  * model can never continue receiving hidden fallback traffic.
  */
-export function planModelTrafficMix(state: SimState, plan: SubPlan): PlanModelTraffic[] {
-  const publicModel = (model: Model) => model.release === 'released' || model.shipped
+export function planModelTrafficMix(
+  state: SimState,
+  plan: SubPlan,
+): PlanModelTraffic[] {
+  const publicModel = (model: Model) =>
+    model.release === "released" || model.shipped;
   const selected = plan.modelIds
-    .map((id) => state.player.models.find((model) => model.id === id && publicModel(model)))
-    .filter((model): model is Model => Boolean(model))
-  if (selected.length === 0) return []
+    .map((id) =>
+      state.player.models.find(
+        (model) => model.id === id && publicModel(model),
+      ),
+    )
+    .filter((model): model is Model => Boolean(model));
+  if (selected.length === 0) return [];
 
-  const served = selected.map((model) => modelForPlanServe(model, plan, state.player.researchUnlocked))
-  const maxCapability = Math.max(...served.map((model) => model.capability), 1)
-  const pfPerMTok = served.map((model) => Math.max(1e-6, inferencePfDemand(1, model, 1)))
-  const cheapest = Math.min(...pfPerMTok)
-  const free = isFreePlan(plan)
-  const premium = plan.pricePerMonth > 180
+  const served = selected.map((model) =>
+    modelForPlanServe(model, plan, state.player.researchUnlocked),
+  );
+  const maxCapability = Math.max(...served.map((model) => model.capability), 1);
+  const pfPerMTok = served.map((model) =>
+    Math.max(1e-6, inferencePfDemand(1, model, 1)),
+  );
+  const cheapest = Math.min(...pfPerMTok);
+  const free = isFreePlan(plan);
+  const premium = plan.pricePerMonth > 180;
   const weights = served.map((model, index) => {
-    const quality = Math.max(0.15, model.capability / maxCapability)
-    const efficiency = Math.max(0.15, cheapest / pfPerMTok[index]!)
-    if (free) return Math.pow(efficiency, 1.45) * (0.45 + quality * 0.55)
-    const capabilityGap = Math.max(0, maxCapability - model.capability)
-    const sotaBias = Math.exp(-capabilityGap / (premium ? 4.5 : 7))
-    if (premium) return Math.pow(quality, 4.5) * sotaBias * (0.88 + efficiency * 0.12)
-    return Math.pow(quality, 3.2) * sotaBias * (0.82 + efficiency * 0.18)
-  })
-  const total = weights.reduce((sum, weight) => sum + weight, 0) || 1
-  return served.map((model, index) => ({ model, share: weights[index]! / total }))
+    const quality = Math.max(0.15, model.capability / maxCapability);
+    const efficiency = Math.max(0.15, cheapest / pfPerMTok[index]!);
+    if (free) return Math.pow(efficiency, 1.45) * (0.45 + quality * 0.55);
+    const capabilityGap = Math.max(0, maxCapability - model.capability);
+    const sotaBias = Math.exp(-capabilityGap / (premium ? 4.5 : 7));
+    if (premium)
+      return Math.pow(quality, 4.5) * sotaBias * (0.88 + efficiency * 0.12);
+    return Math.pow(quality, 3.2) * sotaBias * (0.82 + efficiency * 0.18);
+  });
+  const total = weights.reduce((sum, weight) => sum + weight, 0) || 1;
+  return served.map((model, index) => ({
+    model,
+    share: weights[index]! / total,
+  }));
 }
 
 export interface PremiumPlanScrutiny {
-  applies: boolean
-  entryPlanName: string | null
-  expectedUsageRatio: number
-  actualUsageRatio: number
-  shortfall: number
+  applies: boolean;
+  entryPlanName: string | null;
+  expectedUsageRatio: number;
+  actualUsageRatio: number;
+  shortfall: number;
 }
 
 /** Plans above $180/mo are judged against the company's cheapest paid tier. */
-export function premiumPlanScrutiny(plan: SubPlan, allPlans: readonly SubPlan[]): PremiumPlanScrutiny {
+export function premiumPlanScrutiny(
+  plan: SubPlan,
+  allPlans: readonly SubPlan[],
+): PremiumPlanScrutiny {
   const entry = allPlans
-    .filter((candidate) => candidate.enabled && candidate.pricePerMonth > 0 && candidate.id !== plan.id)
-    .sort((a, b) => a.pricePerMonth - b.pricePerMonth)[0]
+    .filter(
+      (candidate) =>
+        candidate.enabled &&
+        candidate.pricePerMonth > 0 &&
+        candidate.id !== plan.id,
+    )
+    .sort((a, b) => a.pricePerMonth - b.pricePerMonth)[0];
   if (plan.pricePerMonth <= 180 || !entry) {
-    return { applies: false, entryPlanName: entry?.name ?? null, expectedUsageRatio: 20, actualUsageRatio: 0, shortfall: 0 }
+    return {
+      applies: false,
+      entryPlanName: entry?.name ?? null,
+      expectedUsageRatio: 20,
+      actualUsageRatio: 0,
+      shortfall: 0,
+    };
   }
   const actualUsageRatio =
-    planAllowanceMTokPerMonth(plan) / Math.max(0.001, planAllowanceMTokPerMonth(entry))
+    planAllowanceMTokPerMonth(plan) /
+    Math.max(0.001, planAllowanceMTokPerMonth(entry));
   return {
     applies: true,
     entryPlanName: entry.name,
     expectedUsageRatio: 20,
     actualUsageRatio,
     shortfall: Math.max(0, 1 - actualUsageRatio / 20),
-  }
+  };
 }
 
 export function isFreePlan(plan: SubPlan): boolean {
-  return plan.pricePerMonth <= 0
+  return plan.pricePerMonth <= 0;
 }
 
 /** Plan usage mult: 0.1× (tiny free) → 500× (enterprise power seats). */
 export function clampMultiplier(n: number): number {
-  if (!Number.isFinite(n)) return 1
-  return Math.max(0.1, Math.min(500, n))
+  if (!Number.isFinite(n)) return 1;
+  return Math.max(0.1, Math.min(500, n));
 }
 
 /** Soft max monthly price — higher only justified by token value + model quality. */
 export function clampPlanPrice(n: number): number {
-  if (!Number.isFinite(n)) return 0
-  return Math.max(0, Math.min(ECONOMY.planMaxPricePerMonth ?? 25_000, n))
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(ECONOMY.planMaxPricePerMonth ?? 25_000, n));
 }
 
 export function createPlan(
   state: SimState,
-  input: { name: string; pricePerMonth: number; usageMultiplier: number; modelIds?: string[] },
+  input: {
+    name: string;
+    pricePerMonth: number;
+    usageMultiplier: number;
+    modelIds?: string[];
+  },
 ): SimState {
-  let modelIds = input.modelIds ? [...input.modelIds] : []
+  let modelIds = input.modelIds ? [...input.modelIds] : [];
   if (modelIds.length === 0 && state.player.pricing.activeModelId) {
-    modelIds = [state.player.pricing.activeModelId]
+    modelIds = [state.player.pricing.activeModelId];
   }
   const plan: SubPlan = {
-    id: seededId('plan', state.seed, state.day, input.name, state.player.pricing.plans.length),
-    name: input.name.trim() || 'New plan',
+    id: seededId(
+      "plan",
+      state.seed,
+      state.day,
+      input.name,
+      state.player.pricing.plans.length,
+    ),
+    name: input.name.trim() || "New plan",
     pricePerMonth: clampPlanPrice(input.pricePerMonth),
     usageMultiplier: clampMultiplier(input.usageMultiplier),
     includedMTokPerMonth:
@@ -537,31 +626,41 @@ export function createPlan(
       ECONOMY.daysPerMonth,
     usageRate: null,
     modelIds,
-    computePriority: defaultPlanComputePriority({ pricePerMonth: input.pricePerMonth }),
-    servePrecision: isFreePlan({ pricePerMonth: input.pricePerMonth } as SubPlan)
-      ? unlockedPlanPrecisions(state.player.researchUnlocked).includes('int8')
-        ? 'int8'
-        : 'fp16'
-      : 'fp16',
+    computePriority: defaultPlanComputePriority({
+      pricePerMonth: input.pricePerMonth,
+    }),
+    servePrecision: isFreePlan({
+      pricePerMonth: input.pricePerMonth,
+    } as SubPlan)
+      ? unlockedPlanPrecisions(state.player.researchUnlocked).includes("int8")
+        ? "int8"
+        : "fp16"
+      : "fp16",
     servePrecisionByModel: {},
     steadyUsageTarget: defaultSteadyPlanUsage(input.pricePerMonth),
     modalityRoutes: {},
     demandShocks: [],
     enabled: true,
-  }
-  plan.servePrecisionByModel = normalizedPlanModelPrecisions(state, plan)
-  plan.modalityRoutes = normalizedPlanRoutes(state, plan)
+  };
+  plan.servePrecisionByModel = normalizedPlanModelPrecisions(state, plan);
+  plan.modalityRoutes = normalizedPlanRoutes(state, plan);
   for (const route of Object.values(plan.modalityRoutes)) {
-    if (!route?.primaryModelId) continue
+    if (!route?.primaryModelId) continue;
     plan.demandShocks = appendPlanShock(plan.demandShocks, {
-      id: seededId('plan-shock', state.seed, state.day, plan.id, route.modality),
-      kind: 'launch',
+      id: seededId(
+        "plan-shock",
+        state.seed,
+        state.day,
+        plan.id,
+        route.modality,
+      ),
+      kind: "launch",
       modality: route.modality,
       modelId: route.primaryModelId,
       startedDay: state.day,
       amplitude: 0.35,
       halfLifeDays: 14,
-    })
+    });
   }
 
   return {
@@ -577,17 +676,21 @@ export function createPlan(
       {
         id: `plan-new-${plan.id}`,
         day: state.day,
-        severity: 'info' as const,
+        severity: "info" as const,
         message: `Plan created: ${plan.name} ($${plan.pricePerMonth}/mo · ${plan.usageMultiplier}x · ${formatAllowance(plan)} tokens)`,
       },
       ...state.alerts,
     ].slice(0, 40),
-  }
+  };
 }
 
-export function updatePlan(state: SimState, planId: string, patch: Partial<SubPlan>): SimState {
+export function updatePlan(
+  state: SimState,
+  planId: string,
+  patch: Partial<SubPlan>,
+): SimState {
   const plans = state.player.pricing.plans.map((p) => {
-    if (p.id !== planId) return p
+    if (p.id !== planId) return p;
     const usageMultiplier =
       patch.includedMTokPerMonth !== undefined
         ? clampMultiplier(
@@ -596,7 +699,7 @@ export function updatePlan(state: SimState, planId: string, patch: Partial<SubPl
           )
         : patch.usageMultiplier !== undefined
           ? clampMultiplier(patch.usageMultiplier)
-          : p.usageMultiplier
+          : p.usageMultiplier;
     const includedMTokPerMonth =
       patch.includedMTokPerMonth !== undefined
         ? Math.max(
@@ -607,9 +710,13 @@ export function updatePlan(state: SimState, planId: string, patch: Partial<SubPl
             ),
           )
         : patch.usageMultiplier !== undefined
-          ? ECONOMY.basePlanUsageMTokPerDay * usageMultiplier * ECONOMY.daysPerMonth
-          : p.includedMTokPerMonth ??
-            ECONOMY.basePlanUsageMTokPerDay * p.usageMultiplier * ECONOMY.daysPerMonth
+          ? ECONOMY.basePlanUsageMTokPerDay *
+            usageMultiplier *
+            ECONOMY.daysPerMonth
+          : (p.includedMTokPerMonth ??
+            ECONOMY.basePlanUsageMTokPerDay *
+              p.usageMultiplier *
+              ECONOMY.daysPerMonth);
     const next: SubPlan = {
       ...p,
       ...patch,
@@ -627,100 +734,130 @@ export function updatePlan(state: SimState, planId: string, patch: Partial<SubPl
               pricePerMonth: patch.pricePerMonth ?? p.pricePerMonth,
               computePriority: patch.computePriority,
             })
-          : p.computePriority ?? defaultPlanComputePriority(p),
+          : (p.computePriority ?? defaultPlanComputePriority(p)),
       servePrecision:
         patch.servePrecision !== undefined
-          ? clampServePrecision(patch.servePrecision, state.player.researchUnlocked)
-          : p.servePrecision ?? 'fp16',
+          ? clampServePrecision(
+              patch.servePrecision,
+              state.player.researchUnlocked,
+            )
+          : (p.servePrecision ?? "fp16"),
       steadyUsageTarget:
         patch.steadyUsageTarget !== undefined
           ? Math.max(0.02, Math.min(0.9, patch.steadyUsageTarget))
-          : p.steadyUsageTarget ?? defaultSteadyPlanUsage(patch.pricePerMonth ?? p.pricePerMonth),
+          : (p.steadyUsageTarget ??
+            defaultSteadyPlanUsage(patch.pricePerMonth ?? p.pricePerMonth)),
       name: patch.name !== undefined ? patch.name.trim() || p.name : p.name,
-    }
-    const requestedPrecisions = patch.servePrecisionByModel !== undefined
-      ? patch.servePrecisionByModel
-      : patch.servePrecision !== undefined
-        ? Object.fromEntries(next.modelIds.map((modelId) => [modelId, patch.servePrecision!]))
-        : p.servePrecisionByModel
+    };
+    const requestedPrecisions =
+      patch.servePrecisionByModel !== undefined
+        ? patch.servePrecisionByModel
+        : patch.servePrecision !== undefined
+          ? Object.fromEntries(
+              next.modelIds.map((modelId) => [modelId, patch.servePrecision!]),
+            )
+          : p.servePrecisionByModel;
     next.servePrecisionByModel = normalizedPlanModelPrecisions(state, {
       ...next,
       servePrecisionByModel: requestedPrecisions,
-    })
+    });
     const firstModelPrecision = next.modelIds[0]
       ? next.servePrecisionByModel[next.modelIds[0]]
-      : undefined
-    if (firstModelPrecision) next.servePrecision = firstModelPrecision
+      : undefined;
+    if (firstModelPrecision) next.servePrecision = firstModelPrecision;
     // The model roster is authoritative after any edit. Rebuild compatibility
     // routes without hidden fallback assignments.
     next.modalityRoutes = normalizedPlanRoutes(state, {
       ...next,
       modalityRoutes: {},
-    })
-    let shocks = next.demandShocks ?? []
-    const oldIds = new Set(p.modelIds)
-    const newIds = new Set(next.modelIds)
+    });
+    let shocks = next.demandShocks ?? [];
+    const oldIds = new Set(p.modelIds);
+    const newIds = new Set(next.modelIds);
     for (const modelId of newIds) {
-      if (oldIds.has(modelId)) continue
-      const model = state.player.models.find((candidate) => candidate.id === modelId)
-      const modality = (['text', 'image', 'audio', 'video'] as ModelIOModality[])
-        .find((candidate) => model && modelSupportsOutput(model, candidate)) ?? 'text'
+      if (oldIds.has(modelId)) continue;
+      const model = state.player.models.find(
+        (candidate) => candidate.id === modelId,
+      );
+      const modality =
+        (["text", "image", "audio", "video"] as ModelIOModality[]).find(
+          (candidate) => model && modelSupportsOutput(model, candidate),
+        ) ?? "text";
       shocks = appendPlanShock(shocks, {
-        id: seededId('plan-shock', state.seed, state.day, p.id, modelId, 'add'),
-        kind: 'launch',
+        id: seededId("plan-shock", state.seed, state.day, p.id, modelId, "add"),
+        kind: "launch",
         modality,
         modelId,
         startedDay: state.day,
         amplitude: 0.35,
         halfLifeDays: 14,
-      })
+      });
     }
     for (const modelId of oldIds) {
-      if (newIds.has(modelId)) continue
+      if (newIds.has(modelId)) continue;
       shocks = appendPlanShock(shocks, {
-        id: seededId('plan-shock', state.seed, state.day, p.id, modelId, 'remove'),
-        kind: 'removal',
-        modality: 'text',
+        id: seededId(
+          "plan-shock",
+          state.seed,
+          state.day,
+          p.id,
+          modelId,
+          "remove",
+        ),
+        kind: "removal",
+        modality: "text",
         modelId,
         startedDay: state.day,
         amplitude: next.modelIds.length > 0 ? -0.15 : -0.4,
         halfLifeDays: 21,
-      })
+      });
     }
     for (const modelId of next.modelIds) {
-      if (!oldIds.has(modelId)) continue
-      const model = state.player.models.find((candidate) => candidate.id === modelId)
-      if (!model) continue
-      const before = planModelServePrecision(p, model, state.player.researchUnlocked)
-      const after = planModelServePrecision(next, model, state.player.researchUnlocked)
-      if (before === after) continue
-      const modality = (['text', 'image', 'audio', 'video'] as ModelIOModality[])
-        .find((candidate) => modelSupportsOutput(model, candidate)) ?? 'text'
+      if (!oldIds.has(modelId)) continue;
+      const model = state.player.models.find(
+        (candidate) => candidate.id === modelId,
+      );
+      if (!model) continue;
+      const before = planModelServePrecision(
+        p,
+        model,
+        state.player.researchUnlocked,
+      );
+      const after = planModelServePrecision(
+        next,
+        model,
+        state.player.researchUnlocked,
+      );
+      if (before === after) continue;
+      const modality =
+        (["text", "image", "audio", "video"] as ModelIOModality[]).find(
+          (candidate) => modelSupportsOutput(model, candidate),
+        ) ?? "text";
       shocks = appendPlanShock(shocks, {
-        id: seededId('plan-shock', state.seed, state.day, p.id, modelId, after),
-        kind: 'quantization',
+        id: seededId("plan-shock", state.seed, state.day, p.id, modelId, after),
+        kind: "quantization",
         modality,
         modelId,
         startedDay: state.day,
         amplitude: -0.1,
         halfLifeDays: 21,
-      })
+      });
     }
-    next.demandShocks = shocks
-    return next
-  })
+    next.demandShocks = shocks;
+    return next;
+  });
   return {
     ...state,
     player: {
       ...state.player,
       pricing: { ...state.player.pricing, plans },
     },
-  }
+  };
 }
 
 export function deletePlan(state: SimState, planId: string): SimState {
-  const plans = state.player.pricing.plans.filter((p) => p.id !== planId)
-  if (plans.length === state.player.pricing.plans.length) return state
+  const plans = state.player.pricing.plans.filter((p) => p.id !== planId);
+  if (plans.length === state.player.pricing.plans.length) return state;
   if (plans.length === 0) {
     return {
       ...state,
@@ -728,12 +865,12 @@ export function deletePlan(state: SimState, planId: string): SimState {
         {
           id: `plan-del-fail-${state.day}`,
           day: state.day,
-          severity: 'warn' as const,
-          message: 'Keep at least one plan.',
+          severity: "warn" as const,
+          message: "Keep at least one plan.",
         },
         ...state.alerts,
       ].slice(0, 40),
-    }
+    };
   }
   return {
     ...state,
@@ -741,66 +878,82 @@ export function deletePlan(state: SimState, planId: string): SimState {
       ...state.player,
       pricing: { ...state.player.pricing, plans },
     },
-  }
+  };
 }
 
 /** Attach newly shipped models to plans with empty model lists. */
-export function attachModelToEmptyPlans(state: SimState, modelId: string): SimState {
+export function attachModelToEmptyPlans(
+  state: SimState,
+  modelId: string,
+): SimState {
   const plans = state.player.pricing.plans.map((p) => {
-    if (p.modelIds.length > 0) return p
-    const model = state.player.models.find((candidate) => candidate.id === modelId)
+    if (p.modelIds.length > 0) return p;
+    const model = state.player.models.find(
+      (candidate) => candidate.id === modelId,
+    );
     const precision = model
-      ? clampModelServePrecision(model, p.servePrecision, state.player.researchUnlocked)
-      : clampServePrecision(p.servePrecision, state.player.researchUnlocked)
+      ? clampModelServePrecision(
+          model,
+          p.servePrecision,
+          state.player.researchUnlocked,
+        )
+      : clampServePrecision(p.servePrecision, state.player.researchUnlocked);
     const next = {
       ...p,
       modelIds: [modelId],
       servePrecisionByModel: { [modelId]: precision },
-    }
-    const routes = normalizedPlanRoutes(state, next)
-    const modality = (Object.keys(routes) as ModelIOModality[])[0] ?? 'text'
+    };
+    const routes = normalizedPlanRoutes(state, next);
+    const modality = (Object.keys(routes) as ModelIOModality[])[0] ?? "text";
     return {
       ...next,
       modalityRoutes: routes,
       demandShocks: appendPlanShock(p.demandShocks, {
-        id: seededId('plan-shock', state.seed, state.day, p.id, modelId),
-        kind: 'launch',
+        id: seededId("plan-shock", state.seed, state.day, p.id, modelId),
+        kind: "launch",
         modality,
         modelId,
         startedDay: state.day,
         amplitude: 0.35,
         halfLifeDays: 14,
       }),
-    }
-  })
+    };
+  });
   return {
     ...state,
     player: {
       ...state.player,
       pricing: { ...state.player.pricing, plans },
     },
-  }
+  };
 }
 
 /** Max allowance MTok/user/day (before utilization %). */
 export function planAllowanceMTokPerDay(plan: SubPlan): number {
-  return planAllowanceMTokPerMonth(plan) / ECONOMY.daysPerMonth
+  return planAllowanceMTokPerMonth(plan) / ECONOMY.daysPerMonth;
 }
 
 /** Monthly included token allowance (MTok/user/mo at full utilization). */
 export function planAllowanceMTokPerMonth(plan: SubPlan): number {
-  if (Number.isFinite(plan.includedMTokPerMonth) && (plan.includedMTokPerMonth ?? 0) > 0) {
-    return plan.includedMTokPerMonth!
+  if (
+    Number.isFinite(plan.includedMTokPerMonth) &&
+    (plan.includedMTokPerMonth ?? 0) > 0
+  ) {
+    return plan.includedMTokPerMonth!;
   }
-  return ECONOMY.basePlanUsageMTokPerDay * plan.usageMultiplier * ECONOMY.daysPerMonth
+  return (
+    ECONOMY.basePlanUsageMTokPerDay *
+    plan.usageMultiplier *
+    ECONOMY.daysPerMonth
+  );
 }
 
 export interface PlanAllowanceExpectation {
-  minimumMTok: number
-  recommendedMTok: number
-  maximumMTok: number
-  dissatisfaction: number
-  label: string
+  minimumMTok: number;
+  recommendedMTok: number;
+  maximumMTok: number;
+  dissatisfaction: number;
+  label: string;
 }
 
 /**
@@ -808,23 +961,31 @@ export interface PlanAllowanceExpectation {
  * products still need at least 1M tokens/month to feel like a real product;
  * paid tiers are judged at roughly 1–1.5M tokens per monthly dollar.
  */
-export function planAllowanceExpectation(plan: SubPlan): PlanAllowanceExpectation {
-  const allowance = planAllowanceMTokPerMonth(plan)
-  const free = isFreePlan(plan)
-  const minimumMTok = free ? 1 : Math.max(1, plan.pricePerMonth)
-  const recommendedMTok = free ? 10 : Math.max(minimumMTok, plan.pricePerMonth * 1.25)
-  const maximumMTok = free ? 25 : Math.max(recommendedMTok, plan.pricePerMonth * 1.5)
-  const shortfall = Math.max(0, minimumMTok - allowance) / Math.max(1, minimumMTok)
-  const dissatisfaction = shortfall <= 0 ? 0 : Math.min(1, 0.2 + shortfall * 0.8)
+export function planAllowanceExpectation(
+  plan: SubPlan,
+): PlanAllowanceExpectation {
+  const allowance = planAllowanceMTokPerMonth(plan);
+  const free = isFreePlan(plan);
+  const minimumMTok = free ? 1 : Math.max(1, plan.pricePerMonth);
+  const recommendedMTok = free
+    ? 10
+    : Math.max(minimumMTok, plan.pricePerMonth * 1.25);
+  const maximumMTok = free
+    ? 25
+    : Math.max(recommendedMTok, plan.pricePerMonth * 1.5);
+  const shortfall =
+    Math.max(0, minimumMTok - allowance) / Math.max(1, minimumMTok);
+  const dissatisfaction =
+    shortfall <= 0 ? 0 : Math.min(1, 0.2 + shortfall * 0.8);
   return {
     minimumMTok,
     recommendedMTok,
     maximumMTok,
     dissatisfaction,
     label: free
-      ? 'Free users expect at least 1M tokens/month.'
+      ? "Free users expect at least 1M tokens/month."
       : `$${plan.pricePerMonth.toFixed(0)} plans are judged against ${minimumMTok.toFixed(0)}–${maximumMTok.toFixed(0)}M tokens/month.`,
-  }
+  };
 }
 
 /**
@@ -837,118 +998,135 @@ export function planStabilityDissatisfaction(
   marginPerSubMonth: number,
   pricePerMonth: number,
 ): number {
-  const lossRatio = Math.max(0, -marginPerSubMonth) / Math.max(10, pricePerMonth || 20)
-  if (lossRatio <= 0) return 0
+  const lossRatio =
+    Math.max(0, -marginPerSubMonth) / Math.max(10, pricePerMonth || 20);
+  if (lossRatio <= 0) return 0;
   return isFree
     ? Math.min(0.75, 0.35 + lossRatio * 0.45)
-    : Math.min(1, 0.15 + lossRatio * 1.1)
+    : Math.min(1, 0.15 + lossRatio * 1.1);
 }
 
-export type FreeTierDemandBand = 'popular' | 'semi_popular' | 'cost_constrained'
+export type FreeTierDemandBand =
+  "popular" | "semi_popular" | "cost_constrained";
 
 /**
  * Free-tier reach follows the allowance users actually experience. A message
  * is estimated at 2K tokens, matching the plan editor's friendly estimate.
  */
 export function freeTierDemandProfile(plan: SubPlan): {
-  band: FreeTierDemandBand
-  messagesPerDay: number
-  audienceMultiplier: number
-  minimumAudienceShare: number
-  utilityBonus: number
-  paidPopularityLead: number
-  label: string
+  band: FreeTierDemandBand;
+  messagesPerDay: number;
+  audienceMultiplier: number;
+  minimumAudienceShare: number;
+  utilityBonus: number;
+  paidPopularityLead: number;
+  label: string;
 } {
   const messagesPerDay =
     (planAllowanceMTokPerMonth(plan) * 1_000_000) /
     ECONOMY.daysPerMonth /
-    2_000
+    2_000;
   if (messagesPerDay > 10) {
     return {
-      band: 'popular',
+      band: "popular",
       messagesPerDay,
       audienceMultiplier: 2.4,
       minimumAudienceShare: 0.32,
       utilityBonus: 22,
       paidPopularityLead: 2.4,
-      label: 'Mass-market reach',
-    }
+      label: "Mass-market reach",
+    };
   }
   if (messagesPerDay >= 5) {
     return {
-      band: 'semi_popular',
+      band: "semi_popular",
       messagesPerDay,
       audienceMultiplier: 0.9,
       minimumAudienceShare: 0.07,
       utilityBonus: 5,
       paidPopularityLead: 1.6,
-      label: 'Semi-popular reach',
-    }
+      label: "Semi-popular reach",
+    };
   }
   return {
-    band: 'cost_constrained',
+    band: "cost_constrained",
     messagesPerDay,
     audienceMultiplier: 0.16,
     minimumAudienceShare: 0.02,
     utilityBonus: -18,
     paidPopularityLead: 1.12,
-    label: 'Cost-constrained reach',
-  }
+    label: "Cost-constrained reach",
+  };
 }
 
 export function formatAllowance(plan: SubPlan): string {
-  const m = planAllowanceMTokPerMonth(plan)
-  if (m >= 1000) return `${(m / 1000).toFixed(1)}B tok/mo`
-  if (m >= 1) return `${m.toFixed(1)}M tok/mo`
-  return `${(m * 1000).toFixed(0)}K tok/mo`
+  const m = planAllowanceMTokPerMonth(plan);
+  if (m >= 1000) return `${(m / 1000).toFixed(1)}B tok/mo`;
+  if (m >= 1) return `${m.toFixed(1)}M tok/mo`;
+  return `${(m * 1000).toFixed(0)}K tok/mo`;
 }
 
 /** @deprecated use planAllowanceMTokPerDay × utilization */
 export function planTokensPerDay(plan: SubPlan): number {
-  return planAllowanceMTokPerDay(plan)
+  return planAllowanceMTokPerDay(plan);
 }
 
 export function emptyPlanStats(): PlanDayStats[] {
-  return []
+  return [];
 }
 
 /** Best model on a plan for quality scoring. */
 export function bestModelOnPlan(state: SimState, plan: SubPlan) {
   const publicOk = (m: { shipped: boolean; release?: string }) =>
-    m.release === 'released' || m.shipped
+    m.release === "released" || m.shipped;
   const models = plan.modelIds
     .map((id) => state.player.models.find((m) => m.id === id && publicOk(m)))
-    .filter(Boolean)
-  if (models.length === 0) return null
-  return models.sort((a, b) => (b!.capability ?? 0) - (a!.capability ?? 0))[0] ?? null
+    .filter(Boolean);
+  if (models.length === 0) return null;
+  return (
+    models.sort((a, b) => (b!.capability ?? 0) - (a!.capability ?? 0))[0] ??
+    null
+  );
 }
 
 export interface PlanOfferingBreadth {
-  score: number
-  contributors: { modality: 'image' | 'video' | 'audio'; modelId: string; modelName: string; composite: number; points: number }[]
+  score: number;
+  contributors: {
+    modality: "image" | "video" | "audio";
+    modelId: string;
+    modelName: string;
+    composite: number;
+    points: number;
+  }[];
 }
 
 export function offeringBreadthMultiplier(segmentId: SegmentId): number {
-  if (segmentId === 'creative') return 1
-  if (segmentId === 'consumer') return 0.8
-  if (segmentId === 'hobby') return 0.6
-  if (segmentId === 'indie_api' || segmentId === 'startup_api') return 0.4
-  if (segmentId === 'enterprise') return 0.2
-  return 0.1
+  if (segmentId === "creative") return 1;
+  if (segmentId === "consumer") return 0.8;
+  if (segmentId === "hobby") return 0.6;
+  if (segmentId === "indie_api" || segmentId === "startup_api") return 0.4;
+  if (segmentId === "enterprise") return 0.2;
+  return 0.1;
 }
 
 /** Quality-gated portfolio value from generation models included in a plan. */
-export function planOfferingBreadth(state: SimState, plan: SubPlan): PlanOfferingBreadth {
+export function planOfferingBreadth(
+  state: SimState,
+  plan: SubPlan,
+): PlanOfferingBreadth {
   const models = plan.modelIds
     .map((id) => state.player.models.find((model) => model.id === id))
-    .filter((model): model is Model => !!model && (model.release === 'released' || model.shipped))
-    .map(normalizeModelEvaluations)
+    .filter(
+      (model): model is Model =>
+        !!model && (model.release === "released" || model.shipped),
+    )
+    .map(normalizeModelEvaluations);
   const definitions = [
-    { modality: 'image' as const, suite: 'image_generation' as const, max: 7 },
-    { modality: 'video' as const, suite: 'video_generation' as const, max: 6 },
-    { modality: 'audio' as const, suite: 'audio_generation' as const, max: 5 },
-  ]
-  const contributors: PlanOfferingBreadth['contributors'] = []
+    { modality: "image" as const, suite: "image_generation" as const, max: 7 },
+    { modality: "video" as const, suite: "video_generation" as const, max: 6 },
+    { modality: "audio" as const, suite: "audio_generation" as const, max: 5 },
+  ];
+  const contributors: PlanOfferingBreadth["contributors"] = [];
   for (const definition of definitions) {
     const candidates = models
       .map((model) => ({
@@ -956,28 +1134,34 @@ export function planOfferingBreadth(state: SimState, plan: SubPlan): PlanOfferin
         composite: suiteComposite(model.benchmarkSuites?.[definition.suite]),
         safety: model.capabilities?.safety ?? model.quality.safety,
       }))
-      .filter((candidate) => candidate.composite >= 35 && candidate.safety >= 30)
-      .toSorted((a, b) => b.composite - a.composite)
-    const best = candidates[0]
-    if (!best) continue
-    const points = definition.max * Math.max(0, Math.min(1, (best.composite - 35) / 65))
+      .filter(
+        (candidate) => candidate.composite >= 35 && candidate.safety >= 30,
+      )
+      .toSorted((a, b) => b.composite - a.composite);
+    const best = candidates[0];
+    if (!best) continue;
+    const points =
+      definition.max * Math.max(0, Math.min(1, (best.composite - 35) / 65));
     contributors.push({
       modality: definition.modality,
       modelId: best.model.id,
       modelName: best.model.name,
       composite: best.composite,
       points,
-    })
+    });
   }
-  return { score: contributors.reduce((sum, item) => sum + item.points, 0), contributors }
+  return {
+    score: contributors.reduce((sum, item) => sum + item.points, 0),
+    contributors,
+  };
 }
 
 function playerBlendedApi(state: SimState): number {
-  const p = state.player.pricing
+  const p = state.player.pricing;
   if (p.apiPriceInPerMTok != null && p.apiPriceOutPerMTok != null) {
-    return blendApiPrice(p.apiPriceInPerMTok, p.apiPriceOutPerMTok)
+    return blendApiPrice(p.apiPriceInPerMTok, p.apiPriceOutPerMTok);
   }
-  return Math.max(0.05, p.apiPricePerMTok)
+  return Math.max(0.05, p.apiPricePerMTok);
 }
 
 /**
@@ -989,8 +1173,9 @@ export function planApiEquivalentValue(
   apiPricePerMTok: number,
   utilization = 0.75,
 ): number {
-  const mtokMo = planAllowanceMTokPerMonth(plan) * Math.max(0.1, Math.min(1, utilization))
-  return mtokMo * Math.max(0.01, apiPricePerMTok)
+  const mtokMo =
+    planAllowanceMTokPerMonth(plan) * Math.max(0.1, Math.min(1, utilization));
+  return mtokMo * Math.max(0.01, apiPricePerMTok);
 }
 
 /**
@@ -1003,9 +1188,9 @@ export function planSubsidyRatio(
   apiPricePerMTok: number,
   utilization = 0.75,
 ): number {
-  if (isFreePlan(plan)) return Number.POSITIVE_INFINITY
-  const apiEq = planApiEquivalentValue(plan, apiPricePerMTok, utilization)
-  return apiEq / Math.max(0.01, plan.pricePerMonth)
+  if (isFreePlan(plan)) return Number.POSITIVE_INFINITY;
+  const apiEq = planApiEquivalentValue(plan, apiPricePerMTok, utilization);
+  return apiEq / Math.max(0.01, plan.pricePerMonth);
 }
 
 /**
@@ -1015,47 +1200,56 @@ export function planSubsidyRatio(
 export function planPriceTooHighScore(
   plan: SubPlan,
   opts: {
-    apiPricePerMTok: number
-    modelCapability: number
-    frontierCapability: number
-    utilization?: number
+    apiPricePerMTok: number;
+    modelCapability: number;
+    frontierCapability: number;
+    utilization?: number;
   },
 ): number {
-  if (isFreePlan(plan)) return 0
-  const u = opts.utilization ?? 0.75
+  if (isFreePlan(plan)) return 0;
+  const u = opts.utilization ?? 0.75;
   const sota = Math.max(
     0,
-    Math.min(1, 1 - Math.max(0, opts.frontierCapability - opts.modelCapability) / 32),
-  )
+    Math.min(
+      1,
+      1 - Math.max(0, opts.frontierCapability - opts.modelCapability) / 32,
+    ),
+  );
   // Fair price ceiling — SOTA + included tokens justify higher ARPU
   const tokenValue =
-    planApiEquivalentValue(plan, opts.apiPricePerMTok, u) * (0.85 + sota * 1.35)
+    planApiEquivalentValue(plan, opts.apiPricePerMTok, u) *
+    (0.85 + sota * 1.35);
   const brandPremium =
-    (18 + opts.modelCapability * 1.6) * (1 + sota * 3.2) + (plan.pricePerMonth <= 25 ? 14 : 0)
-  const fairCeiling = tokenValue + brandPremium
-  const over = plan.pricePerMonth / Math.max(1, fairCeiling)
+    (18 + opts.modelCapability * 1.6) * (1 + sota * 3.2) +
+    (plan.pricePerMonth <= 25 ? 14 : 0);
+  const fairCeiling = tokenValue + brandPremium;
+  const over = plan.pricePerMonth / Math.max(1, fairCeiling);
   // Softer curve so fair Plus/Pro sell; gouging still near 1.0
-  return Math.max(0, Math.min(1, Math.pow(Math.max(0, over - 1.1), 1.0) / 1.85))
+  return Math.max(
+    0,
+    Math.min(1, Math.pow(Math.max(0, over - 1.1), 1.0) / 1.85),
+  );
 }
 
 /** Headline rival sub price (cheapest paid rival tier as competitive anchor). */
 export function rivalHeadlineSubPrice(state: SimState): number {
   const prices = state.rivals
-    .filter((r) => r.models.some((m) => m.shipped || m.release === 'released'))
+    .filter((r) => r.models.some((m) => m.shipped || m.release === "released"))
     .map((r) => r.pricing.subPlusPrice)
-    .filter((p) => p > 0)
-  if (prices.length === 0) return 20
-  return Math.min(...prices)
+    .filter((p) => p > 0);
+  if (prices.length === 0) return 20;
+  return Math.min(...prices);
 }
 
 export function rivalBestCapability(state: SimState): number {
-  let best = 0
+  let best = 0;
   for (const r of state.rivals) {
     for (const m of r.models) {
-      if (m.shipped || m.release === 'released') best = Math.max(best, m.capability)
+      if (m.shipped || m.release === "released")
+        best = Math.max(best, m.capability);
     }
   }
-  return best
+  return best;
 }
 
 /**
@@ -1065,48 +1259,55 @@ export function rivalBestCapability(state: SimState): number {
 export function planAttractiveness(
   state: SimState,
   plan: SubPlan,
-  segmentId: SegmentId = 'consumer',
+  segmentId: SegmentId = "consumer",
 ): number {
-  if (!plan.enabled) return -50
-  const baseModel = bestModelOnPlan(state, plan)
-  if (!baseModel) return -40
-  const model = modelForPlanServe(baseModel, plan, state.player.researchUnlocked)
+  if (!plan.enabled) return -50;
+  const baseModel = bestModelOnPlan(state, plan);
+  if (!baseModel) return -40;
+  const model = modelForPlanServe(
+    baseModel,
+    plan,
+    state.player.researchUnlocked,
+  );
 
   const frontier = Math.max(
     model.capability,
     ...state.player.models
-      .filter((m) => m.release === 'released' || m.shipped)
+      .filter((m) => m.release === "released" || m.shipped)
       .map((m) => m.capability),
     rivalBestCapability(state),
     40,
-  )
-  const gap = Math.max(0, frontier - model.capability)
-  const sota = Math.max(0, Math.min(1, 1 - gap / 28))
-  const api = playerBlendedApi(state)
-  const rivalSub = rivalHeadlineSubPrice(state)
-  const rivalCap = rivalBestCapability(state) || frontier
+  );
+  const gap = Math.max(0, frontier - model.capability);
+  const sota = Math.max(0, Math.min(1, 1 - gap / 28));
+  const api = playerBlendedApi(state);
+  const rivalSub = rivalHeadlineSubPrice(state);
+  const rivalCap = rivalBestCapability(state) || frontier;
 
   const quality =
     model.capability * 0.42 +
     model.quality.reliability * 0.22 +
     model.quality.chat * 0.12 +
-    sota * 30
+    sota * 30;
 
   // Explicit token offer (log of monthly MTok)
-  const allowMo = planAllowanceMTokPerMonth(plan)
-  const tokenOfferScore = Math.min(52, 8 + Math.log10(allowMo * 1000 + 10) * 12)
+  const allowMo = planAllowanceMTokPerMonth(plan);
+  const tokenOfferScore = Math.min(
+    52,
+    8 + Math.log10(allowMo * 1000 + 10) * 12,
+  );
 
   // Price: free attractive for lagging; SOTA can charge more if tokens justify
   const priceScore =
     plan.pricePerMonth <= 0
       ? 48 + (1 - sota) * 16
-      : Math.max(0, 72 - Math.log10(plan.pricePerMonth + 1) * 22)
+      : Math.max(0, 72 - Math.log10(plan.pricePerMonth + 1) * 22);
 
   const tooHigh = planPriceTooHighScore(plan, {
     apiPricePerMTok: api,
     modelCapability: model.capability,
     frontierCapability: frontier,
-  })
+  });
 
   // Value vs rival: more tokens @ same/lower price, or smarter model
   const tokenVsRival =
@@ -1114,31 +1315,39 @@ export function planAttractiveness(
       ? 0
       : Math.min(
           24,
-          Math.log2(1 + allowMo / Math.max(0.01, ECONOMY.basePlanUsageMTokPerDay * 30)) *
+          Math.log2(
+            1 + allowMo / Math.max(0.01, ECONOMY.basePlanUsageMTokPerDay * 30),
+          ) *
             (rivalSub / Math.max(1, plan.pricePerMonth)) *
             4,
-        )
+        );
   const smarterAtPrice =
     plan.pricePerMonth > 0 && plan.pricePerMonth <= rivalSub * 1.15
       ? Math.max(0, model.capability - rivalCap) * 0.85
-      : Math.max(0, model.capability - rivalCap) * 0.35
+      : Math.max(0, model.capability - rivalCap) * 0.35;
 
   const valueRatio =
     plan.pricePerMonth <= 0
       ? tokenOfferScore * 0.3 * (1.1 - sota * 0.35)
       : Math.min(
           32,
-          ((quality + tokenOfferScore) / plan.pricePerMonth) * (1.8 + (1 - sota) * 2.5),
-        )
+          ((quality + tokenOfferScore) / plan.pricePerMonth) *
+            (1.8 + (1 - sota) * 2.5),
+        );
 
-  const sotaPull = Math.pow(sota, 1.35) * 20
-  const pricePenalty = tooHigh * 38
-  const premiumPenalty = premiumPlanScrutiny(plan, state.player.pricing.plans).shortfall * 52
-  const allowancePenalty = planAllowanceExpectation(plan).dissatisfaction * 72
+  const sotaPull = Math.pow(sota, 1.35) * 20;
+  const pricePenalty = tooHigh * 38;
+  const premiumPenalty =
+    premiumPlanScrutiny(plan, state.player.pricing.plans).shortfall * 52;
+  const allowancePenalty = planAllowanceExpectation(plan).dissatisfaction * 72;
   const priorDissatisfaction =
-    state.lastMarket.planStats.find((stat) => stat.planId === plan.id)?.dissatisfaction ?? 0
-  const instabilityPenalty = priorDissatisfaction * (isFreePlan(plan) ? 34 : 58)
-  const breadth = planOfferingBreadth(state, plan).score * offeringBreadthMultiplier(segmentId)
+    state.lastMarket.planStats.find((stat) => stat.planId === plan.id)
+      ?.dissatisfaction ?? 0;
+  const instabilityPenalty =
+    priorDissatisfaction * (isFreePlan(plan) ? 34 : 58);
+  const breadth =
+    planOfferingBreadth(state, plan).score *
+    offeringBreadthMultiplier(segmentId);
 
   return (
     quality * 0.34 +
@@ -1153,7 +1362,7 @@ export function planAttractiveness(
     premiumPenalty -
     allowancePenalty -
     instabilityPenalty
-  )
+  );
 }
 
 /**
@@ -1162,42 +1371,53 @@ export function planAttractiveness(
  */
 export function maxSeatsForPlan(
   plan: SubPlan,
-  model: Pick<Model, 'paramsB' | 'activeParamsB' | 'family' | 'inferCostMult'> | null,
+  model: Pick<
+    Model,
+    "paramsB" | "activeParamsB" | "family" | "inferCostMult"
+  > | null,
   capacityUnits: number,
   serveEff: number,
   usageRate: number,
   opts?: {
-    modelCapability?: number
-    frontierCapability?: number
+    modelCapability?: number;
+    frontierCapability?: number;
     /** Fraction of capacity reserved for subs (rest for API) */
-    subPoolShare?: number
+    subPoolShare?: number;
     /** When true, capacityUnits is MTok/day (token path); else inference PF */
-    capacityIsMTok?: boolean
+    capacityIsMTok?: boolean;
   },
 ): number {
-  if (!model || capacityUnits <= 1e-9) return 0
+  if (!model || capacityUnits <= 1e-9) return 0;
   const sota = sotaProximityLocal(
     opts?.modelCapability ?? 40,
     opts?.frontierCapability ?? 50,
-  )
-  const free = isFreePlan(plan)
-  const eng = free ? 0.4 + sota * 0.8 : 0.55 + Math.pow(sota, 1.3) * 2.2
+  );
+  const free = isFreePlan(plan);
+  const eng = free ? 0.4 + sota * 0.8 : 0.55 + Math.pow(sota, 1.3) * 2.2;
   const perUserMTok =
-    planActualMTokPerUser(plan, ECONOMY.basePlanUsageMTokPerDay, usageRate) * eng
-  if (perUserMTok <= 1e-12) return 1e9
-  const subShare = opts?.subPoolShare ?? 1 - (ECONOMY.defaultApiVsSubPriority ?? 0.68)
-  const subPool = capacityUnits * Math.max(0.12, Math.min(1, subShare))
+    planActualMTokPerUser(plan, ECONOMY.basePlanUsageMTokPerDay, usageRate) *
+    eng;
+  if (perUserMTok <= 1e-12) return plan.subscriberCap ?? 1e9;
+  const subShare =
+    opts?.subPoolShare ?? 1 - (ECONOMY.defaultApiVsSubPriority ?? 0.68);
+  const subPool = capacityUnits * Math.max(0.12, Math.min(1, subShare));
   if (opts?.capacityIsMTok) {
-    return Math.max(0, Math.floor(subPool / perUserMTok))
+    return Math.min(
+      plan.subscriberCap ?? Number.POSITIVE_INFINITY,
+      Math.max(0, Math.floor(subPool / perUserMTok)),
+    );
   }
-  const pfEach = inferencePfDemand(perUserMTok, model, serveEff)
-  if (pfEach <= 1e-12) return 1e9
-  return Math.max(0, Math.floor(subPool / pfEach))
+  const pfEach = inferencePfDemand(perUserMTok, model, serveEff);
+  if (pfEach <= 1e-12) return 1e9;
+  return Math.min(
+    plan.subscriberCap ?? Number.POSITIVE_INFINITY,
+    Math.max(0, Math.floor(subPool / pfEach)),
+  );
 }
 
 function sotaProximityLocal(cap: number, frontier: number): number {
-  const f = Math.max(18, frontier)
-  return Math.max(0, Math.min(1, 1 - Math.max(0, f - cap) / 32))
+  const f = Math.max(18, frontier);
+  return Math.max(0, Math.min(1, 1 - Math.max(0, f - cap) / 32));
 }
 
 /** Soft max total sub seats from whole inference pool (UI / market). */
@@ -1206,14 +1426,20 @@ export function maxTotalSubSeats(
   capacityPf: number,
   serveEff: number,
 ): number {
-  const plans = state.player.pricing.plans.filter((p) => p.enabled)
-  if (plans.length === 0) return 0
+  const plans = state.player.pricing.plans.filter((p) => p.enabled);
+  if (plans.length === 0) return 0;
   // Weighted average per-user PF using plan attractiveness as weights
-  let seats = 0
+  let seats = 0;
   for (const p of plans) {
-    const m = bestModelOnPlan(state, p)
-    const u = p.usageRate ?? 0.65
-    seats += maxSeatsForPlan(p, m, capacityPf / Math.max(1, plans.length), serveEff, u)
+    const m = bestModelOnPlan(state, p);
+    const u = p.usageRate ?? 0.65;
+    seats += maxSeatsForPlan(
+      p,
+      m,
+      capacityPf / Math.max(1, plans.length),
+      serveEff,
+      u,
+    );
   }
-  return Math.max(0, seats)
+  return Math.max(0, seats);
 }

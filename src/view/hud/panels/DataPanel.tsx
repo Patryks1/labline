@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react'
-import { useGameStore } from '../../../store/gameStore'
-import { ResearchUnlockLink } from '../ui/ResearchUnlockLink'
+import { useMemo, useState } from "react";
+import { useGameStore } from "../../../store/gameStore";
+import { ResearchUnlockLink } from "../ui/ResearchUnlockLink";
 import {
   DATA_DOMAINS,
   DATA_DOMAIN_META,
@@ -13,14 +13,18 @@ import {
   estimateDataPrune,
   estimateSynthBudget,
   formatTokens,
+  listDataSupplierOffers,
   totalProcessed,
   totalRaw,
   totalSources,
-  type DataPortfolioChannel,
   type DataPruneEstimate,
-} from '../../../sim/systems/data'
-import { money, num, pct } from '../format'
-import type { DataDomain, DataQualityBand, DataSellerKind } from '../../../sim/types'
+} from "../../../sim/systems/data";
+import { money, num, pct } from "../format";
+import type {
+  DataDomain,
+  DataQualityBand,
+  DataSellerKind,
+} from "../../../sim/types";
 import {
   BlockerList,
   CardGrid,
@@ -30,179 +34,226 @@ import {
   SegmentedTabs,
   StatRow,
   type Blocker,
-} from '../ui/kit'
+} from "../ui/kit";
 import {
   EmptyState,
   HudButton,
   MetricTile,
   PanelScaffold,
   StatusChip,
-} from '../ui/HudPrimitives'
+} from "../ui/HudPrimitives";
+import {
+  NegotiationHeader,
+  NegotiationMessage,
+  NegotiationMetric,
+} from "../ui/NegotiationRoom";
 
-type CorpusSourceKey = 'web' | 'bought' | 'user' | 'synth'
-type DataTab = 'stocks' | 'sources' | 'market' | 'synth'
+type CorpusSourceKey = "web" | "bought" | "user" | "synth";
+type DataTab = "stocks" | "sources" | "market" | "synth";
 
 const CORPUS_SOURCE_META: Record<
   CorpusSourceKey,
   { label: string; color: string; signal: string; risk: string }
 > = {
   web: {
-    label: 'Web',
-    color: '#7c8b99',
-    signal: 'Broad coverage',
-    risk: 'Noisy and repetitive',
+    label: "Web",
+    color: "#7c8b99",
+    signal: "Broad coverage",
+    risk: "Noisy and repetitive",
   },
   bought: {
-    label: 'Bought',
-    color: '#e9ad55',
-    signal: 'Clearer rights',
-    risk: 'Expensive and finite',
+    label: "Bought",
+    color: "#e9ad55",
+    signal: "Clearer rights",
+    risk: "Expensive and finite",
   },
   user: {
-    label: 'User',
-    color: '#57d6cb',
-    signal: 'Fresh product signal',
-    risk: 'Trust-sensitive',
+    label: "User",
+    color: "#57d6cb",
+    signal: "Fresh product signal",
+    risk: "Trust-sensitive",
   },
   synth: {
-    label: 'Synth',
-    color: '#a58be0',
-    signal: 'Scales continuously',
-    risk: 'Teacher can go stale',
+    label: "Synth",
+    color: "#a58be0",
+    signal: "Scales continuously",
+    risk: "Teacher can go stale",
   },
-}
+};
 
 const MARKET_FILTERS = [
-  ['all', 'All'],
-  ['scrap', 'Scrap'],
-  ['standard', 'Standard'],
-  ['premium', 'Premium'],
-  ['curated', 'Curated'],
-  ['code', 'Code'],
-  ['chat', 'Chat'],
-  ['law', 'Law'],
-  ['health', 'Health'],
-  ['web_scrape', 'Scrapers'],
-  ['rival', 'Rivals'],
-  ['enterprise', 'Enterprise'],
-] as const
+  ["all", "All"],
+  ["scrap", "Scrap"],
+  ["standard", "Standard"],
+  ["premium", "Premium"],
+  ["curated", "Curated"],
+  ["code", "Code"],
+  ["chat", "Chat"],
+  ["law", "Law"],
+  ["health", "Health"],
+  ["web_scrape", "Scrapers"],
+  ["rival", "Rivals"],
+  ["enterprise", "Enterprise"],
+] as const;
 
 export function DataPanel() {
-  const state = useGameStore((s) => s.state)
-  const setCollectionRate = useGameStore((s) => s.setCollectionRate)
-  const setAutoProcess = useGameStore((s) => s.setAutoProcess)
-  const enqueueProcess = useGameStore((s) => s.enqueueProcess)
-  const enqueueProcessAll = useGameStore((s) => s.enqueueProcessAll)
-  const enqueueDataPrune = useGameStore((s) => s.enqueueDataPrune)
-  const enqueueAllDataPrunes = useGameStore((s) => s.enqueueAllDataPrunes)
-  const purchaseDataPruneAudit = useGameStore((s) => s.purchaseDataPruneAudit)
-  const buyDataPortfolio = useGameStore((s) => s.buyDataPortfolio)
-  const buyDomainContract = useGameStore((s) => s.buyDomainContract)
-  const startSynthBudget = useGameStore((s) => s.startSynthBudget)
-  const cancelSynthGen = useGameStore((s) => s.cancelSynthGen)
+  const state = useGameStore((s) => s.state);
+  const setCollectionRate = useGameStore((s) => s.setCollectionRate);
+  const setAutoProcess = useGameStore((s) => s.setAutoProcess);
+  const enqueueProcess = useGameStore((s) => s.enqueueProcess);
+  const enqueueProcessAll = useGameStore((s) => s.enqueueProcessAll);
+  const enqueueDataPrune = useGameStore((s) => s.enqueueDataPrune);
+  const enqueueAllDataPrunes = useGameStore((s) => s.enqueueAllDataPrunes);
+  const purchaseDataPruneAudit = useGameStore((s) => s.purchaseDataPruneAudit);
+  const acceptDataSupplierOffer = useGameStore(
+    (s) => s.acceptDataSupplierOffer,
+  );
+  const buyDomainContract = useGameStore((s) => s.buyDomainContract);
+  const startSynthBudget = useGameStore((s) => s.startSynthBudget);
+  const cancelSynthGen = useGameStore((s) => s.cancelSynthGen);
 
-  const data = ensureLabData(state)
-  const raw = totalRaw(data)
-  const proc = totalProcessed(data)
-  const sources = totalSources(data)
-  const sourceTotal = sources.web + sources.user + sources.bought + sources.synth
-  const srcSum = sourceTotal || 1
+  const data = ensureLabData(state);
+  const raw = totalRaw(data);
+  const proc = totalProcessed(data);
+  const sources = totalSources(data);
+  const sourceTotal =
+    sources.web + sources.user + sources.bought + sources.synth;
+  const srcSum = sourceTotal || 1;
   const playerDataOrders = state.worldMarkets.orders.filter(
-    (order) => order.labId === state.playerLabId && order.kind === 'data',
-  )
-  const dataReserved = playerDataOrders.reduce((sum, order) => sum + order.cashReserved, 0)
+    (order) => order.labId === state.playerLabId && order.kind === "data",
+  );
+  const dataReserved = playerDataOrders.reduce(
+    (sum, order) => sum + order.cashReserved,
+    0,
+  );
   const latestDataFills = state.worldMarkets.fills.filter(
-    (fill) => fill.labId === state.playerLabId && fill.kind === 'data',
-  )
+    (fill) => fill.labId === state.playerLabId && fill.kind === "data",
+  );
 
-  const [tab, setTab] = useState<DataTab>('stocks')
-  const [genShare, setGenShare] = useState(0.25)
-  const [selectedSource, setSelectedSource] = useState<CorpusSourceKey>('user')
+  const [tab, setTab] = useState<DataTab>("stocks");
+  const [genShare, setGenShare] = useState(0.25);
+  const [selectedSource, setSelectedSource] = useState<CorpusSourceKey>("user");
+  const [supplierNegotiatingId, setSupplierNegotiatingId] = useState<
+    string | null
+  >(null);
+  const [supplierOfferPercent, setSupplierOfferPercent] = useState(95);
   const [marketFilter, setMarketFilter] = useState<
-    'all' | DataQualityBand | DataDomain | DataSellerKind
-  >('all')
-  const [portfolioBudgetM, setPortfolioBudgetM] = useState(7.5)
-  const [portfolioMix, setPortfolioMix] = useState<Record<DataPortfolioChannel, number>>({
-    open: 35,
-    broker: 25,
-    enterprise: 30,
-    rival: 10,
-  })
+    "all" | DataQualityBand | DataDomain | DataSellerKind
+  >("all");
+  const supplierOffers = useMemo(() => listDataSupplierOffers(state), [state]);
+  const activeSupplierContracts = state.player.dataSupplierContracts ?? [];
 
-  const synthUnlocked = state.player.researchUnlocked.includes('data_synth')
-  const market = ensureDataMarket(state).dataMarket!
+  const synthUnlocked = state.player.researchUnlocked.includes("data_synth");
+  const market = ensureDataMarket(state).dataMarket!;
   const pruneEstimates = useMemo(
-    () => new Map(DATA_DOMAINS.map((domain) => [domain, estimateDataPrune(state, domain)])),
+    () =>
+      new Map(
+        DATA_DOMAINS.map((domain) => [
+          domain,
+          estimateDataPrune(state, domain),
+        ]),
+      ),
     [state],
-  )
-  const pruneAllEstimate = useMemo(() => estimateAllDataPrunes(state), [state])
-  const pruneAuditEstimate = useMemo(() => estimateDataPruneAudit(state), [state])
-  const synthEstimate = useMemo(() => estimateSynthBudget(state, genShare), [state, genShare])
-  const autoSynthJob = data.synthQueue.find((job) => job.autoPortfolio)
+  );
+  const pruneAllEstimate = useMemo(() => estimateAllDataPrunes(state), [state]);
+  const pruneAuditEstimate = useMemo(
+    () => estimateDataPruneAudit(state),
+    [state],
+  );
+  const synthEstimate = useMemo(
+    () => estimateSynthBudget(state, genShare),
+    [state, genShare],
+  );
+  const autoSynthJob = data.synthQueue.find((job) => job.autoPortfolio);
 
-  const sourceMix = (['web', 'bought', 'user', 'synth'] as const).map((key) => ({
-    key,
-    value: sources[key],
-    share: sources[key] / srcSum,
-    ...CORPUS_SOURCE_META[key],
-  }))
-  const selectedSourceInfo = sourceMix.find((source) => source.key === selectedSource)!
+  const sourceMix = (["web", "bought", "user", "synth"] as const).map(
+    (key) => ({
+      key,
+      value: sources[key],
+      share: sources[key] / srcSum,
+      ...CORPUS_SOURCE_META[key],
+    }),
+  );
+  const selectedSourceInfo = sourceMix.find(
+    (source) => source.key === selectedSource,
+  )!;
   const sourceDomainRows = DATA_DOMAINS.map((domain) => {
-    const stock = data.stocks[domain]
+    const stock = data.stocks[domain];
     const volume =
-      selectedSource === 'web'
+      selectedSource === "web"
         ? stock.fromWeb
-        : selectedSource === 'bought'
+        : selectedSource === "bought"
           ? stock.fromBought
-          : selectedSource === 'user'
+          : selectedSource === "user"
             ? stock.fromUser
-            : stock.fromSynth
-    return { domain, volume: volume ?? 0, quality: stock.quality }
-  }).sort((left, right) => right.volume - left.volume)
+            : stock.fromSynth;
+    return { domain, volume: volume ?? 0, quality: stock.quality };
+  }).sort((left, right) => right.volume - left.volume);
 
   const sourceQualityNumerator = sourceDomainRows.reduce(
     (sum, row) => sum + row.volume * row.quality,
     0,
-  )
+  );
   const sourceQuality =
-    selectedSourceInfo.value > 0 ? sourceQualityNumerator / selectedSourceInfo.value : 0
+    selectedSourceInfo.value > 0
+      ? sourceQualityNumerator / selectedSourceInfo.value
+      : 0;
   const sourceQualityBand =
     sourceQuality >= 75
-      ? 'High'
+      ? "High"
       : sourceQuality >= 55
-        ? 'Medium'
+        ? "Medium"
         : sourceQuality > 0
-          ? 'Low'
-          : 'No stock'
+          ? "Low"
+          : "No stock";
 
-  const readyShare = proc / Math.max(1, raw + proc)
-  const licensedShare = sourceTotal > 0 ? (sources.bought + sources.user) / sourceTotal : 0
+  const readyShare = proc / Math.max(1, raw + proc);
+  const licensedShare =
+    sourceTotal > 0 ? (sources.bought + sources.user) / sourceTotal : 0;
   const avgQuality =
     DATA_DOMAINS.reduce((sum, domain) => {
-      const stock = data.stocks[domain]
-      return sum + (stock.raw + stock.processed) * stock.quality
-    }, 0) / Math.max(1, raw + proc)
+      const stock = data.stocks[domain];
+      return sum + (stock.raw + stock.processed) * stock.quality;
+    }, 0) / Math.max(1, raw + proc);
   const domainsCovered = DATA_DOMAINS.filter((domain) => {
-    const stock = data.stocks[domain]
-    return stock.raw + stock.processed > 0.5
-  }).length
+    const stock = data.stocks[domain];
+    return stock.raw + stock.processed > 0.5;
+  }).length;
   const collectionRisk =
     data.collectionRate >= 0.8
-      ? 'High trust risk'
+      ? "High trust risk"
       : data.collectionRate >= 0.55
-        ? 'Guarded'
-        : 'Low risk'
+        ? "Guarded"
+        : "Low risk";
 
-  const liveOffers = market.offers.filter((offer) => offer.mTokLeft > 0)
+  const liveOffers = market.offers.filter((offer) => offer.mTokLeft > 0);
   const pruneAllBlockers: Blocker[] = !pruneAllEstimate.ok
-    ? [{ text: pruneAllEstimate.reason ?? 'Cannot prune all domains', tone: 'warning' }]
-    : []
+    ? [
+        {
+          text: pruneAllEstimate.reason ?? "Cannot prune all domains",
+          tone: "warning",
+        },
+      ]
+    : [];
   const auditBlockers: Blocker[] = !pruneAuditEstimate.ok
-    ? [{ text: pruneAuditEstimate.reason ?? 'Cannot audit corpus', tone: 'warning' }]
-    : []
-  const synthBlockers: Blocker[] = []
-  if (!synthUnlocked) synthBlockers.push({ text: 'Unlock Synthetic Generators research', tone: 'warning' })
-  if (!synthEstimate.model) synthBlockers.push({ text: 'Need a usable teacher model', tone: 'warning' })
+    ? [
+        {
+          text: pruneAuditEstimate.reason ?? "Cannot audit corpus",
+          tone: "warning",
+        },
+      ]
+    : [];
+  const synthBlockers: Blocker[] = [];
+  if (!synthUnlocked)
+    synthBlockers.push({
+      text: "Unlock Synthetic Generators research",
+      tone: "warning",
+    });
+  if (!synthEstimate.model)
+    synthBlockers.push({
+      text: "Need a usable teacher model",
+      tone: "warning",
+    });
 
   return (
     <PanelScaffold
@@ -210,13 +261,17 @@ export function DataPanel() {
       title="Data"
       description="Corpus stocks, acquisition, and synthetic generation."
       actions={
-        <StatusChip tone={readyShare >= 0.7 ? 'positive' : 'warning'}>
+        <StatusChip tone={readyShare >= 0.7 ? "positive" : "warning"}>
           {pct(readyShare, 0)} ready
         </StatusChip>
       }
     >
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <MetricTile label="Corpus" value={formatTokens(raw + proc)} detail={`${formatTokens(proc)} ready`} />
+        <MetricTile
+          label="Corpus"
+          value={formatTokens(raw + proc)}
+          detail={`${formatTokens(proc)} ready`}
+        />
         <MetricTile
           label="Licensed"
           value={pct(licensedShare, 0)}
@@ -225,15 +280,21 @@ export function DataPanel() {
         />
         <MetricTile
           label="Quality"
-          value={avgQuality > 0 ? `Q${Math.round(avgQuality)}` : '—'}
+          value={avgQuality > 0 ? `Q${Math.round(avgQuality)}` : "—"}
           detail={`${domainsCovered}/${DATA_DOMAINS.length} domains`}
-          tone={avgQuality >= 70 ? 'positive' : avgQuality >= 50 ? 'warning' : 'neutral'}
+          tone={
+            avgQuality >= 70
+              ? "positive"
+              : avgQuality >= 50
+                ? "warning"
+                : "neutral"
+          }
         />
         <MetricTile
           label="Today"
           value={`+${formatTokens(data.dayProcessed + (data.daySynthMTok ?? 0))}`}
           detail={`${data.assets.length} assets · ${data.manifests.length} manifests`}
-          tone={autoSynthJob ? 'research' : 'neutral'}
+          tone={autoSynthJob ? "research" : "neutral"}
         />
       </div>
 
@@ -243,19 +304,21 @@ export function DataPanel() {
           active={tab}
           onChange={(id) => setTab(id as DataTab)}
           items={[
-            { id: 'stocks', label: 'Stocks' },
-            { id: 'sources', label: 'Sources' },
+            { id: "stocks", label: "Stocks" },
+            { id: "sources", label: "Sources" },
             {
-              id: 'market',
+              id: "market",
               label: (
                 <span className="inline-flex items-center gap-1.5">
                   Market
-                  <span className="font-mono text-[0.625rem] text-muted">{liveOffers.length}</span>
+                  <span className="font-mono text-[0.625rem] text-muted">
+                    {liveOffers.length}
+                  </span>
                 </span>
               ),
             },
             {
-              id: 'synth',
+              id: "synth",
               label: (
                 <span className="inline-flex items-center gap-1.5">
                   {autoSynthJob ? <LiveDot className="text-research" /> : null}
@@ -268,7 +331,7 @@ export function DataPanel() {
       </div>
 
       <div key={tab} className="panel-swap mt-3 space-y-3">
-        {tab === 'stocks' && (
+        {tab === "stocks" && (
           <>
             <GameCard
               eyebrow="Flywheel"
@@ -278,10 +341,10 @@ export function DataPanel() {
                 <StatusChip
                   tone={
                     data.collectionRate >= 0.8
-                      ? 'danger'
+                      ? "danger"
                       : data.collectionRate >= 0.55
-                        ? 'warning'
-                        : 'positive'
+                        ? "warning"
+                        : "positive"
                   }
                 >
                   {collectionRisk}
@@ -301,14 +364,25 @@ export function DataPanel() {
                   max={100}
                   step={5}
                   value={Math.round(data.collectionRate * 100)}
-                  onChange={(e) => setCollectionRate(Number(e.target.value) / 100)}
+                  onChange={(e) =>
+                    setCollectionRate(Number(e.target.value) / 100)
+                  }
                   className="mt-1.5 w-full"
                 />
               </label>
               <div className="mt-2 grid grid-cols-3 gap-x-3">
-                <StatRow label="Collected" value={formatTokens(data.dayCollected)} />
-                <StatRow label="Processed" value={formatTokens(data.dayProcessed)} />
-                <StatRow label="Queue" value={`${data.processQueue.length}/6`} />
+                <StatRow
+                  label="Collected"
+                  value={formatTokens(data.dayCollected)}
+                />
+                <StatRow
+                  label="Processed"
+                  value={formatTokens(data.dayProcessed)}
+                />
+                <StatRow
+                  label="Queue"
+                  value={`${data.processQueue.length}/6`}
+                />
               </div>
               <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                 <label className="flex items-center gap-2 text-[0.8125rem] text-bone">
@@ -319,7 +393,10 @@ export function DataPanel() {
                   />
                   Auto-clean
                 </label>
-                <HudButton variant="secondary" onClick={() => enqueueProcessAll()}>
+                <HudButton
+                  variant="secondary"
+                  onClick={() => enqueueProcessAll()}
+                >
                   Process backlog
                 </HudButton>
               </div>
@@ -331,7 +408,10 @@ export function DataPanel() {
               tone="mint"
               actions={
                 <div className="flex flex-wrap gap-1.5">
-                  <HudButton variant="ghost" onClick={() => enqueueProcessAll()}>
+                  <HudButton
+                    variant="ghost"
+                    onClick={() => enqueueProcessAll()}
+                  >
                     Clean all
                   </HudButton>
                   <HudButton
@@ -345,26 +425,36 @@ export function DataPanel() {
                 </div>
               }
             >
-              {pruneAllBlockers.length > 0 ? <div className="mb-2"><BlockerList items={pruneAllBlockers} /></div> : null}
+              {pruneAllBlockers.length > 0 ? (
+                <div className="mb-2">
+                  <BlockerList items={pruneAllBlockers} />
+                </div>
+              ) : null}
               {pruneAuditEstimate.unlocked ? (
                 <div className="mb-2 rounded-md border border-amber/20 bg-amber/5 px-2.5 py-2 text-[0.75rem]">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-muted">
-                      Audit live · discard{' '}
+                      Audit live · discard{" "}
                       <strong className="font-mono tabular-nums text-amber">
                         {formatTokens(pruneAllEstimate.totalMTok)}
                       </strong>
                     </span>
                     <span className="font-mono tabular-nums text-muted">
-                      {money(pruneAllEstimate.cashCost)} · {num(pruneAllEstimate.pfDays, 0)} PFd ·{' '}
+                      {money(pruneAllEstimate.cashCost)} ·{" "}
+                      {num(pruneAllEstimate.pfDays, 0)} PFd ·{" "}
                       {pruneAllEstimate.researchersRequired}R
                     </span>
                   </div>
-                  <p className="mt-1 text-mint">Volumes unlocked through D{pruneAuditEstimate.validUntilDay}.</p>
+                  <p className="mt-1 text-mint">
+                    Volumes unlocked through D{pruneAuditEstimate.validUntilDay}
+                    .
+                  </p>
                 </div>
               ) : (
                 <div className="mb-2 space-y-2">
-                  {auditBlockers.length > 0 ? <BlockerList items={auditBlockers} /> : null}
+                  {auditBlockers.length > 0 ? (
+                    <BlockerList items={auditBlockers} />
+                  ) : null}
                   <HudButton
                     variant="secondary"
                     disabled={!pruneAuditEstimate.ok}
@@ -379,10 +469,10 @@ export function DataPanel() {
 
               <CardGrid min="14rem" className="anim-stagger">
                 {DATA_DOMAINS.map((domain) => {
-                  const stock = data.stocks[domain]
+                  const stock = data.stocks[domain];
                   const queued = data.processQueue
                     .filter((job) => job.domain === domain)
-                    .reduce((sum, job) => sum + job.remaining, 0)
+                    .reduce((sum, job) => sum + job.remaining, 0);
                   return (
                     <DomainStockCard
                       key={domain}
@@ -394,10 +484,12 @@ export function DataPanel() {
                       queued={queued}
                       prune={pruneEstimates.get(domain)!}
                       auditUnlocked={pruneAuditEstimate.unlocked}
-                      onProcess={() => enqueueProcess(domain, Math.min(stock.raw, 50), 70)}
+                      onProcess={() =>
+                        enqueueProcess(domain, Math.min(stock.raw, 50), 70)
+                      }
                       onPrune={() => enqueueDataPrune(domain)}
                     />
-                  )
+                  );
                 })}
               </CardGrid>
             </GameCard>
@@ -409,14 +501,16 @@ export function DataPanel() {
                 tone="train"
                 live
                 actions={
-                  <StatusChip tone="warning">{data.pruneQueue.length} active</StatusChip>
+                  <StatusChip tone="warning">
+                    {data.pruneQueue.length} active
+                  </StatusChip>
                 }
               >
                 <div className="anim-stagger space-y-2">
                   {data.pruneQueue.map((job) => {
-                    const total = job.rawTotal + job.processedTotal
-                    const remaining = job.rawRemaining + job.processedRemaining
-                    const done = 1 - remaining / Math.max(0.01, total)
+                    const total = job.rawTotal + job.processedTotal;
+                    const remaining = job.rawRemaining + job.processedRemaining;
+                    const done = 1 - remaining / Math.max(0.01, total);
                     return (
                       <div
                         key={job.id}
@@ -441,12 +535,13 @@ export function DataPanel() {
                         <div className="mt-1 flex flex-wrap justify-between gap-1 font-mono text-[0.6875rem] tabular-nums text-muted">
                           <span>{money(total * job.cashPerMTok)}</span>
                           <span>
-                            {num(total * job.pfDaysPerMTok, 0)} PFd · {job.researchersRequired}R ·{' '}
+                            {num(total * job.pfDaysPerMTok, 0)} PFd ·{" "}
+                            {job.researchersRequired}R ·{" "}
                             {pct(job.researchShare, 0)} research
                           </span>
                         </div>
                       </div>
-                    )
+                    );
                   })}
                 </div>
               </GameCard>
@@ -454,7 +549,7 @@ export function DataPanel() {
           </>
         )}
 
-        {tab === 'sources' && (
+        {tab === "sources" && (
           <GameCard
             eyebrow="Mix"
             title="Source intelligence"
@@ -474,8 +569,8 @@ export function DataPanel() {
                   aria-pressed={selectedSource === source.key}
                   className={`rounded-md border px-2.5 py-2 text-left transition ${
                     selectedSource === source.key
-                      ? 'border-mint/50 bg-mint/10'
-                      : 'border-line/70 bg-void/35 hover:border-line hover:bg-void/55'
+                      ? "border-mint/50 bg-mint/10"
+                      : "border-line/70 bg-void/35 hover:border-line hover:bg-void/55"
                   }`}
                 >
                   <span className="flex items-center gap-1.5 text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
@@ -496,19 +591,23 @@ export function DataPanel() {
             </div>
 
             <div className="mt-3 grid grid-cols-3 gap-x-3">
-              <StatRow label="Share" value={pct(selectedSourceInfo.share, 0)} strong />
+              <StatRow
+                label="Share"
+                value={pct(selectedSourceInfo.share, 0)}
+                strong
+              />
               <StatRow
                 label="Quality"
                 value={
                   sourceQuality > 0
                     ? `Q${Math.round(sourceQuality)} · ${sourceQualityBand}`
-                    : 'No stock'
+                    : "No stock"
                 }
               />
               <StatRow
                 label="Signal"
                 value={
-                  selectedSource === 'synth' && selectedSourceInfo.value > 0
+                  selectedSource === "synth" && selectedSourceInfo.value > 0
                     ? `${pct((sources.synthHQ ?? 0) / selectedSourceInfo.value, 0)} HQ`
                     : selectedSourceInfo.signal
                 }
@@ -517,15 +616,21 @@ export function DataPanel() {
 
             <div className="mt-3 border-t border-line/60 pt-3">
               <div className="mb-2 flex items-center justify-between gap-2 text-[0.6875rem]">
-                <span className="uppercase tracking-[0.12em] text-muted">Top domains</span>
-                <span className="text-amber">Watch: {selectedSourceInfo.risk}</span>
+                <span className="uppercase tracking-[0.12em] text-muted">
+                  Top domains
+                </span>
+                <span className="text-amber">
+                  Watch: {selectedSourceInfo.risk}
+                </span>
               </div>
               <div className="anim-stagger space-y-2">
                 {sourceDomainRows.slice(0, 4).map((row) => (
                   <MeterBar
                     key={row.domain}
                     label={DATA_DOMAIN_META[row.domain].label}
-                    value={row.volume / Math.max(1, sourceDomainRows[0]?.volume ?? 1)}
+                    value={
+                      row.volume / Math.max(1, sourceDomainRows[0]?.volume ?? 1)
+                    }
                     detail={formatTokens(row.volume)}
                     tone="positive"
                   />
@@ -535,20 +640,29 @@ export function DataPanel() {
           </GameCard>
         )}
 
-        {tab === 'market' && (
+        {tab === "market" && (
           <>
             <div className="grid grid-cols-3 gap-2">
-              <MetricTile label="Open bids" value={String(playerDataOrders.length)} />
-              <MetricTile label="Reserved" value={money(dataReserved)} tone="warning" />
+              <MetricTile
+                label="Open bids"
+                value={String(playerDataOrders.length)}
+              />
+              <MetricTile
+                label="Reserved"
+                value={money(dataReserved)}
+                tone="warning"
+              />
               <MetricTile
                 label="Last fill"
                 value={
                   latestDataFills[0]
                     ? formatTokens(latestDataFills[0].quantity)
-                    : '—'
+                    : "—"
                 }
                 detail={
-                  latestDataFills[0] ? `${money(latestDataFills[0].unitPrice)}/MTok` : undefined
+                  latestDataFills[0]
+                    ? `${money(latestDataFills[0].unitPrice)}/MTok`
+                    : undefined
                 }
               />
             </div>
@@ -571,8 +685,8 @@ export function DataPanel() {
                     onClick={() => setMarketFilter(id)}
                     className={`rounded-full px-2 py-0.5 text-[0.6875rem] font-medium ${
                       marketFilter === id
-                        ? 'bg-mint/20 text-mint ring-1 ring-mint/30'
-                        : 'bg-void/50 text-muted hover:text-bone'
+                        ? "bg-mint/20 text-mint ring-1 ring-mint/30"
+                        : "bg-void/50 text-muted hover:text-bone"
                     }`}
                   >
                     {label}
@@ -583,59 +697,59 @@ export function DataPanel() {
               <div className="anim-stagger mt-2 max-h-72 space-y-1.5 overflow-y-auto pr-0.5">
                 {market.offers
                   .filter((offer) => {
-                    if (marketFilter === 'all') return true
+                    if (marketFilter === "all") return true;
                     if (
-                      marketFilter === 'scrap' ||
-                      marketFilter === 'standard' ||
-                      marketFilter === 'premium' ||
-                      marketFilter === 'curated'
+                      marketFilter === "scrap" ||
+                      marketFilter === "standard" ||
+                      marketFilter === "premium" ||
+                      marketFilter === "curated"
                     ) {
-                      return offer.qualityBand === marketFilter
+                      return offer.qualityBand === marketFilter;
                     }
                     if (
-                      marketFilter === 'web_scrape' ||
-                      marketFilter === 'rival' ||
-                      marketFilter === 'enterprise' ||
-                      marketFilter === 'broker' ||
-                      marketFilter === 'research_lab' ||
-                      marketFilter === 'opensource'
+                      marketFilter === "web_scrape" ||
+                      marketFilter === "rival" ||
+                      marketFilter === "enterprise" ||
+                      marketFilter === "broker" ||
+                      marketFilter === "research_lab" ||
+                      marketFilter === "opensource"
                     ) {
-                      return offer.sellerKind === marketFilter
+                      return offer.sellerKind === marketFilter;
                     }
-                    return offer.domain === marketFilter
+                    return offer.domain === marketFilter;
                   })
                   .map((offer) => {
-                    const soldOut = offer.mTokLeft <= 0
+                    const soldOut = offer.mTokLeft <= 0;
                     const lot = Math.min(
                       offer.lotMTok,
                       Math.max(0, offer.mTokLeft) || offer.lotMTok,
-                    )
+                    );
                     const stockPct =
                       offer.mTokTotal > 0
                         ? Math.min(1, offer.mTokLeft / offer.mTokTotal)
-                        : 0
-                    const broke = state.player.cash < offer.cash || soldOut
+                        : 0;
+                    const broke = state.player.cash < offer.cash || soldOut;
                     const pending = playerDataOrders.find(
                       (order) => order.resourceId === offer.id,
-                    )
+                    );
                     const fill = latestDataFills.find(
                       (entry) => entry.resourceId === offer.id,
-                    )
-                    const blockers: Blocker[] = []
-                    if (soldOut) blockers.push({ text: 'Sold out' })
+                    );
+                    const blockers: Blocker[] = [];
+                    if (soldOut) blockers.push({ text: "Sold out" });
                     else if (state.player.cash < offer.cash) {
                       blockers.push({
                         text: `Need ${money(offer.cash)} cash`,
-                        tone: 'warning',
-                      })
+                        tone: "warning",
+                      });
                     }
                     return (
                       <div
                         key={offer.id}
                         className={`rounded-md border px-2.5 py-2 ${
                           soldOut
-                            ? 'border-line/50 bg-void/20 opacity-70'
-                            : 'border-line/70 bg-void/40'
+                            ? "border-line/50 bg-void/20 opacity-70"
+                            : "border-line/70 bg-void/40"
                         }`}
                       >
                         <div className="flex items-start justify-between gap-2">
@@ -646,11 +760,11 @@ export function DataPanel() {
                               </span>
                               <StatusChip
                                 tone={
-                                  offer.qualityBand === 'curated'
-                                    ? 'positive'
-                                    : offer.qualityBand === 'premium'
-                                      ? 'warning'
-                                      : 'neutral'
+                                  offer.qualityBand === "curated"
+                                    ? "positive"
+                                    : offer.qualityBand === "premium"
+                                      ? "warning"
+                                      : "neutral"
                                 }
                               >
                                 {DATA_QUALITY_LABELS[offer.qualityBand]}
@@ -660,16 +774,18 @@ export function DataPanel() {
                               </StatusChip>
                             </div>
                             <p className="mt-0.5 truncate text-[0.75rem] text-muted">
-                              {offer.sellerName} · {DATA_SELLER_LABELS[offer.sellerKind]}
+                              {offer.sellerName} ·{" "}
+                              {DATA_SELLER_LABELS[offer.sellerKind]}
                             </p>
                             <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
                               <span>Q{offer.quality}</span>
                               <span>
                                 Lot {formatTokens(lot)}
-                                {offer.mTokLeft > 0 && offer.mTokLeft < offer.mTokTotal
+                                {offer.mTokLeft > 0 &&
+                                offer.mTokLeft < offer.mTokTotal
                                   ? ` · ${formatTokens(offer.mTokLeft)} left`
                                   : offer.mTokLeft <= 0
-                                    ? ' · sold out'
+                                    ? " · sold out"
                                     : ` · ${formatTokens(offer.mTokTotal)} listed`}
                               </span>
                               <span>{offer.daysLeft}d left</span>
@@ -680,7 +796,10 @@ export function DataPanel() {
                                     offer.cash /
                                       Math.max(
                                         1,
-                                        Math.min(offer.lotMTok, offer.mTokLeft || offer.lotMTok),
+                                        Math.min(
+                                          offer.lotMTok,
+                                          offer.mTokLeft || offer.lotMTok,
+                                        ),
                                       ),
                                   ),
                                 )}
@@ -693,7 +812,8 @@ export function DataPanel() {
                               ) : null}
                               {pending ? (
                                 <span className="text-amber">
-                                  bid queued · {money(pending.cashReserved)} · D{state.day + 1}
+                                  bid queued · {money(pending.cashReserved)} · D
+                                  {state.day + 1}
                                 </span>
                               ) : null}
                             </div>
@@ -701,7 +821,7 @@ export function DataPanel() {
                               <MeterBar
                                 value={stockPct}
                                 detail={`${pct(stockPct, 0)} stock`}
-                                tone={soldOut ? 'danger' : 'positive'}
+                                tone={soldOut ? "danger" : "positive"}
                               />
                             </div>
                             {blockers.length > 0 ? (
@@ -717,90 +837,195 @@ export function DataPanel() {
                             onClick={() => buyDomainContract(offer.id)}
                             className="shrink-0"
                           >
-                            {soldOut ? 'Dry' : money(offer.cash)}
+                            {soldOut ? "Dry" : money(offer.cash)}
                           </HudButton>
                         </div>
                       </div>
-                    )
+                    );
                   })}
               </div>
             </GameCard>
 
             <GameCard
-              eyebrow="Basket"
-              title="Portfolio buyer"
+              eyebrow="Suppliers"
+              title="Negotiate delivery"
               tone="train"
               actions={
-                <span className="font-mono text-[0.8125rem] tabular-nums text-amber">
-                  {money(portfolioBudgetM * 1_000_000)}
-                </span>
+                <StatusChip tone="warning">
+                  {supplierOffers.length} desks
+                </StatusChip>
               }
             >
-              <label className="block text-[0.6875rem] text-muted">
-                Budget
-                <input
-                  type="range"
-                  min={0.5}
-                  max={50}
-                  step={0.5}
-                  value={portfolioBudgetM}
-                  onChange={(event) => setPortfolioBudgetM(Number(event.target.value))}
-                  className="mt-1 w-full"
-                />
-              </label>
-              <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5">
-                {(
-                  [
-                    ['open', 'Open web / public'],
-                    ['broker', 'Brokers'],
-                    ['enterprise', 'Enterprise / research'],
-                    ['rival', 'Rival surplus'],
-                  ] as const
-                ).map(([channel, label]) => (
-                  <label key={channel} className="text-[0.6875rem] text-muted">
-                    <span className="flex justify-between">
-                      <span>{label}</span>
-                      <span className="font-mono tabular-nums text-bone">
-                        {portfolioMix[channel]}%
-                      </span>
-                    </span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={100}
-                      step={5}
-                      value={portfolioMix[channel]}
-                      onChange={(event) =>
-                        setPortfolioMix((current) => ({
-                          ...current,
-                          [channel]: Number(event.target.value),
-                        }))
-                      }
-                      className="mt-0.5 w-full"
-                    />
-                  </label>
-                ))}
+              <p className="mb-2 text-[0.8125rem] text-muted">
+                Three companies deliver a fixed mix over 30 days.
+              </p>
+              <div className="anim-stagger space-y-2">
+                {supplierOffers.map((offer) => {
+                  const active = activeSupplierContracts.find(
+                    (contract) =>
+                      contract.supplierId === offer.id &&
+                      contract.daysRemaining > 0,
+                  );
+                  const mix = Object.entries(offer.domainMix)
+                    .filter(([, weight]) => (weight ?? 0) > 0)
+                    .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
+                    .slice(0, 4)
+                    .map(
+                      ([domain, weight]) =>
+                        `${DATA_DOMAIN_META[domain as DataDomain]?.label ?? domain} ${Math.round((weight ?? 0) * 100)}%`,
+                    )
+                    .join(" · ");
+                  const blockers: Blocker[] = [];
+                  if (active)
+                    blockers.push({
+                      text: `${active.daysRemaining}d remaining`,
+                      tone: "warning",
+                    });
+                  if (!active && state.player.cash < offer.dailyPrice) {
+                    blockers.push({
+                      text: `Need ${money(offer.dailyPrice)} for day 1`,
+                      tone: "danger",
+                    });
+                  }
+                  return (
+                    <section
+                      key={offer.id}
+                      className="overflow-hidden rounded-lg border border-line/70 bg-void/30"
+                    >
+                      <NegotiationHeader
+                        title={offer.name}
+                        subtitle="Recurring corpus delivery"
+                        status={active ? "signed" : "idle"}
+                      />
+                      <div className="space-y-2 p-2.5">
+                        <NegotiationMessage side="provider" name={offer.name}>
+                          We collect and clear a steady mix of {mix}. Delivery
+                          runs daily for the full term.
+                        </NegotiationMessage>
+                        <div className="grid grid-cols-3 gap-1.5 font-mono text-[0.6875rem]">
+                          <NegotiationMetric
+                            label="Quality"
+                            value={`Q${offer.quality}`}
+                          />
+                          <NegotiationMetric
+                            label="Delivery"
+                            value={`${formatTokens(offer.dailyDeliveryMTok)}/d`}
+                          />
+                          <NegotiationMetric
+                            label="Term"
+                            value={`${offer.termDays}d`}
+                          />
+                        </div>
+                        <NegotiationMessage
+                          side="player"
+                          name="Labline"
+                          status={active ? "signed" : "idle"}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-mono tabular-nums text-amber">
+                              {money(offer.dailyPrice)}/day
+                            </span>
+                            <HudButton
+                              variant="primary"
+                              disabled={
+                                Boolean(active) ||
+                                state.player.cash < offer.dailyPrice
+                              }
+                              title={blockers[0]?.text?.toString()}
+                              onClick={() =>
+                                acceptDataSupplierOffer(
+                                  offer.id,
+                                  supplierOfferPercent / 100,
+                                )
+                              }
+                            >
+                              {active ? "Contract live" : "Accept offer"}
+                            </HudButton>
+                          </div>
+                        </NegotiationMessage>
+                        {!active ? (
+                          <div className="flex items-center gap-2">
+                            <HudButton
+                              variant="secondary"
+                              onClick={() =>
+                                setSupplierNegotiatingId((current) =>
+                                  current === offer.id ? null : offer.id,
+                                )
+                              }
+                            >
+                              Negotiate
+                            </HudButton>
+                            {supplierNegotiatingId === offer.id ? (
+                              <label className="min-w-0 flex-1 text-[0.6875rem] text-muted">
+                                Offer {supplierOfferPercent}%
+                                <input
+                                  type="range"
+                                  min={80}
+                                  max={100}
+                                  value={supplierOfferPercent}
+                                  onChange={(event) =>
+                                    setSupplierOfferPercent(
+                                      Number(event.target.value),
+                                    )
+                                  }
+                                  className="ml-2 align-middle"
+                                />
+                                <span className="ml-2 font-mono text-amber">
+                                  {money(
+                                    (offer.dailyPrice * supplierOfferPercent) /
+                                      100,
+                                  )}
+                                  /d
+                                </span>
+                              </label>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                      {blockers.length > 0 ? (
+                        <div className="px-2.5 pb-2.5">
+                          <BlockerList items={blockers} />
+                        </div>
+                      ) : null}
+                    </section>
+                  );
+                })}
               </div>
-              <HudButton
-                variant="primary"
-                className="mt-3 w-full"
-                onClick={() => buyDataPortfolio(portfolioBudgetM * 1_000_000, portfolioMix)}
-              >
-                Build portfolio from live lots
-              </HudButton>
+              {activeSupplierContracts.filter(
+                (contract) => contract.daysRemaining > 0,
+              ).length > 0 ? (
+                <div className="mt-3 border-t border-line/50 pt-2">
+                  <div className="mb-1 text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+                    Live contracts
+                  </div>
+                  <div className="space-y-1">
+                    {activeSupplierContracts
+                      .filter((contract) => contract.daysRemaining > 0)
+                      .map((contract) => (
+                        <StatRow
+                          key={contract.id}
+                          label={contract.supplierName}
+                          value={`${contract.daysRemaining}d left`}
+                          hint={`${formatTokens(contract.dailyDeliveryMTok)} · ${money(contract.dailyPrice)}/d`}
+                        />
+                      ))}
+                  </div>
+                </div>
+              ) : null}
             </GameCard>
           </>
         )}
 
-        {tab === 'synth' && (
+        {tab === "synth" && (
           <GameCard
             eyebrow="Synthetic lab"
             title="Automatic generation"
             tone="research"
             live={Boolean(autoSynthJob)}
             actions={
-              <StatusChip tone={autoSynthJob ? 'research' : 'neutral'}>
-                {autoSynthJob ? 'Live' : 'Idle'} · ~{formatTokens(synthEstimate.grossMTokPerDay)}/d
+              <StatusChip tone={autoSynthJob ? "research" : "neutral"}>
+                {autoSynthJob ? "Live" : "Idle"} · ~
+                {formatTokens(synthEstimate.grossMTokPerDay)}/d
               </StatusChip>
             }
           >
@@ -808,7 +1033,8 @@ export function DataPanel() {
               <span className="flex items-center justify-between gap-3">
                 <span>Research compute budget</span>
                 <strong className="font-mono tabular-nums text-research">
-                  {Math.round(genShare * 100)}% · {num(synthEstimate.researchPf, 2)} PF
+                  {Math.round(genShare * 100)}% ·{" "}
+                  {num(synthEstimate.researchPf, 2)} PF
                 </strong>
               </span>
               <input
@@ -817,21 +1043,35 @@ export function DataPanel() {
                 max={50}
                 step={1}
                 value={Math.round(genShare * 100)}
-                onChange={(event) => setGenShare(Number(event.target.value) / 100)}
+                onChange={(event) =>
+                  setGenShare(Number(event.target.value) / 100)
+                }
                 className="mt-2 w-full"
               />
             </label>
 
             <div className="mt-2 grid grid-cols-2 gap-x-3 sm:grid-cols-4">
-              <StatRow label="Attempts / day" value={formatTokens(synthEstimate.grossMTokPerDay)} />
-              <StatRow label="Useful" value={pct(synthEstimate.usefulChance, 0)} />
+              <StatRow
+                label="Attempts / day"
+                value={formatTokens(synthEstimate.grossMTokPerDay)}
+              />
+              <StatRow
+                label="Useful"
+                value={pct(synthEstimate.usefulChance, 0)}
+              />
               <StatRow label="High-Q" value={pct(synthEstimate.hqChance, 0)} />
-              <StatRow label="Teacher" value={synthEstimate.model?.name ?? 'None'} />
+              <StatRow
+                label="Teacher"
+                value={synthEstimate.model?.name ?? "None"}
+              />
             </div>
 
             {!synthUnlocked ? (
               <div className="mt-2">
-                <ResearchUnlockLink nodeId="data_synth" label="Open Synthetic Generators research" />
+                <ResearchUnlockLink
+                  nodeId="data_synth"
+                  label="Open Synthetic Generators research"
+                />
               </div>
             ) : null}
 
@@ -848,7 +1088,9 @@ export function DataPanel() {
               className="mt-3 w-full"
               onClick={() => startSynthBudget({ researchShare: genShare })}
             >
-              {autoSynthJob ? 'Update compute budget' : 'Start automatic generation'}
+              {autoSynthJob
+                ? "Update compute budget"
+                : "Start automatic generation"}
             </HudButton>
 
             {autoSynthJob ? (
@@ -860,22 +1102,41 @@ export function DataPanel() {
                       Auto portfolio · {autoSynthJob.modelName}
                     </div>
                     <div className="mt-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
-                      {Math.round(autoSynthJob.researchShare * 100)}% research · useful → processed
+                      {Math.round(autoSynthJob.researchShare * 100)}% research ·
+                      useful → processed
                     </div>
                   </div>
-                  <HudButton variant="danger" onClick={() => cancelSynthGen(autoSynthJob.id)}>
+                  <HudButton
+                    variant="danger"
+                    onClick={() => cancelSynthGen(autoSynthJob.id)}
+                  >
                     Stop
                   </HudButton>
                 </div>
                 <div className="mt-2 grid grid-cols-3 gap-x-3">
-                  <StatRow label="High quality" value={formatTokens(autoSynthJob.hqMTok ?? 0)} tone="positive" />
-                  <StatRow label="Low quality" value={formatTokens(autoSynthJob.lqMTok ?? 0)} tone="research" />
-                  <StatRow label="Rejected" value={formatTokens(autoSynthJob.wastedMTok ?? 0)} tone="danger" />
+                  <StatRow
+                    label="High quality"
+                    value={formatTokens(autoSynthJob.hqMTok ?? 0)}
+                    tone="positive"
+                  />
+                  <StatRow
+                    label="Low quality"
+                    value={formatTokens(autoSynthJob.lqMTok ?? 0)}
+                    tone="research"
+                  />
+                  <StatRow
+                    label="Rejected"
+                    value={formatTokens(autoSynthJob.wastedMTok ?? 0)}
+                    tone="danger"
+                  />
                 </div>
                 <div className="mt-2">
                   <MeterBar
                     label="Yield mix"
-                    value={(autoSynthJob.hqMTok ?? 0) / Math.max(1, autoSynthJob.progressMTok)}
+                    value={
+                      (autoSynthJob.hqMTok ?? 0) /
+                      Math.max(1, autoSynthJob.progressMTok)
+                    }
                     detail={`${formatTokens(autoSynthJob.progressMTok)} attempts`}
                     tone="research"
                     live
@@ -892,7 +1153,7 @@ export function DataPanel() {
         )}
       </div>
     </PanelScaffold>
-  )
+  );
 }
 
 function DomainStockCard({
@@ -907,31 +1168,34 @@ function DomainStockCard({
   onProcess,
   onPrune,
 }: {
-  domain: DataDomain
-  raw: number
-  processed: number
-  quality: number
-  dayIn: number
-  queued: number
-  prune: DataPruneEstimate
-  auditUnlocked: boolean
-  onProcess: () => void
-  onPrune: () => void
+  domain: DataDomain;
+  raw: number;
+  processed: number;
+  quality: number;
+  dayIn: number;
+  queued: number;
+  prune: DataPruneEstimate;
+  auditUnlocked: boolean;
+  onProcess: () => void;
+  onPrune: () => void;
 }) {
-  const meta = DATA_DOMAIN_META[domain]
-  const total = Math.max(1, raw + processed + queued)
-  const readyRatio = processed / total
-  const blockers: Blocker[] = []
-  if (raw < 0.5) blockers.push({ text: 'Need ≥0.5MTok raw to clean', tone: 'warning' })
+  const meta = DATA_DOMAIN_META[domain];
+  const total = Math.max(1, raw + processed + queued);
+  const readyRatio = processed / total;
+  const blockers: Blocker[] = [];
+  if (raw < 0.5)
+    blockers.push({ text: "Need ≥0.5MTok raw to clean", tone: "warning" });
   const pruneBlockers: Blocker[] = !prune.ok
-    ? [{ text: prune.reason ?? 'Cannot prune', tone: 'warning' }]
-    : []
+    ? [{ text: prune.reason ?? "Cannot prune", tone: "warning" }]
+    : [];
 
   return (
     <div className="rounded-md border border-line/70 bg-void/35 p-2.5 hover-lift">
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">
-          <div className="truncate text-[0.8125rem] font-semibold text-bone">{meta.label}</div>
+          <div className="truncate text-[0.8125rem] font-semibold text-bone">
+            {meta.label}
+          </div>
           <div className="mt-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
             Q{num(quality, 0)} · {pct(readyRatio, 0)} ready
           </div>
@@ -960,12 +1224,18 @@ function DomainStockCard({
 
       <div className="mt-2 grid grid-cols-2 gap-x-2">
         <StatRow label="Raw" value={formatTokens(raw)} />
-        <StatRow label="Ready" value={formatTokens(processed)} tone="positive" />
+        <StatRow
+          label="Ready"
+          value={formatTokens(processed)}
+          tone="positive"
+        />
       </div>
 
       <div className="mt-1.5">
         <MeterBar
-          label={queued > 0.01 ? `Cleaning ${formatTokens(queued)}` : 'Coverage'}
+          label={
+            queued > 0.01 ? `Cleaning ${formatTokens(queued)}` : "Coverage"
+          }
           value={readyRatio}
           detail={pct(readyRatio, 0)}
           tone="positive"
@@ -978,8 +1248,8 @@ function DomainStockCard({
           <span>Audit corpus to reveal low-Q volume</span>
         ) : prune.totalMTok >= 0.5 ? (
           <span className="font-mono tabular-nums">
-            Low-Q {formatTokens(prune.totalMTok)} · {money(prune.cashCost)} · {num(prune.pfDays, 0)}{' '}
-            PFd · {prune.researchersRequired}R
+            Low-Q {formatTokens(prune.totalMTok)} · {money(prune.cashCost)} ·{" "}
+            {num(prune.pfDays, 0)} PFd · {prune.researchersRequired}R
           </span>
         ) : (
           <span>No low-quality stock</span>
@@ -996,5 +1266,5 @@ function DomainStockCard({
         </div>
       ) : null}
     </div>
-  )
+  );
 }

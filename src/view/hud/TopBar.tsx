@@ -3,6 +3,7 @@ import { useGameStore } from '../../store/gameStore'
 import { money, pct } from './format'
 import type { Speed } from '../../sim/types'
 import {
+  CalendarBlank,
   CaretRight,
   FloppyDisk,
   GearSix,
@@ -19,9 +20,9 @@ import { KpiHistoryPopover, type KpiHistoryMetric } from './KpiHistoryPopover'
 const PLAY_SPEEDS: Speed[] = [1, 2, 5]
 
 /**
- * Floating top chrome — three clear zones:
- *  1. Identity + time transport + drawer toggles (left)
- *  2. Live KPIs (center)
+ * Floating top chrome — game play bar:
+ *  1. Day clock + transport (left)
+ *  2. Live KPIs with chart popovers (center)
  *  3. Utility (right)
  */
 export function TopBar() {
@@ -41,27 +42,36 @@ export function TopBar() {
   const pnl =
     typeof f.dayNet === 'number' ? f.dayNet : f.dayRevenue - f.dayCogs - f.dayEnergyCost
   const paused = state.paused || state.speed === 0
+  const clock = formatCampaignClock(state.calendar, state.day)
+  const [campaignDate, elapsedLabel] = clock.split(' · ')
 
   return (
     <header className="top-command-bar pointer-events-none p-2 pb-1">
-      <div className="hud-surface pointer-events-auto relative flex h-full min-w-0 items-center gap-3 overflow-hidden rounded-xl px-3">
-        {/* ── Zone 1: identity + transport + drawers ── */}
-        <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
-          <div className="min-w-0">
-            <div className="max-w-[10rem] truncate text-[0.875rem] font-semibold tracking-tight text-bone">
-              {state.player.name || 'Labline'}
+      <div className="top-command-main hud-surface pointer-events-auto relative flex h-full min-w-0 items-center gap-3 overflow-hidden rounded-lg px-3">
+        {/* ── Zone 1: day clock + transport ── */}
+        <div className="top-command-controls flex shrink-0 items-center gap-2 sm:gap-2.5">
+          <div className="top-command-clock" data-paused={paused}>
+            <div className="top-command-clock__icon" aria-hidden="true">
+              <CalendarBlank size="1rem" weight="duotone" />
             </div>
-            <div className="font-mono text-[0.6875rem] tabular-nums text-muted">
-              {formatCampaignClock(state.calendar, state.day)}
-              <span className="text-muted/60"> · {state.calendar.era.replaceAll('_', ' ').toUpperCase()}</span>
+            <div className="top-command-clock__content">
+              <div className="top-command-clock__row">
+                <span className="top-command-clock__label">DAY</span>
+                <strong className="top-command-clock__day">{state.day.toLocaleString()}</strong>
+                <span className="top-command-clock__elapsed">{elapsedLabel}</span>
+              </div>
+              <div className="top-command-clock__meta">
+                <time>{campaignDate}</time>
+                <span>{state.player.name || 'Labline'}</span>
+              </div>
             </div>
           </div>
 
-          <div className="mx-0.5 h-7 w-px shrink-0 bg-line/80" />
+          <div className="mx-0.5 h-8 w-px shrink-0 bg-line/80" />
 
           {/* Transport: Pause first, then speeds, then step */}
           <div
-            className="flex items-center gap-0.5 rounded-xl border border-line/70 bg-void/50 p-0.5"
+            className="top-command-transport flex items-center gap-0.5 rounded-lg border border-line/70 bg-void/50 p-0.5"
             role="group"
             aria-label="Game speed"
           >
@@ -109,7 +119,7 @@ export function TopBar() {
         </div>
 
         {/* ── Zone 2: KPIs (never collide with transport) ── */}
-        <div className="flex min-w-0 flex-1 items-center justify-center gap-3 overflow-hidden px-1 xl:gap-4">
+        <div className="top-command-kpis flex min-w-0 flex-1 items-center justify-center gap-3 overflow-hidden px-1 xl:gap-4">
           <Metric
             label="Cash"
             value={money(state.player.cash)}
@@ -147,7 +157,7 @@ export function TopBar() {
         </div>
 
         {/* ── Zone 3: utility ── */}
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="top-command-utility flex shrink-0 items-center gap-1">
           <ObjectivesButton />
           <button
             type="button"
@@ -176,7 +186,7 @@ export function TopBar() {
             type="button"
             title="Pause menu"
             onClick={() => setPauseMenuOpen(true)}
-            className="hidden h-8 items-center gap-1.5 rounded-lg border border-line/60 px-2.5 text-[0.75rem] text-muted hover:border-line hover:text-bone sm:inline-flex"
+            className="flex h-8 w-8 items-center justify-center rounded-lg border border-line/60 text-[0.75rem] text-muted hover:border-line hover:text-bone sm:w-auto sm:gap-1.5 sm:px-2.5"
           >
             <GearSix size="1rem" /> <span className="hidden 2xl:inline">Menu</span>
           </button>
@@ -195,9 +205,11 @@ export function TopBar() {
             brand: state.player.brandTrust,
           }}
           onClose={() => setActiveMetric(null)}
+          onSelectMetric={setActiveMetric}
           onOpenDetails={() => {
             if (activeMetric === 'share') setPanel('market')
-            else if (activeMetric === 'brand') setPanel('org')
+            else if (activeMetric === 'brand') setPanel('marketing')
+            else if (activeMetric === 'valuation') setPanel('org')
             else {
               setPanel('stats')
               setCommandView('pnl')
@@ -236,9 +248,9 @@ function Metric({
         onClick ? 'text-left hover:opacity-90' : ''
       } ${active ? 'bg-mint/10 ring-1 ring-mint/30' : ''} ${className}`}
     >
-      <span className="text-[0.625rem] uppercase tracking-[0.12em] text-muted">{label}</span>
+      <span className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">{label}</span>
       <span
-        className={`mt-1 max-w-full truncate font-mono text-[0.8125rem] font-medium tabular-nums ${
+        className={`mt-1 max-w-full truncate font-mono text-sm font-semibold tabular-nums ${
           danger ? 'text-danger' : 'text-bone'
         }`}
       >

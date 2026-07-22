@@ -4,9 +4,10 @@ import type {
 } from '../types'
 import { normalizeModelEvaluations } from '../balance/evaluationSuites'
 import { computeSnapshot } from './compute'
+import { playerTrainingResourcePlan } from './training'
 import { enforceMinTrainingDuration, MIN_TRAINING_DAYS } from './trainingDuration'
 import { playerStaff } from './staff'
-import { seededId } from '../rng'
+import { createRng, hashSeed, seededId } from '../rng'
 
 const INTENSITY_MULT: Record<SafetyCampaignIntensity, number> = {
   targeted: 1,
@@ -55,9 +56,25 @@ export function safetyCampaignEstimate(
       safetyDataQuality: 0,
     }
   }
+  // Safety only on finished internal / unreleased checkpoints.
+  if (model.release === 'released' || model.shipped) {
+    return {
+      ok: false,
+      reason: 'Safety campaigns require an unreleased internal checkpoint.',
+      minimumResearchers: 1,
+      trainingPfDays: 0,
+      researchPfDays: 0,
+      cashBudget: 0,
+      safetyDataMTok: 0,
+      safetyDataQuality: 0,
+    }
+  }
   const mult = INTENSITY_MULT[intensity]
-  const scale = Math.log10(Math.max(1, model.paramsB) + 1)
-  let totalPfDays = (4 + scale * 4) * mult
+  // Monotonic scale with total params and prior data volume.
+  const paramsB = Math.max(0.01, model.paramsB)
+  const dataMTok = Math.max(1, model.dataTokensUsedMTok ?? model.dataTrainMTok ?? 1)
+  const scale = Math.log10(paramsB + 1) + Math.log10(dataMTok + 10) * 0.35
+  let totalPfDays = (6 + scale * 7) * mult
   // Safety campaigns are day-based training jobs: scale the training lane so
   // estimated duration is at least 30 days at current shared training throughput.
   const snap = computeSnapshot(state)
@@ -71,7 +88,7 @@ export function safetyCampaignEstimate(
     MIN_TRAINING_DAYS,
   )
   totalPfDays = trainingTarget / trainingShare
-  const minimumResearchers = Math.max(1, Math.ceil(scale * 4))
+  const minimumResearchers = Math.max(1, Math.ceil(scale * 5 + paramsB * 0.02))
   const qualityInputs = ['chat', 'law', 'health'] as const
   const qualityValues = qualityInputs.map(
     (domain) => model.dataQualityByDomain?.[domain] ?? model.dataQualityUsed ?? 50,
@@ -79,7 +96,7 @@ export function safetyCampaignEstimate(
   const safetyDataQuality = qualityValues.reduce((sum, value) => sum + value, 0) / qualityValues.length
   const safetyDataMTok =
     (model.dataVerifyMTok ?? 0) + mult * Math.max(5, Math.log10(model.paramsB * 1000 + 10) * 20)
-  const cashBudget = Math.round(totalPfDays * 80_000 + safetyDataMTok * 120)
+  const cashBudget = Math.round(totalPfDays * 95_000 + safetyDataMTok * 160 + paramsB * 25_000)
   const researchers = playerStaff(state).researcher ?? 0
   const reason =
     !state.player.researchUnlocked.includes('align_rlhf')
@@ -188,8 +205,16 @@ export function tickSafetyCampaign(state: SimState): SimState {
   }
   const surplus = Math.max(0, Math.min(staff, campaign.assignedResearchers) - campaign.minimumResearchers)
   const staffMult = 1 + Math.min(0.5, surplus * 0.06)
-  const activeTrainingJobs = state.player.trainingJobs?.length ?? (state.player.trainingJob ? 1 : 0)
-  const sharedTrainingPool = snap.pools.training / Math.max(1, activeTrainingJobs + 1)
+  const safetyResources = playerTrainingResourcePlan(state, snap).safetyCampaign
+  if (safetyResources && !safetyResources.ramReady) {
+    if (state.day % 4 !== 0) return state
+    return withAlert(
+      state,
+      'warn',
+      `Safety campaign RAM blocked — needs ${safetyResources.ramRequiredGb.toFixed(0)} GB, but ${safetyResources.ramAllocatedGb.toFixed(0)} GB is assigned. Raise Training allocation, add memory, or pause another run.`,
+    )
+  }
+  const sharedTrainingPool = safetyResources?.effectivePf ?? 0
   const nextCampaign = {
     ...campaign,
     progressTrainingPfDays: Math.min(
@@ -225,7 +250,16 @@ export function tickSafetyCampaign(state: SimState): SimState {
   const current = model.benchmarks.safety ?? model.quality.safety
   const intensityGain = { targeted: 0.2, standard: 0.34, frontier: 0.52 }[campaign.intensity]
   const diminishing = 1 / (1 + previous.campaigns * 0.75)
-  const gain = Math.max(0.25, (ceiling - current) * intensityGain * diminishing)
+  // Adequacy: spent cash vs recommended budget for this intensity/params.
+  const recommendedCash = Math.max(1, campaign.cashBudget)
+  const adequacy = Math.min(1.35, campaign.cashSpent / recommendedCash)
+  const underfunded = adequacy < 0.85
+  const rng = createRng(hashSeed(state.seed, campaign.id, state.day, 'safety-outcome'))
+  let gain = Math.max(0.25, (ceiling - current) * intensityGain * diminishing * Math.max(0.55, adequacy))
+  if (underfunded && rng.next() < 0.45 + (0.85 - adequacy)) {
+    // Seeded downside: underfunded campaigns can worsen safety.
+    gain = -Math.max(0.4, (current - 20) * 0.08 * (1.1 - adequacy))
+  }
   const benchmarks = { ...model.benchmarks, safety: Math.min(ceiling, current + gain) }
   const quality = { ...model.quality, safety: Math.min(ceiling, model.quality.safety + gain * 0.9) }
   const capabilities = model.capabilities
@@ -260,7 +294,7 @@ export function tickSafetyCampaign(state: SimState): SimState {
     ...state,
     player: { ...state.player, models, safetyCampaign: null },
     news: [
-      `Day ${state.day}: ${model.name} safety revision ${upgraded.revision} completed (+${gain.toFixed(1)} safety).`,
+      `Day ${state.day}: ${model.name} safety revision ${upgraded.revision} completed (${gain >= 0 ? '+' : ''}${gain.toFixed(1)} safety).`,
       ...state.news,
     ].slice(0, 20),
     alerts: [

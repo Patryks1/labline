@@ -2051,6 +2051,22 @@ export function expandRivalCampuses(state: SimState): SimState {
   }
 }
 
+
+function claimFacilityFootprint(claimed: Set<TileId>, facility: Facility, world: NonNullable<SimState['map']['world']>) {
+  const { x, y } = tileCoords(facility.anchor, world.descriptor.width)
+  // Reserve the anchor plus a conservative neighborhood for multi-tile campuses.
+  // Exact blueprint footprint varies by kind; claiming a 3x3 around anchors prevents
+  // same-batch collisions during weekly rival campus expansion.
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      const nx = x + dx
+      const ny = y + dy
+      if (nx < 0 || ny < 0 || nx >= world.descriptor.width || ny >= world.descriptor.height) continue
+      claimed.add(tileId(nx, ny, world.descriptor.width, world.descriptor.height))
+    }
+  }
+}
+
 function expandCompactRivalCampuses(state: SimState): SimState {
   const world = state.map.world!
   const batch = world.beginBatch()
@@ -2116,6 +2132,7 @@ function expandCompactRivalCampuses(state: SimState): SimState {
     // Include active builds so a weekly planning tick does not start duplicate
     // HQ or compute projects before the existing one completes.
     const owned = world.queryFacilities({ ownerId: rival.id })
+    for (const existing of owned) claimFacilityFootprint(claimed, existing, world)
     const dcs = owned.filter((facility) =>
       facility.kind === 'dc' || facility.kind === 'dc_m' || facility.kind === 'dc_l',
     )
@@ -2192,7 +2209,24 @@ function expandCompactRivalCampuses(state: SimState): SimState {
       stats,
       data: { name, note, dcSize: kind === 'dc' ? 'small' : undefined },
     })
-    claimed.add(spot)
+    // Reserve the full footprint for this mutation batch so later rivals cannot collide.
+    claimFacilityFootprint(
+      claimed,
+      {
+        id: `rival-${rival.id}-${state.day}-${spot}`,
+        kind,
+        ownerId: rival.id,
+        anchor: spot,
+        footprint: [spot],
+        level: 1,
+        constructionProgress: 0,
+        constructionTarget: def.days,
+        powered: kind === 'dc' ? false : undefined,
+        stats,
+        data: { name, note, dcSize: kind === 'dc' ? 'small' : undefined },
+      },
+      world,
+    )
     changed = true
     if (
       state.day % 11 ===

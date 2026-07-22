@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
+import type { MapTile, SimState } from '../types'
 import { dcBayUsage } from './dcRacks'
 import {
   deployRackBatchAcrossHalls,
@@ -9,59 +10,85 @@ import {
 import { isDcAnchor, isDcKind } from './map'
 import { facilityAnchorTiles } from './worldAccess'
 
+function blankTile(x: number, y: number, regionId = 'city_0'): MapTile {
+  return {
+    x,
+    y,
+    kind: 'empty',
+    owner: 'neutral',
+    level: 1,
+    buildingProgress: 0,
+    buildingTarget: 0,
+    name: '',
+    racksUsed: 0,
+    rackCapacity: 0,
+    mwCapacity: 0,
+    mwGeneration: 0,
+    capex: 0,
+    opexPerDay: 0,
+    note: '',
+    landValue: 1,
+    regionId,
+  }
+}
+
+function hallTile(
+  x: number,
+  y: number,
+  opts: { rackCapacity: number; buildingProgress: number; buildingTarget?: number },
+): MapTile {
+  return {
+    ...blankTile(x, y),
+    kind: 'dc',
+    owner: 'player',
+    campusRole: 'anchor',
+    rackCapacity: opts.rackCapacity,
+    buildingProgress: opts.buildingProgress,
+    buildingTarget: opts.buildingTarget ?? 30,
+    name: `Hall ${x},${y}`,
+  }
+}
+
+function withLegacyHalls(
+  seed: number,
+  halls: MapTile[],
+  extras?: Partial<SimState>,
+): SimState {
+  const created = createGame(seed)
+  const tiles = [
+    ...halls,
+    ...Array.from({ length: 8 }, (_, i) => blankTile(20 + i, 20)),
+  ]
+  return {
+    ...created,
+    ...extras,
+    map: {
+      ...created.map,
+      storage: 'legacy',
+      world: undefined,
+      worldRevision: 0,
+      width: Math.max(created.map.width, 40),
+      height: Math.max(created.map.height, 40),
+      tiles,
+    },
+    player: {
+      ...created.player,
+      ...(extras?.player ?? {}),
+      cash: extras?.player?.cash ?? 1_000_000_000_000_000,
+      chips: [],
+      deployedRacks: [],
+      rackFleet: [],
+    },
+  }
+}
+
 describe('fillAllAvailableRackBays', () => {
   it('reserves every free bay in completed halls and ignores construction', () => {
-    const created = createGame(82_441)
-    const sites = created.map.tiles.filter(
-      (tile) => tile.kind === 'empty' && tile.owner === 'neutral' && tile.regionId !== 'void',
-    ).slice(0, 3)
-    const [firstHall, secondHall, constructionSite] = sites
-    const state = {
-      ...created,
-      map: {
-        ...created.map,
-        tiles: created.map.tiles.map((tile) =>
-          tile.x === firstHall.x && tile.y === firstHall.y
-            ? {
-                ...tile,
-                kind: 'dc' as const,
-                owner: 'player' as const,
-                campusRole: 'anchor' as const,
-                rackCapacity: 4,
-                buildingProgress: 30,
-                buildingTarget: 30,
-              }
-            : tile.x === secondHall.x && tile.y === secondHall.y
-              ? {
-                  ...tile,
-                  kind: 'dc' as const,
-                  owner: 'player' as const,
-                  campusRole: 'anchor' as const,
-                  rackCapacity: 3,
-                  buildingProgress: 30,
-                  buildingTarget: 30,
-                }
-              : tile.x === constructionSite.x && tile.y === constructionSite.y
-            ? {
-                ...tile,
-                kind: 'dc' as const,
-                owner: 'player' as const,
-                campusRole: 'anchor' as const,
-                rackCapacity: 11,
-                buildingProgress: 3,
-                buildingTarget: 30,
-              }
-            : tile,
-        ),
-      },
-      player: {
-        ...created.player,
-        cash: 1_000_000_000_000_000,
-        chips: [],
-        deployedRacks: [],
-        rackFleet: [],
-      },
-    }
+    const firstHall = hallTile(2, 2, { rackCapacity: 4, buildingProgress: 30 })
+    const secondHall = hallTile(4, 2, { rackCapacity: 3, buildingProgress: 30 })
+    const constructionSite = hallTile(6, 2, { rackCapacity: 11, buildingProgress: 3 })
+    const state = withLegacyHalls(82_441, [firstHall, secondHall, constructionSite])
+
     const completed = facilityAnchorTiles(state, { ownerId: 'player' }).filter(
       (tile) =>
         isDcKind(tile.kind) &&
@@ -94,29 +121,13 @@ describe('fillAllAvailableRackBays', () => {
   })
 
   it('caps a multi-hall deployment by aggregate market supply', () => {
+    const halls = [
+      hallTile(2, 2, { rackCapacity: 6, buildingProgress: 30 }),
+      hallTile(4, 2, { rackCapacity: 6, buildingProgress: 30 }),
+    ]
     const created = createGame(73_112)
-    const sites = created.map.tiles.filter(
-      (tile) => tile.kind === 'empty' && tile.owner === 'neutral' && tile.regionId !== 'void',
-    ).slice(0, 2)
-    const state = {
-      ...created,
-      map: {
-        ...created.map,
-        tiles: created.map.tiles.map((tile) =>
-          sites.some((site) => site.x === tile.x && site.y === tile.y)
-            ? {
-                ...tile,
-                kind: 'dc' as const,
-                owner: 'player' as const,
-                campusRole: 'anchor' as const,
-                rackCapacity: 6,
-                buildingProgress: 30,
-                buildingTarget: 30,
-              }
-            : tile,
-        ),
-      },
-      player: { ...created.player, cash: 10_000_000_000, rackFleet: [], deployedRacks: [] },
+    const state = withLegacyHalls(73_112, halls, {
+      player: { ...created.player, cash: 10_000_000_000 },
       worldMarkets: {
         ...created.worldMarkets,
         accelerators: {
@@ -127,8 +138,8 @@ describe('fillAllAvailableRackBays', () => {
           },
         },
       },
-    }
-    const targets = sites.map((site) => ({ x: site.x, y: site.y }))
+    })
+    const targets = halls.map((site) => ({ x: site.x, y: site.y }))
     const quote = quoteRackDeployment(state, 'rack_h100', targets)
 
     expect(quote.fillAllRacks).toBe(12)

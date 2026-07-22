@@ -1,19 +1,20 @@
-import { create } from 'zustand'
-import { createGame, type CreateGameOpts } from '../sim/createGame'
-import { tickDay, computeSnapshot } from '../sim/tick'
+import { create } from "zustand";
+import { createGame, type CreateGameOpts } from "../sim/createGame";
+import { tickDay, computeSnapshot } from "../sim/tick";
 import {
   startResearch,
   enqueueResearch,
   dequeueResearch,
   moveQueue,
   cancelActiveResearch,
-} from '../sim/systems/research'
+} from "../sim/systems/research";
 import {
   startTraining,
   advancePostTrain,
   selectPostTrain,
   cancelTraining,
   benchmarkTrainingJob,
+  extendTraining,
   shipModel,
   keepInternal,
   releaseFromJob,
@@ -22,47 +23,47 @@ import {
   setModelApiPrice,
   setModelApiInOut,
   applyModelApiMarkup,
-} from '../sim/systems/training'
-import { applyLabAction } from '../sim/systems/labActionKernel'
+} from "../sim/systems/training";
+import { applyLabAction } from "../sim/systems/labActionKernel";
 import {
   cancelSafetyCampaign,
   startSafetyCampaign,
-} from '../sim/systems/safetyCampaigns'
+} from "../sim/systems/safetyCampaigns";
 import {
   cancelRackOrder,
   orderRacksIntoDc,
   sellRacksFromDc,
-} from '../sim/systems/dcRacks'
+} from "../sim/systems/dcRacks";
 import {
   autoBalanceHosting,
   deployRackBatchAcrossHalls,
   fillAllAvailableRackBays,
   type RackDeploymentTarget,
-} from '../sim/systems/hosting'
+} from "../sim/systems/hosting";
 import {
   placeBuilding,
   upgradeBuilding,
   renameBuilding,
   isScenicKind,
   mapTileAt,
-} from '../sim/systems/map'
+} from "../sim/systems/map";
 import {
   setChipDesignFocus,
   startFabCampaign,
   toggleChipDesignTech,
-} from '../sim/systems/silicon'
+} from "../sim/systems/silicon";
 import {
   hireTalent,
   buyDataPartnership,
   setMarketing,
   setMarketingChannel,
-} from '../sim/systems/org'
-import { loanOffers, takeLoan, repayLoan } from '../sim/systems/loans'
+} from "../sim/systems/org";
+import { loanOffers, takeLoan, repayLoan } from "../sim/systems/loans";
 import {
   acceptFirmLoanOffer,
   declineFirmLoanOffer,
   submitLoanApplication,
-} from '../sim/systems/sharedMarkets'
+} from "../sim/systems/sharedMarkets";
 import {
   buyDomainContract,
   buyDataPortfolio,
@@ -76,9 +77,11 @@ import {
   startSynthGen,
   startSynthBudget,
   purchaseDataPruneAudit,
+  listDataSupplierOffers,
+  acceptDataSupplierOffer,
   type DataPortfolioChannel,
-} from '../sim/systems/data'
-import { createPlan, updatePlan, deletePlan } from '../sim/systems/plans'
+} from "../sim/systems/data";
+import { createPlan, updatePlan, deletePlan } from "../sim/systems/plans";
 import {
   deleteSaveSlot,
   listSaveSlots,
@@ -88,7 +91,7 @@ import {
   type SaveSlotId,
   writeSaveSlot,
   SaveError,
-} from '../sim/save'
+} from "../sim/save";
 import type {
   Allocation,
   DataDomain,
@@ -103,227 +106,275 @@ import type {
   ChipDesignTechId,
   MarketingChannel,
   CampaignRules,
-} from '../sim/types'
-import type { CommandViewId } from '../view/hud/navConfig'
+  MapOverlayMode,
+  MapToolMode,
+} from "../sim/types";
+import type { CommandViewId } from "../view/hud/navConfig";
 
-type BuildKind = BuildableKind
-export type GamePhase = 'menu' | 'loading' | 'playing'
-export type { SaveMeta, SaveSlotId }
+type BuildKind = BuildableKind;
+export type GamePhase = "menu" | "loading" | "playing";
+export type { SaveMeta, SaveSlotId };
 
-export type SaveResult = { ok: true; meta: SaveMeta } | { ok: false; error: string }
-export type LoadResult = { ok: true } | { ok: false; error: string }
+export type SaveResult =
+  { ok: true; meta: SaveMeta } | { ok: false; error: string };
+export type LoadResult = { ok: true } | { ok: false; error: string };
 
 export interface GameLoadingState {
-  operation: 'new-game' | 'load-game'
-  message: string
-  progress: number
+  operation: "new-game" | "load-game";
+  message: string;
+  progress: number;
 }
 
 /** Tiny placeholder so TypeScript consumers always have a state shape offline. */
 function placeholderState(): SimState {
   return createGame({
     seed: 0,
-    labName: 'Labline',
-    difficulty: 'easy',
+    labName: "Labline",
+    difficulty: "easy",
     advanced: { mapWidth: 24, mapHeight: 24, cityCount: 2, rivalCount: 1 },
-  })
+  });
 }
 
 interface GameStore {
-  phase: GamePhase
-  loading: GameLoadingState | null
-  lifecycleError: string | null
-  saveSlots: SaveMeta[]
-  storageReady: boolean
-  saveStatus: 'idle' | 'saving' | 'saved' | 'error'
-  state: SimState
-  activePanel: PanelId
-  selectedTile: { x: number; y: number } | null
-  mapFocusRequest: { x: number; y: number; sequence: number } | null
-  researchFocusRequest: { nodeId: string; sequence: number } | null
-  buildMode: BuildKind | null
+  phase: GamePhase;
+  loading: GameLoadingState | null;
+  lifecycleError: string | null;
+  saveSlots: SaveMeta[];
+  storageReady: boolean;
+  saveStatus: "idle" | "saving" | "saved" | "error";
+  state: SimState;
+  activePanel: PanelId;
+  selectedTile: { x: number; y: number } | null;
+  selectedRivalId: string | null;
+  mapTool: MapToolMode;
+  mapOverlay: MapOverlayMode;
+  mapViewport: { x: number; y: number; w: number; h: number } | null;
+  fleetOwnerFilter: string | null;
+  mapFocusRequest: { x: number; y: number; sequence: number } | null;
+  researchFocusRequest: { nodeId: string; sequence: number } | null;
+  buildMode: BuildKind | null;
   /** Left workspace drawer open */
-  leftRailOpen: boolean
+  leftRailOpen: boolean;
   /** Right command dock open */
-  commandDockOpen: boolean
+  commandDockOpen: boolean;
   /** Active command dock view (P&L / trends / rivals / feed) */
-  commandView: CommandViewId
-  hotkeyHelpOpen: boolean
+  commandView: CommandViewId;
+  hotkeyHelpOpen: boolean;
   /** In-run pause / save-load menu */
-  pauseMenuOpen: boolean
-  setPanel: (p: PanelId) => void
+  pauseMenuOpen: boolean;
+  setPanel: (p: PanelId) => void;
   /** Open Infrastructure → Overview (map) and expand the left rail. */
-  openSites: () => void
-  openInfrastructureOverview: () => void
+  openSites: () => void;
+  openInfrastructureOverview: () => void;
   /** Open Research, select the requested method, and center it in the tree. */
-  openResearchNode: (nodeId: string) => void
+  openResearchNode: (nodeId: string) => void;
   /** Open Fleet → Racks and expand the left rail (never switches to Sites). */
-  openFleet: () => void
-  selectTile: (x: number, y: number | null) => void
-  focusMapTile: (x: number, y: number) => void
-  clearSelection: () => void
-  setBuildMode: (k: BuildKind | null) => void
-  setLeftRailOpen: (open: boolean) => void
-  toggleLeftRail: () => void
-  setCommandDockOpen: (open: boolean) => void
-  toggleCommandDock: () => void
-  setCommandView: (v: CommandViewId) => void
-  setHotkeyHelpOpen: (open: boolean) => void
-  toggleHotkeyHelp: () => void
-  setPauseMenuOpen: (open: boolean) => void
-  togglePauseMenu: () => void
-  setSpeed: (s: Speed) => void
-  setPaused: (p: boolean) => void
-  setAutoPause: (key: keyof CampaignRules['autoPause'], enabled: boolean) => void
-  togglePause: () => void
-  stepDay: () => void
-  setAllocation: (a: Partial<Allocation>) => void
-  startResearch: (nodeId: string) => void
-  enqueueResearch: (nodeId: string) => void
-  dequeueResearch: (nodeId: string) => void
-  moveQueue: (nodeId: string, dir: -1 | 1) => void
-  cancelActiveResearch: () => void
-  setChipDesignFocus: (focus: ChipDesignFocus) => void
-  toggleChipDesignTech: (techId: ChipDesignTechId) => void
-  startTraining: (opts: StartTrainingOpts) => void
-  setTrainingPriority: (jobId: string, priority: number, reservedPf?: number) => void
-  pauseTraining: (jobId: string, paused: boolean) => void
-  cancelTraining: (jobId: string) => void
-  selectPostTrain: (jobId: string, stage: Exclude<import('../sim/types').PostTrainStage, 'none'>) => void
-  benchmarkTrainingJob: (jobId: string) => void
-  advancePostTrain: (jobId?: string) => void
-  shipModel: () => void
-  keepInternal: (jobId?: string) => void
-  releaseFromJob: (jobId?: string) => void
-  releaseModel: (id: string) => void
-  deleteModel: (id: string) => void
-  setModelApiPrice: (id: string, price: number | null) => void
-  setModelApiInOut: (id: string, priceIn: number | null, priceOut: number | null) => void
-  applyModelApiMarkup: (id: string, markupPct: number) => void
+  openFleet: () => void;
+  openFleetForOwner: (ownerId: string) => void;
+  setSelectedRivalId: (id: string | null) => void;
+  setMapTool: (tool: MapToolMode) => void;
+  setMapOverlay: (overlay: MapOverlayMode) => void;
+  setMapViewport: (
+    viewport: { x: number; y: number; w: number; h: number } | null,
+  ) => void;
+  selectTile: (x: number, y: number | null) => void;
+  focusMapTile: (x: number, y: number) => void;
+  clearSelection: () => void;
+  setBuildMode: (k: BuildKind | null) => void;
+  setLeftRailOpen: (open: boolean) => void;
+  toggleLeftRail: () => void;
+  setCommandDockOpen: (open: boolean) => void;
+  toggleCommandDock: () => void;
+  setCommandView: (v: CommandViewId) => void;
+  setHotkeyHelpOpen: (open: boolean) => void;
+  toggleHotkeyHelp: () => void;
+  setPauseMenuOpen: (open: boolean) => void;
+  togglePauseMenu: () => void;
+  setSpeed: (s: Speed) => void;
+  setPaused: (p: boolean) => void;
+  setAutoPause: (
+    key: keyof CampaignRules["autoPause"],
+    enabled: boolean,
+  ) => void;
+  togglePause: () => void;
+  stepDay: () => void;
+  setAllocation: (a: Partial<Allocation>) => void;
+  startResearch: (nodeId: string) => void;
+  enqueueResearch: (nodeId: string) => void;
+  dequeueResearch: (nodeId: string) => void;
+  moveQueue: (nodeId: string, dir: -1 | 1) => void;
+  cancelActiveResearch: () => void;
+  setChipDesignFocus: (focus: ChipDesignFocus) => void;
+  toggleChipDesignTech: (techId: ChipDesignTechId) => void;
+  startTraining: (opts: StartTrainingOpts) => void;
+  setTrainingPriority: (
+    jobId: string,
+    priority: number,
+    reservedPf?: number,
+  ) => void;
+  pauseTraining: (jobId: string, paused: boolean) => void;
+  extendTraining: (jobId: string) => void;
+  cancelTraining: (jobId: string) => void;
+  selectPostTrain: (
+    jobId: string,
+    stage: Exclude<import("../sim/types").PostTrainStage, "none">,
+  ) => void;
+  benchmarkTrainingJob: (jobId: string) => void;
+  advancePostTrain: (jobId?: string) => void;
+  shipModel: () => void;
+  keepInternal: (jobId?: string) => void;
+  releaseFromJob: (jobId?: string) => void;
+  releaseModel: (id: string) => void;
+  deleteModel: (id: string) => void;
+  setModelApiPrice: (id: string, price: number | null) => void;
+  setModelApiInOut: (
+    id: string,
+    priceIn: number | null,
+    priceOut: number | null,
+  ) => void;
+  applyModelApiMarkup: (id: string, markupPct: number) => void;
   startSafetyCampaign: (
     modelId: string,
-    intensity: import('../sim/types').SafetyCampaignIntensity,
+    intensity: import("../sim/types").SafetyCampaignIntensity,
     researchers: number,
-  ) => void
-  cancelSafetyCampaign: () => void
+  ) => void;
+  cancelSafetyCampaign: () => void;
   /** Order complete racks into a data hall (x,y). */
-  orderRacks: (x: number, y: number, skuId: string, count: number) => void
+  orderRacks: (x: number, y: number, skuId: string, count: number) => void;
   /** Sell live racks from a hall to free bays / recoup cash. */
-  sellRacks: (x: number, y: number, skuId: string, count: number) => void
-  cancelRackOrder: (x: number, y: number, skuId: string, count: number) => void
+  sellRacks: (x: number, y: number, skuId: string, count: number) => void;
+  cancelRackOrder: (x: number, y: number, skuId: string, count: number) => void;
   /** Rebalance allocation + order racks toward ~80% serve compute / VRAM needs */
-  autoBalanceHosting: () => void
+  autoBalanceHosting: () => void;
   /** Queue racks to reserve every free bay in every completed data hall. */
-  fillAllAvailableRackBays: () => void
-  deployRackBatch: (skuId: string, targets: RackDeploymentTarget[], count: number) => void
-  setPricing: (p: Partial<ProductPricing>) => void
-  setActiveModel: (id: string) => void
+  fillAllAvailableRackBays: () => void;
+  deployRackBatch: (
+    skuId: string,
+    targets: RackDeploymentTarget[],
+    count: number,
+  ) => void;
+  setPricing: (p: Partial<ProductPricing>) => void;
+  setActiveModel: (id: string) => void;
   createPlan: (input: {
-    name: string
-    pricePerMonth: number
-    usageMultiplier: number
-    modelIds?: string[]
-  }) => void
-  updatePlan: (planId: string, patch: Partial<SubPlan>) => void
-  deletePlan: (planId: string) => void
-  placeBuilding: (kind?: BuildKind) => void
-  upgradeBuilding: () => void
+    name: string;
+    pricePerMonth: number;
+    usageMultiplier: number;
+    modelIds?: string[];
+  }) => void;
+  updatePlan: (planId: string, patch: Partial<SubPlan>) => void;
+  deletePlan: (planId: string) => void;
+  placeBuilding: (kind?: BuildKind) => void;
+  upgradeBuilding: () => void;
   /** Rename selected / given player building (multi-tile campuses included). */
-  renameBuilding: (x: number, y: number, name: string) => void
-  startFab: () => void
-  hireTalent: () => void
-  buyData: () => void
+  renameBuilding: (x: number, y: number, name: string) => void;
+  startFab: () => void;
+  hireTalent: () => void;
+  buyData: () => void;
   buyDataPortfolio: (
     budget: number,
     mix: Record<DataPortfolioChannel, number>,
-  ) => void
-  setMarketing: (n: number) => void
-  setMarketingChannel: (channel: MarketingChannel, n: number) => void
-  takeLoan: (offerId: string) => void
-  takeCustomLoan: (opts: { principal: number; termDays: number; label?: string }) => void
-  acceptLoanOffer: (offerId: string) => void
-  declineLoanOffer: (offerId: string) => void
-  repayLoan: (loanId: string, amount?: number) => void
-  setCollectionRate: (n: number) => void
-  setAutoProcess: (on: boolean) => void
-  enqueueProcess: (domain: DataDomain, amount: number, qualityTarget?: number) => void
-  enqueueProcessAll: () => void
-  enqueueDataPrune: (domain: DataDomain) => void
-  enqueueAllDataPrunes: () => void
-  purchaseDataPruneAudit: () => void
+  ) => void;
+  listDataSupplierOffers: () => ReturnType<typeof listDataSupplierOffers>;
+  acceptDataSupplierOffer: (offerId: string, priceMultiplier?: number) => void;
+  setMarketing: (n: number) => void;
+  setMarketingChannel: (channel: MarketingChannel, n: number) => void;
+  takeLoan: (offerId: string) => void;
+  takeCustomLoan: (opts: {
+    principal: number;
+    termDays: number;
+    label?: string;
+  }) => void;
+  acceptLoanOffer: (offerId: string) => void;
+  declineLoanOffer: (offerId: string) => void;
+  repayLoan: (loanId: string, amount?: number) => void;
+  setCollectionRate: (n: number) => void;
+  setAutoProcess: (on: boolean) => void;
+  enqueueProcess: (
+    domain: DataDomain,
+    amount: number,
+    qualityTarget?: number,
+  ) => void;
+  enqueueProcessAll: () => void;
+  enqueueDataPrune: (domain: DataDomain) => void;
+  enqueueAllDataPrunes: () => void;
+  purchaseDataPruneAudit: () => void;
   startSynthGen: (opts: {
-    domain: DataDomain
-    modelId: string
-    targetMTok?: number
-    researchShare: number
-    qualityTier?: 'hq' | 'lq'
-  }) => void
-  startSynthBudget: (opts: { researchShare: number }) => void
-  cancelSynthGen: (jobId: string) => void
-  buyDomainContract: (contractId: string) => void
-  dismissOnboarding: () => void
-  setOnboardingDismissed: (dismissed: boolean) => void
+    domain: DataDomain;
+    modelId: string;
+    targetMTok?: number;
+    researchShare: number;
+    qualityTier?: "hq" | "lq";
+  }) => void;
+  startSynthBudget: (opts: { researchShare: number }) => void;
+  cancelSynthGen: (jobId: string) => void;
+  buyDomainContract: (contractId: string) => void;
+  dismissOnboarding: () => void;
+  setOnboardingDismissed: (dismissed: boolean) => void;
   /** Open new-game menu (does not start a run). */
-  newGame: () => Promise<void>
+  newGame: () => Promise<void>;
   /** Start a run from menu config. */
-  startGame: (opts: CreateGameOpts) => Promise<LoadResult>
-  refreshSaves: () => Promise<SaveMeta[]>
-  listSaves: () => SaveMeta[]
-  hasSave: () => boolean
-  saveGame: (slotId?: SaveSlotId) => Promise<SaveResult>
-  quickSave: () => Promise<SaveResult>
-  flushAutosave: () => Promise<SaveResult | null>
-  loadGame: (slotId: SaveSlotId) => Promise<LoadResult>
-  continueGame: () => Promise<LoadResult>
-  deleteSave: (slotId: SaveSlotId) => Promise<void>
-  clearLifecycleError: () => void
-  snapshot: () => ReturnType<typeof computeSnapshot>
+  startGame: (opts: CreateGameOpts) => Promise<LoadResult>;
+  refreshSaves: () => Promise<SaveMeta[]>;
+  listSaves: () => SaveMeta[];
+  hasSave: () => boolean;
+  saveGame: (slotId?: SaveSlotId) => Promise<SaveResult>;
+  quickSave: () => Promise<SaveResult>;
+  flushAutosave: () => Promise<SaveResult | null>;
+  loadGame: (slotId: SaveSlotId) => Promise<LoadResult>;
+  continueGame: () => Promise<LoadResult>;
+  deleteSave: (slotId: SaveSlotId) => Promise<void>;
+  clearLifecycleError: () => void;
+  snapshot: () => ReturnType<typeof computeSnapshot>;
 }
 
-const AUTOSAVE_MIN_INTERVAL_MS = 5_000
-const AUTOSAVE_FORCE_DAYS = 5
-let autosaveDirty = false
-let lastAutosaveAt = 0
-let lastPersistedDay = 1
-let autosaveTimer: ReturnType<typeof setTimeout> | undefined
-let autosaveInFlight: Promise<SaveResult | null> | null = null
-let forcedAutosaveRequested = 0
-let forcedAutosavePersisted = 0
+const AUTOSAVE_MIN_INTERVAL_MS = 5_000;
+const AUTOSAVE_FORCE_DAYS = 5;
+let autosaveDirty = false;
+let lastAutosaveAt = 0;
+let lastPersistedDay = 1;
+let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
+let autosaveInFlight: Promise<SaveResult | null> | null = null;
+let forcedAutosaveRequested = 0;
+let forcedAutosavePersisted = 0;
 
-export type GameSaveWriter = (slotId: SaveSlotId, state: SimState) => Promise<SaveMeta>
-let saveSlotWriter: GameSaveWriter = writeSaveSlot
+export type GameSaveWriter = (
+  slotId: SaveSlotId,
+  state: SimState,
+) => Promise<SaveMeta>;
+let saveSlotWriter: GameSaveWriter = writeSaveSlot;
 
 /** Deterministic write barrier for store concurrency tests. */
 export function setGameSaveWriterForTests(writer?: GameSaveWriter): void {
-  saveSlotWriter = writer ?? writeSaveSlot
+  saveSlotWriter = writer ?? writeSaveSlot;
 }
 
-type StoreGet = () => GameStore
-type StoreSet = (partial: Partial<GameStore>) => void
+type StoreGet = () => GameStore;
+type StoreSet = (partial: Partial<GameStore>) => void;
 
 function mergeSaveMeta(saves: readonly SaveMeta[], meta: SaveMeta): SaveMeta[] {
-  return [meta, ...saves.filter((candidate) => candidate.slotId !== meta.slotId)].sort((a, b) =>
-    a.savedAt < b.savedAt ? 1 : -1,
-  )
+  return [
+    meta,
+    ...saves.filter((candidate) => candidate.slotId !== meta.slotId),
+  ].sort((a, b) => (a.savedAt < b.savedAt ? 1 : -1));
 }
 
 function clearAutosaveTimer() {
-  if (autosaveTimer !== undefined) clearTimeout(autosaveTimer)
-  autosaveTimer = undefined
+  if (autosaveTimer !== undefined) clearTimeout(autosaveTimer);
+  autosaveTimer = undefined;
 }
 
 function resetAutosaveTracking(day: number) {
-  clearAutosaveTimer()
-  autosaveDirty = false
-  lastPersistedDay = day
-  lastAutosaveAt = 0
+  clearAutosaveTimer();
+  autosaveDirty = false;
+  lastPersistedDay = day;
+  lastAutosaveAt = 0;
 }
 
 function yieldForPaint(): Promise<void> {
-  if (typeof requestAnimationFrame === 'function') {
-    return new Promise((resolve) => requestAnimationFrame(() => resolve()))
+  if (typeof requestAnimationFrame === "function") {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
   }
-  return new Promise((resolve) => setTimeout(resolve, 0))
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 async function persistAutosave(
@@ -331,95 +382,115 @@ async function persistAutosave(
   set: StoreSet,
   force: boolean,
 ): Promise<SaveResult | null> {
-  const current = get()
-  if (current.phase !== 'playing' || (!force && !autosaveDirty)) return null
-  if (force) forcedAutosaveRequested++
-  if (autosaveInFlight) return autosaveInFlight
-  clearAutosaveTimer()
+  const current = get();
+  if (current.phase !== "playing" || (!force && !autosaveDirty)) return null;
+  if (force) forcedAutosaveRequested++;
+  if (autosaveInFlight) return autosaveInFlight;
+  clearAutosaveTimer();
   autosaveInFlight = (async () => {
-    let result: SaveResult | null = null
-    let writeAgain = true
+    let result: SaveResult | null = null;
+    let writeAgain = true;
     while (writeAgain) {
-      clearAutosaveTimer()
-      const targetForceGeneration = forcedAutosaveRequested
-      const snapshot = get().state
-      set({ saveStatus: 'saving' })
+      clearAutosaveTimer();
+      const targetForceGeneration = forcedAutosaveRequested;
+      const snapshot = get().state;
+      set({ saveStatus: "saving" });
       try {
-        const meta = await saveSlotWriter('auto', snapshot)
-        lastAutosaveAt = Date.now()
-        lastPersistedDay = snapshot.day
-        autosaveDirty = get().phase === 'playing' && get().state.day > snapshot.day
-        forcedAutosavePersisted = Math.max(forcedAutosavePersisted, targetForceGeneration)
+        const meta = await saveSlotWriter("auto", snapshot);
+        lastAutosaveAt = Date.now();
+        lastPersistedDay = snapshot.day;
+        autosaveDirty =
+          get().phase === "playing" && get().state.day > snapshot.day;
+        forcedAutosavePersisted = Math.max(
+          forcedAutosavePersisted,
+          targetForceGeneration,
+        );
         set({
-          saveStatus: 'saved',
+          saveStatus: "saved",
           saveSlots: mergeSaveMeta(get().saveSlots, meta),
           storageReady: true,
-        })
-        result = { ok: true as const, meta }
+        });
+        result = { ok: true as const, meta };
       } catch (error) {
-        const message = error instanceof SaveError ? error.message : 'Autosave failed.'
-        set({ saveStatus: 'error' })
-        return { ok: false as const, error: message }
+        const message =
+          error instanceof SaveError ? error.message : "Autosave failed.";
+        set({ saveStatus: "error" });
+        return { ok: false as const, error: message };
       }
-      writeAgain = forcedAutosaveRequested > forcedAutosavePersisted
-      if (!writeAgain && autosaveDirty) scheduleAutosave(get, set)
+      writeAgain = forcedAutosaveRequested > forcedAutosavePersisted;
+      if (!writeAgain && autosaveDirty) scheduleAutosave(get, set);
     }
-    return result
+    return result;
   })().finally(() => {
-    autosaveInFlight = null
-  })
-  return autosaveInFlight
+    autosaveInFlight = null;
+  });
+  return autosaveInFlight;
 }
 
 function scheduleAutosave(get: StoreGet, set: StoreSet) {
-  autosaveDirty = true
-  const state = get().state
-  const earliest = Math.max(0, lastAutosaveAt + AUTOSAVE_MIN_INTERVAL_MS - Date.now())
-  const forcedByDays = state.day - lastPersistedDay >= AUTOSAVE_FORCE_DAYS
-  const delay = forcedByDays ? earliest : Math.max(earliest, AUTOSAVE_MIN_INTERVAL_MS)
-  if (autosaveTimer !== undefined && !forcedByDays) return
-  clearAutosaveTimer()
+  autosaveDirty = true;
+  const state = get().state;
+  const earliest = Math.max(
+    0,
+    lastAutosaveAt + AUTOSAVE_MIN_INTERVAL_MS - Date.now(),
+  );
+  const forcedByDays = state.day - lastPersistedDay >= AUTOSAVE_FORCE_DAYS;
+  const delay = forcedByDays
+    ? earliest
+    : Math.max(earliest, AUTOSAVE_MIN_INTERVAL_MS);
+  if (autosaveTimer !== undefined && !forcedByDays) return;
+  clearAutosaveTimer();
   autosaveTimer = setTimeout(() => {
-    autosaveTimer = undefined
-    void persistAutosave(get, set, false)
-  }, delay)
+    autosaveTimer = undefined;
+    void persistAutosave(get, set, false);
+  }, delay);
 }
 
 function applyLoadedState(state: SimState) {
   return {
-    phase: 'playing' as const,
+    phase: "playing" as const,
     loading: null,
     lifecycleError: null,
     state: { ...state, paused: true },
-    activePanel: 'stats' as PanelId,
+    activePanel: "stats" as PanelId,
     selectedTile: null,
+    selectedRivalId: null,
+    mapTool: "select" as MapToolMode,
+    mapOverlay: "zones" as MapOverlayMode,
+    mapViewport: null,
+    fleetOwnerFilter: null,
     mapFocusRequest: null,
     researchFocusRequest: null,
     buildMode: null,
     leftRailOpen: false,
     commandDockOpen: false,
-    commandView: 'pnl' as CommandViewId,
+    commandView: "pnl" as CommandViewId,
     hotkeyHelpOpen: false,
     pauseMenuOpen: false,
-  }
+  };
 }
 
 export const useGameStore = create<GameStore>((set, get) => ({
-  phase: 'menu',
+  phase: "menu",
   loading: null,
   lifecycleError: null,
   saveSlots: [],
   storageReady: false,
-  saveStatus: 'idle',
+  saveStatus: "idle",
   state: placeholderState(),
-  activePanel: 'stats',
+  activePanel: "stats",
   selectedTile: null,
+  selectedRivalId: null,
+  mapTool: "select" as MapToolMode,
+  mapOverlay: "zones" as MapOverlayMode,
+  mapViewport: null,
+  fleetOwnerFilter: null,
   mapFocusRequest: null,
   researchFocusRequest: null,
   buildMode: null,
   leftRailOpen: true,
   commandDockOpen: true,
-  commandView: 'pnl',
+  commandView: "pnl",
   hotkeyHelpOpen: false,
   pauseMenuOpen: false,
 
@@ -429,25 +500,25 @@ export const useGameStore = create<GameStore>((set, get) => ({
       // Opening a panel re-expands the drawer
       leftRailOpen: true,
       // Leaving Sites ends build placement so Fleet/other workspaces stay put
-      buildMode: p === 'map' ? get().buildMode : null,
+      buildMode: p === "map" ? get().buildMode : null,
     }),
 
   openSites: () =>
     set({
-      activePanel: 'map',
+      activePanel: "map",
       leftRailOpen: true,
     }),
 
   openInfrastructureOverview: () =>
     set({
-      activePanel: 'map',
+      activePanel: "map",
       leftRailOpen: true,
       buildMode: null,
     }),
 
   openResearchNode: (nodeId) =>
     set((store) => ({
-      activePanel: 'research',
+      activePanel: "research",
       leftRailOpen: true,
       buildMode: null,
       researchFocusRequest: {
@@ -458,17 +529,34 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
   openFleet: () =>
     set({
-      activePanel: 'racks',
+      activePanel: "racks",
       leftRailOpen: true,
       buildMode: null,
     }),
+  openFleetForOwner: (ownerId) =>
+    set({
+      fleetOwnerFilter: ownerId,
+      selectedRivalId: ownerId === "player" ? null : ownerId,
+      activePanel: "racks",
+      leftRailOpen: true,
+    }),
+  setSelectedRivalId: (id) => set({ selectedRivalId: id }),
+  setMapTool: (tool) =>
+    set({
+      mapTool: tool,
+      buildMode: tool === "build" ? get().buildMode : null,
+    }),
+  setMapOverlay: (overlay) => set({ mapOverlay: overlay }),
+  setMapViewport: (viewport) => set({ mapViewport: viewport }),
 
   setLeftRailOpen: (open) => set({ leftRailOpen: open }),
   toggleLeftRail: () => set((s) => ({ leftRailOpen: !s.leftRailOpen })),
   setCommandDockOpen: (open) =>
-    set(open
-      ? { commandDockOpen: true, leftRailOpen: false }
-      : { commandDockOpen: false }),
+    set(
+      open
+        ? { commandDockOpen: true, leftRailOpen: false }
+        : { commandDockOpen: false },
+    ),
   toggleCommandDock: () =>
     set((s) =>
       s.commandDockOpen
@@ -484,12 +572,12 @@ export const useGameStore = create<GameStore>((set, get) => ({
       pauseMenuOpen: open,
       // Pause sim while the menu is open so days don't advance under the modal
       state: open ? { ...st.state, paused: true } : st.state,
-    }))
-    if (open) void persistAutosave(get, (partial) => set(partial), true)
+    }));
+    if (open) void persistAutosave(get, (partial) => set(partial), true);
   },
   togglePauseMenu: () => {
-    const open = !get().pauseMenuOpen
-    get().setPauseMenuOpen(open)
+    const open = !get().pauseMenuOpen;
+    get().setPauseMenuOpen(open);
   },
 
   setBuildMode: (k) =>
@@ -499,7 +587,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       // player previews, drags, and multi-places facilities on the map.
       ...(k
         ? {
-            activePanel: 'build' as const,
+            activePanel: "build" as const,
             leftRailOpen: true,
             selectedTile: null,
           }
@@ -522,63 +610,68 @@ export const useGameStore = create<GameStore>((set, get) => ({
   selectTile: (x, y) => {
     // Explicit single-select: always one tile or none
     if (y === null) {
-      set({ selectedTile: null })
-      return
+      set({ selectedTile: null });
+      return;
     }
-    const { buildMode, state, phase } = get()
-    if (phase !== 'playing') return
+    const { buildMode, state, phase } = get();
+    if (phase !== "playing") return;
 
-    const tile = mapTileAt(state, x, y)
+    const tile = mapTileAt(state, x, y);
     if (!tile) {
-      set({ selectedTile: null })
-      return
+      set({ selectedTile: null });
+      return;
     }
 
     if (
       buildMode &&
-      tile.kind === 'empty' &&
-      (tile.owner === 'neutral' || tile.owner === 'player')
+      tile.kind === "empty" &&
+      (tile.owner === "neutral" || tile.owner === "player")
     ) {
-      const next = placeBuilding(state, x, y, buildMode)
+      const next = placeBuilding(state, x, y, buildMode);
       // Keep build mode so you can place multiple of the same type
-      const placed = mapTileAt(next, x, y)
-      const ok = placed && placed.kind === buildMode && placed.owner === 'player'
+      const placed = mapTileAt(next, x, y);
+      const ok =
+        placed && placed.kind === buildMode && placed.owner === "player";
       set({
         selectedTile: ok ? { x, y } : null,
         state: next,
         buildMode: get().buildMode,
-        activePanel: 'build',
+        activePanel: "build",
         leftRailOpen: true,
-      })
-      return
+      });
+      return;
     }
 
     // Scenery (roads, lakes, forests, houses, parks, city fabric) is not selectable
-    if (isScenicKind(tile.kind) && tile.owner === 'neutral') {
-      set({ selectedTile: null })
-      return
+    if (isScenicKind(tile.kind) && tile.owner === "neutral") {
+      set({ selectedTile: null });
+      return;
     }
 
     // Toggle off if clicking the same tile again
-    const cur = get().selectedTile
+    const cur = get().selectedTile;
     if (cur && cur.x === x && cur.y === y) {
-      set({ selectedTile: null })
-      return
+      set({ selectedTile: null });
+      return;
     }
     // Select tile only — do not steal the active workspace (Fleet stays on Racks, etc.)
-    set({ selectedTile: { x, y } })
+    set({ selectedTile: { x, y } });
   },
 
   setSpeed: (s) => {
     set((st) => ({
-      state: { ...st.state, speed: s, paused: s === 0 ? true : st.state.paused },
-    }))
-    if (s === 0) void persistAutosave(get, (partial) => set(partial), true)
+      state: {
+        ...st.state,
+        speed: s,
+        paused: s === 0 ? true : st.state.paused,
+      },
+    }));
+    if (s === 0) void persistAutosave(get, (partial) => set(partial), true);
   },
 
   setPaused: (p) => {
-    set((st) => ({ state: { ...st.state, paused: p } }))
-    if (p) void persistAutosave(get, (partial) => set(partial), true)
+    set((st) => ({ state: { ...st.state, paused: p } }));
+    if (p) void persistAutosave(get, (partial) => set(partial), true);
   },
 
   setAutoPause: (key, enabled) =>
@@ -600,21 +693,22 @@ export const useGameStore = create<GameStore>((set, get) => ({
     })),
 
   togglePause: () => {
-    const paused = !get().state.paused
-    set((st) => ({ state: { ...st.state, paused } }))
-    if (paused) void persistAutosave(get, (partial) => set(partial), true)
+    const paused = !get().state.paused;
+    set((st) => ({ state: { ...st.state, paused } }));
+    if (paused) void persistAutosave(get, (partial) => set(partial), true);
   },
 
   stepDay: () => {
-    if (get().phase !== 'playing') return
-    set((st) => ({ state: tickDay(st.state) }))
-    scheduleAutosave(get, (partial) => set(partial))
+    if (get().phase !== "playing") return;
+    set((st) => ({ state: tickDay(st.state) }));
+    scheduleAutosave(get, (partial) => set(partial));
   },
 
   setAllocation: (a) =>
     set((st) => {
-      const allocation = { ...st.state.player.allocation, ...a }
-      const sum = allocation.training + allocation.inference + allocation.research
+      const allocation = { ...st.state.player.allocation, ...a };
+      const sum =
+        allocation.training + allocation.inference + allocation.research;
       return {
         state: {
           ...st.state,
@@ -630,20 +724,26 @@ export const useGameStore = create<GameStore>((set, get) => ({
                 : allocation,
           },
         },
-      }
+      };
     }),
 
-  startResearch: (nodeId) => set((st) => ({ state: startResearch(st.state, nodeId) })),
-  enqueueResearch: (nodeId) => set((st) => ({ state: enqueueResearch(st.state, nodeId) })),
-  dequeueResearch: (nodeId) => set((st) => ({ state: dequeueResearch(st.state, nodeId) })),
-  moveQueue: (nodeId, dir) => set((st) => ({ state: moveQueue(st.state, nodeId, dir) })),
-  cancelActiveResearch: () => set((st) => ({ state: cancelActiveResearch(st.state) })),
+  startResearch: (nodeId) =>
+    set((st) => ({ state: startResearch(st.state, nodeId) })),
+  enqueueResearch: (nodeId) =>
+    set((st) => ({ state: enqueueResearch(st.state, nodeId) })),
+  dequeueResearch: (nodeId) =>
+    set((st) => ({ state: dequeueResearch(st.state, nodeId) })),
+  moveQueue: (nodeId, dir) =>
+    set((st) => ({ state: moveQueue(st.state, nodeId, dir) })),
+  cancelActiveResearch: () =>
+    set((st) => ({ state: cancelActiveResearch(st.state) })),
 
-  startTraining: (opts) => set((st) => ({ state: startTraining(st.state, opts) })),
+  startTraining: (opts) =>
+    set((st) => ({ state: startTraining(st.state, opts) })),
   setTrainingPriority: (jobId, priority, reservedPf) =>
     set((st) => ({
       state: applyLabAction(st.state, st.state.playerLabId, {
-        kind: 'set_training_priority',
+        kind: "set_training_priority",
         jobId,
         priority,
         reservedPf,
@@ -652,29 +752,38 @@ export const useGameStore = create<GameStore>((set, get) => ({
   pauseTraining: (jobId, paused) =>
     set((st) => ({
       state: applyLabAction(st.state, st.state.playerLabId, {
-        kind: 'pause_training',
+        kind: "pause_training",
         jobId,
         paused,
       }),
     })),
-  cancelTraining: (jobId) => set((st) => ({ state: cancelTraining(st.state, jobId) })),
+  extendTraining: (jobId) =>
+    set((st) => ({ state: extendTraining(st.state, jobId) })),
+  cancelTraining: (jobId) =>
+    set((st) => ({ state: cancelTraining(st.state, jobId) })),
   selectPostTrain: (jobId, stage) =>
     set((st) => ({ state: selectPostTrain(st.state, jobId, stage) })),
   benchmarkTrainingJob: (jobId) =>
     set((st) => ({ state: benchmarkTrainingJob(st.state, jobId) })),
-  advancePostTrain: (jobId) => set((st) => ({ state: advancePostTrain(st.state, jobId) })),
+  advancePostTrain: (jobId) =>
+    set((st) => ({ state: advancePostTrain(st.state, jobId) })),
   shipModel: () => set((st) => ({ state: shipModel(st.state) })),
-  keepInternal: (jobId) => set((st) => ({ state: keepInternal(st.state, jobId) })),
-  releaseFromJob: (jobId) => set((st) => ({ state: releaseFromJob(st.state, jobId) })),
+  keepInternal: (jobId) =>
+    set((st) => ({ state: keepInternal(st.state, jobId) })),
+  releaseFromJob: (jobId) =>
+    set((st) => ({ state: releaseFromJob(st.state, jobId) })),
   releaseModel: (id) => set((st) => ({ state: releaseModel(st.state, id) })),
   deleteModel: (id) => set((st) => ({ state: deleteModel(st.state, id) })),
-  setModelApiPrice: (id, price) => set((st) => ({ state: setModelApiPrice(st.state, id, price) })),
+  setModelApiPrice: (id, price) =>
+    set((st) => ({ state: setModelApiPrice(st.state, id, price) })),
   setModelApiInOut: (id, priceIn, priceOut) =>
     set((st) => ({ state: setModelApiInOut(st.state, id, priceIn, priceOut) })),
   applyModelApiMarkup: (id, markupPct) =>
     set((st) => ({ state: applyModelApiMarkup(st.state, id, markupPct) })),
   startSafetyCampaign: (modelId, intensity, researchers) =>
-    set((st) => ({ state: startSafetyCampaign(st.state, { modelId, intensity, researchers }) })),
+    set((st) => ({
+      state: startSafetyCampaign(st.state, { modelId, intensity, researchers }),
+    })),
   cancelSafetyCampaign: () =>
     set((st) => ({ state: cancelSafetyCampaign(st.state) })),
 
@@ -684,55 +793,66 @@ export const useGameStore = create<GameStore>((set, get) => ({
     set((st) => ({ state: sellRacksFromDc(st.state, x, y, skuId, count) })),
   cancelRackOrder: (x, y, skuId, count) =>
     set((st) => ({ state: cancelRackOrder(st.state, x, y, skuId, count) })),
-  autoBalanceHosting: () => set((st) => ({ state: autoBalanceHosting(st.state) })),
+  autoBalanceHosting: () =>
+    set((st) => ({ state: autoBalanceHosting(st.state) })),
   fillAllAvailableRackBays: () =>
     set((st) => ({ state: fillAllAvailableRackBays(st.state) })),
   deployRackBatch: (skuId, targets, count) =>
-    set((st) => ({ state: deployRackBatchAcrossHalls(st.state, skuId, targets, count) })),
+    set((st) => ({
+      state: deployRackBatchAcrossHalls(st.state, skuId, targets, count),
+    })),
 
   setPricing: (p) =>
     set((st) => {
-      const next = { ...st.state.player.pricing, ...p }
-      if (p.apiPriceInPerMTok !== undefined || p.apiPriceOutPerMTok !== undefined) {
-        const pin = next.apiPriceInPerMTok ?? next.apiPricePerMTok * 0.35
-        const pout = next.apiPriceOutPerMTok ?? next.apiPricePerMTok * 1.25
-        next.apiPriceInPerMTok = pin
-        next.apiPriceOutPerMTok = pout
-        next.apiPricePerMTok = Math.round((pin * 0.3 + pout * 0.7) * 1000) / 1000
+      const next = { ...st.state.player.pricing, ...p };
+      if (
+        p.apiPriceInPerMTok !== undefined ||
+        p.apiPriceOutPerMTok !== undefined
+      ) {
+        const pin = next.apiPriceInPerMTok ?? next.apiPricePerMTok * 0.35;
+        const pout = next.apiPriceOutPerMTok ?? next.apiPricePerMTok * 1.25;
+        next.apiPriceInPerMTok = pin;
+        next.apiPriceOutPerMTok = pout;
+        next.apiPricePerMTok =
+          Math.round((pin * 0.3 + pout * 0.7) * 1000) / 1000;
       } else if (p.apiPricePerMTok !== undefined) {
-        next.apiPriceInPerMTok = Math.round(p.apiPricePerMTok * 0.35 * 1000) / 1000
-        next.apiPriceOutPerMTok = Math.round(p.apiPricePerMTok * 1.25 * 1000) / 1000
-        next.apiPricePerMTok = p.apiPricePerMTok
+        next.apiPriceInPerMTok =
+          Math.round(p.apiPricePerMTok * 0.35 * 1000) / 1000;
+        next.apiPriceOutPerMTok =
+          Math.round(p.apiPricePerMTok * 1.25 * 1000) / 1000;
+        next.apiPricePerMTok = p.apiPricePerMTok;
       }
       // Plans edits also update the active model's own in/out list (only fields touched).
-      let models = st.state.player.models
-      const activeId = next.activeModelId
-      const touchedIn = p.apiPriceInPerMTok !== undefined
-      const touchedOut = p.apiPriceOutPerMTok !== undefined
-      const touchedBlend = p.apiPricePerMTok !== undefined
+      let models = st.state.player.models;
+      const activeId = next.activeModelId;
+      const touchedIn = p.apiPriceInPerMTok !== undefined;
+      const touchedOut = p.apiPriceOutPerMTok !== undefined;
+      const touchedBlend = p.apiPricePerMTok !== undefined;
       if (activeId && (touchedIn || touchedOut || touchedBlend)) {
         models = models.map((m) => {
-          if (m.id !== activeId) return m
-          const pin = touchedIn || touchedBlend
-            ? next.apiPriceInPerMTok
-            : (m.apiPriceInPerMTok ?? next.apiPriceInPerMTok)
-          const pout = touchedOut || touchedBlend
-            ? next.apiPriceOutPerMTok
-            : (m.apiPriceOutPerMTok ?? next.apiPriceOutPerMTok)
+          if (m.id !== activeId) return m;
+          const pin =
+            touchedIn || touchedBlend
+              ? next.apiPriceInPerMTok
+              : (m.apiPriceInPerMTok ?? next.apiPriceInPerMTok);
+          const pout =
+            touchedOut || touchedBlend
+              ? next.apiPriceOutPerMTok
+              : (m.apiPriceOutPerMTok ?? next.apiPriceOutPerMTok);
           return {
             ...m,
             apiPriceInPerMTok: pin,
             apiPriceOutPerMTok: pout,
             apiPricePerMTok: Math.round((pin * 0.3 + pout * 0.7) * 1000) / 1000,
-          }
-        })
+          };
+        });
       }
       return {
         state: {
           ...st.state,
           player: { ...st.state.player, pricing: next, models },
         },
-      }
+      };
     }),
 
   setActiveModel: (id) =>
@@ -747,26 +867,28 @@ export const useGameStore = create<GameStore>((set, get) => ({
     })),
 
   createPlan: (input) => set((st) => ({ state: createPlan(st.state, input) })),
-  updatePlan: (planId, patch) => set((st) => ({ state: updatePlan(st.state, planId, patch) })),
-  deletePlan: (planId) => set((st) => ({ state: deletePlan(st.state, planId) })),
+  updatePlan: (planId, patch) =>
+    set((st) => ({ state: updatePlan(st.state, planId, patch) })),
+  deletePlan: (planId) =>
+    set((st) => ({ state: deletePlan(st.state, planId) })),
 
   placeBuilding: (kind) => {
-    const { selectedTile, state, buildMode } = get()
-    if (!selectedTile) return
-    const k = kind ?? buildMode
-    if (!k) return
+    const { selectedTile, state, buildMode } = get();
+    if (!selectedTile) return;
+    const k = kind ?? buildMode;
+    if (!k) return;
     set({
       state: placeBuilding(state, selectedTile.x, selectedTile.y, k),
       // Stay in build mode to place another of the same type
       buildMode: k,
       selectedTile: { x: selectedTile.x, y: selectedTile.y },
-    })
+    });
   },
 
   upgradeBuilding: () => {
-    const { selectedTile, state } = get()
-    if (!selectedTile) return
-    set({ state: upgradeBuilding(state, selectedTile.x, selectedTile.y) })
+    const { selectedTile, state } = get();
+    if (!selectedTile) return;
+    set({ state: upgradeBuilding(state, selectedTile.x, selectedTile.y) });
   },
 
   renameBuilding: (x, y, name) =>
@@ -781,14 +903,21 @@ export const useGameStore = create<GameStore>((set, get) => ({
   buyData: () => set((st) => ({ state: buyDataPartnership(st.state) })),
   buyDataPortfolio: (budget, mix) =>
     set((st) => ({ state: buyDataPortfolio(st.state, budget, mix) })),
+  listDataSupplierOffers: () => listDataSupplierOffers(get().state),
+  acceptDataSupplierOffer: (offerId, priceMultiplier) =>
+    set((st) => ({
+      state: acceptDataSupplierOffer(st.state, offerId, priceMultiplier),
+    })),
   setMarketing: (n) => set((st) => ({ state: setMarketing(st.state, n) })),
   setMarketingChannel: (channel, n) =>
     set((st) => ({ state: setMarketingChannel(st.state, channel, n) })),
   takeLoan: (offerId) =>
     set((st) => {
-      if (offerId === 'bailout') return { state: takeLoan(st.state, offerId) }
-      const offer = loanOffers(st.state).find((candidate) => candidate.id === offerId)
-      if (!offer) return { state: st.state }
+      if (offerId === "bailout") return { state: takeLoan(st.state, offerId) };
+      const offer = loanOffers(st.state).find(
+        (candidate) => candidate.id === offerId,
+      );
+      if (!offer) return { state: st.state };
       return {
         state: submitLoanApplication(
           st.state,
@@ -796,7 +925,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
           offer.principal,
           offer.termDays,
         ),
-      }
+      };
     }),
   takeCustomLoan: (opts) =>
     set((st) => ({
@@ -811,19 +940,31 @@ export const useGameStore = create<GameStore>((set, get) => ({
     set((st) => ({ state: acceptFirmLoanOffer(st.state, offerId) })),
   declineLoanOffer: (offerId) =>
     set((st) => ({ state: declineFirmLoanOffer(st.state, offerId) })),
-  repayLoan: (loanId, amount) => set((st) => ({ state: repayLoan(st.state, loanId, amount) })),
-  setCollectionRate: (n) => set((st) => ({ state: setCollectionRate(st.state, n) })),
-  setAutoProcess: (on) => set((st) => ({ state: setAutoProcess(st.state, on) })),
+  repayLoan: (loanId, amount) =>
+    set((st) => ({ state: repayLoan(st.state, loanId, amount) })),
+  setCollectionRate: (n) =>
+    set((st) => ({ state: setCollectionRate(st.state, n) })),
+  setAutoProcess: (on) =>
+    set((st) => ({ state: setAutoProcess(st.state, on) })),
   enqueueProcess: (domain, amount, qualityTarget) =>
-    set((st) => ({ state: enqueueProcess(st.state, domain, amount, qualityTarget) })),
-  enqueueProcessAll: () => set((st) => ({ state: enqueueProcessAll(st.state) })),
-  enqueueDataPrune: (domain) => set((st) => ({ state: enqueueDataPrune(st.state, domain) })),
-  enqueueAllDataPrunes: () => set((st) => ({ state: enqueueAllDataPrunes(st.state) })),
-  purchaseDataPruneAudit: () => set((st) => ({ state: purchaseDataPruneAudit(st.state) })),
+    set((st) => ({
+      state: enqueueProcess(st.state, domain, amount, qualityTarget),
+    })),
+  enqueueProcessAll: () =>
+    set((st) => ({ state: enqueueProcessAll(st.state) })),
+  enqueueDataPrune: (domain) =>
+    set((st) => ({ state: enqueueDataPrune(st.state, domain) })),
+  enqueueAllDataPrunes: () =>
+    set((st) => ({ state: enqueueAllDataPrunes(st.state) })),
+  purchaseDataPruneAudit: () =>
+    set((st) => ({ state: purchaseDataPruneAudit(st.state) })),
 
-  startSynthGen: (opts) => set((st) => ({ state: startSynthGen(st.state, opts) })),
-  startSynthBudget: (opts) => set((st) => ({ state: startSynthBudget(st.state, opts) })),
-  cancelSynthGen: (jobId) => set((st) => ({ state: cancelSynthGen(st.state, jobId) })),
+  startSynthGen: (opts) =>
+    set((st) => ({ state: startSynthGen(st.state, opts) })),
+  startSynthBudget: (opts) =>
+    set((st) => ({ state: startSynthBudget(st.state, opts) })),
+  cancelSynthGen: (jobId) =>
+    set((st) => ({ state: cancelSynthGen(st.state, jobId) })),
   buyDomainContract: (contractId) =>
     set((st) => ({ state: buyDomainContract(st.state, contractId) })),
 
@@ -833,10 +974,10 @@ export const useGameStore = create<GameStore>((set, get) => ({
     set((st) => ({ state: { ...st.state, onboardingDismissed } })),
 
   newGame: async () => {
-    set((store) => ({ state: { ...store.state, paused: true } }))
-    await persistAutosave(get, (partial) => set(partial), true)
+    set((store) => ({ state: { ...store.state, paused: true } }));
+    await persistAutosave(get, (partial) => set(partial), true);
     set({
-      phase: 'menu',
+      phase: "menu",
       loading: null,
       lifecycleError: null,
       selectedTile: null,
@@ -844,41 +985,41 @@ export const useGameStore = create<GameStore>((set, get) => ({
       researchFocusRequest: null,
       buildMode: null,
       pauseMenuOpen: false,
-    })
+    });
   },
 
   startGame: async (opts) => {
     set({
-      phase: 'loading',
+      phase: "loading",
       lifecycleError: null,
       loading: {
-        operation: 'new-game',
-        message: 'Preparing world generation…',
+        operation: "new-game",
+        message: "Preparing world generation…",
         progress: 0.1,
       },
-    })
-    await yieldForPaint()
+    });
+    await yieldForPaint();
     try {
       const state = createGame({
         ...opts,
         seed: opts.seed ?? Date.now() % 100000,
-      })
+      });
       set({
         loading: {
-          operation: 'new-game',
-          message: 'Indexing cities and facilities…',
+          operation: "new-game",
+          message: "Indexing cities and facilities…",
           progress: 0.9,
         },
-      })
-      await yieldForPaint()
-      resetAutosaveTracking(state.day)
+      });
+      await yieldForPaint();
+      resetAutosaveTracking(state.day);
       set({
-        phase: 'playing',
+        phase: "playing",
         loading: null,
         lifecycleError: null,
-        saveStatus: 'idle',
+        saveStatus: "idle",
         state: { ...state, paused: true },
-        activePanel: 'stats',
+        activePanel: "stats",
         selectedTile: null,
         mapFocusRequest: null,
         researchFocusRequest: null,
@@ -886,138 +1027,147 @@ export const useGameStore = create<GameStore>((set, get) => ({
         // Map-first: drawers start collapsed (icons only); Q / click opens workspace
         leftRailOpen: false,
         commandDockOpen: false,
-        commandView: 'pnl',
+        commandView: "pnl",
         hotkeyHelpOpen: false,
         pauseMenuOpen: false,
-      })
-      return { ok: true as const }
+      });
+      return { ok: true as const };
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'World generation failed.'
-      set({ phase: 'menu', loading: null, lifecycleError: message })
-      return { ok: false as const, error: message }
+      const message =
+        error instanceof Error ? error.message : "World generation failed.";
+      set({ phase: "menu", loading: null, lifecycleError: message });
+      return { ok: false as const, error: message };
     }
   },
 
   refreshSaves: async () => {
     try {
-      const saves = await listSaveSlots()
-      set({ saveSlots: saves, storageReady: true })
-      return saves
+      const saves = await listSaveSlots();
+      set({ saveSlots: saves, storageReady: true });
+      return saves;
     } catch (error) {
-      const message = error instanceof SaveError ? error.message : 'Could not read save slots.'
-      set({ storageReady: true, lifecycleError: message })
-      return []
+      const message =
+        error instanceof SaveError
+          ? error.message
+          : "Could not read save slots.";
+      set({ storageReady: true, lifecycleError: message });
+      return [];
     }
   },
   listSaves: () => get().saveSlots,
   hasSave: () => get().saveSlots.length > 0,
 
-  saveGame: async (slotId = '1') => {
-    if (get().phase !== 'playing') {
-      return { ok: false as const, error: 'No active run to save.' }
+  saveGame: async (slotId = "1") => {
+    if (get().phase !== "playing") {
+      return { ok: false as const, error: "No active run to save." };
     }
-    if (autosaveInFlight) await autosaveInFlight
-    if (get().phase !== 'playing') {
-      return { ok: false as const, error: 'No active run to save.' }
+    if (autosaveInFlight) await autosaveInFlight;
+    if (get().phase !== "playing") {
+      return { ok: false as const, error: "No active run to save." };
     }
-    clearAutosaveTimer()
-    const snapshot = get().state
-    set({ saveStatus: 'saving' })
+    clearAutosaveTimer();
+    const snapshot = get().state;
+    set({ saveStatus: "saving" });
     try {
-      const meta = await saveSlotWriter(slotId, snapshot)
-      lastPersistedDay = snapshot.day
-      autosaveDirty = get().state.day > snapshot.day
-      if (slotId === 'auto') lastAutosaveAt = Date.now()
+      const meta = await saveSlotWriter(slotId, snapshot);
+      lastPersistedDay = snapshot.day;
+      autosaveDirty = get().state.day > snapshot.day;
+      if (slotId === "auto") lastAutosaveAt = Date.now();
       set({
-        saveStatus: 'saved',
+        saveStatus: "saved",
         saveSlots: mergeSaveMeta(get().saveSlots, meta),
         storageReady: true,
-      })
-      if (autosaveDirty) scheduleAutosave(get, (partial) => set(partial))
-      return { ok: true as const, meta }
+      });
+      if (autosaveDirty) scheduleAutosave(get, (partial) => set(partial));
+      return { ok: true as const, meta };
     } catch (e) {
-      const msg = e instanceof SaveError ? e.message : 'Save failed.'
-      set({ saveStatus: 'error' })
-      return { ok: false as const, error: msg }
+      const msg = e instanceof SaveError ? e.message : "Save failed.";
+      set({ saveStatus: "error" });
+      return { ok: false as const, error: msg };
     }
   },
 
-  quickSave: () => get().saveGame('auto'),
+  quickSave: () => get().saveGame("auto"),
 
   flushAutosave: () => persistAutosave(get, (partial) => set(partial), true),
 
   loadGame: async (slotId) => {
-    const previousPhase = get().phase === 'playing' ? 'playing' : 'menu'
+    const previousPhase = get().phase === "playing" ? "playing" : "menu";
     set({
-      phase: 'loading',
+      phase: "loading",
       lifecycleError: null,
       loading: {
-        operation: 'load-game',
-        message: 'Reading campaign data…',
+        operation: "load-game",
+        message: "Reading campaign data…",
         progress: 0.15,
       },
-    })
-    await yieldForPaint()
+    });
+    await yieldForPaint();
     try {
-      const state = await readSaveSlot(slotId)
+      const state = await readSaveSlot(slotId);
       set({
         loading: {
-          operation: 'load-game',
-          message: 'Regenerating world indexes…',
+          operation: "load-game",
+          message: "Regenerating world indexes…",
           progress: 0.9,
         },
-      })
-      await yieldForPaint()
-      resetAutosaveTracking(state.day)
-      set({ ...applyLoadedState(state), saveStatus: 'idle' })
-      return { ok: true as const }
+      });
+      await yieldForPaint();
+      resetAutosaveTracking(state.day);
+      set({ ...applyLoadedState(state), saveStatus: "idle" });
+      return { ok: true as const };
     } catch (e) {
-      const msg = e instanceof SaveError ? e.message : 'Load failed.'
+      const msg = e instanceof SaveError ? e.message : "Load failed.";
       set({
         phase: previousPhase,
         loading: null,
         lifecycleError: msg,
-        saveStatus: 'error',
-      })
-      return { ok: false as const, error: msg }
+        saveStatus: "error",
+      });
+      return { ok: false as const, error: msg };
     }
   },
 
   continueGame: async () => {
     try {
-      const id = await mostRecentSlotId()
-      if (!id) return { ok: false as const, error: 'No saved run found.' }
-      return get().loadGame(id)
+      const id = await mostRecentSlotId();
+      if (!id) return { ok: false as const, error: "No saved run found." };
+      return get().loadGame(id);
     } catch (error) {
-      const message = error instanceof SaveError ? error.message : 'Could not read save slots.'
-      set({ lifecycleError: message })
-      return { ok: false as const, error: message }
+      const message =
+        error instanceof SaveError
+          ? error.message
+          : "Could not read save slots.";
+      set({ lifecycleError: message });
+      return { ok: false as const, error: message };
     }
   },
 
   deleteSave: async (slotId) => {
     try {
-      await deleteSaveSlot(slotId)
-      await get().refreshSaves()
+      await deleteSaveSlot(slotId);
+      await get().refreshSaves();
     } catch (error) {
-      const message = error instanceof SaveError ? error.message : 'Could not delete save.'
-      set({ lifecycleError: message })
+      const message =
+        error instanceof SaveError ? error.message : "Could not delete save.";
+      set({ lifecycleError: message });
     }
   },
 
   clearLifecycleError: () => set({ lifecycleError: null }),
 
   snapshot: () => computeSnapshot(get().state),
-}))
+}));
 
 /** Flush pending world/simulation changes when the tab moves to the background. */
 export function installGameSaveLifecycle(): () => void {
-  if (typeof document === 'undefined') return () => undefined
+  if (typeof document === "undefined") return () => undefined;
   const onVisibilityChange = () => {
-    if (document.visibilityState === 'hidden') {
-      void useGameStore.getState().flushAutosave()
+    if (document.visibilityState === "hidden") {
+      void useGameStore.getState().flushAutosave();
     }
-  }
-  document.addEventListener('visibilitychange', onVisibilityChange)
-  return () => document.removeEventListener('visibilitychange', onVisibilityChange)
+  };
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  return () =>
+    document.removeEventListener("visibilitychange", onVisibilityChange);
 }

@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo } from 'react'
 import {
   Brain,
   ChartDonut,
@@ -7,6 +7,7 @@ import {
   Database,
   Flask,
   Gauge,
+  Bulldozer,
   Hammer,
   HardDrives,
   Lightning,
@@ -28,7 +29,6 @@ import { MarketPanel } from './panels/MarketPanel'
 import { HardwarePanel } from './panels/HardwarePanel'
 import { MapPanel } from './panels/MapPanel'
 import { OrgPanel } from './panels/OrgPanel'
-import { EventsPanel } from './panels/EventsPanel'
 import { StatsPanel } from './panels/StatsPanel'
 import { DataPanel } from './panels/DataPanel'
 import { BenchmarksPanel } from './panels/BenchmarksPanel'
@@ -102,6 +102,9 @@ export function LeftRail() {
   const setPanel = useGameStore((s) => s.setPanel)
   const open = useGameStore((s) => s.leftRailOpen)
   const setOpen = useGameStore((s) => s.setLeftRailOpen)
+  const mapTool = useGameStore((s) => s.mapTool)
+  const setMapTool = useGameStore((s) => s.setMapTool)
+  const setBuildMode = useGameStore((s) => s.setBuildMode)
   const state = useGameStore((s) => s.state)
 
   const group = useMemo(() => groupForPanel(active), [active])
@@ -143,8 +146,14 @@ export function LeftRail() {
       return
     }
     if (id === 'map') {
+      setMapTool('select')
       useGameStore.getState().openSites()
       return
+    }
+    if (id === 'build') {
+      setMapTool('build')
+    } else if (mapTool === 'destroy') {
+      setMapTool('select')
     }
     setPanel(id)
     setOpen(true)
@@ -154,11 +163,12 @@ export function LeftRail() {
     <div className="workspace-shell pointer-events-none">
       {/* Icon rail: Build action pinned on top, then every panel as its own tab */}
       <nav
-        className="hud-surface pointer-events-auto relative col-start-1 m-1.5 mr-1 flex min-h-0 flex-col items-stretch gap-0.5 overflow-y-auto rounded-xl p-1 panel-scroll"
+        className="hud-surface pointer-events-auto relative col-start-1 m-1.5 mr-1 flex min-h-0 flex-col items-stretch gap-0.5 overflow-y-auto rounded-lg p-1 panel-scroll"
         aria-label="Workspaces"
       >
         <button
           type="button"
+          aria-label="Build"
           title="Build (R) - place facilities and expand campus capacity"
           onClick={() => handleTab('build')}
           className={`group relative flex min-h-12 w-full flex-col items-center justify-center gap-1 rounded-lg border px-1 py-1.5 transition ${
@@ -178,6 +188,36 @@ export function LeftRail() {
           </span>
         </button>
 
+        <div aria-hidden className="mx-2 my-1 h-px bg-line/60" />
+
+        <button
+          type="button"
+          aria-label="Destroy"
+          title="Destroy — sell owned facilities or cancel construction"
+          aria-pressed={mapTool === 'destroy'}
+          onClick={() => {
+            if (mapTool === 'destroy') {
+              setMapTool('select')
+              return
+            }
+            setBuildMode(null)
+            setMapTool('destroy')
+            setOpen(false)
+          }}
+          className={`group relative flex min-h-12 w-full flex-col items-center justify-center gap-1 rounded-lg border px-1 py-1.5 transition ${
+            mapTool === 'destroy'
+              ? 'border-danger/60 bg-danger/15 text-danger'
+              : 'border-line/70 bg-panel-2/60 text-danger/90 hover:border-danger/45 hover:bg-danger/10 hover:text-danger'
+          }`}
+        >
+          <span className="relative">
+            <Bulldozer size="1.25rem" weight="duotone" aria-hidden />
+          </span>
+          <span className="max-w-full truncate text-[0.625rem] font-semibold leading-none">
+            Destroy
+          </span>
+        </button>
+
         {RAIL_SECTIONS.map((section) => (
           <div key={section.group} className="flex flex-col gap-0.5">
             <div aria-hidden className="mx-2 my-1 h-px bg-line/60" />
@@ -188,6 +228,7 @@ export function LeftRail() {
                 <button
                   key={tab.id}
                   type="button"
+                  aria-label={tab.label}
                   title={`${tab.label} - ${tab.hint}`}
                   onClick={() => handleTab(tab.id)}
                   className={`group relative flex min-h-11 w-full flex-col items-center justify-center gap-1 rounded-lg px-1 py-1.5 transition ${
@@ -221,7 +262,7 @@ export function LeftRail() {
 
       {/* Content drawer: stable header + animated panel swap */}
       <div
-        className={`hud-surface pointer-events-auto relative col-start-2 m-2 ml-1 flex min-h-0 min-w-0 flex-col overflow-hidden rounded-xl transition-opacity duration-200 ease-out ${
+        className={`hud-surface pointer-events-auto relative col-start-2 m-2 ml-1 flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg transition-opacity duration-200 ease-out ${
           open ? 'opacity-100' : 'pointer-events-none opacity-0'
         }`}
       >
@@ -251,10 +292,17 @@ export function LeftRail() {
 
             <div
               className={`panel-scroll relative z-10 min-h-0 flex-1 p-4 ${
-                active === 'research' ? 'flex flex-col overflow-hidden' : 'overflow-y-auto'
+                active === 'research'
+                  ? 'flex flex-col overflow-y-auto xl:overflow-hidden'
+                  : 'overflow-y-auto'
               }`}
             >
-              <div key={active} className="panel-swap min-h-0">
+              <div
+                key={active}
+                className={`panel-swap min-h-0 ${
+                  active === 'research' ? 'flex min-h-full flex-1 flex-col xl:min-h-0' : ''
+                }`}
+              >
                 <PanelBody id={active} />
               </div>
             </div>
@@ -263,6 +311,17 @@ export function LeftRail() {
       </div>
     </div>
   )
+}
+
+
+function LegacyEventsRedirect() {
+  const setCommandView = useGameStore((s) => s.setCommandView)
+  const setLeftRailOpen = useGameStore((s) => s.setLeftRailOpen)
+  useEffect(() => {
+    setCommandView('feed')
+    setLeftRailOpen(false)
+  }, [setCommandView, setLeftRailOpen])
+  return null
 }
 
 function PanelBody({ id }: { id: PanelId }) {
@@ -300,7 +359,7 @@ function PanelBody({ id }: { id: PanelId }) {
     case 'org':
       return <OrgPanel key="company" />
     case 'events':
-      return <EventsPanel />
+      return <LegacyEventsRedirect />
     case 'benchmarks':
       return <BenchmarksPanel />
     case 'rivals':

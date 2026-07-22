@@ -7,12 +7,12 @@ import {
 } from '../../sim/systems/computeBreakdown'
 import { useGameStore } from '../../store/gameStore'
 import { computeSnapshot, inferenceTokensPerDay } from '../../sim/tick'
-import { mw, num, pct } from './format'
+import { computeMw, mw, num, pct, pfToMw } from './format'
 import { SliderField } from './ui/SliderField'
 
 /**
- * Floating ops strip over the map — allocation + live capacity.
- * Hover Train / Serve / Research for PF breakdown + utilization.
+ * Floating ops strip over the full-bleed map — allocation + live capacity.
+ * Hover Train / Serve / Research for the three key facts only.
  */
 export function BottomBar() {
   const state = useGameStore((s) => s.state)
@@ -39,7 +39,7 @@ export function BottomBar() {
   }
 
   const poolSub = (p: PoolBreakdown) =>
-    `${num(p.poolPf, 1)} PF · ${p.utilizationLabel} ${pct(Math.min(1, p.utilization), 0)}`
+    `${computeMw(pfToMw(p.poolPf))} · ${p.utilizationLabel} ${pct(Math.min(1, p.utilization), 0)}`
 
   const servedRatio = state.lastMarket.playerDemandMTok > 0
     ? Math.min(1, state.lastMarket.servedMTok / state.lastMarket.playerDemandMTok)
@@ -49,14 +49,13 @@ export function BottomBar() {
 
   return (
     <footer className="operations-shell pointer-events-none">
-      <div className="hud-surface pointer-events-auto absolute inset-x-2 bottom-2 rounded-xl px-3 py-2">
-        {/* Only the three signals needed to make the next operating decision. */}
+      <div className="hud-surface pointer-events-auto absolute inset-x-2 bottom-2 rounded-lg px-3 py-2">
         <div className="relative z-10 mb-1.5 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap font-mono text-[0.75rem]">
           <Stat
             label="Compute"
-            value={`${num(snap.effectiveFlopsPf, 1)} PF`}
+            value={computeMw(pfToMw(snap.effectiveFlopsPf))}
             className="hidden sm:inline-flex"
-            title={`Effective ${num(snap.effectiveFlopsPf, 2)} PF across pools · raw fleet ${num(snap.rawFlopsPf, 2)} PF · yield ${pct(breakdown.fleetYield, 0)}`}
+            title={`Effective compute ${computeMw(pfToMw(snap.effectiveFlopsPf))} · yield ${pct(breakdown.fleetYield, 0)}`}
           />
           <Stat
             label="Power"
@@ -69,20 +68,16 @@ export function BottomBar() {
             label="Demand served"
             value={pct(servedRatio, 0)}
             danger={unserved > 0.08}
-            title={`${num(state.lastMarket.servedMTok, 1)} of ${num(state.lastMarket.playerDemandMTok, 1)} MTok served today · ${num(cap, 1)} MTok/day maximum`}
+            title={`${num(state.lastMarket.servedMTok, 1)} of ${num(state.lastMarket.playerDemandMTok, 1)} MTok · max ${num(cap, 1)} MTok/day`}
           />
-          {snap.throttled && (
-            <StatusChip tone="danger">Power throttled</StatusChip>
-          )}
+          {snap.throttled && <StatusChip tone="danger">Power throttled</StatusChip>}
           {unserved > 0.08 && (
             <StatusChip tone="warning">Plans/API short {pct(unserved, 0)}</StatusChip>
           )}
           {!snap.throttled && powerTight && (
             <StatusChip tone="warning">Power headroom low</StatusChip>
           )}
-          {racksTight && (
-            <StatusChip tone="warning">Racks nearly full</StatusChip>
-          )}
+          {racksTight && <StatusChip tone="warning">Racks nearly full</StatusChip>}
           <div className="ml-auto flex items-center gap-1">
             <button
               type="button"
@@ -111,7 +106,6 @@ export function BottomBar() {
           </div>
         </div>
 
-        {/* Pool split — hover for where PF goes */}
         <div className="relative z-10 grid grid-cols-3 gap-3">
           <SliderField
             label="Train"
@@ -151,97 +145,69 @@ export function BottomBar() {
           />
         </div>
 
-        {/* Efficiency + shared grid strip */}
-        {expanded ? <div className="relative z-10 mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line/50 pt-2 font-mono text-[0.6875rem] text-muted">
-          <span>
-            Util cap{' '}
-            <strong className="text-bone">{pct(state.player.utilCap, 0)}</strong>
-          </span>
-          <span>
-            Serve{' '}
-            <strong className="text-infer">
-              {pct(state.player.servingEfficiency, 0)}
-            </strong>
-          </span>
-          <span>
-            Train{' '}
-            <strong className="text-train">
-              {pct(state.player.trainEfficiency, 0)}
-            </strong>
-          </span>
-          <span>
-            Fleet yield{' '}
-            <strong className="text-mint">
-              {pct(snap.rawFlopsPf > 0 ? snap.effectiveFlopsPf / snap.rawFlopsPf : 0, 0)}
-            </strong>{' '}
-            of raw PF
-          </span>
-          <span>
-            Shared grid{' '}
-            <strong className={grid.priceMult > 1.35 ? 'text-amber' : 'text-bone'}>
-              {num(grid.gridDemandMw, 0)}/{num(grid.gridCapMw, 0)} MW
-            </strong>
-            {' · '}
-            <strong className={grid.industryDcCount > grid.softCap ? 'text-amber' : 'text-bone'}>
-              {grid.industryDcCount}
-            </strong>{' '}
-            live DCs (soft cap {grid.softCap})
-          </span>
-          <span className="text-muted/80">
-            Hover Train / Serve / Research for PF destinations · own gen offsets grid
-          </span>
-        </div> : null}
+        {expanded ? (
+          <div className="relative z-10 mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line/50 pt-2 font-mono text-[0.6875rem] text-muted">
+            <span>
+              Util cap <strong className="text-bone">{pct(state.player.utilCap, 0)}</strong>
+            </span>
+            <span>
+              Serve{' '}
+              <strong className="text-infer">{pct(state.player.servingEfficiency, 0)}</strong>
+            </span>
+            <span>
+              Train{' '}
+              <strong className="text-train">{pct(state.player.trainEfficiency, 0)}</strong>
+            </span>
+            <span>
+              Fleet yield{' '}
+              <strong className="text-mint">
+                {pct(snap.rawFlopsPf > 0 ? snap.effectiveFlopsPf / snap.rawFlopsPf : 0, 0)}
+              </strong>{' '}
+              of raw compute
+            </span>
+            <span>
+              Shared grid{' '}
+              <strong className={grid.priceMult > 1.35 ? 'text-amber' : 'text-bone'}>
+                {num(grid.gridDemandMw, 0)}/{num(grid.gridCapMw, 0)} MW
+              </strong>
+              {' · '}
+              <strong className={grid.industryDcCount > grid.softCap ? 'text-amber' : 'text-bone'}>
+                {grid.industryDcCount}
+              </strong>{' '}
+              live DCs (soft cap {grid.softCap})
+            </span>
+          </div>
+        ) : null}
       </div>
     </footer>
   )
 }
 
 function PoolTooltip({ pool, accent }: { pool: PoolBreakdown; accent: string }) {
-  const utilShow = Math.min(1.5, Math.max(0, pool.utilization))
-  const utilBar = Math.min(1, utilShow)
-  const utilWarn = pool.utilization > 1.02 || pool.utilizationLabel === 'Stalled'
+  const blocker =
+    pool.lines.find((line) => line.warn)?.value ??
+    (pool.utilizationLabel === 'Idle' || pool.utilizationLabel === 'Stalled'
+      ? pool.summary
+      : null)
+
   return (
     <div className="space-y-1.5 text-left">
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <div className={`text-[0.8125rem] font-semibold ${accent}`}>{pool.title}</div>
-          <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">{pool.summary}</p>
-        </div>
-        <div className="shrink-0 text-right font-mono text-[0.6875rem]">
-          <div className={utilWarn ? 'text-amber' : 'text-bone'}>{pool.utilizationLabel}</div>
-          <div className="text-muted">{pct(Math.min(1, pool.utilization), 0)}</div>
-        </div>
+      <div className={`text-[0.8125rem] font-semibold ${accent}`}>{pool.title}</div>
+      <div className="flex items-baseline justify-between gap-3 font-mono text-[0.75rem]">
+        <span className="text-muted">Allocation</span>
+        <span className="text-bone">{pct(pool.allocShare, 0)}</span>
       </div>
-      <div className="h-1 overflow-hidden rounded-full bg-void">
-        <div
-          className={`h-full ${utilWarn ? 'bg-amber' : accent.replace('text-', 'bg-')}`}
-          style={{ width: `${utilBar * 100}%` }}
-        />
+      <div className="flex items-baseline justify-between gap-3 font-mono text-[0.75rem]">
+        <span className="text-muted">Effective work</span>
+        <span className="text-bone">{computeMw(pfToMw(pool.poolPf))} · {pool.utilizationLabel}</span>
       </div>
-      <div className="space-y-1">
-        {pool.lines.map((line) => (
-          <div key={line.label} className="min-w-0">
-            <div className="flex items-baseline justify-between gap-2 font-mono text-[0.6875rem]">
-              <span className="shrink-0 text-muted">{line.label}</span>
-              <span
-                className={`min-w-0 truncate text-right ${
-                  line.warn ? 'text-amber' : line.muted ? 'text-muted' : 'text-bone'
-                }`}
-              >
-                {line.value}
-              </span>
-            </div>
-            {typeof line.bar === 'number' && (
-              <div className="mt-0.5 h-0.5 overflow-hidden rounded-full bg-void">
-                <div
-                  className={`h-full ${line.warn ? 'bg-amber/80' : 'bg-line'}`}
-                  style={{ width: `${Math.max(0, Math.min(1, line.bar)) * 100}%` }}
-                />
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
+      {blocker ? (
+        <p className="rounded-md border border-amber/30 bg-amber/10 px-2 py-1 text-[0.6875rem] leading-snug text-amber">
+          {blocker}
+        </p>
+      ) : (
+        <p className="text-[0.6875rem] leading-snug text-muted">No blockers.</p>
+      )}
     </div>
   )
 }
@@ -262,10 +228,7 @@ function Stat({
   title?: string
 }) {
   return (
-    <span
-      className={`inline-flex items-baseline gap-1 text-muted ${className}`}
-      title={title}
-    >
+    <span className={`inline-flex items-baseline gap-1 text-muted ${className}`} title={title}>
       <span className="text-[0.625rem] uppercase tracking-wide opacity-80">{label}</span>
       <strong className={`text-bone ${danger ? 'text-danger' : ''}`}>{value}</strong>
       {sub && <span className="text-muted/80">{sub}</span>}

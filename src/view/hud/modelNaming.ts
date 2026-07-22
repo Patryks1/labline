@@ -2,6 +2,39 @@ type NamedModel = { name: string }
 
 const VERSION_SUFFIX = /\s+v(\d+)$/i
 
+const NAME_POOL = [
+  'Spark',
+  'Nova',
+  'Atlas',
+  'Quill',
+  'Pulse',
+  'Orbit',
+  'Forge',
+  'Aether',
+  'Lumen',
+  'Cascade',
+  'Helix',
+  'Vertex',
+  'Prism',
+  'Nimbus',
+  'Solace',
+  'Vector',
+  'Cobalt',
+  'Ion',
+  'Rune',
+  'Ember',
+  'Flux',
+  'Glyph',
+  'Harbor',
+  'Iris',
+  'Jolt',
+  'Kite',
+  'Ledger',
+  'Mirage',
+  'North',
+  'Oxide',
+] as const
+
 export function modelTemplateName(name: string): string {
   const trimmed = name.trim()
   return trimmed.replace(VERSION_SUFFIX, '').trim()
@@ -46,4 +79,62 @@ export function recentModelTemplates(models: readonly NamedModel[], limit = 6): 
   }
 
   return templates
+}
+
+/** Case-insensitive exact name collision against player + rival models and active jobs. */
+export function isModelNameTaken(
+  name: string,
+  sources: {
+    playerModels?: readonly NamedModel[]
+    rivalModels?: readonly NamedModel[]
+    jobs?: readonly NamedModel[]
+  },
+): boolean {
+  const needle = name.trim().toLocaleLowerCase()
+  if (!needle) return false
+  const lists = [sources.playerModels, sources.rivalModels, sources.jobs]
+  for (const list of lists) {
+    if (!list) continue
+    for (const entry of list) {
+      if (entry.name.trim().toLocaleLowerCase() === needle) return true
+    }
+  }
+  return false
+}
+
+export const MODEL_NAME_TAKEN_MESSAGE = 'That model name is already in use.'
+
+/** Generate a unique display name not used by player, rivals, or active jobs. */
+export function generateUniqueModelName(sources: {
+  playerModels?: readonly NamedModel[]
+  rivalModels?: readonly NamedModel[]
+  jobs?: readonly NamedModel[]
+}): string {
+  const taken = new Set<string>()
+  for (const list of [sources.playerModels, sources.rivalModels, sources.jobs]) {
+    if (!list) continue
+    for (const entry of list) {
+      const exact = entry.name.trim().toLocaleLowerCase()
+      if (exact) taken.add(exact)
+      const template = modelTemplateName(entry.name).toLocaleLowerCase()
+      if (template) taken.add(template)
+    }
+  }
+
+  const shuffled = [...NAME_POOL]
+  for (let i = shuffled.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[shuffled[i], shuffled[j]] = [shuffled[j]!, shuffled[i]!]
+  }
+
+  for (const base of shuffled) {
+    if (!taken.has(base.toLocaleLowerCase())) return base
+  }
+
+  for (let attempt = 1; attempt <= 999; attempt += 1) {
+    const candidate = `${shuffled[attempt % shuffled.length]} ${attempt}`
+    if (!taken.has(candidate.toLocaleLowerCase())) return candidate
+  }
+
+  return `Model ${Date.now().toString(36)}`
 }

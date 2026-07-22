@@ -7,6 +7,7 @@ import type {
   SimState,
 } from '../types'
 import { computeLabSnapshot, updateLab } from './labEngine'
+import { formatComputeMw } from './computeMarket'
 
 const MIN_PF = 1
 const MAX_PF = 10_000
@@ -181,8 +182,8 @@ export function quoteComputeContract(
       ? 'Rival resale needs an existing, distinct seller lab.'
       : !capacityAvailable
         ? request.kind === 'rival_resale'
-          ? `The seller only has ${resaleSellerCapacityPf(state, request.sellerLabId).toFixed(0)} PF of uncommitted compute.`
-          : `${provider.name} only has ${provider.availablePf.toFixed(0)} PF available.`
+          ? `The seller only has ${formatComputeMw(resaleSellerCapacityPf(state, request.sellerLabId))} of uncommitted compute.`
+          : `${provider.name} only has ${formatComputeMw(provider.availablePf)} available.`
         : undefined
   const contract: ComputeContract = {
     id: seededId(
@@ -278,7 +279,7 @@ export function signComputeContract(
       return withAlert(
         state,
         'warn',
-        `The seller only has ${availablePf.toFixed(0)} PF of uncommitted compute; request a fresh quote.`,
+        `The seller only has ${formatComputeMw(availablePf)} of uncommitted compute; request a fresh quote.`,
       )
     }
   }
@@ -289,7 +290,7 @@ export function signComputeContract(
     return withAlert(
       state,
       'warn',
-      `${provider.name} only has ${provider.availablePf.toFixed(0)} PF left; request a fresh quote.`,
+      `${provider.name} only has ${formatComputeMw(provider.availablePf)} left; request a fresh quote.`,
     )
   }
   const providers = state.worldMarkets.cloudProviders.map((entry) =>
@@ -310,8 +311,8 @@ export function signComputeContract(
     worldMarkets: { ...state.worldMarkets, cloudProviders: providers },
     news: [
       active.availableDay != null && active.availableDay > state.day
-        ? `Day ${state.day}: ${active.providerName} reserves ${active.pf.toFixed(0)} PF of ${active.kind.replace('_', ' ')} capacity for delivery on day ${active.availableDay}.`
-        : `Day ${state.day}: ${active.providerName} supplies ${active.pf.toFixed(0)} PF on ${active.kind.replace('_', ' ')} terms.`,
+        ? `Day ${state.day}: ${active.providerName} reserves ${formatComputeMw(active.pf)} of ${active.kind.replace('_', ' ')} capacity for delivery on day ${active.availableDay}.`
+        : `Day ${state.day}: ${active.providerName} supplies ${formatComputeMw(active.pf)} on ${active.kind.replace('_', ' ')} terms.`,
       ...state.news,
     ].slice(0, 48),
   }
@@ -403,7 +404,7 @@ export function terminateComputeContract(state: SimState, contractId: string): S
   }
 }
 
-/** Capacity visible to a lab today. Interrupted and expired contracts contribute zero PF. */
+/** Capacity visible to a lab today. Interrupted and expired contracts contribute zero capacity. */
 export function labContractCapacityPf(state: SimState, labId: LabId): LabContractCapacity {
   let inboundPf = 0
   let outboundPf = 0
@@ -504,7 +505,7 @@ export function tickComputeContracts(state: SimState): SimState {
         contract.interruptionDaysLeft = 1
         availableToday = false
         news.push(
-          `Day ${state.day}: ${contract.providerName} spot capacity interrupted (${contract.pf.toFixed(0)} PF).`,
+          `Day ${state.day}: ${contract.providerName} spot capacity interrupted (${formatComputeMw(contract.pf)}).`,
         )
       }
     }
@@ -523,7 +524,7 @@ export function tickComputeContracts(state: SimState): SimState {
         interruptionDaysLeft: undefined,
       }
       news.push(
-        `Day ${state.day}: ${contract.providerName} compute contract expired; ${contract.pf.toFixed(0)} PF returned.`,
+        `Day ${state.day}: ${contract.providerName} compute contract expired; ${formatComputeMw(contract.pf)} returned.`,
       )
     }
     contracts.push(contract)

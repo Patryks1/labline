@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
 import { computeSnapshot } from './compute'
 import { vramPressure } from './racks'
-import { startTraining } from './training'
+import {
+  playerTrainingResourcePlan,
+  startTraining,
+  tickTraining,
+} from './training'
 
 function richState(seed: number) {
   const state = createGame(seed)
@@ -61,5 +65,88 @@ describe('concurrent training memory placement', () => {
     expect(vramPressure(fp32, 'train').needGb).toBeGreaterThan(
       vramPressure(fp16, 'train').needGb,
     )
+  })
+
+  it('treats the Training allocation RAM slice as a hard start limit', () => {
+    const base = richState(905)
+    const constrained = {
+      ...base,
+      player: {
+        ...base.player,
+        allocation: { training: 0.001, inference: 0.749, research: 0.25 },
+      },
+    }
+    const next = startTraining(constrained, {
+      name: 'TooWide', family: 'dense', paramsB: 1,
+    })
+
+    expect(next.player.trainingJob).toBeNull()
+    expect(next.alerts[0]?.message).toContain('Training RAM is a hard limit')
+    expect(next.alerts[0]?.message).toContain('Training allocation')
+  })
+
+  it('splits training RAM by compute priority and stalls only the run that does not fit', () => {
+    let state = richState(906)
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        allocation: { training: 1, inference: 0, research: 0 },
+      },
+    }
+    state = startTraining(state, {
+      name: 'Priority', family: 'dense', paramsB: 1, computePriority: 90,
+    })
+    state = startTraining(state, {
+      name: 'Background', family: 'dense', paramsB: 1, computePriority: 10,
+    })
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        allocation: { training: 0.05, inference: 0.95, research: 0 },
+      },
+    }
+
+    const plan = playerTrainingResourcePlan(state)
+    const priority = state.player.trainingJobs!.find((job) => job.name === 'Priority')!
+    const background = state.player.trainingJobs!.find((job) => job.name === 'Background')!
+    expect(plan.jobs[priority.id]?.ramReady).toBe(true)
+    expect(plan.jobs[background.id]?.ramReady).toBe(false)
+
+    const next = tickTraining(state)
+    const nextPriority = next.player.trainingJobs!.find((job) => job.id === priority.id)!
+    const nextBackground = next.player.trainingJobs!.find((job) => job.id === background.id)!
+    expect(nextPriority.progressPfDays).toBeGreaterThan(priority.progressPfDays)
+    expect(nextBackground.progressPfDays).toBe(background.progressPfDays)
+    expect(nextBackground.stallReason).toContain('Training RAM blocked')
+  })
+
+  it('shares limited compute across RAM-ready jobs instead of blocking them', () => {
+    const base = {
+      ...richState(907),
+      player: {
+        ...richState(907).player,
+        allocation: { training: 1, inference: 0, research: 0 },
+      },
+    }
+    const solo = startTraining(base, {
+      name: 'Solo', family: 'dense', paramsB: 1, computePriority: 50,
+    })
+    const soloNext = tickTraining(solo)
+    const soloProgress = soloNext.player.trainingJob!.progressPfDays
+
+    let shared = startTraining(base, {
+      name: 'One', family: 'dense', paramsB: 1, computePriority: 50,
+    })
+    shared = startTraining(shared, {
+      name: 'Two', family: 'dense', paramsB: 1, computePriority: 50,
+    })
+    const sharedNext = tickTraining(shared)
+    for (const job of sharedNext.player.trainingJobs ?? []) {
+      expect(job.progressPfDays).toBeGreaterThan(0)
+      expect(job.progressPfDays).toBeLessThan(soloProgress)
+      expect(job.stallReason).toBeNull()
+    }
   })
 })

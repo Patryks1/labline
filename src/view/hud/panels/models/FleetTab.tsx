@@ -1,25 +1,31 @@
-import { useEffect, useState } from 'react'
-import type { Model } from '../../../../sim/types'
+import { useEffect, useState } from "react";
+import type { Model } from "../../../../sim/types";
 import {
   normalizeModelEvaluations,
   suiteComposite,
-} from '../../../../sim/balance/evaluationSuites'
-import { modelCostMult, suggestApiInOut } from '../../../../sim/balance/pricing'
-import { GameCard, CardGrid, MeterBar, StatRow } from '../../ui/kit'
-import { EmptyState, HudButton, StatusChip } from '../../ui/HudPrimitives'
-import { ModelProductSummary } from '../../ui/ModelProductSummary'
-import { useUiStore } from '../../../../store/uiStore'
+} from "../../../../sim/balance/evaluationSuites";
+import {
+  modelCostMult,
+  suggestApiInOut,
+} from "../../../../sim/balance/pricing";
+import { GameCard, CardGrid, MeterBar, StatRow } from "../../ui/kit";
+import { EmptyState, HudButton, StatusChip } from "../../ui/HudPrimitives";
+import { money } from "../../format";
+import { ModelProductSummary } from "../../ui/ModelProductSummary";
+import { useUiStore } from "../../../../store/uiStore";
+import { RadarChart } from "../../ui/RadarChart";
 
 function modelTier(capability: number) {
-  if (capability >= 80) return { label: 'Breakthrough', floor: 80, nextAt: null as number | null }
-  if (capability >= 60) return { label: 'Frontier', floor: 60, nextAt: 80 }
-  if (capability >= 40) return { label: 'Competitive', floor: 40, nextAt: 60 }
-  return { label: 'Prototype', floor: 0, nextAt: 40 }
+  if (capability >= 80)
+    return { label: "Breakthrough", floor: 80, nextAt: null as number | null };
+  if (capability >= 60) return { label: "Frontier", floor: 60, nextAt: 80 };
+  if (capability >= 40) return { label: "Competitive", floor: 40, nextAt: 60 };
+  return { label: "Prototype", floor: 0, nextAt: 40 };
 }
 
 function displayRate(value: number): string {
-  if (value > 0 && value < 0.01) return `$${value.toFixed(3)}`
-  return `$${value.toFixed(2)}`
+  if (value > 0 && value < 0.01) return `$${value.toFixed(3)}`;
+  return `$${value.toFixed(2)}`;
 }
 
 function PriceInput({
@@ -28,26 +34,28 @@ function PriceInput({
   placeholder,
   onChange,
 }: {
-  label: string
-  value: number | null
-  placeholder: number
-  onChange: (value: number | null) => void
+  label: string;
+  value: number | null;
+  placeholder: number;
+  onChange: (value: number | null) => void;
 }) {
-  const [draft, setDraft] = useState(() => (value == null ? '' : value.toFixed(2)))
+  const [draft, setDraft] = useState(() =>
+    value == null ? "" : value.toFixed(2),
+  );
   useEffect(() => {
-    setDraft(value == null ? '' : value.toFixed(2))
-  }, [value])
+    setDraft(value == null ? "" : value.toFixed(2));
+  }, [value]);
   const commit = () => {
-    if (draft.trim() === '') {
-      onChange(null)
-      return
+    if (draft.trim() === "") {
+      onChange(null);
+      return;
     }
-    const parsed = Number(draft)
-    const next = Number.isFinite(parsed) ? Math.max(0, parsed) : 0
-    const rounded = Math.round(next * 100) / 100
-    setDraft(rounded.toFixed(2))
-    onChange(rounded)
-  }
+    const parsed = Number(draft);
+    const next = Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+    const rounded = Math.round(next * 100) / 100;
+    setDraft(rounded.toFixed(2));
+    onChange(rounded);
+  };
   return (
     <label className="text-[0.6875rem] text-muted">
       {label}
@@ -61,28 +69,33 @@ function PriceInput({
         onChange={(event) => setDraft(event.target.value)}
         onBlur={commit}
         onKeyDown={(event) => {
-          if (event.key === 'Enter') event.currentTarget.blur()
-          if (event.key === 'Escape') setDraft(value == null ? '' : value.toFixed(2))
+          if (event.key === "Enter") event.currentTarget.blur();
+          if (event.key === "Escape")
+            setDraft(value == null ? "" : value.toFixed(2));
         }}
         className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1 font-mono text-xs text-bone outline-none focus:border-mint/50"
       />
     </label>
-  )
+  );
 }
 
 function MarkupControl({
   initialPercent,
   onApply,
 }: {
-  initialPercent: number
-  onApply: (percent: number) => void
+  initialPercent: number;
+  onApply: (percent: number) => void;
 }) {
-  const [draft, setDraft] = useState(() => String(initialPercent))
-  const parsed = Number(draft)
-  const valid = draft.trim() !== '' && Number.isFinite(parsed) && parsed >= 0 && parsed <= 10_000
+  const [draft, setDraft] = useState(() => String(initialPercent));
+  const parsed = Number(draft);
+  const valid =
+    draft.trim() !== "" &&
+    Number.isFinite(parsed) &&
+    parsed >= 0 &&
+    parsed <= 10_000;
   useEffect(() => {
-    setDraft(String(initialPercent))
-  }, [initialPercent])
+    setDraft(String(initialPercent));
+  }, [initialPercent]);
   return (
     <div className="flex items-stretch overflow-hidden rounded-md border border-mint/25 bg-mint/10">
       <label className="flex items-center gap-1 px-2 text-[0.6875rem] text-muted">
@@ -97,7 +110,7 @@ function MarkupControl({
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && valid) onApply(parsed)
+            if (event.key === "Enter" && valid) onApply(parsed);
           }}
           className="w-16 border-0 bg-transparent py-1 text-right font-mono text-[0.6875rem] text-bone outline-none"
         />
@@ -112,7 +125,7 @@ function MarkupControl({
         Apply
       </button>
     </div>
-  )
+  );
 }
 
 export function FleetTab({
@@ -132,21 +145,25 @@ export function FleetTab({
   onDistill,
   safetySlot,
 }: {
-  internal: Model[]
-  released: Model[]
-  pricingId: string | null
-  onSelect: (id: string) => void
-  onRelease: (id: string) => void
-  onDelete: (id: string) => void
-  onPriceInOut: (id: string, priceIn: number | null, priceOut: number | null) => void
-  onApplyMarkup: (id: string, markupPct: number) => void
-  markupPct: number
-  frontierCapability: number
-  unitCostActive?: number
-  activeModelRef?: Model | null
-  onTrainFurther: (model: Model) => void
-  onDistill: (model: Model) => void
-  safetySlot?: React.ReactNode
+  internal: Model[];
+  released: Model[];
+  pricingId: string | null;
+  onSelect: (id: string) => void;
+  onRelease: (id: string) => void;
+  onDelete: (id: string) => void;
+  onPriceInOut: (
+    id: string,
+    priceIn: number | null,
+    priceOut: number | null,
+  ) => void;
+  onApplyMarkup: (id: string, markupPct: number) => void;
+  markupPct: number;
+  frontierCapability: number;
+  unitCostActive?: number;
+  activeModelRef?: Model | null;
+  onTrainFurther: (model: Model) => void;
+  onDistill: (model: Model) => void;
+  safetySlot?: React.ReactNode;
 }) {
   return (
     <div className="panel-swap space-y-4">
@@ -154,9 +171,13 @@ export function FleetTab({
         <div className="flex items-center justify-between gap-2">
           <div>
             <p className="hud-eyebrow">Internal</p>
-            <h3 className="text-sm font-semibold text-bone">Private checkpoints</h3>
+            <h3 className="text-sm font-semibold text-bone">
+              Private checkpoints
+            </h3>
           </div>
-          <span className="font-mono text-[0.6875rem] tabular-nums text-muted">{internal.length}</span>
+          <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
+            {internal.length}
+          </span>
         </div>
         {internal.length === 0 ? (
           <EmptyState
@@ -164,53 +185,128 @@ export function FleetTab({
             description="Finish a job with Keep internal to unlock teachers and continue-train."
           />
         ) : (
-          <CardGrid min="15rem" className="anim-stagger">
+          <CardGrid min="32rem" className="anim-stagger">
             {internal.map((source) => {
-              const model = normalizeModelEvaluations(source)
-              const selected = pricingId === model.id
-              const tier = modelTier(model.capability)
-              const nextAt = tier.nextAt
+              const model = normalizeModelEvaluations(source);
+              const selected = pricingId === model.id;
+              const tier = modelTier(model.capability);
+              const nextAt = tier.nextAt;
               const progress =
                 nextAt == null
                   ? 1
-                  : (model.capability - tier.floor) / Math.max(1, nextAt - tier.floor)
-              const gap = model.capability - frontierCapability
-              const speed = model.serviceProfile?.interactiveTokPerSec ?? 52 * model.tokPerSecMult
+                  : (model.capability - tier.floor) /
+                    Math.max(1, nextAt - tier.floor);
+              const gap = model.capability - frontierCapability;
+              const speed =
+                model.serviceProfile?.interactiveTokPerSec ??
+                52 * model.tokPerSecMult;
               const primarySuite =
                 model.benchmarkSuites?.omni_overview ??
                 model.benchmarkSuites?.image_generation ??
                 model.benchmarkSuites?.video_generation ??
                 model.benchmarkSuites?.audio_generation ??
-                model.benchmarkSuites?.language
-              const suiteScore = suiteComposite(primarySuite)
+                model.benchmarkSuites?.language;
+              const suiteScore = suiteComposite(primarySuite);
+              const suiteId = model.benchmarkSuites?.omni_overview
+                ? "omni_overview"
+                : model.benchmarkSuites?.image_generation
+                  ? "image_generation"
+                  : model.benchmarkSuites?.video_generation
+                    ? "video_generation"
+                    : model.benchmarkSuites?.audio_generation
+                      ? "audio_generation"
+                      : "language";
               return (
                 <GameCard
                   key={model.id}
-                  className={`hover-lift ${selected ? 'ring-1 ring-mint/40' : ''}`}
-                  tone={selected ? 'mint' : undefined}
+                  className={`hover-lift ${selected ? "ring-1 ring-mint/40" : ""}`}
+                  tone={selected ? "mint" : undefined}
                   eyebrow={`internal · ${tier.label}`}
                   title={
-                    <button type="button" onClick={() => onSelect(model.id)} className="truncate text-left">
+                    <button
+                      type="button"
+                      onClick={() => onSelect(model.id)}
+                      className="truncate text-left"
+                    >
                       {model.name}
                     </button>
                   }
-                  actions={<StatusChip tone="neutral">{model.capability.toFixed(0)}</StatusChip>}
+                  actions={
+                    <StatusChip tone="neutral">
+                      {model.capability.toFixed(0)}
+                    </StatusChip>
+                  }
                 >
-                  <button type="button" onClick={() => onSelect(model.id)} className="w-full text-left">
+                  <button
+                    type="button"
+                    onClick={() => onSelect(model.id)}
+                    className="w-full text-left"
+                  >
                     <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
                       <StatRow label="Suite" value={suiteScore.toFixed(2)} />
                       <StatRow
                         label="Frontier"
-                        value={`${gap >= 0 ? '+' : ''}${gap.toFixed(2)}`}
-                        tone={gap >= 0 ? 'positive' : 'warning'}
+                        value={`${gap >= 0 ? "+" : ""}${gap.toFixed(2)}`}
+                        tone={gap >= 0 ? "positive" : "warning"}
                       />
-                      <StatRow label="Speed" value={`${speed.toFixed(1)} t/s`} />
+                      <StatRow
+                        label="Speed"
+                        value={`${speed.toFixed(1)} t/s`}
+                      />
                       <StatRow label="Family" value={model.family} />
                     </div>
+                    {model.economics ? (
+                      <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-0.5 border-t border-line/40 pt-2">
+                        <StatRow
+                          label="Setup"
+                          value={money(model.economics.trainingInitialCost)}
+                        />
+                        <StatRow
+                          label="Data cost"
+                          value={money(model.economics.trainingDataCost)}
+                        />
+                        <StatRow
+                          label="Daily train"
+                          value={money(model.economics.trainingDailyCost)}
+                        />
+                        <StatRow
+                          label="Life net"
+                          value={money(model.economics.lifetimeNet)}
+                          tone={
+                            model.economics.lifetimeNet >= 0
+                              ? "positive"
+                              : "warning"
+                          }
+                        />
+                        <StatRow
+                          label="API rev"
+                          value={money(model.economics.lifetimeApiRevenue)}
+                        />
+                        <StatRow
+                          label="Sub+Ent"
+                          value={money(
+                            model.economics.lifetimeSubRevenue +
+                              model.economics.lifetimeEnterpriseRevenue,
+                          )}
+                        />
+                      </div>
+                    ) : null}
                     <div className="mt-2">
-                      <MeterBar label="Tier progress" value={progress} detail={tier.label} tone="positive" />
+                      <MeterBar
+                        label="Tier progress"
+                        value={progress}
+                        detail={tier.label}
+                        tone="positive"
+                      />
                     </div>
                   </button>
+                  <div className="mt-3 border-t border-line/50 pt-3">
+                    <RadarChart
+                      suiteId={suiteId}
+                      scores={model.benchmarkSuites?.[suiteId] ?? {}}
+                      profile={model.evaluationProfile}
+                    />
+                  </div>
                   <div className="mt-3 flex flex-wrap gap-1.5">
                     <HudButton
                       type="button"
@@ -233,11 +329,11 @@ export function FleetTab({
                       variant="primary"
                       className="!px-2 !py-1 text-[0.6875rem]"
                       onClick={() => {
-                        onRelease(model.id)
+                        onRelease(model.id);
                         useUiStore.getState().announceRelease({
                           name: model.name,
                           capability: model.capability,
-                        })
+                        });
                       }}
                     >
                       Release
@@ -251,9 +347,11 @@ export function FleetTab({
                       Delete
                     </HudButton>
                   </div>
-                  {selected && safetySlot ? <div className="mt-3">{safetySlot}</div> : null}
+                  {selected && safetySlot ? (
+                    <div className="mt-3">{safetySlot}</div>
+                  ) : null}
                 </GameCard>
-              )
+              );
             })}
           </CardGrid>
         )}
@@ -265,24 +363,30 @@ export function FleetTab({
             <p className="hud-eyebrow">Released</p>
             <h3 className="text-sm font-semibold text-bone">Public fleet</h3>
           </div>
-          <span className="font-mono text-[0.6875rem] tabular-nums text-muted">{released.length}</span>
+          <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
+            {released.length}
+          </span>
         </div>
         {released.length === 0 ? (
-          <EmptyState title="No public models" description="Release an internal checkpoint when it is ready for production." />
+          <EmptyState
+            title="No public models"
+            description="Release an internal checkpoint when it is ready for production."
+          />
         ) : (
           <CardGrid min="16rem" className="anim-stagger">
             {released.map((source) => {
-              const model = normalizeModelEvaluations(source)
-              const selected = pricingId === model.id
-              const tier = modelTier(model.capability)
+              const model = normalizeModelEvaluations(source);
+              const selected = pricingId === model.id;
+              const tier = modelTier(model.capability);
               const unit =
                 unitCostActive != null && activeModelRef
                   ? Math.max(
                       0.005,
                       unitCostActive *
-                        (modelCostMult(model) / Math.max(0.08, modelCostMult(activeModelRef))),
+                        (modelCostMult(model) /
+                          Math.max(0.08, modelCostMult(activeModelRef))),
                     )
-                  : unitCostActive
+                  : unitCostActive;
               const suggested =
                 unit != null
                   ? suggestApiInOut({
@@ -295,41 +399,58 @@ export function FleetTab({
                       markupPct,
                       applyModelMult: false,
                     })
-                  : null
-              const gap = model.capability - frontierCapability
-              const speed = model.serviceProfile?.interactiveTokPerSec ?? 52 * model.tokPerSecMult
+                  : null;
+              const gap = model.capability - frontierCapability;
+              const speed =
+                model.serviceProfile?.interactiveTokPerSec ??
+                52 * model.tokPerSecMult;
               const primarySuite =
                 model.benchmarkSuites?.omni_overview ??
-                model.benchmarkSuites?.language
-              const suiteScore = suiteComposite(primarySuite)
+                model.benchmarkSuites?.language;
+              const suiteScore = suiteComposite(primarySuite);
               return (
                 <GameCard
                   key={model.id}
-                  className={`hover-lift ${selected ? 'ring-1 ring-gold/40' : ''}`}
+                  className={`hover-lift ${selected ? "ring-1 ring-gold/40" : ""}`}
                   tone="gold"
                   eyebrow={`released · ${tier.label}`}
                   title={
-                    <button type="button" onClick={() => onSelect(model.id)} className="truncate text-left">
+                    <button
+                      type="button"
+                      onClick={() => onSelect(model.id)}
+                      className="truncate text-left"
+                    >
                       {model.name}
                     </button>
                   }
-                  actions={<StatusChip tone="positive">{model.capability.toFixed(0)}</StatusChip>}
+                  actions={
+                    <StatusChip tone="positive">
+                      {model.capability.toFixed(0)}
+                    </StatusChip>
+                  }
                 >
-                  <button type="button" onClick={() => onSelect(model.id)} className="w-full text-left">
+                  <button
+                    type="button"
+                    onClick={() => onSelect(model.id)}
+                    className="w-full text-left"
+                  >
                     <ModelProductSummary
                       model={model}
                       badge={`released · ${tier.label}`}
-                      badgeTone={gap >= 0 ? 'mint' : 'amber'}
+                      badgeTone={gap >= 0 ? "mint" : "amber"}
                       score={model.capability.toFixed(2)}
                       metrics={[
-                        { label: 'suite', value: suiteScore.toFixed(2) },
+                        { label: "suite", value: suiteScore.toFixed(2) },
                         {
-                          label: 'frontier',
-                          value: `${gap >= 0 ? '+' : ''}${gap.toFixed(2)}`,
-                          tone: gap >= 0 ? 'text-mint' : 'text-amber',
+                          label: "frontier",
+                          value: `${gap >= 0 ? "+" : ""}${gap.toFixed(2)}`,
+                          tone: gap >= 0 ? "text-mint" : "text-amber",
                         },
-                        { label: 'speed', value: `${speed.toFixed(1)} t/s` },
-                        { label: 'serve', value: unit == null ? '—' : `${displayRate(unit)}/M` },
+                        { label: "speed", value: `${speed.toFixed(1)} t/s` },
+                        {
+                          label: "serve",
+                          value: unit == null ? "—" : `${displayRate(unit)}/M`,
+                        },
                       ]}
                     />
                   </button>
@@ -339,14 +460,30 @@ export function FleetTab({
                         <PriceInput
                           label="Input $/1M"
                           value={model.apiPriceInPerMTok}
-                          placeholder={model.suggestedApiPriceIn ?? model.costApiPriceIn}
-                          onChange={(value) => onPriceInOut(model.id, value, model.apiPriceOutPerMTok)}
+                          placeholder={
+                            model.suggestedApiPriceIn ?? model.costApiPriceIn
+                          }
+                          onChange={(value) =>
+                            onPriceInOut(
+                              model.id,
+                              value,
+                              model.apiPriceOutPerMTok,
+                            )
+                          }
                         />
                         <PriceInput
                           label="Output $/1M"
                           value={model.apiPriceOutPerMTok}
-                          placeholder={model.suggestedApiPriceOut ?? model.costApiPriceOut}
-                          onChange={(value) => onPriceInOut(model.id, model.apiPriceInPerMTok, value)}
+                          placeholder={
+                            model.suggestedApiPriceOut ?? model.costApiPriceOut
+                          }
+                          onChange={(value) =>
+                            onPriceInOut(
+                              model.id,
+                              model.apiPriceInPerMTok,
+                              value,
+                            )
+                          }
                         />
                       </div>
                       <div className="flex flex-wrap items-center gap-1.5">
@@ -357,14 +494,20 @@ export function FleetTab({
                               variant="ghost"
                               className="!px-2 !py-1 text-[0.6875rem]"
                               onClick={() =>
-                                onPriceInOut(model.id, model.costApiPriceIn, model.costApiPriceOut)
+                                onPriceInOut(
+                                  model.id,
+                                  model.costApiPriceIn,
+                                  model.costApiPriceOut,
+                                )
                               }
                             >
                               At cost
                             </HudButton>
                             <MarkupControl
                               initialPercent={markupPct}
-                              onApply={(percent) => onApplyMarkup(model.id, percent)}
+                              onApply={(percent) =>
+                                onApplyMarkup(model.id, percent)
+                              }
                             />
                           </>
                         ) : null}
@@ -377,15 +520,14 @@ export function FleetTab({
                           Delete
                         </HudButton>
                       </div>
-                      {safetySlot ? <div className="pt-1">{safetySlot}</div> : null}
                     </div>
                   ) : null}
                 </GameCard>
-              )
+              );
             })}
           </CardGrid>
         )}
       </section>
     </div>
-  )
+  );
 }

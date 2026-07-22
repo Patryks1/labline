@@ -74,12 +74,14 @@ export function KpiHistoryPopover({
   current,
   onClose,
   onOpenDetails,
+  onSelectMetric,
 }: {
   metric: KpiHistoryMetric
   history: FinanceDaySnapshot[]
   current: CurrentKpis
   onClose: () => void
   onOpenDetails: () => void
+  onSelectMetric?: (metric: KpiHistoryMetric) => void
 }) {
   const [range, setRange] = useState(90)
   const [hoverIndex, setHoverIndex] = useState<number | null>(null)
@@ -152,6 +154,18 @@ export function KpiHistoryPopover({
         >
           <X size="1rem" />
         </button>
+      </div>
+
+      <div className="mt-3">
+        <SegmentedTabs
+          ariaLabel="KPI series"
+          active={metric}
+          onChange={(id) => onSelectMetric?.(id as KpiHistoryMetric)}
+          items={(Object.keys(METRICS) as KpiHistoryMetric[]).map((id) => ({
+            id,
+            label: METRICS[id].label,
+          }))}
+        />
       </div>
 
       <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto] items-end gap-3">

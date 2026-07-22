@@ -1,4 +1,11 @@
 import type { SimState } from './types'
+import {
+  collectFromTraffic,
+  tickData,
+  tickDataMarket,
+  tickDataSupplierContracts,
+} from './systems/data'
+
 import { tickRivals } from './systems/rivals'
 import { tickResearch } from './systems/research'
 import { tickTraining } from './systems/training'
@@ -19,7 +26,6 @@ import { tickOrg } from './systems/org'
 import { tickStaff } from './systems/staff'
 import { tickLoans } from './systems/loans'
 import { tickVictory } from './systems/victory'
-import { tickData, tickDataMarket, collectFromTraffic } from './systems/data'
 import { computeSnapshot, inferenceTokensPerDay } from './systems/compute'
 import { tickCityGrowth } from './systems/cityGrowth'
 import { labIds, refreshPublicEstimates, syncLabIndex, tickLab } from './systems/labEngine'
@@ -107,6 +113,7 @@ export function tickDay(state: SimState): SimState {
   // 6. Both controller types advance data, research, and training from the
   // same day's settled physical resources.
   s = tickData(s)
+  s = tickDataSupplierContracts(s)
   s = tickRivals(s)
   s = tickResearch(s)
   s = tickResearchPrograms(s)
@@ -192,6 +199,7 @@ export function tickDay(state: SimState): SimState {
       ],
     }
   }
+
 
   return boundHistories(s)
 }

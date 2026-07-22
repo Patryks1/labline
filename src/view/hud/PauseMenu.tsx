@@ -4,7 +4,13 @@ import {
   type SaveSlotId,
 } from '../../sim/save'
 import { useGameStore } from '../../store/gameStore'
-import { type InterfaceScale, useResolvedUiScale, useUiStore } from '../../store/uiStore'
+import {
+  RENDER_PRESETS,
+  type InterfaceScale,
+  type RenderPreset,
+  useResolvedUiScale,
+  useUiStore,
+} from '../../store/uiStore'
 import { money } from './format'
 import { ArrowsOut, Eye, Monitor, X } from '@phosphor-icons/react'
 
@@ -39,6 +45,8 @@ export function PauseMenu() {
   const setOnboardingDismissed = useGameStore((s) => s.setOnboardingDismissed)
   const interfaceScale = useUiStore((s) => s.interfaceScale)
   const setInterfaceScale = useUiStore((s) => s.setInterfaceScale)
+  const renderPreset = useUiStore((s) => s.renderPreset)
+  const setRenderPreset = useUiStore((s) => s.setRenderPreset)
   const reducedMotion = useUiStore((s) => s.reducedMotion)
   const setReducedMotion = useUiStore((s) => s.setReducedMotion)
   const resolvedScale = useResolvedUiScale()
@@ -215,6 +223,45 @@ export function PauseMenu() {
             >
               ← Back
             </button>
+
+            <section className="rounded-xl border border-line/70 bg-panel-2/70 p-3.5">
+              <div className="flex items-start gap-3">
+                <Monitor size="1.25rem" className="mt-0.5 text-mint" />
+                <div className="min-w-0 flex-1">
+                  <h3 className="text-[0.875rem] font-semibold text-bone">Render preset</h3>
+                  <p className="mt-1 text-[0.75rem] leading-snug text-muted">
+                    Pixel ratio, decorative traffic, and LOD transition timing.
+                  </p>
+                  <div className="mt-3 grid grid-cols-3 gap-1.5">
+                    {([
+                      ['performance', 'Performance'],
+                      ['balanced', 'Balanced'],
+                      ['quality', 'Quality'],
+                    ] as const).map(([id, label]) => {
+                      const preset = RENDER_PRESETS[id as RenderPreset]
+                      return (
+                        <button
+                          key={id}
+                          type="button"
+                          aria-pressed={renderPreset === id}
+                          onClick={() => setRenderPreset(id)}
+                          className={`rounded-lg border px-2 py-2 text-left transition ${
+                            renderPreset === id
+                              ? 'border-mint/50 bg-mint/15 text-mint'
+                              : 'border-line bg-void/35 text-muted hover:text-bone'
+                          }`}
+                        >
+                          <strong className="block text-[0.75rem]">{label}</strong>
+                          <span className="mt-1 block font-mono text-[0.625rem] tabular-nums opacity-80">
+                            {preset.pixelRatio}× · {preset.decorativeTraffic ? 'traffic' : 'no traffic'} · {preset.lodTransitionMs}ms
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+            </section>
 
             <section className="rounded-xl border border-line/70 bg-panel-2/70 p-3.5">
               <div className="flex items-start gap-3">

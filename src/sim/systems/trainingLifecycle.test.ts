@@ -72,9 +72,12 @@ describe('training lifecycle controls', () => {
     }
 
     const next = benchmarkTrainingJob(completed, job.id)
-    const model = next.player.models.at(-1)!
-    expect(model.release).toBe('internal')
-    expect(next.player.trainingJobs).toHaveLength(0)
-    expect(next.evaluations).toContainEqual(expect.objectContaining({ modelId: model.id, kind: 'internal', published: false }))
+    // Mid-run / milestone benchmarks are non-terminal snapshots — they do not
+    // materialize or release a model, and the job remains active.
+    const updated = next.player.trainingJobs?.find((candidate) => candidate.id === job.id)
+    expect(updated).toBeTruthy()
+    expect(updated!.benchmarkSnapshots?.length ?? 0).toBeGreaterThan(0)
+    expect(updated!.lastBenchmarkDay).toBe(next.day)
+    expect(next.player.models.length).toBe(completed.player.models.length)
   })
 })
