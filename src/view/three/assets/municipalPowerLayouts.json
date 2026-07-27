@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "footprint": [2, 2],
+  "campuses": [
+    {
+      "kind": "coal", "key": "municipal-coal-campus", "archetypeId": 506,
+      "color": 7367522,
+      "structures": [
+        { "shape": "box", "position": [-0.25, 0.24, 0.08], "scale": [0.72, 0.48, 0.62], "color": 7568510 },
+        { "shape": "box", "position": [0.48, 0.12, 0.34], "scale": [0.46, 0.24, 0.42], "color": 5394250 },
+        { "shape": "cylinder", "position": [-0.5, 0.62, -0.32], "scale": [0.11, 1.24, 0.11], "color": 4672071 },
+        { "shape": "cylinder", "position": [-0.22, 0.72, -0.38], "scale": [0.09, 1.44, 0.09], "color": 4672071 },
+        { "shape": "cylinder", "position": [0.46, 0.24, -0.36], "scale": [0.25, 0.48, 0.25], "color": 9521445 }
+      ],
+      "effects": [{ "type": "vapor", "position": [-0.22, 1.48, -0.38], "near": 5, "mid": 3, "far": 1, "scale": 0.14 }]
+    },
+    {
+      "kind": "wind", "key": "municipal-wind-campus", "archetypeId": 507,
+      "color": 15199465,
+      "structures": [
+        { "shape": "cylinder", "position": [-0.48, 0.52, -0.42], "scale": [0.045, 1.04, 0.045], "color": 15199465 },
+        { "shape": "cylinder", "position": [0.42, 0.58, -0.22], "scale": [0.045, 1.16, 0.045], "color": 15199465 },
+        { "shape": "cylinder", "position": [-0.1, 0.48, 0.48], "scale": [0.045, 0.96, 0.045], "color": 15199465 },
+        { "shape": "box", "position": [0.5, 0.11, 0.48], "scale": [0.38, 0.22, 0.3], "color": 7042430 }
+      ],
+      "effects": [
+        { "type": "rotor", "position": [-0.48, 1.04, -0.42], "near": 1, "mid": 1, "far": 1, "scale": 0.31 },
+        { "type": "rotor", "position": [0.42, 1.16, -0.22], "near": 1, "mid": 1, "far": 0, "scale": 0.34 },
+        { "type": "rotor", "position": [-0.1, 0.96, 0.48], "near": 1, "mid": 1, "far": 0, "scale": 0.29 }
+      ]
+    },
+    {
+      "kind": "solar", "key": "municipal-solar-campus", "archetypeId": 508,
+      "color": 5405344,
+      "structures": [
+        { "shape": "solarCluster", "position": [-0.2, 0.13, -0.2], "scale": [1.45, 0.26, 1.4], "color": 5279397 },
+        { "shape": "box", "position": [0.58, 0.13, 0.58], "scale": [0.3, 0.26, 0.28], "color": 7502973 }
+      ],
+      "effects": [{ "type": "solar", "position": [-0.2, 0.285, -0.2], "near": 1, "mid": 1, "far": 0, "scale": 1.25 }]
+    },
+    {
+      "kind": "nuclear", "key": "municipal-nuclear-campus", "archetypeId": 509,
+      "color": 13160649,
+      "structures": [
+        { "shape": "coolingTower", "position": [-0.4, 0.45, -0.24], "scale": [0.42, 0.9, 0.42], "color": 13160649 },
+        { "shape": "coolingTower", "position": [0.38, 0.38, -0.4], "scale": [0.35, 0.76, 0.35], "color": 13160649 },
+        { "shape": "sphere", "position": [0.28, 0.34, 0.38], "scale": [0.42, 0.48, 0.42], "color": 11055542 },
+        { "shape": "box", "position": [-0.36, 0.15, 0.5], "scale": [0.52, 0.3, 0.4], "color": 8227474 }
+      ],
+      "effects": [{ "type": "vapor", "position": [-0.4, 0.94, -0.24], "near": 7, "mid": 4, "far": 1, "scale": 0.2 }]
+    }
+  ]
+}

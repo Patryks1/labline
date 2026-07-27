@@ -23,6 +23,8 @@ export interface VisualTrafficVehicle {
   readonly route: number[]
   readonly colorIndex: number
   readonly modelChoice: number
+  /** Stable 0..1 activation order within the road chunk that spawned it. */
+  readonly densityRank: number
   routeIndex: number
   distance: number
   speed: number
@@ -31,6 +33,11 @@ export interface VisualTrafficVehicle {
   continuationCount: number
   previous: VisualTrafficPose
   current: VisualTrafficPose
+}
+
+export interface VisualTrafficStats {
+  steps: number
+  utilizationRefreshes: number
 }
 
 interface LaneMetrics {
@@ -42,6 +49,12 @@ interface ConnectorMetrics extends LaneMetrics {
   points: readonly RoadNetworkPoint[]
 }
 
+interface SpawnCandidate {
+  readonly lane: DirectedLane
+  readonly id: number
+  readonly load: number
+}
+
 /**
  * Small, deterministic render-only lane simulation. Its state is deliberately
  * not serialised: the canonical daily congestion snapshot is the only traffic
@@ -50,12 +63,21 @@ interface ConnectorMetrics extends LaneMetrics {
 export class VisualTrafficSimulation {
   readonly vehicles: VisualTrafficVehicle[]
   readonly network: RoadNetworkSnapshot
+  readonly stats: VisualTrafficStats = { steps: 0, utilizationRefreshes: 0 }
   interpolation = 0
+  lastFrameSteps = 0
 
   private readonly laneMetrics = new Map<number, LaneMetrics>()
   private readonly connectorByPair = new Map<string, LaneConnector>()
   private readonly connectorMetrics = new Map<string, ConnectorMetrics>()
   private readonly adjacency: readonly number[][]
+  private readonly orderedVehicles: VisualTrafficVehicle[]
+  private readonly aheadByLane: Float64Array
+  private readonly vehiclesBySegment = new Map<string, Set<VisualTrafficVehicle>>()
+  private readonly vehicleSegment = new Map<number, string>()
+  private readonly segmentIndexById = new Map<string, number>()
+  private readonly segmentRoadClassById = new Map<string, number>()
+  private readonly utilization = new Map<number, number>()
   private readonly tileSize: number
   private lastTime: number | null = null
   private accumulator = 0
@@ -70,6 +92,7 @@ export class VisualTrafficSimulation {
   ) {
     this.network = network
     this.tileSize = tileSize
+    for (const [segmentIndex, load] of segmentUtilization) this.utilization.set(segmentIndex, load)
     for (const lane of network.lanes) {
       this.laneMetrics.set(lane.index, metricsFor(lane.points))
     }
@@ -83,9 +106,18 @@ export class VisualTrafficSimulation {
       if (from && to) this.connectorMetrics.set(key, metricsForConnector(from, to, junction))
     }
     this.vehicles = this.spawn(visibleChunkIds, segmentUtilization, maxVisible)
+    this.orderedVehicles = this.vehicles.slice()
+    this.aheadByLane = new Float64Array(network.lanes.length)
+    for (const segment of network.segments) {
+      this.vehiclesBySegment.set(segment.id, new Set())
+      this.segmentIndexById.set(segment.id, segment.index)
+      this.segmentRoadClassById.set(segment.id, segment.roadClass)
+    }
+    for (const vehicle of this.vehicles) this.syncVehicleSegment(vehicle)
   }
 
   setFrame(timeSeconds: number, paused: boolean): boolean {
+    this.lastFrameSteps = 0
     if (this.lastTime === null || timeSeconds < this.lastTime) {
       this.lastTime = timeSeconds
       this.interpolation = 0
@@ -100,9 +132,40 @@ export class VisualTrafficSimulation {
       this.step()
       this.accumulator -= TRAFFIC_STEP_SECONDS
       changed = true
+      this.lastFrameSteps++
     }
     this.interpolation = this.accumulator / TRAFFIC_STEP_SECONDS
     return changed
+  }
+
+  /** Applies a new canonical daily load snapshot without rebuilding lane topology or routes. */
+  refreshUtilization(utilization: ReadonlyMap<number, number>): void {
+    this.utilization.clear()
+    for (const [segmentIndex, load] of utilization) this.utilization.set(segmentIndex, load)
+    for (const vehicle of this.vehicles) {
+      const lane = this.network.lanes[vehicle.route[vehicle.routeIndex]!]!
+      const segmentIndex = this.segmentIndexById.get(lane.segmentId) ?? -1
+      vehicle.speed = speedFor(lane, clamp(utilization.get(segmentIndex) ?? 0.2, 0, 2), vehicle.id)
+    }
+    this.stats.utilizationRefreshes++
+  }
+
+  /** Deterministic segment-indexed query used by viewport projection. */
+  vehiclesInSegments(segmentIds: ReadonlySet<string>): VisualTrafficVehicle[] {
+    const result: VisualTrafficVehicle[] = []
+    for (const segmentId of segmentIds) {
+      for (const vehicle of this.vehiclesBySegment.get(segmentId) ?? []) {
+        if (this.isDensityEligible(vehicle, segmentId)) result.push(vehicle)
+      }
+    }
+    return result.sort((a, b) => a.id - b.id)
+  }
+
+  private isDensityEligible(vehicle: VisualTrafficVehicle, segmentId: string): boolean {
+    const segmentIndex = this.segmentIndexById.get(segmentId) ?? -1
+    const load = clamp(this.utilization.get(segmentIndex) ?? 0.2, 0, 2)
+    const roadClass = this.segmentRoadClassById.get(segmentId) ?? 1
+    return vehicle.densityRank <= densityFor(roadClass, load)
   }
 
   private spawn(
@@ -110,43 +173,83 @@ export class VisualTrafficSimulation {
     utilization: ReadonlyMap<number, number>,
     maxVisible: number,
   ): VisualTrafficVehicle[] {
-    const visibleSegments = new Set<string>()
-    for (const chunkId of [...visibleChunks].sort((a, b) => a - b)) {
-      for (const id of this.network.chunks.get(chunkId)?.segmentIds ?? []) visibleSegments.add(id)
-    }
-    const candidates = this.network.lanes.filter((lane) => visibleSegments.has(lane.segmentId))
     const allLanes = this.network.lanes
     const segmentById = new Map(this.network.segments.map((segment) => [segment.id, segment]))
+    const lanesBySegment = new Map<string, DirectedLane[]>()
+    for (const lane of allLanes) {
+      const lanes = lanesBySegment.get(lane.segmentId) ?? []
+      lanes.push(lane)
+      lanesBySegment.set(lane.segmentId, lanes)
+    }
+    const chunkCandidates = [...visibleChunks]
+      .sort((a, b) => a - b)
+      .map((chunkId) => {
+        const candidates: SpawnCandidate[] = []
+        for (const segmentId of this.network.chunks.get(chunkId)?.segmentIds ?? []) {
+          const segment = segmentById.get(segmentId)
+          if (!segment) continue
+          const load = clamp(utilization.get(segment.index) ?? 0.2, 0, 2)
+          const attempts = Math.min(4, Math.max(1, Math.ceil(segment.length / 5)))
+          for (const lane of lanesBySegment.get(segmentId) ?? []) {
+            for (let slot = 0; slot < attempts; slot++) {
+              const id = hash(lane.index, slot, this.network.revision)
+              if (unit(id) <= 0.94) candidates.push({ lane, id, load })
+            }
+          }
+        }
+        candidates.sort((a, b) =>
+          hash(a.id, chunkId, 0x51ed) - hash(b.id, chunkId, 0x51ed) || a.id - b.id,
+        )
+        return candidates
+      })
+      .filter((candidates) => candidates.length > 0)
+    // A global lane can be indexed by more than one chunk. Round-robin chunks
+    // for spatial coverage, but instantiate each deterministic lane slot once.
+    const used = new Set<number>()
+    const cursors = new Uint32Array(chunkCandidates.length)
     const vehicles: VisualTrafficVehicle[] = []
-    for (const lane of candidates) {
-      if (vehicles.length >= maxVisible) break
-      const segment = segmentById.get(lane.segmentId)!
-      const load = clamp(utilization.get(segment.index) ?? 0.2, 0, 2)
-      const density = (0.17 + segment.roadClass * 0.105) * (0.55 + load * 0.75)
-      const attempts = Math.min(4, Math.max(1, Math.ceil(segment.length / 5)))
-      for (let slot = 0; slot < attempts && vehicles.length < maxVisible; slot++) {
-        const id = hash(lane.index, slot, this.network.revision)
-        if (unit(id) > Math.min(0.94, density)) continue
-        const target = chooseReachableTarget(lane.index, allLanes, this.adjacency, id)
-        const route = target === null ? [lane.index] : findRoute(this.adjacency, lane.index, target)
-        if (route.length < 2) continue
-        const metric = this.laneMetrics.get(lane.index)!
-        const distance = metric.length * unit(hash(id, 17, 5)) * 0.72
-        const pose = this.pose(lane, distance)
-        vehicles.push({
-          id,
-          route,
-          colorIndex: hash(id, 3, 7),
-          modelChoice: hash(id, 11, 13),
-          routeIndex: 0,
-          distance,
-          speed: speedFor(lane, load, id),
-          arrived: false,
-          connectorDistance: null,
-          continuationCount: 0,
-          previous: { ...pose },
-          current: pose,
-        })
+    let progressed = true
+    while (vehicles.length < maxVisible && progressed) {
+      progressed = false
+      for (let chunkIndex = 0; chunkIndex < chunkCandidates.length; chunkIndex++) {
+        const candidates = chunkCandidates[chunkIndex]!
+        while (cursors[chunkIndex]! < candidates.length) {
+          const candidate = candidates[cursors[chunkIndex]!]!
+          const densityRank = candidates.length <= 1
+            ? 0
+            : cursors[chunkIndex]! / (candidates.length - 1)
+          cursors[chunkIndex]++
+          if (used.has(candidate.id)) continue
+          used.add(candidate.id)
+          const target = chooseReachableTarget(
+            candidate.lane.index, allLanes, this.adjacency, candidate.id,
+          )
+          const route = target === null
+            ? [candidate.lane.index]
+            : findRoute(this.adjacency, candidate.lane.index, target)
+          if (route.length < 2) continue
+          const metric = this.laneMetrics.get(candidate.lane.index)!
+          const distance = metric.length * unit(hash(candidate.id, 17, 5)) * 0.72
+          const pose = this.pose(candidate.lane, distance)
+          vehicles.push({
+            id: candidate.id,
+            route,
+            colorIndex: hash(candidate.id, 3, 7),
+            modelChoice: hash(candidate.id, 11, 13),
+            densityRank,
+            routeIndex: 0,
+            distance,
+            speed: speedFor(candidate.lane, candidate.load, candidate.id),
+            arrived: false,
+            connectorDistance: null,
+            continuationCount: 0,
+            previous: { ...pose },
+            current: pose,
+          })
+          progressed = true
+          break
+        }
+        if (vehicles.length >= maxVisible) break
       }
     }
     return vehicles.sort((a, b) => a.id - b.id)
@@ -154,13 +257,16 @@ export class VisualTrafficSimulation {
 
   private step(): void {
     this.tick++
-    const ordered = [...this.vehicles].sort((a, b) =>
+    this.stats.steps++
+    const ordered = this.orderedVehicles
+    ordered.sort((a, b) =>
       a.route[a.routeIndex]! - b.route[b.routeIndex]! || b.distance - a.distance || a.id - b.id,
     )
-    const ahead = new Map<number, number>()
+    this.aheadByLane.fill(Number.NaN)
+    const ahead = this.aheadByLane
     for (const vehicle of ordered) {
       if (vehicle.arrived) continue
-      vehicle.previous = { ...vehicle.current }
+      copyPose(vehicle.previous, vehicle.current)
       const laneIndex = vehicle.route[vehicle.routeIndex]!
       const lane = this.network.lanes[laneIndex]!
       const metrics = this.laneMetrics.get(laneIndex)!
@@ -187,7 +293,8 @@ export class VisualTrafficSimulation {
         const advanced = vehicle.connectorDistance + vehicle.speed * TRAFFIC_STEP_SECONDS
         if (advanced < transition.length - 1e-5) {
           vehicle.connectorDistance = advanced
-          vehicle.current = this.posePoints(transition.points, transition, advanced)
+          this.posePointsInto(vehicle.current, transition.points, transition, advanced)
+          this.syncVehicleSegment(vehicle)
           continue
         }
         vehicle.routeIndex++
@@ -196,12 +303,13 @@ export class VisualTrafficSimulation {
         const activeLane = this.network.lanes[nextLaneIndex]!
         const activeMetrics = this.laneMetrics.get(activeLane.index)!
         vehicle.distance = Math.min(vehicle.distance, activeMetrics.length)
-        vehicle.current = this.pose(activeLane, vehicle.distance)
-        ahead.set(activeLane.index, vehicle.distance)
+        this.poseInto(vehicle.current, activeLane, vehicle.distance)
+        ahead[activeLane.index] = vehicle.distance
+        this.syncVehicleSegment(vehicle)
         continue
       }
-      const frontDistance = ahead.get(laneIndex)
-      const headwayLimit = frontDistance === undefined
+      const frontDistance = ahead[laneIndex]!
+      const headwayLimit = Number.isNaN(frontDistance)
         ? Infinity
         : Math.max(0, frontDistance - 0.34 / this.tileSize)
       const connector = nextLaneIndex === undefined
@@ -221,7 +329,8 @@ export class VisualTrafficSimulation {
         if (transition && transition.length > 1e-5) {
           vehicle.distance = metrics.length
           vehicle.connectorDistance = Math.min(overflow, transition.length)
-          vehicle.current = this.posePoints(transition.points, transition, vehicle.connectorDistance)
+          this.posePointsInto(vehicle.current, transition.points, transition, vehicle.connectorDistance)
+          this.syncVehicleSegment(vehicle)
           continue
         }
         vehicle.routeIndex++
@@ -232,16 +341,52 @@ export class VisualTrafficSimulation {
       // A completed A-to-B trip remains at its destination until the visible
       // projection is rebuilt; it never reverses or silently U-turns.
       vehicle.distance = Math.min(vehicle.distance, activeMetrics.length)
-      vehicle.current = this.pose(activeLane, vehicle.distance)
+      this.poseInto(vehicle.current, activeLane, vehicle.distance)
       if (vehicle.routeIndex === vehicle.route.length - 1 &&
         vehicle.distance >= activeMetrics.length - 1e-5) vehicle.arrived = true
-      ahead.set(activeLane.index, vehicle.distance)
+      ahead[activeLane.index] = vehicle.distance
+      this.syncVehicleSegment(vehicle)
     }
+  }
+
+  private syncVehicleSegment(vehicle: VisualTrafficVehicle): void {
+    const segmentId = this.network.lanes[vehicle.route[vehicle.routeIndex]!]!.segmentId
+    const previous = this.vehicleSegment.get(vehicle.id)
+    if (previous === segmentId) return
+    if (previous !== undefined) this.vehiclesBySegment.get(previous)?.delete(vehicle)
+    this.vehiclesBySegment.get(segmentId)?.add(vehicle)
+    this.vehicleSegment.set(vehicle.id, segmentId)
   }
 
   private pose(lane: DirectedLane, distance: number): VisualTrafficPose {
     const metrics = this.laneMetrics.get(lane.index)!
     return this.posePoints(lane.points, metrics, distance)
+  }
+
+  private poseInto(target: VisualTrafficPose, lane: DirectedLane, distance: number): void {
+    this.posePointsInto(target, lane.points, this.laneMetrics.get(lane.index)!, distance)
+  }
+
+  private posePointsInto(
+    target: VisualTrafficPose,
+    points: readonly RoadNetworkPoint[],
+    metrics: LaneMetrics,
+    distance: number,
+  ): void {
+    const clamped = clamp(distance, 0, metrics.length)
+    let edge = 0
+    while (edge + 1 < metrics.cumulative.length && metrics.cumulative[edge + 1]! < clamped) edge++
+    const a = points[Math.min(edge, points.length - 1)]!
+    const b = points[Math.min(edge + 1, points.length - 1)] ?? a
+    const start = metrics.cumulative[edge] ?? 0
+    const end = metrics.cumulative[Math.min(edge + 1, metrics.cumulative.length - 1)] ?? start
+    const t = end > start ? (clamped - start) / (end - start) : 0
+    const dx = b.x - a.x
+    const dz = b.y - a.y
+    target.x = (a.x + dx * t - 0.5) * this.tileSize
+    target.y = a.elevation + (b.elevation - a.elevation) * t + 0.035
+    target.z = (a.y + dz * t - 0.5) * this.tileSize
+    target.yaw = Math.atan2(-dz, dx)
   }
 
   private posePoints(
@@ -376,6 +521,10 @@ function speedFor(lane: DirectedLane, utilization: number, id: number): number {
   return freeFlowTilesPerSecond * congestion * (0.9 + unit(hash(id, 41, 3)) * 0.18)
 }
 
+function densityFor(roadClass: number, utilization: number): number {
+  return Math.min(0.94, (0.17 + roadClass * 0.105) * (0.55 + utilization * 0.75))
+}
+
 function hash(a: number, b: number, c: number): number {
   let value = Math.imul(a ^ 0x9e3779b9, 0x85ebca6b)
   value = Math.imul(value ^ b, 0xc2b2ae35)
@@ -388,4 +537,11 @@ function unit(value: number): number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value))
+}
+
+function copyPose(target: VisualTrafficPose, source: VisualTrafficPose): void {
+  target.x = source.x
+  target.y = source.y
+  target.z = source.z
+  target.yaw = source.yaw
 }

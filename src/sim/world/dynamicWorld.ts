@@ -212,6 +212,7 @@ export class DynamicWorld {
   private readonly listeners = new Set<WorldMetricsListener>()
   private readonly journal: WorldChangeJournal
   private revisionValue = 0
+  private roadRevisionValue = 0
   private metricsValue: WorldMetrics
 
   constructor(staticWorld: StaticWorld, options: CreateDynamicWorldOptions = {}) {
@@ -269,6 +270,11 @@ export class DynamicWorld {
 
   get revision(): number {
     return this.revisionValue
+  }
+
+  /** Changes only when the effective packed transport layer changes. */
+  get roadRevision(): number {
+    return this.roadRevisionValue
   }
 
   get sequence(): number {
@@ -546,9 +552,11 @@ export class DynamicWorld {
     tileIds: Set<TileId>,
     facilityIds: Set<string>,
     cityIndexes: Set<number>,
+    roadChanged = false,
   ): WorldBatchCommit {
     if (flags === 0) return { committed: false, revision: this.revisionValue }
     this.revisionValue++
+    if (roadChanged) this.roadRevisionValue++
     const sortedTiles = [...tileIds].sort((a, b) => a - b)
     const chunks = new Set<ChunkId>()
     for (const id of sortedTiles) chunks.add(chunkIdForTile(id, this.descriptor))
@@ -712,6 +720,7 @@ export class WorldMutationBatch {
     const changedTiles = new Set<TileId>()
     const changedFacilities = new Set<string>()
     const changedCities = new Set<number>()
+    let roadChanged = false
 
     for (const [id, next] of this.facilityWrites) {
       const previous = world.facilitiesById.get(id)
@@ -729,12 +738,15 @@ export class WorldMutationBatch {
 
     for (const [id, next] of this.terrainWrites) {
       const previous = world.terrainOverrides.get(id)
+      const previousTransport = previous?.transport ?? world.staticWorld.transport?.[id] ?? 0
+      const nextTransport = next?.transport ?? world.staticWorld.transport?.[id] ?? 0
       if (next) world.terrainOverrides.set(id, next)
       else world.terrainOverrides.delete(id)
       if (previous === next || (previous === undefined && next === null)) continue
       changedTiles.add(id)
       for (const neighbor of cardinalNeighborIds(id, world.descriptor)) changedTiles.add(neighbor)
       flags |= WORLD_CHANGE_FLAGS.terrain | WORLD_CHANGE_FLAGS.metrics
+      if (previousTransport !== nextTransport) roadChanged = true
     }
 
     for (const [index, state] of this.cityWrites) {
@@ -743,7 +755,7 @@ export class WorldMutationBatch {
       flags |= WORLD_CHANGE_FLAGS.city
     }
 
-    return world.finishCommit(flags, changedTiles, changedFacilities, changedCities)
+    return world.finishCommit(flags, changedTiles, changedFacilities, changedCities, roadChanged)
   }
 
   private currentFacility(id: string): Facility | undefined {

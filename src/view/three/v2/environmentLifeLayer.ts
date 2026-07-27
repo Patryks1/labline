@@ -64,6 +64,15 @@ export class EnvironmentLifeLayer {
     }
   }
 
+  /** Refresh authored boat geometry without replacing the world projection. */
+  refreshAuthoredGeometry(registry: Pick<ArchetypeRegistry, 'has' | 'get'>): void {
+    this.assertLive()
+    this.boatGeometry.clear()
+    collectLoadedGeometry(registry, BOAT_ARCHETYPES, BOAT_FALLBACK_ARCHETYPE, this.boatGeometry)
+    this.clearMeshes()
+    this.signature = ''
+  }
+
   update(
     visibleChunks: ReadonlySet<ChunkId>,
     chunks: ViewportChunkManager,

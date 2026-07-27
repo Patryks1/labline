@@ -4,6 +4,11 @@ import type { MapTile } from '../../../sim/types'
 import { createBuildingKit, type KitDetail } from '../buildingKits'
 import type { Neighbors } from '../tileNeighbors'
 import {
+  MUNICIPAL_POWER_BY_KIND,
+  type MunicipalCampusDescriptor,
+  type MunicipalStructureDescriptor,
+} from '../assets/municipalPowerLayouts'
+import {
   ArchetypeRegistry,
   DefaultArchetype,
   LodTier,
@@ -180,10 +185,10 @@ export const RoadPropArchetype = {
 } as const
 
 export const MunicipalPowerArchetype = {
-  coal: FacilityArchetype.gas,
-  wind: 499,
-  solar: IntegrationArchetype.solar,
-  nuclear: IntegrationArchetype.generation,
+  coal: MUNICIPAL_POWER_BY_KIND.coal.archetypeId,
+  wind: MUNICIPAL_POWER_BY_KIND.wind.archetypeId,
+  solar: MUNICIPAL_POWER_BY_KIND.solar.archetypeId,
+  nuclear: MUNICIPAL_POWER_BY_KIND.nuclear.archetypeId,
 } as const
 
 /**
@@ -517,16 +522,72 @@ export function createArtDirectedArchetypeRegistry(): ArchetypeRegistry {
     const detailed = bakeLegacyKit(kind, height, WHITE_HEX, 0, 0, { ownerTinted: true })
     register(registry, materials, id, name, detailed, detailed, facilityFar(kind))
   }
-  const windTurbine = compound([
-    cylinder(0.045, 0.075, 0.9, 8, 0, 0.45, 0, LIGHT_METAL),
-    cylinder(0.065, 0.065, 0.18, 8, 0, 0.92, 0, DARK_METAL).rotateZ(Math.PI / 2),
-    box(0.055, 0.62, 0.04, 0, 0.92, 0.055, WHITE),
-    box(0.62, 0.055, 0.04, 0, 0.92, 0.055, WHITE),
-  ])
-  register(registry, materials, MunicipalPowerArchetype.wind, 'municipal-wind-farm',
-    windTurbine, windTurbine, facilityFar('substation'))
+  for (const campus of Object.values(MUNICIPAL_POWER_BY_KIND)) {
+    register(
+      registry,
+      materials,
+      campus.archetypeId,
+      campus.key,
+      municipalCampusGeometry(campus, LodTier.near),
+      municipalCampusGeometry(campus, LodTier.mid),
+      municipalCampusGeometry(campus, LodTier.far),
+    )
+  }
   registerWorldCatalogFallbacks(registry)
   return registry
+}
+
+function municipalCampusGeometry(campus: MunicipalCampusDescriptor, tier: LodTier): THREE.BufferGeometry {
+  const parts = campus.structures.flatMap(structure => municipalStructureGeometry(structure, tier))
+  const geometry = compound(parts)
+  geometry.userData.municipalCampus = {
+    kind: campus.kind,
+    footprint: [2, 2],
+    solarClusterMerged: campus.kind === 'solar',
+  }
+  return geometry
+}
+
+function municipalStructureGeometry(
+  structure: MunicipalStructureDescriptor,
+  tier: LodTier,
+): THREE.BufferGeometry[] {
+  const [x, y, z] = structure.position
+  const [sx, sy, sz] = structure.scale
+  const color = hexRgb(structure.color)
+  const segments = tier === LodTier.near ? 16 : tier === LodTier.mid ? 10 : 7
+  if (structure.shape === 'box') return [box(sx, sy, sz, x, y, z, color)]
+  if (structure.shape === 'cylinder') return [cylinder(sx, sx * 0.84, sy, segments, x, y, z, color)]
+  if (structure.shape === 'sphere') {
+    const geometry = paint(new THREE.IcosahedronGeometry(0.5, tier === LodTier.near ? 1 : 0), color)
+    geometry.scale(sx * 2, sy * 2, sz * 2)
+    geometry.translate(x, y, z)
+    return [geometry]
+  }
+  if (structure.shape === 'coolingTower') {
+    const parts = [cylinder(sx * 0.72, sx, sy, segments, x, y, z, color)]
+    if (tier === LodTier.near) parts.push(cylinder(sx, sx * 0.72, sy * 0.3, segments, x, y + sy * 0.36, z, color))
+    return parts
+  }
+  const rows = tier === LodTier.near ? 4 : tier === LodTier.mid ? 3 : 2
+  const columns = rows
+  const panels: THREE.BufferGeometry[] = []
+  for (let row = 0; row < rows; row++) for (let column = 0; column < columns; column++) {
+    const panel = box(
+      sx / columns * 0.82, 0.025, sz / rows * 0.62,
+      x + (column - (columns - 1) / 2) * sx / columns,
+      y,
+      z + (row - (rows - 1) / 2) * sz / rows,
+      color,
+    )
+    panel.rotateX(-0.24)
+    panels.push(panel)
+  }
+  return panels
+}
+
+function hexRgb(hex: number): Rgb {
+  return [((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255]
 }
 
 function registerWorldCatalogFallbacks(registry: ArchetypeRegistry): void {

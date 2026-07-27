@@ -13,6 +13,7 @@ export type WorldAssetFamily =
   | 'boats'
   | 'ducks'
   | 'props'
+  | 'municipal'
 
 export interface WorldAssetBundle {
   readonly family: WorldAssetFamily
@@ -46,7 +47,7 @@ export interface WorldAssetManifest {
 
 const FAMILY_NAMES = new Set<WorldAssetFamily>([
   'terrain', 'vegetation', 'residential', 'urban', 'industrial',
-  'facilities', 'vehicles', 'boats', 'ducks', 'props',
+  'facilities', 'vehicles', 'boats', 'ducks', 'props', 'municipal',
 ])
 
 /** Validate untrusted manifest JSON before it can influence asset requests. */

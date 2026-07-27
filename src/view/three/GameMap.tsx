@@ -254,6 +254,10 @@ export function GameMap() {
     let lastFrameAt = performance.now()
     let lastRenderAt = 0
     let previousUploadBytes = 0
+    let previousTrafficSteps = 0
+    let previousTrafficReconciles = 0
+    let previousTrafficRebuilds = 0
+    let previousTrafficUploadBytes = 0
     let replayFrame = perfSession?.nextFrame()
     let warmupPending = true
     let rivalLabelSignature = ''
@@ -363,6 +367,10 @@ export function GameMap() {
       perfSession = createMapPerfSession(projection.source.width, projection.source.height)
       replayFrame = perfSession?.nextFrame()
       previousUploadBytes = 0
+      previousTrafficSteps = 0
+      previousTrafficReconciles = 0
+      previousTrafficRebuilds = 0
+      previousTrafficUploadBytes = 0
       lastViewportUpdate = null
       lastJournalBacklog = 0
       warmupPending = true
@@ -665,6 +673,14 @@ export function GameMap() {
       const metrics = projection.viewport.metrics.snapshot()
       const uploadBytes = Math.max(0, metrics.surfaceUploadBytes - previousUploadBytes)
       previousUploadBytes = metrics.surfaceUploadBytes
+      const trafficSteps = Math.max(0, metrics.trafficSteps - previousTrafficSteps)
+      const trafficReconciles = Math.max(0, metrics.trafficReconciles - previousTrafficReconciles)
+      const trafficRebuilds = Math.max(0, metrics.trafficRebuilds - previousTrafficRebuilds)
+      const trafficUploadBytes = Math.max(0, metrics.trafficUploadBytes - previousTrafficUploadBytes)
+      previousTrafficSteps = metrics.trafficSteps
+      previousTrafficReconciles = metrics.trafficReconciles
+      previousTrafficRebuilds = metrics.trafficRebuilds
+      previousTrafficUploadBytes = metrics.trafficUploadBytes
       const closeUpPlaceholder =
         pixelsPerTile() >= 28 &&
         lastViewportUpdate.lod.layers.some(
@@ -692,6 +708,11 @@ export function GameMap() {
         gpuChunkLayers: metrics.gpuChunkLayers,
         activeInstances: metrics.instances,
         uploadBytes,
+        trafficSteps,
+        trafficReconciles,
+        trafficRebuilds,
+        trafficUploadBytes,
+        municipalEffectInstances: metrics.municipalEffectInstances,
         chunkWorkMs: frameChunkWorkMs,
         journalBacklog: lastJournalBacklog,
         // Missing tier geometry and pending visible chunks are both continuity
@@ -977,6 +998,13 @@ export function GameMap() {
             viewportDirty = true
             visualChange = true
           }
+          // Canonical congestion changes daily even when no road cell changes.
+          // Re-enter the traffic projection so it can refresh speeds against
+          // the new immutable load snapshot without rebuilding lane topology.
+          if (next.state.transport !== previous.state.transport) {
+            viewportDirty = true
+            visualChange = true
+          }
           if (next.state.map.regions !== projection.regions) {
             projection.regions = next.state.map.regions
             rebuildRegionLabels(labels, projection.regions, projection.source)
@@ -1081,16 +1109,32 @@ export function GameMap() {
     reconcileViewport(performance.now())
     scheduleAnimation()
 
-    // Keep first paint immediate through the procedural resilience registry,
-    // then atomically rebuild once all authored families that can load are
-    // ready. Failed families remain on their matching procedural fallbacks.
-    void assetCache.loadAll().then((snapshot) => {
-      if (disposed) return
-      assetSnapshot = snapshot
-      const live = useGameStore.getState()
-      replaceProjection(live.state, live.selectedTile, live.buildMode)
-      markInteraction()
-    })
+    // Keep first paint immediate through procedural fallbacks, then publish one
+    // validated family at a time into the live registry. Only resident batches
+    // using those archetypes are retired; camera, surface, simulation and LOD
+    // state remain intact instead of paying for a whole projection replacement.
+    void (async () => {
+      for await (const family of assetCache.streamAll()) {
+        if (disposed) return
+        assetSnapshot = family.snapshot
+        if (family.archetypeIds.length === 0) continue
+        for (let offset = 0; offset < family.archetypeIds.length; offset += 16) {
+          if (disposed) return
+          const publishStarted = performance.now()
+          const changed = new Set(family.archetypeIds.slice(offset, offset + 16))
+          applyWorldAssetSnapshot(projection.registry, family.snapshot, changed)
+          projection.viewport.invalidateArchetypes(changed)
+          performance.measure(`labline.asset.publish.${family.family}.${offset / 16}`, {
+            start: publishStarted,
+            end: performance.now(),
+          })
+          viewportDirty = true
+          markInteraction()
+          // Keep each publication slice outside the current input/render task.
+          await new Promise<void>(resolve => setTimeout(resolve, 0))
+        }
+      }
+    })()
 
     return () => {
       disposed = true

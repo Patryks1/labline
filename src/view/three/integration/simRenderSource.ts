@@ -417,11 +417,13 @@ export class SimViewportRenderSource implements ViewportRenderSource {
       return Object.freeze({
         id: stableStringId(plant.id),
         kind: plant.kind,
-        tileX: plant.cx,
-        tileY: plant.cy,
-        x: (plant.cx + 0.5) * MAP_TILE_SIZE,
+        tileX: plant.cx + 1,
+        tileY: plant.cy + 1,
+        // cx/cy is the north-west tile of the 2x2 footprint; its true centre
+        // is the shared corner one full tile away, not either tile centre.
+        x: (plant.cx + 1) * MAP_TILE_SIZE,
         y: (Number.isFinite(elevation) ? elevation : 0) + 0.015,
-        z: (plant.cy + 0.5) * MAP_TILE_SIZE,
+        z: (plant.cy + 1) * MAP_TILE_SIZE,
         phase: plant.animationPhase * Math.PI * 2,
       })
     })
@@ -743,20 +745,21 @@ export class SimViewportRenderSource implements ViewportRenderSource {
       entityId: stableStringId(plant.id),
       pickTileId: plant.footprint[0],
       archetypeId: MunicipalPowerArchetype[plant.kind],
-      x: (plant.cx + 0.5) * MAP_TILE_SIZE,
+      x: (plant.cx + 1) * MAP_TILE_SIZE,
       y: (Number.isFinite(elevation) ? elevation : 0) + 0.015,
-      z: (plant.cy + 0.5) * MAP_TILE_SIZE,
+      z: (plant.cy + 1) * MAP_TILE_SIZE,
       yaw: plant.animationPhase * Math.PI * 2,
-      scaleX: plant.kind === 'wind' ? 1.65 : 1.55,
-      scaleY: plant.kind === 'nuclear' ? 1.5 : 1.25,
-      scaleZ: plant.kind === 'wind' ? 1.65 : 1.55,
+      scaleX: MAP_TILE_SIZE,
+      scaleY: MAP_TILE_SIZE,
+      scaleZ: MAP_TILE_SIZE,
       color: plant.kind === 'coal' ? 0x706b62 : plant.kind === 'wind' ? 0xe7ece9 :
         plant.kind === 'solar' ? 0x527aa0 : 0xc8d0c9,
     }
   }
 
   private municipalPowerRenderChunk(plant: MunicipalPowerPlant): ChunkId {
-    return Math.floor(plant.cy / this.chunkSize) * this.chunksWide + Math.floor(plant.cx / this.chunkSize)
+    return Math.floor((plant.cy + 1) / this.chunkSize) * this.chunksWide +
+      Math.floor((plant.cx + 1) / this.chunkSize)
   }
 
   /** Own a multi-tile prop from one deterministic centroid chunk only. */

@@ -28,6 +28,10 @@ export interface TrafficLayerStats {
   instances: number
   drawCalls: number
   triangles: number
+  steps: number
+  reconciles: number
+  rebuilds: number
+  uploadBytes: number
 }
 
 interface TrafficVehicle {
@@ -44,6 +48,28 @@ interface TrafficTimeState {
   value: number
 }
 
+function emptyTrafficStats(): TrafficLayerStats {
+  return {
+    vehicles: 0,
+    instances: 0,
+    drawCalls: 0,
+    triangles: 0,
+    steps: 0,
+    reconciles: 0,
+    rebuilds: 0,
+    uploadBytes: 0,
+  }
+}
+
+function trafficCounters(stats: TrafficLayerStats): Pick<TrafficLayerStats, 'steps' | 'reconciles' | 'rebuilds' | 'uploadBytes'> {
+  return {
+    steps: stats.steps,
+    reconciles: stats.reconciles,
+    rebuilds: stats.rebuilds,
+    uploadBytes: stats.uploadBytes,
+  }
+}
+
 /**
  * Visual traffic consumes the immutable lane graph and canonical congestion,
  * but never writes simulation state. Motion advances at a deterministic 10 Hz;
@@ -51,7 +77,7 @@ interface TrafficTimeState {
  */
 export class TrafficLayer {
   readonly root = new THREE.Group()
-  stats: TrafficLayerStats = { vehicles: 0, instances: 0, drawCalls: 0, triangles: 0 }
+  stats: TrafficLayerStats = emptyTrafficStats()
 
   private readonly bodyMaterial = createTrafficMaterial('body', 0.35, 0.45)
   private readonly cabinMaterial = createTrafficMaterial('cabin', 0.28, 0.35)
@@ -62,6 +88,7 @@ export class TrafficLayer {
   private cabin: THREE.InstancedMesh | null = null
   private signature = ''
   private simulationKey = ''
+  private utilizationKey = ''
   private simulation: VisualTrafficSimulation | null = null
   private displayedVehicleIds = new Set<number>()
   private projectedVisibleChunks = new Set<ChunkId>()
@@ -107,13 +134,18 @@ export class TrafficLayer {
           `${chunkId}:${source.getSurfaceRevision?.(chunkId) ?? source.getChunkRevision(chunkId)}`,
       )
       .join(',') + `|road:${network?.revision ?? -1}`
+    const nextUtilizationKey = transport
+      ? `${transport.networkRevision}:${transport.day}`
+      : 'none'
+    if (this.simulation && nextUtilizationKey !== this.utilizationKey) {
+      this.simulation.refreshUtilization(utilizationMap(transport?.segmentLoads ?? []))
+      this.utilizationKey = nextUtilizationKey
+      this.reconcileSimulationProjection()
+    }
     if (nextSignature === this.signature) return
     this.signature = nextSignature
     if (network && network.lanes.length > 0 && this.maxVisible > 0) {
-      const utilization = new Map<number, number>()
-      for (const load of transport?.segmentLoads ?? []) {
-        utilization.set(load.segmentId, load.utilization)
-      }
+      const utilization = utilizationMap(transport?.segmentLoads ?? [])
       const simulationKey = `${network.revision}:${network.drivingSide}`
       if (!this.simulation || this.simulationKey !== simulationKey) {
         this.simulationKey = simulationKey
@@ -126,6 +158,7 @@ export class TrafficLayer {
         )
         this.displayedVehicleIds.clear()
         this.rosterKey = ''
+        this.utilizationKey = nextUtilizationKey
       }
       this.projectedVisibleChunks = new Set(visibleChunks)
       this.projectionChunks = chunks
@@ -182,11 +215,31 @@ export class TrafficLayer {
     const stepped = this.simulation?.setFrame(timeSeconds, this.paused) ?? false
     for (const state of this.timeStates) state.value = this.simulation?.interpolation ?? 0
     if (stepped) {
+      this.stats.steps += this.simulation?.lastFrameSteps ?? 0
       this.reconcileSimulationProjection()
       for (const mesh of [this.body, this.cabin, ...this.authoredMeshes]) {
-        if (mesh) uploadTrafficEndpoints(mesh)
+        if (mesh) this.stats.uploadBytes += uploadTrafficEndpoints(mesh)
       }
     }
+  }
+
+  /** Refreshes traffic-owned geometry clones after the live asset registry changes. */
+  refreshAuthoredGeometry(registry: Pick<ArchetypeRegistry, 'has' | 'get'>): void {
+    const next = new Map<number, THREE.BufferGeometry>()
+    for (const id of VEHICLE_ARCHETYPES) {
+      const geometry = loadedGeometry(registry, id, VEHICLE_FALLBACK_ARCHETYPE)
+      if (geometry) next.set(id, geometry)
+    }
+    if (sameGeometryMap(this.authoredGeometry, next)) return
+    const retained = this.simulation
+      ? []
+      : currentMeshVehicles(this.body, this.authoredMeshes)
+    this.authoredGeometry.clear()
+    for (const [id, geometry] of next) this.authoredGeometry.set(id, geometry)
+    this.clearMeshes()
+    this.rosterKey = ''
+    if (this.simulation) this.reconcileSimulationProjection()
+    else this.rebuild(retained)
   }
 
   dispose(): void {
@@ -198,37 +251,36 @@ export class TrafficLayer {
   }
 
   private rebuild(vehicles: readonly TrafficVehicle[]): void {
-    this.clearMeshes()
+    const counters = trafficCounters(this.stats)
+    if (this.body || this.cabin || this.authoredMeshes.length > 0) {
+      this.populateMeshes(vehicles)
+      return
+    }
+    this.stats.rebuilds++
     if (vehicles.length === 0) {
-      this.stats = { vehicles: 0, instances: 0, drawCalls: 0, triangles: 0 }
+      this.stats = { ...emptyTrafficStats(), ...counters, rebuilds: this.stats.rebuilds }
       return
     }
 
     if (this.authoredGeometry.size > 0) {
-      let triangles = 0
-      const batches = groupByModel(vehicles, this.authoredGeometry)
-      for (const [modelId, batch] of batches) {
+      for (const [modelId, sourceGeometry] of [...this.authoredGeometry].sort(([a], [b]) => a - b)) {
         // Instance attributes belong to the layer and are disposed on rebuild;
         // never mutate or dispose geometry owned by the shared registry.
-        const geometry = this.authoredGeometry.get(modelId)!.clone()
+        const geometry = sourceGeometry.clone()
         const mesh = createVehicleMesh(
           `traffic-authored-${modelId}`,
           geometry,
           this.authoredMaterial,
-          batch,
+          [],
+          this.maxVisible,
           false,
           false,
         )
+        mesh.userData.trafficModelId = modelId
         this.root.add(mesh)
         this.authoredMeshes.push(mesh)
-        triangles += triangleCount(geometry) * batch.length
       }
-      this.stats = {
-        vehicles: vehicles.length,
-        instances: vehicles.length,
-        drawCalls: this.authoredMeshes.length,
-        triangles,
-      }
+      this.populateMeshes(vehicles)
       return
     }
 
@@ -236,7 +288,8 @@ export class TrafficLayer {
       'traffic-bodies',
       new THREE.BoxGeometry(0.22, 0.07, 0.11).translate(0, 0.09, 0),
       this.bodyMaterial,
-      vehicles,
+      [],
+      this.maxVisible,
       false,
       true,
     )
@@ -244,16 +297,51 @@ export class TrafficLayer {
       'traffic-cabins',
       new THREE.BoxGeometry(0.1, 0.05, 0.08).translate(0, 0.14, 0),
       this.cabinMaterial,
-      vehicles,
+      [],
+      this.maxVisible,
       true,
       true,
     )
     this.root.add(this.body, this.cabin)
+    this.populateMeshes(vehicles)
+  }
+
+  private populateMeshes(vehicles: readonly TrafficVehicle[]): void {
+    const counters = trafficCounters(this.stats)
+    if (this.authoredMeshes.length > 0) {
+      const batches = groupByModel(vehicles, this.authoredGeometry)
+      let triangles = 0
+      let drawCalls = 0
+      let uploaded = 0
+      for (const mesh of this.authoredMeshes) {
+        const modelId = mesh.userData.trafficModelId as number
+        const batch = batches.get(modelId) ?? []
+        uploaded += populateVehicleMesh(mesh, batch, false)
+        if (batch.length > 0) {
+          drawCalls++
+          triangles += triangleCount(mesh.geometry) * batch.length
+        }
+      }
+      this.stats = {
+        vehicles: vehicles.length,
+        instances: vehicles.length,
+        drawCalls,
+        triangles,
+        ...counters,
+        uploadBytes: counters.uploadBytes + uploaded,
+      }
+      return
+    }
+    if (!this.body || !this.cabin) return
+    const uploaded = populateVehicleMesh(this.body, vehicles, false) +
+      populateVehicleMesh(this.cabin, vehicles, true)
     this.stats = {
       vehicles: vehicles.length,
       instances: vehicles.length * 2,
-      drawCalls: 2,
+      drawCalls: vehicles.length > 0 ? 2 : 0,
       triangles: vehicles.length * 24,
+      ...counters,
+      uploadBytes: counters.uploadBytes + uploaded,
     }
   }
 
@@ -262,6 +350,7 @@ export class TrafficLayer {
     const chunks = this.projectionChunks
     const network = this.projectionNetwork
     if (!simulation || !chunks || !network) return
+    this.stats.reconciles++
     const visibleSegmentIds = new Set<string>()
     for (const chunkId of this.projectedVisibleChunks) {
       for (const segmentId of network.chunks.get(chunkId)?.segmentIds ?? []) {
@@ -274,9 +363,10 @@ export class TrafficLayer {
         haloSegmentIds.add(segmentId)
       }
     }
-    const laneSegment = (state: VisualTrafficVehicle) =>
-      network.lanes[state.route[state.routeIndex]!]!.segmentId
-    const byId = new Map(simulation.vehicles.map((vehicle) => [vehicle.id, vehicle]))
+    const laneSegment = (state: VisualTrafficVehicle) => network.lanes[state.route[state.routeIndex]!]!.segmentId
+    const visibleCandidates = simulation.vehiclesInSegments(visibleSegmentIds)
+    const haloCandidates = simulation.vehiclesInSegments(haloSegmentIds)
+    const byId = new Map(haloCandidates.map((vehicle) => [vehicle.id, vehicle]))
     const retained = [...this.displayedVehicleIds]
       .map((id) => byId.get(id))
       .filter((state): state is VisualTrafficVehicle =>
@@ -288,9 +378,8 @@ export class TrafficLayer {
         if (!selected.has(state.id)) selected.set(state.id, state)
       }
     }
-    const stableVehicles = [...simulation.vehicles].sort((a, b) => a.id - b.id)
-    fill(stableVehicles.filter((state) => visibleSegmentIds.has(laneSegment(state))))
-    fill(stableVehicles.filter((state) => haloSegmentIds.has(laneSegment(state))))
+    fill(visibleCandidates)
+    fill(haloCandidates)
     const ordered = [...selected.values()].sort((a, b) => a.id - b.id)
     const nextRosterKey = ordered.map((state) => state.id).join(',')
     this.displayedVehicleIds = new Set(selected.keys())
@@ -365,25 +454,39 @@ function createVehicleMesh(
   geometry: THREE.BufferGeometry,
   material: THREE.Material,
   vehicles: readonly TrafficVehicle[],
+  capacity: number,
   cabin: boolean,
   profiled: boolean,
 ): THREE.InstancedMesh {
-  const deltas = new Float32Array(vehicles.length * 3)
-  const yawDeltas = new Float32Array(vehicles.length)
-  const visible = new Float32Array(vehicles.length)
+  const deltas = new Float32Array(capacity * 3)
+  const yawDeltas = new Float32Array(capacity)
+  const visible = new Float32Array(capacity)
   visible.fill(1)
   geometry.setAttribute('trafficDelta', new THREE.InstancedBufferAttribute(deltas, 3))
   geometry.setAttribute('trafficYawDelta', new THREE.InstancedBufferAttribute(yawDeltas, 1))
   geometry.setAttribute('trafficVisible', new THREE.InstancedBufferAttribute(visible, 1))
-  const mesh = new THREE.InstancedMesh(geometry, material, vehicles.length)
+  const mesh = new THREE.InstancedMesh(geometry, material, capacity)
   mesh.name = name
-  mesh.instanceMatrix.setUsage(vehicles.some((vehicle) => vehicle.state)
-    ? THREE.DynamicDrawUsage
-    : THREE.StaticDrawUsage)
+  mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
   // These instances move independently after the creation-time bounds are
   // computed. A stale aggregate sphere can cull cars that are currently in
   // view, which looks exactly like despawning while the camera moves.
   mesh.frustumCulled = false
+  mesh.userData.trafficProfiled = profiled
+  populateVehicleMesh(mesh, vehicles, cabin)
+  return mesh
+}
+
+function populateVehicleMesh(
+  mesh: THREE.InstancedMesh,
+  vehicles: readonly TrafficVehicle[],
+  cabin: boolean,
+): number {
+  mesh.userData.trafficVehicles = vehicles
+  mesh.count = vehicles.length
+  mesh.instanceMatrix.setUsage(vehicles.some((vehicle) => vehicle.state)
+    ? THREE.DynamicDrawUsage
+    : THREE.StaticDrawUsage)
   const matrix = new THREE.Matrix4()
   const position = new THREE.Vector3()
   const quaternion = new THREE.Quaternion()
@@ -395,34 +498,27 @@ function createVehicleMesh(
     const pose = vehicle.state?.previous
     position.set(pose?.x ?? vehicle.x, pose?.y ?? vehicle.y + 0.035, pose?.z ?? vehicle.z)
     quaternion.setFromAxisAngle(yAxis, pose?.yaw ?? vehicle.yaw)
-    applyVehicleScale(scale, profiled ? (vehicle.state?.modelChoice ?? vehicle.modelId) : -1)
+    applyVehicleScale(scale, mesh.userData.trafficProfiled ? (vehicle.state?.modelChoice ?? vehicle.modelId) : -1)
     matrix.compose(position, quaternion, scale)
     mesh.setMatrixAt(index, matrix)
     mesh.setColorAt(index, color.setHex(cabin
       ? CABIN_COLORS[(vehicle.state?.modelChoice ?? vehicle.modelId) % CABIN_COLORS.length]!
       : vehicle.color))
   }
-  mesh.userData.trafficVehicles = vehicles
-  mesh.userData.trafficProfiled = profiled
-  mesh.instanceMatrix.addUpdateRange(0, vehicles.length * 16)
-  mesh.instanceMatrix.needsUpdate = true
+  setUpdateRange(mesh.instanceMatrix, vehicles.length * 16)
   if (mesh.instanceColor) {
-    mesh.instanceColor.setUsage(THREE.StaticDrawUsage)
-    mesh.instanceColor.addUpdateRange(0, vehicles.length * 3)
-    mesh.instanceColor.needsUpdate = true
+    mesh.instanceColor.setUsage(THREE.DynamicDrawUsage)
+    setUpdateRange(mesh.instanceColor, vehicles.length * 3)
   }
-  mesh.computeBoundingBox()
-  mesh.computeBoundingSphere()
-  if (mesh.boundingSphere) mesh.boundingSphere.radius += 0.35
-  // A roster refresh must preserve the current interpolation endpoint. Zeroed
-  // deltas would pull every retained car back one fixed step for a frame.
-  if (vehicles.some((vehicle) => vehicle.state)) uploadTrafficEndpoints(mesh)
-  return mesh
+  const endpointBytes = vehicles.some((vehicle) => vehicle.state)
+    ? uploadTrafficEndpoints(mesh)
+    : 0
+  return vehicles.length * (16 + 3) * Float32Array.BYTES_PER_ELEMENT + endpointBytes
 }
 
-function uploadTrafficEndpoints(mesh: THREE.InstancedMesh): void {
+function uploadTrafficEndpoints(mesh: THREE.InstancedMesh): number {
   const vehicles = mesh.userData.trafficVehicles as readonly TrafficVehicle[] | undefined
-  if (!vehicles) return
+  if (!vehicles || vehicles.length === 0) return 0
   const delta = mesh.geometry.getAttribute('trafficDelta') as THREE.InstancedBufferAttribute
   const yawDelta = mesh.geometry.getAttribute('trafficYawDelta') as THREE.InstancedBufferAttribute
   const visible = mesh.geometry.getAttribute('trafficVisible') as THREE.InstancedBufferAttribute
@@ -452,10 +548,17 @@ function uploadTrafficEndpoints(mesh: THREE.InstancedMesh): void {
     // are extended by the simulation before arrival and continue smoothly.
     visible.setX(index, 1)
   }
-  delta.needsUpdate = true
-  yawDelta.needsUpdate = true
-  visible.needsUpdate = true
-  mesh.instanceMatrix.needsUpdate = true
+  setUpdateRange(delta, vehicles.length * 3)
+  setUpdateRange(yawDelta, vehicles.length)
+  setUpdateRange(visible, vehicles.length)
+  setUpdateRange(mesh.instanceMatrix, vehicles.length * 16)
+  return vehicles.length * (16 + 3 + 1 + 1) * Float32Array.BYTES_PER_ELEMENT
+}
+
+function setUpdateRange(attribute: THREE.BufferAttribute, count: number): void {
+  attribute.clearUpdateRanges()
+  if (count > 0) attribute.addUpdateRange(0, count)
+  attribute.needsUpdate = count > 0
 }
 
 function applyVehicleScale(target: THREE.Vector3, choice: number): void {
@@ -600,4 +703,33 @@ function bitCount8(mask: number): number {
     count++
   }
   return count
+}
+
+function utilizationMap(
+  loads: readonly { segmentId: number; utilization: number }[],
+): Map<number, number> {
+  const result = new Map<number, number>()
+  for (const load of loads) result.set(load.segmentId, load.utilization)
+  return result
+}
+
+function sameGeometryMap(
+  a: ReadonlyMap<number, THREE.BufferGeometry>,
+  b: ReadonlyMap<number, THREE.BufferGeometry>,
+): boolean {
+  if (a.size !== b.size) return false
+  for (const [id, geometry] of a) if (b.get(id) !== geometry) return false
+  return true
+}
+
+function currentMeshVehicles(
+  body: THREE.InstancedMesh | null,
+  authored: readonly THREE.InstancedMesh[],
+): TrafficVehicle[] {
+  if (body) return [...(body.userData.trafficVehicles as readonly TrafficVehicle[] | undefined ?? [])]
+  const vehicles: TrafficVehicle[] = []
+  for (const mesh of authored) {
+    vehicles.push(...(mesh.userData.trafficVehicles as readonly TrafficVehicle[] | undefined ?? []))
+  }
+  return vehicles
 }

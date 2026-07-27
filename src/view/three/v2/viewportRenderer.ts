@@ -156,6 +156,29 @@ export class ViewportMapRenderer {
   }
 
   /**
+   * Retire only resident batches that reference newly published archetypes.
+   * Their replacements are rebuilt through the normal viewport work budget on
+   * the next reconciliation; camera, simulation, surface and LOD state survive.
+   */
+  invalidateArchetypes(archetypeIds: ReadonlySet<number>): number {
+    this.assertLive()
+    const ids = [...archetypeIds]
+    let invalidated = 0
+    for (const [key, record] of [...this.chunkLayers]) {
+      if (!ids.some(id => record.chunk.capacityFor(id) > 0)) continue
+      this.removeChunkLayer(key, record)
+      invalidated++
+    }
+    if (ids.some(id => id === 300 || (id >= 473 && id <= 483))) {
+      this.traffic.refreshAuthoredGeometry(this.registry)
+    }
+    if (ids.some(id => id === 301 || (id >= 484 && id <= 487))) {
+      this.environmentLife.refreshAuthoredGeometry(this.registry)
+    }
+    return invalidated
+  }
+
+  /**
    * Reconcile viewport chunks and screen-space LOD. Call on a chunk-boundary,
    * LOD-threshold, or world-journal change rather than on every React render.
    */
@@ -296,7 +319,7 @@ export class ViewportMapRenderer {
     }
     this.traffic.update(selection.visible, this.chunks, this.source)
     this.environmentLife.update(selection.visible, this.chunks, this.source)
-    this.municipalPower.update(selection.visible, this.chunks, this.source)
+    this.municipalPower.update(selection.visible, this.chunks, this.source, lod.active)
     this.updateMetrics(selection, lod, pendingChunks, performance.now() - buildStarted)
     return { chunks: selection, lod, prewarming: pendingPrewarm > 0 }
   }
@@ -326,6 +349,12 @@ export class ViewportMapRenderer {
   setTrafficFrame(timeSeconds: number): void {
     this.assertLive()
     this.traffic.setFrame(timeSeconds)
+    this.metrics.set({
+      trafficSteps: this.traffic.stats.steps,
+      trafficReconciles: this.traffic.stats.reconciles,
+      trafficRebuilds: this.traffic.stats.rebuilds,
+      trafficUploadBytes: this.traffic.stats.uploadBytes,
+    })
   }
 
   render(camera: THREE.Camera, timeSeconds: number): void {
@@ -440,6 +469,10 @@ export class ViewportMapRenderer {
     capacity += this.environmentLife.stats.instances
     drawCalls += this.environmentLife.stats.drawCalls
     triangles += this.environmentLife.stats.triangles
+    instances += this.municipalPower.stats.instances
+    capacity += this.municipalPower.stats.instances
+    drawCalls += this.municipalPower.stats.drawCalls
+    triangles += this.municipalPower.stats.triangles
     if (this.clouds.root.visible) {
       drawCalls += this.clouds.stats.drawCalls
       triangles += this.clouds.stats.triangles
@@ -455,6 +488,11 @@ export class ViewportMapRenderer {
       instanceCapacity: capacity,
       estimatedDrawCalls: drawCalls,
       estimatedTriangles: triangles,
+      trafficSteps: this.traffic.stats.steps,
+      trafficReconciles: this.traffic.stats.reconciles,
+      trafficRebuilds: this.traffic.stats.rebuilds,
+      trafficUploadBytes: this.traffic.stats.uploadBytes,
+      municipalEffectInstances: this.municipalPower.stats.instances,
       chunkBuildMs,
       lodActive: lod.active,
       lodDesired: lod.desired,

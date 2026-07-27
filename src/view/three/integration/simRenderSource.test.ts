@@ -527,9 +527,26 @@ describe('SimViewportRenderSource', () => {
     const source = new SimViewportRenderSource(state)
     const plant = world.staticWorld.municipalPowerPlants?.[0]
     expect(plant).toBeDefined()
-    const records = source.getChunkInstances(chunkFor(plant!.footprint[0], source), LodTier.near)!
+    const centreTile = (plant!.cy + 1) * source.width + plant!.cx + 1
+    const records = source.getChunkInstances(chunkFor(centreTile as TileId, source), LodTier.near)!
 
-    expect(records.some((record) => record.pickTileId === plant!.footprint[0])).toBe(true)
+    const record = records.find((candidate) => candidate.pickTileId === plant!.footprint[0])
+    expect(record).toBeDefined()
+    expect(record).toMatchObject({
+      x: (plant!.cx + 1) * source.tileSize,
+      z: (plant!.cy + 1) * source.tileSize,
+      yaw: plant!.animationPhase * Math.PI * 2,
+      scaleX: source.tileSize,
+      scaleY: source.tileSize,
+      scaleZ: source.tileSize,
+    })
+    expect(source.getMunicipalPowerPlants()[0]).toMatchObject({
+      tileX: plant!.cx + 1,
+      tileY: plant!.cy + 1,
+      x: record!.x,
+      z: record!.z,
+      phase: record!.yaw,
+    })
     for (const id of plant!.footprint) {
       expect(source.isSelectable(id % source.width, Math.floor(id / source.width))).toBe(true)
     }

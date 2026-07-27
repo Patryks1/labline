@@ -27,6 +27,15 @@ describe('canonical transport congestion', () => {
     expect(first.transport.day).toBe(state.day)
     expect(first.transport.segmentLoads.length).toBeGreaterThan(0)
     expect(first.transport.networkRevision).toBeGreaterThanOrEqual(0)
+    expect(JSON.stringify(first.transport)).toBe(JSON.stringify(second.transport))
+  })
+
+  it('runs at most one shortest-path traversal per origin and assignment pass', () => {
+    const diagnostics = { endpointCount: 0, demandRouteCount: 0, shortestPathTraversals: 0 }
+    tickTransport(compactState(), diagnostics)
+    expect(diagnostics.endpointCount).toBeGreaterThan(1)
+    expect(diagnostics.shortestPathTraversals).toBeLessThanOrEqual(diagnostics.endpointCount * 3)
+    expect(diagnostics.demandRouteCount).toBeGreaterThan(diagnostics.shortestPathTraversals)
   })
 
   it('keeps gameplay multipliers within their specified bounds', () => {
