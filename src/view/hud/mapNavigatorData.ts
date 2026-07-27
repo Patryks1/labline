@@ -1,4 +1,5 @@
 import type { MapOverlayMode, MapRegion, SimState, TileKind } from '../../sim/types'
+import { deriveCityStats, type CityStats } from '../../sim/systems/cityStats'
 import { facilityAnchorTiles, mapTileAtAny } from '../../sim/systems/worldAccess'
 import { tileId } from '../../sim/world/ids'
 import {
@@ -11,6 +12,7 @@ import {
   WORLD_CHANGE_FLAGS,
   WORLD_GENERATOR_VERSION_V4,
   WORLD_GENERATOR_VERSION_V5,
+  WORLD_GENERATOR_VERSION_V6,
   type BiomeKindName,
 } from '../../sim/world/types'
 import { rivalMapSites, rivalSiteKindLabel } from '../three/rivalMapSites'
@@ -68,11 +70,27 @@ export interface MapNavigatorData {
   width: number
   height: number
   regions: MapRegion[]
-  cities: NonNullable<SimState['map']['cities']>
+  cities: MapNavigatorCity[]
   sites: MapNavigatorSite[]
   companies: MapNavigatorCompany[]
   terrain: MapNavigatorTerrainCell[]
   roads: MapNavigatorRoadEdge[]
+}
+
+export type MapNavigatorCity = NonNullable<SimState['map']['cities']>[number] & {
+  /** Live derived population and municipal power balance for this city. */
+  stats: CityStats
+}
+
+/** Shared accessible description for both the city marker and its text label. */
+export function navigatorCitySummary(city: MapNavigatorCity): string {
+  const stats = city.stats
+  const reserve = `${stats.reserveMargin >= 0 ? '+' : ''}${Math.round(stats.reserveMargin * 100)}%`
+  const contracts = stats.cityPowerContractCount + stats.powerExportContractCount
+  return `${city.name}, population ${Math.round(stats.population).toLocaleString()}, ` +
+    `municipal capacity ${Math.round(stats.municipalCapacityMw).toLocaleString()} megawatts, ` +
+    `demand ${Math.round(stats.municipalDemandMw).toLocaleString()} megawatts, ` +
+    `${contracts} active power ${contracts === 1 ? 'contract' : 'contracts'}, reserve margin ${reserve}`
 }
 
 export interface MapNavigatorRoadEdge {
@@ -226,7 +244,8 @@ function dominantTerrainKind(
   const staticWorld = state.map.storage === 'compact' ? state.map.world?.staticWorld : undefined
   const elevation = staticWorld?.elevation
   const elevationScale = staticWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V4 ||
-    staticWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5
+    staticWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
+    staticWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6
     ? staticWorld.descriptor.elevationScale
     : 0
   for (let y = y0; y < y1; y += 1) {
@@ -528,7 +547,11 @@ export function buildMapNavigatorData(
   state: SimState,
   terrain = buildMinimapTerrain(state),
 ): MapNavigatorData {
-  const cities = state.map.cities ?? []
+  const statsById = new Map(deriveCityStats(state).map((stats) => [stats.cityId, stats]))
+  const cities: MapNavigatorCity[] = (state.map.cities ?? []).flatMap((city) => {
+    const stats = statsById.get(city.id)
+    return stats ? [{ ...city, population: stats.population, stats }] : []
+  })
   const fallback = cities[0] ?? {
     cx: state.map.width / 2,
     cy: state.map.height / 2,

@@ -12,6 +12,7 @@ import {
   WORLD_FORMAT_VERSION,
   WORLD_GENERATOR_VERSION_V4,
   WORLD_GENERATOR_VERSION_V5,
+  WORLD_GENERATOR_VERSION_V6,
   type ChunkId,
   type CityRuntimeState,
   type DynamicWorldSnapshotV2,
@@ -228,7 +229,8 @@ export class DynamicWorld {
       (staticWorld.biome !== undefined && staticWorld.biome.length !== size) ||
       (staticWorld.district !== undefined && staticWorld.district.length !== size) ||
       ((staticWorld.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V4 ||
-        staticWorld.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5) &&
+        staticWorld.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
+        staticWorld.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6) &&
         (staticWorld.elevation === undefined || staticWorld.biome === undefined))
     ) {
       throw new Error('static world layer lengths do not match its descriptor')

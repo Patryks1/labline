@@ -568,6 +568,14 @@ function restoreState(stateRaw: unknown, snapshot: DynamicWorldSnapshotV2 | null
     if (!Array.isArray(state.map.cities)) {
       throw new SaveError('Compact save is missing city runtime state.')
     }
+    const staticCityIndexById = new Map(staticWorld.cities.map((city) => [city.id, city.index]))
+    const compatibilityCities = state.map.cities.map((city, compatibilityIndex) => {
+      const cityIndex = staticCityIndexById.get(city.id) ?? compatibilityIndex
+      const population = world.cityRuntime.get(cityIndex)?.population
+      return population === undefined || population === city.population
+        ? city
+        : { ...city, population }
+    })
     map = {
       width: snapshot.descriptor.width,
       height: snapshot.descriptor.height,
@@ -578,7 +586,7 @@ function restoreState(stateRaw: unknown, snapshot: DynamicWorldSnapshotV2 | null
       regions: regionsFromStatic(staticWorld),
       energyPricePerMWh: state.map.energyPricePerMWh,
       activeRegionId: state.map.activeRegionId,
-      cities: state.map.cities,
+      cities: compatibilityCities,
     }
   } else {
     if (!Array.isArray(state.map.tiles) || !Array.isArray(state.map.regions)) {

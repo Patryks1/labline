@@ -527,12 +527,38 @@ describe('SimViewportRenderSource', () => {
     const source = new SimViewportRenderSource(state)
     const plant = world.staticWorld.municipalPowerPlants?.[0]
     expect(plant).toBeDefined()
-    const records = source.getChunkInstances(chunkFor(plant!.footprint[0], source), LodTier.near)!
+    const equipmentTileId = plant!.layout?.equipmentTileId ?? plant!.footprint[0]
+    const records = source.getChunkInstances(chunkFor(equipmentTileId, source), LodTier.near)!
 
-    expect(records.some((record) => record.pickTileId === plant!.footprint[0])).toBe(true)
+    expect(records.some((record) => record.pickTileId === equipmentTileId)).toBe(true)
     for (const id of plant!.footprint) {
       expect(source.isSelectable(id % source.width, Math.floor(id / source.width))).toBe(true)
+      expect(source.getSelectionFootprint(id % source.width, Math.floor(id / source.width)))
+        .toHaveLength(plant!.footprint.length)
     }
+  })
+
+  it('projects V6 solar panels from authoritative tile IDs across their owning chunks', () => {
+    const state = compactGame()
+    const source = new SimViewportRenderSource(state)
+    const plant = state.map.world!.staticWorld.municipalPowerPlants?.find((candidate) =>
+      candidate.kind === 'solar' && (candidate.layout?.panelTileIds.length ?? 0) > 0)
+    if (!plant?.layout) return
+
+    const records = allChunkInstances(source)
+    for (const panelTileId of plant.layout.panelTileIds) {
+      const x = panelTileId % source.width
+      const y = Math.floor(panelTileId / source.width)
+      expect(records.some((record) =>
+        record.pickTileId === plant.layout!.equipmentTileId &&
+        Math.abs(record.x - x * source.tileSize) < 0.0001 &&
+        Math.abs(record.z - y * source.tileSize) < 0.0001,
+      )).toBe(true)
+    }
+    expect(source.getMunicipalPowerPlants().find((candidate) =>
+      candidate.kind === 'solar' && candidate.panels.length === plant.layout!.panelTileIds.length,
+    )?.panels)
+      .toHaveLength(plant.layout.panelTileIds.length)
   })
 
   it('projects v3 transport over its base terrain and suppresses underlying props/selection', () => {

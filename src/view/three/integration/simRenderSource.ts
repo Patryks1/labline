@@ -1,8 +1,10 @@
 import type { BuildableKind, MapTile, SimState, TileKind } from '../../../sim/types'
 import {
+  DISTRICT_KIND,
   TERRAIN_KIND,
   WORLD_GENERATOR_VERSION_V4,
   WORLD_GENERATOR_VERSION_V5,
+  WORLD_GENERATOR_VERSION_V6,
   WORLD_CHANGE_FLAGS,
   compileRoadNetwork,
   type DynamicWorld,
@@ -10,6 +12,7 @@ import {
   type MunicipalPowerPlant,
   type RoadNetworkCompileSource,
   type RoadNetworkSnapshot,
+  type TileId as WorldTileId,
 } from '../../../sim/world'
 import {
   AUTHORED_INDUSTRIAL_ARCHETYPES,
@@ -139,7 +142,8 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     this.compactWorld = state.map.storage === 'compact' ? state.map.world : undefined
     this.useHeightfieldRoadMeshes =
       this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V4 ||
-      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5
+      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
+      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6
     this.chunkSize = this.compactWorld?.descriptor.chunkSize ?? RENDER_CHUNK_SIZE
     this.chunksWide = Math.ceil(this.width / this.chunkSize)
     this.chunksHigh = Math.ceil(this.height / this.chunkSize)
@@ -414,6 +418,18 @@ export class SimViewportRenderSource implements ViewportRenderSource {
       for (const id of plant.footprint) {
         elevation = Math.max(elevation, this.getTileElevation(id % this.width, Math.floor(id / this.width)))
       }
+      const orientation = (plant.layout?.orientationQuarterTurns ?? 0) * Math.PI * 0.5
+      const panels = (plant.layout?.panelTileIds ?? []).map((tileId) => {
+        const x = tileId % this.width
+        const y = Math.floor(tileId / this.width)
+        return Object.freeze({
+          tileId,
+          x: x * MAP_TILE_SIZE,
+          y: this.getTileElevation(x, y) + 0.015,
+          z: y * MAP_TILE_SIZE,
+          yaw: orientation,
+        })
+      })
       return Object.freeze({
         id: stableStringId(plant.id),
         kind: plant.kind,
@@ -423,6 +439,8 @@ export class SimViewportRenderSource implements ViewportRenderSource {
         y: (Number.isFinite(elevation) ? elevation : 0) + 0.015,
         z: (plant.cy + 0.5) * MAP_TILE_SIZE,
         phase: plant.animationPhase * Math.PI * 2,
+        footprintTileIds: plant.footprint,
+        panels: Object.freeze(panels),
       })
     })
   }
@@ -453,7 +471,7 @@ export class SimViewportRenderSource implements ViewportRenderSource {
       const facility = this.compactWorld.getFacilityAt(tileId as never)
       if (facility) return true
       if (this.compactTransport(tileId) !== 0) return false
-      if (this.compactWorld.staticWorld.district?.[tileId] === 2) return true
+      if (this.compactWorld.staticWorld.district?.[tileId] === DISTRICT_KIND.municipalCampus) return true
       const owner = this.compactWorld.getOwner(tileId as never)
       if (owner !== 'neutral') return true
       const kind = this.compactWorld.getKind(tileId as never)
@@ -467,7 +485,14 @@ export class SimViewportRenderSource implements ViewportRenderSource {
 
   getSelectionFootprint(x: number, y: number): readonly { x: number; y: number }[] | undefined {
     const tileId = idAt(x, y, this.width, this.height)
-    if (tileId === null || !this.usesUrbanParcels()) return undefined
+    if (tileId === null) return undefined
+    const plant = this.compactWorld?.staticWorld.municipalPowerPlants?.find((candidate) =>
+      candidate.footprint.includes(tileId as WorldTileId),
+    )
+    if (plant) {
+      return plant.footprint.map((id) => ({ x: id % this.width, y: Math.floor(id / this.width) }))
+    }
+    if (!this.usesUrbanParcels()) return undefined
     const footprint = this.getUrbanParcelPlan().footprintForTile(tileId)
     if (footprint.length === 0) return undefined
     return footprint.map((id) => ({ x: id % this.width, y: Math.floor(id / this.width) }))
@@ -487,7 +512,8 @@ export class SimViewportRenderSource implements ViewportRenderSource {
 
   getBiome(x: number, y: number) {
     if (this.compactWorld?.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V4 &&
-      this.compactWorld?.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V5) {
+      this.compactWorld?.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V5 &&
+      this.compactWorld?.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V6) {
       return RenderBiome.plains
     }
     return this.compactWorld.getBiome(x, y)
@@ -499,7 +525,7 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     const bounds = this.chunkBounds(chunkId)
     const roadNetwork = this.getRoadNetwork()
     for (const plant of world.staticWorld.municipalPowerPlants ?? []) {
-      if (this.municipalPowerRenderChunk(plant) === chunkId) records.push(this.municipalPowerInstance(plant))
+      records.push(...this.municipalPowerInstancesForChunk(plant, chunkId))
     }
     for (const facility of world.queryFacilities({ chunkId: chunkId as never })) {
       if (this.facilityRenderChunk(facility) === chunkId) {
@@ -516,7 +542,8 @@ export class SimViewportRenderSource implements ViewportRenderSource {
         const tileId = y * this.width + x
         const facility = world.getFacilityAt(tileId as never)
         if (facility) continue
-        if (world.staticWorld.district?.[tileId] === 2) continue
+        if (world.staticWorld.district?.[tileId] === DISTRICT_KIND.municipalCampus ||
+          world.staticWorld.district?.[tileId] === DISTRICT_KIND.greenBuffer) continue
         // V3 transport overlays can cross populated terrain. The surface owns
         // the road cell so an underlying house/city prop cannot protrude.
         if (this.compactTransport(tileId) !== 0) continue
@@ -554,7 +581,8 @@ export class SimViewportRenderSource implements ViewportRenderSource {
   }
 
   private usesUrbanParcels(): boolean {
-    return this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5
+    return this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
+      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6
   }
 
   private invalidateUrbanParcelPlan(): void {
@@ -609,7 +637,7 @@ export class SimViewportRenderSource implements ViewportRenderSource {
       archetypeId = SingleBuildingArchetype.skyscraper
     } else if (parcel.class === 'small') {
       const choice = random % 10
-      archetypeId = choice < 6
+      archetypeId = parcel.style === 'suburban' && choice < 6
         ? SingleBuildingArchetype.detachedHouse
         : choice < 8 ? SingleBuildingArchetype.smallShop : SingleBuildingArchetype.rowhouse
     } else {
@@ -739,20 +767,65 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     for (const id of plant.footprint) {
       elevation = Math.max(elevation, this.getTileElevation(id % this.width, Math.floor(id / this.width)))
     }
+    const equipmentTileId = plant.layout?.equipmentTileId
+    const equipmentX = equipmentTileId === undefined ? plant.cx + 0.5 : equipmentTileId % this.width
+    const equipmentY = equipmentTileId === undefined ? plant.cy + 0.5 : Math.floor(equipmentTileId / this.width)
     return {
       entityId: stableStringId(plant.id),
-      pickTileId: plant.footprint[0],
-      archetypeId: MunicipalPowerArchetype[plant.kind],
-      x: (plant.cx + 0.5) * MAP_TILE_SIZE,
+      pickTileId: equipmentTileId ?? plant.footprint[0],
+      archetypeId: plant.kind === 'solar' && plant.layout
+        ? IntegrationArchetype.grid
+        : MunicipalPowerArchetype[plant.kind],
+      x: equipmentX * MAP_TILE_SIZE,
       y: (Number.isFinite(elevation) ? elevation : 0) + 0.015,
-      z: (plant.cy + 0.5) * MAP_TILE_SIZE,
-      yaw: plant.animationPhase * Math.PI * 2,
+      z: equipmentY * MAP_TILE_SIZE,
+      yaw: plant.layout
+        ? plant.layout.orientationQuarterTurns * Math.PI * 0.5
+        : plant.animationPhase * Math.PI * 2,
       scaleX: plant.kind === 'wind' ? 1.65 : 1.55,
       scaleY: plant.kind === 'nuclear' ? 1.5 : 1.25,
       scaleZ: plant.kind === 'wind' ? 1.65 : 1.55,
       color: plant.kind === 'coal' ? 0x706b62 : plant.kind === 'wind' ? 0xe7ece9 :
         plant.kind === 'solar' ? 0x527aa0 : 0xc8d0c9,
     }
+  }
+
+  private municipalSolarPanelInstance(plant: MunicipalPowerPlant, tileId: TileId): RenderInstance {
+    const x = tileId % this.width
+    const y = Math.floor(tileId / this.width)
+    return {
+      entityId: stableStringId(`${plant.id}:panel:${tileId}`),
+      pickTileId: plant.layout?.equipmentTileId ?? plant.footprint[0],
+      archetypeId: MunicipalPowerArchetype.solar,
+      x: x * MAP_TILE_SIZE,
+      y: this.getTileElevation(x, y) + 0.015,
+      z: y * MAP_TILE_SIZE,
+      yaw: (plant.layout?.orientationQuarterTurns ?? 0) * Math.PI * 0.5,
+      scaleX: 0.82,
+      scaleY: 0.72,
+      scaleZ: 0.82,
+      color: 0x527aa0,
+    }
+  }
+
+  private municipalPowerInstancesForChunk(
+    plant: MunicipalPowerPlant,
+    chunkId: ChunkId,
+  ): readonly RenderInstance[] {
+    const records: RenderInstance[] = []
+    const equipmentTileId = plant.layout?.equipmentTileId
+    const equipmentChunk = equipmentTileId === undefined
+      ? this.municipalPowerRenderChunk(plant)
+      : this.chunkIdForTile(equipmentTileId)
+    if (equipmentChunk === chunkId) records.push(this.municipalPowerInstance(plant))
+    if (plant.kind === 'solar') {
+      for (const tileId of plant.layout?.panelTileIds ?? []) {
+        if (this.chunkIdForTile(tileId) === chunkId) {
+          records.push(this.municipalSolarPanelInstance(plant, tileId))
+        }
+      }
+    }
+    return records
   }
 
   private municipalPowerRenderChunk(plant: MunicipalPowerPlant): ChunkId {

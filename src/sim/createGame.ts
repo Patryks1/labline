@@ -33,7 +33,7 @@ import {
 import {
   TERRAIN_KIND,
   createDynamicWorld,
-  generateStaticWorldV5,
+  generateStaticWorldV6,
   tileId,
   type DynamicWorld,
   type Facility,
@@ -52,7 +52,7 @@ export interface CreateGameOpts {
   advanced?: AdvancedOverrides
   /** Full config wins over difficulty/advanced when provided */
   config?: GameConfig
-  /** Compatibility-fixture escape hatch. Normal campaigns always use V4. */
+  /** Compatibility-fixture escape hatch. Normal campaigns always use V6. */
   legacyMapFixture?: boolean
 }
 
@@ -210,7 +210,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
   // are still supported when loading old saves, but are no longer created.
   const compact = opts.legacyMapFixture !== true
   const staticWorld = compact
-    ? generateStaticWorldV5({
+    ? generateStaticWorldV6({
         seed,
         width: cfg.mapWidth,
         height: cfg.mapHeight,
