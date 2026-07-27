@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import {
   CloudVisibilityButton,
+  NavigatorCompass,
   MapViewportOverlay,
 } from './MapNavigator'
 
@@ -26,6 +27,15 @@ describe('CloudVisibilityButton', () => {
 
     expect(markup).toContain('aria-pressed="false"')
     expect(markup).toContain('title="Show clouds"')
+  })
+})
+
+describe('NavigatorCompass', () => {
+  it('identifies the navigator as north up', () => {
+    const markup = renderToStaticMarkup(createElement(NavigatorCompass))
+    expect(markup).toContain('role="img"')
+    expect(markup).toContain('aria-label="North up"')
+    expect(markup).toContain('>N</div>')
   })
 })
 

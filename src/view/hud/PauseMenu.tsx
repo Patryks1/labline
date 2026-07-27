@@ -4,25 +4,10 @@ import {
   type SaveSlotId,
 } from '../../sim/save'
 import { useGameStore } from '../../store/gameStore'
-import {
-  RENDER_PRESETS,
-  type InterfaceScale,
-  type RenderPreset,
-  useResolvedUiScale,
-  useUiStore,
-} from '../../store/uiStore'
 import { money } from './format'
-import { ArrowsOut, Eye, Monitor, X } from '@phosphor-icons/react'
-
-const SCALE_OPTIONS: { value: InterfaceScale; label: string }[] = [
-  { value: 'auto', label: 'Auto' },
-  { value: 0.8, label: '80%' },
-  { value: 0.9, label: '90%' },
-  { value: 1, label: '100%' },
-  { value: 1.1, label: '110%' },
-  { value: 1.25, label: '125%' },
-  { value: 1.5, label: '150%' },
-]
+import { X } from '@phosphor-icons/react'
+import { LablineMenuShell } from './menu/LablineMenuShell'
+import { SettingsPanel } from './menu/SettingsPanel'
 
 /**
  * In-run pause menu: resume, save/load slots, return to main menu.
@@ -43,15 +28,8 @@ export function PauseMenu() {
   const newGame = useGameStore((s) => s.newGame)
   const onboardingDismissed = useGameStore((s) => s.state.onboardingDismissed)
   const setOnboardingDismissed = useGameStore((s) => s.setOnboardingDismissed)
-  const interfaceScale = useUiStore((s) => s.interfaceScale)
-  const setInterfaceScale = useUiStore((s) => s.setInterfaceScale)
-  const renderPreset = useUiStore((s) => s.renderPreset)
-  const setRenderPreset = useUiStore((s) => s.setRenderPreset)
-  const reducedMotion = useUiStore((s) => s.reducedMotion)
-  const setReducedMotion = useUiStore((s) => s.setReducedMotion)
-  const resolvedScale = useResolvedUiScale()
   const [msg, setMsg] = useState<string | null>(null)
-  const [tab, setTab] = useState<'main' | 'save' | 'load' | 'interface'>('main')
+  const [tab, setTab] = useState<'main' | 'save' | 'load' | 'settings'>('main')
   const [confirm, setConfirm] = useState<{
     title: string
     body: string
@@ -62,6 +40,12 @@ export function PauseMenu() {
   useEffect(() => {
     if (open) void refreshSaves()
   }, [open, refreshSaves])
+  useEffect(() => {
+    if (open) return
+    setTab('main')
+    setMsg(null)
+    setConfirm(null)
+  }, [open])
   void savesTick
   const bySlot = Object.fromEntries(saves.map((m) => [m.slotId, m])) as Partial<
     Record<SaveSlotId, (typeof saves)[0]>
@@ -93,26 +77,26 @@ export function PauseMenu() {
     })
   }
 
+  const requestClose = () => {
+    if (confirm) {
+      setConfirm(null)
+      return
+    }
+    setOpen(false)
+  }
+
   return (
-    <div
-      className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-void/70 p-4 backdrop-blur-sm"
-      onClick={() => setOpen(false)}
+    <LablineMenuShell
+      variant="pause"
+      titleId="labline-pause-title"
+      onRequestClose={requestClose}
+      contentClassName="max-h-[calc(100dvh-11.5rem)] max-w-[46rem] p-5 sm:p-6"
     >
-      <div
-        className="hud-surface relative w-full max-w-[32rem] overflow-hidden rounded-xl p-5"
-        onClick={(e) => e.stopPropagation()}
-      >
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-sm font-semibold text-bone">
-            {tab === 'main' ? 'Paused' : tab === 'save' ? 'Save run' : tab === 'load' ? 'Load run' : 'Interface'}
+            {tab === 'main' ? 'Paused' : tab === 'save' ? 'Save run' : tab === 'load' ? 'Load run' : 'Settings'}
           </h2>
-          <button
-            type="button"
-            onClick={() => setOpen(false)}
-            className="rounded-full px-2 py-0.5 text-[0.8125rem] text-muted hover:bg-panel-2 hover:text-bone"
-          >
-            Esc
-          </button>
+          <span className="font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">Esc to close</span>
         </div>
 
         {(msg ?? lifecycleError) && (
@@ -156,10 +140,10 @@ export function PauseMenu() {
               onClick={() => void onSave('auto')}
             />
             <MenuBtn
-              label="Interface settings"
+              label="Settings"
               onClick={() => {
                 setMsg(null)
-                setTab('interface')
+                setTab('settings')
               }}
             />
             <MenuBtn
@@ -214,8 +198,8 @@ export function PauseMenu() {
           </div>
         )}
 
-        {tab === 'interface' && (
-          <div className="space-y-4">
+        {tab === 'settings' && (
+          <div>
             <button
               type="button"
               className="text-[0.75rem] text-mint hover:underline"
@@ -223,149 +207,12 @@ export function PauseMenu() {
             >
               ← Back
             </button>
-
-            <section className="rounded-xl border border-line/70 bg-panel-2/70 p-3.5">
-              <div className="flex items-start gap-3">
-                <Monitor size="1.25rem" className="mt-0.5 text-mint" />
-                <div className="min-w-0 flex-1">
-                  <h3 className="text-[0.875rem] font-semibold text-bone">Render preset</h3>
-                  <p className="mt-1 text-[0.75rem] leading-snug text-muted">
-                    Pixel ratio, decorative traffic, and LOD transition timing.
-                  </p>
-                  <div className="mt-3 grid grid-cols-3 gap-1.5">
-                    {([
-                      ['performance', 'Performance'],
-                      ['balanced', 'Balanced'],
-                      ['quality', 'Quality'],
-                    ] as const).map(([id, label]) => {
-                      const preset = RENDER_PRESETS[id as RenderPreset]
-                      return (
-                        <button
-                          key={id}
-                          type="button"
-                          aria-pressed={renderPreset === id}
-                          onClick={() => setRenderPreset(id)}
-                          className={`rounded-lg border px-2 py-2 text-left transition ${
-                            renderPreset === id
-                              ? 'border-mint/50 bg-mint/15 text-mint'
-                              : 'border-line bg-void/35 text-muted hover:text-bone'
-                          }`}
-                        >
-                          <strong className="block text-[0.75rem]">{label}</strong>
-                          <span className="mt-1 block font-mono text-[0.625rem] tabular-nums opacity-80">
-                            {preset.pixelRatio}× · {preset.decorativeTraffic ? 'traffic' : 'no traffic'} · {preset.lodTransitionMs}ms
-                          </span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            <section className="rounded-xl border border-line/70 bg-panel-2/70 p-3.5">
-              <div className="flex items-start gap-3">
-                <Monitor size="1.25rem" className="mt-0.5 text-mint" />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <h3 className="text-[0.875rem] font-semibold text-bone">Interface scale</h3>
-                      <p className="mt-1 text-[0.75rem] leading-snug text-muted">
-                        Auto follows display height. Ultrawide width does not enlarge controls.
-                      </p>
-                    </div>
-                    <span className="status-chip status-chip--positive">{Math.round(resolvedScale * 100)}%</span>
-                  </div>
-                  <div className="mt-3 grid grid-cols-4 gap-1.5">
-                    {SCALE_OPTIONS.map((option) => (
-                      <button
-                        key={String(option.value)}
-                        type="button"
-                        onClick={() => setInterfaceScale(option.value)}
-                        className={`min-h-9 rounded-lg border px-2 font-mono text-[0.6875rem] transition ${
-                          interfaceScale === option.value
-                            ? 'border-mint/50 bg-mint/15 text-mint'
-                            : 'border-line bg-void/35 text-muted hover:text-bone'
-                        }`}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setInterfaceScale('auto')}
-                    className="mt-2 text-[0.75rem] font-medium text-mint hover:underline"
-                  >
-                    Reset to Auto
-                  </button>
-                </div>
-              </div>
-            </section>
-
-            <button
-              type="button"
-              aria-pressed={reducedMotion}
-              onClick={() => setReducedMotion(!reducedMotion)}
-              className="flex w-full items-center gap-3 rounded-xl border border-line/70 bg-panel-2/70 p-3.5 text-left hover:border-mint/30"
-            >
-              <ArrowsOut size="1.25rem" className="text-mint" />
-              <span className="min-w-0 flex-1">
-                <span className="block text-[0.875rem] font-semibold text-bone">Reduce interface motion</span>
-                <span className="mt-1 block text-[0.75rem] text-muted">Remove panel transitions and animated status changes.</span>
-              </span>
-              <span className={`status-chip ${reducedMotion ? 'status-chip--positive' : ''}`}>{reducedMotion ? 'On' : 'Off'}</span>
-            </button>
-
-            <section className="rounded-xl border border-line/70 bg-panel-2/70 p-3.5">
-              <div>
-                <h3 className="text-[0.875rem] font-semibold text-bone">Simulation auto-pause</h3>
-                <p className="mt-1 text-[0.75rem] leading-snug text-muted">
-                  Off by default. Enable only the interruptions you want; rack deliveries never stop time.
-                </p>
-              </div>
-              <div className="mt-3 space-y-1.5">
-                {([
-                  ['projectComplete', 'Project completion', 'Construction, research, or model projects finish.'],
-                  ['majorEvent', 'Major world event', 'A new industry event begins.'],
-                  ['quarterlyReport', 'Quarterly review', 'A scheduled company review is ready.'],
-                  ['runwayEmergency', 'Runway emergency', 'Cash runway falls below 60 days.'],
-                ] as const).map(([key, label, description]) => {
-                  const enabled = autoPause[key]
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      aria-pressed={enabled}
-                      onClick={() => setAutoPause(key, !enabled)}
-                      className="flex w-full items-center gap-3 rounded-lg border border-line/60 bg-void/35 px-2.5 py-2 text-left hover:border-mint/30"
-                    >
-                      <span className="min-w-0 flex-1">
-                        <span className="block text-[0.8125rem] text-bone">{label}</span>
-                        <span className="mt-0.5 block text-[0.6875rem] text-muted">{description}</span>
-                      </span>
-                      <span className={`status-chip ${enabled ? 'status-chip--positive' : ''}`}>
-                        {enabled ? 'On' : 'Off'}
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
-            </section>
-
-            <button
-              type="button"
-              aria-pressed={!onboardingDismissed}
-              onClick={() => setOnboardingDismissed(!onboardingDismissed)}
-              className="flex w-full items-center gap-3 rounded-xl border border-line/70 bg-panel-2/70 p-3.5 text-left hover:border-mint/30"
-            >
-              <Eye size="1.25rem" className="text-mint" />
-              <span className="min-w-0 flex-1">
-                <span className="block text-[0.875rem] font-semibold text-bone">Starter objectives</span>
-                <span className="mt-1 block text-[0.75rem] text-muted">Show the guided launch sequence in mission control.</span>
-              </span>
-              <span className={`status-chip ${!onboardingDismissed ? 'status-chip--positive' : ''}`}>{onboardingDismissed ? 'Hidden' : 'Visible'}</span>
-            </button>
+            <SettingsPanel gameplay={{
+              autoPause,
+              setAutoPause,
+              onboardingDismissed,
+              setOnboardingDismissed,
+            }} />
           </div>
         )}
 
@@ -398,8 +245,7 @@ export function PauseMenu() {
             </div>
           </div>
         ) : null}
-      </div>
-    </div>
+    </LablineMenuShell>
   )
 }
 

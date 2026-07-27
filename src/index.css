@@ -120,6 +120,41 @@ button:not(:disabled):active {
   isolation: isolate;
 }
 
+.labline-menu-shell--pause {
+  background: rgba(7, 17, 23, 0.76);
+  backdrop-filter: blur(10px) saturate(88%);
+}
+
+.labline-menu-logo {
+  padding-top: max(1.25rem, env(safe-area-inset-top));
+}
+
+.labline-menu-stage {
+  padding-top: 10.75rem;
+  padding-bottom: max(1.25rem, env(safe-area-inset-bottom));
+}
+
+.labline-menu-console {
+  min-height: 0;
+  animation: main-menu-console-in 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.labline-menu-shell--pause .main-menu-shade {
+  background:
+    radial-gradient(circle at 50% 15%, rgba(72, 215, 209, 0.1), transparent 32%),
+    linear-gradient(180deg, rgba(7, 17, 23, 0.32), rgba(7, 17, 23, 0.8));
+}
+
+.labline-menu-shell--pause .main-menu-grid {
+  opacity: 0.24;
+  mask-image: radial-gradient(ellipse at 50% 35%, black, transparent 78%);
+}
+
+.labline-menu-utility {
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+}
+
 .main-menu-art {
   object-position: center;
   filter: saturate(0.88) contrast(1.04) brightness(0.78);
@@ -272,6 +307,18 @@ button:not(:disabled):active {
 }
 
 @media (max-height: 820px) and (min-width: 1024px) {
+  .labline-menu-logo {
+    padding-top: 0.75rem;
+  }
+
+  .labline-menu-logo > div > span {
+    display: none;
+  }
+
+  .labline-menu-stage {
+    padding-top: 6.75rem;
+  }
+
   .main-menu-console-head {
     padding-top: 1rem !important;
     padding-bottom: 0.9rem !important;
@@ -308,6 +355,31 @@ button:not(:disabled):active {
 
   .main-menu-difficulty > span:last-child:not(:nth-child(2)) {
     bottom: 0.45rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .labline-menu-logo {
+    padding-top: max(0.85rem, env(safe-area-inset-top));
+  }
+
+  .labline-menu-logo > div > span,
+  .labline-menu-logo > div > p {
+    display: none;
+  }
+
+  .labline-menu-stage {
+    align-items: flex-start;
+    padding-top: 5.5rem;
+    padding-bottom: 4.75rem;
+  }
+
+  .labline-menu-console {
+    max-height: calc(100dvh - 10.25rem) !important;
+  }
+
+  .settings-panel [role='tablist'] {
+    overflow-x: auto;
   }
 }
 
@@ -554,12 +626,92 @@ button:not(:disabled):active {
 .map-navigator {
   left: calc(var(--hud-rail) + 0.75rem);
   bottom: calc(var(--hud-ops) + 0.75rem);
+  width: clamp(22rem, 25vw, 26rem);
+  max-width: calc(100vw - var(--hud-rail) - var(--intel-width) - 1.5rem);
+  max-height: calc(100dvh - var(--hud-top) - var(--hud-ops) - 1.5rem);
   transition: width 180ms ease, opacity 180ms ease;
 }
 
-@media (max-width: 900px), (max-height: 720px) {
+.map-navigator-frame {
+  height: clamp(12rem, 22vh, 15rem);
+}
+
+.map-navigator-launcher,
+.map-navigator-compact-close,
+.map-navigator-compact-heading {
+  display: none;
+}
+
+.game-shell[data-workspace-open='true'] .map-navigator,
+.game-shell[data-workspace-open='true'] .map-navigator-launcher {
+  left: calc(var(--hud-rail) + var(--workspace-width) + 0.75rem);
+}
+
+.game-shell[data-workspace-open='true'] .map-navigator {
+  max-width: calc(100vw - var(--hud-rail) - var(--workspace-width) - var(--intel-width) - 1.5rem);
+}
+
+.game-shell[data-workspace-open='true'][data-presentation='workbench'] .map-navigator,
+.game-shell[data-workspace-open='true'][data-presentation='immersive'] .map-navigator {
+  display: none;
+}
+
+.game-shell[data-workspace-open='true'][data-presentation='workbench'] .map-navigator-launcher,
+.game-shell[data-workspace-open='true'][data-presentation='immersive'] .map-navigator-launcher {
+  display: flex;
+}
+
+.game-shell[data-workspace-open='true'][data-presentation='workbench'] .map-navigator[data-expanded='true'],
+.game-shell[data-workspace-open='true'][data-presentation='immersive'] .map-navigator[data-expanded='true'] {
+  display: block;
+  left: max(0.5rem, env(safe-area-inset-left));
+  width: min(26rem, calc(100vw - 1rem));
+  max-width: calc(100vw - 1rem);
+  overflow-y: auto;
+  z-index: 45;
+}
+
+.game-shell[data-workspace-open='true'][data-presentation='workbench'] .map-navigator-compact-close,
+.game-shell[data-workspace-open='true'][data-presentation='immersive'] .map-navigator-compact-close,
+.game-shell[data-workspace-open='true'][data-presentation='workbench'] .map-navigator-compact-heading,
+.game-shell[data-workspace-open='true'][data-presentation='immersive'] .map-navigator-compact-heading {
+  display: flex;
+}
+
+@media (max-width: 1000px), (max-height: 760px) {
+  .map-navigator-launcher {
+    display: flex;
+    left: calc(var(--hud-rail) + 0.5rem);
+    bottom: calc(var(--hud-ops) + 0.5rem);
+  }
+
   .map-navigator {
     display: none;
+    left: max(0.5rem, env(safe-area-inset-left));
+    bottom: calc(var(--hud-ops) + 0.5rem);
+    width: min(26rem, calc(100vw - 1rem));
+    max-width: calc(100vw - 1rem);
+    max-height: calc(100dvh - var(--hud-top) - var(--hud-ops) - 1rem);
+    overflow-y: auto;
+    z-index: 45;
+  }
+
+  .map-navigator[data-expanded='true'] {
+    display: block;
+  }
+
+  .map-navigator-compact-close,
+  .map-navigator-compact-heading {
+    display: flex;
+  }
+
+  .game-shell[data-workspace-open='true'] .map-navigator,
+  .game-shell[data-workspace-open='true'] .map-navigator-launcher {
+    left: max(0.5rem, env(safe-area-inset-left));
+  }
+
+  .map-navigator-frame {
+    height: clamp(12rem, 32vh, 15rem);
   }
 }
 
