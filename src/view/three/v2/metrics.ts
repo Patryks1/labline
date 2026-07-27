@@ -16,6 +16,11 @@ export interface ViewportRendererMetricsSnapshot {
   rendererTriangles: number
   surfaceUploadBytes: number
   surfaceUploadTiles: number
+  trafficSteps: number
+  trafficReconciles: number
+  trafficRebuilds: number
+  trafficUploadBytes: number
+  municipalEffectInstances: number
   chunkBuildMs: number
   lodActive: LodTier
   lodDesired: LodTier
@@ -40,6 +45,11 @@ export class ViewportRendererMetrics {
       rendererTriangles: 0,
       surfaceUploadBytes: 0,
       surfaceUploadTiles: 0,
+      trafficSteps: 0,
+      trafficReconciles: 0,
+      trafficRebuilds: 0,
+      trafficUploadBytes: 0,
+      municipalEffectInstances: 0,
       chunkBuildMs: 0,
       lodActive: initialTier,
       lodDesired: initialTier,

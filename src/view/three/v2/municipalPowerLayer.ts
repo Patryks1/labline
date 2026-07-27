@@ -1,6 +1,12 @@
 import * as THREE from 'three'
 import type { ViewportChunkManager } from './chunks'
-import type { ChunkId, ViewportRenderSource } from './types'
+import { LodTier, type ChunkId, type ViewportRenderSource } from './types'
+import {
+  MUNICIPAL_POWER_BY_KIND,
+  effectDensity,
+  transformMunicipalAnchor,
+  type MunicipalEffectType,
+} from '../assets/municipalPowerLayouts'
 
 interface PowerEffect {
   x: number
@@ -13,6 +19,13 @@ interface PowerEffect {
 
 interface TimeState { value: number }
 
+export interface MunicipalPowerLayerStats {
+  readonly plants: number
+  readonly instances: number
+  readonly drawCalls: number
+  readonly triangles: number
+}
+
 /** Shader-time municipal utility animation; instance transforms remain static. */
 export class MunicipalPowerLayer {
   readonly root = new THREE.Group()
@@ -22,10 +35,16 @@ export class MunicipalPowerLayer {
   private readonly vaporMaterial = animatedMaterial('municipal-vapor', this.time, 'vapor')
   private readonly solarMaterial = animatedMaterial('municipal-solar-shimmer', this.time, 'solar')
   private signature = ''
+  stats: MunicipalPowerLayerStats = emptyStats()
 
   constructor() { this.root.name = 'municipal-power-effects' }
 
-  update(visible: ReadonlySet<ChunkId>, chunks: ViewportChunkManager, source: ViewportRenderSource): void {
+  update(
+    visible: ReadonlySet<ChunkId>,
+    chunks: ViewportChunkManager,
+    source: ViewportRenderSource,
+    tier: LodTier = LodTier.mid,
+  ): void {
     const plants = source.getMunicipalPowerPlants?.() ?? []
     const visiblePlants = plants.filter((plant) => {
       for (const chunkId of visible) {
@@ -38,9 +57,9 @@ export class MunicipalPowerLayer {
       }
       return false
     })
-    const signature = visiblePlants.map((plant) =>
-      `${plant.id}:${plant.kind}:${plant.panels.map((panel) => panel.tileId).join('.')}`,
-    ).join(',')
+    const signature = `${tier}|${visiblePlants.map((plant) =>
+      `${plant.id}:${plant.kind}:${plant.yaw}:${plant.panels.map((panel) => panel.tileId).join('.')}`,
+    ).join(',')}`
     if (signature === this.signature) return
     this.signature = signature
     this.clear()
@@ -48,40 +67,43 @@ export class MunicipalPowerLayer {
     const vapor: PowerEffect[] = []
     const solar: PowerEffect[] = []
     for (const plant of visiblePlants) {
-      if (plant.kind === 'wind') {
-        for (const offset of [-0.36, 0, 0.36]) rotors.push({
-          x: plant.x + Math.cos(plant.phase) * offset,
-          y: plant.y + 1.05,
-          z: plant.z + Math.sin(plant.phase) * offset,
-          yaw: plant.phase,
-          phase: plant.phase + offset * 2,
-          scale: 0.62,
-        })
-      } else if (plant.kind === 'coal' || plant.kind === 'nuclear') {
-        const count = plant.kind === 'nuclear' ? 7 : 5
-        for (let index = 0; index < count; index++) vapor.push({
-          x: plant.x + (plant.kind === 'nuclear' ? 0.2 : 0.3),
-          y: plant.y + (plant.kind === 'nuclear' ? 0.9 : 0.72),
-          z: plant.z - 0.2,
-          yaw: 0,
-          phase: plant.phase + index / count * Math.PI * 2,
-          scale: plant.kind === 'nuclear' ? 0.22 : 0.14,
-        })
-      } else {
-        const panels = plant.panels.length > 0 ? plant.panels : [plant]
-        for (const panel of panels) solar.push({
-          x: panel.x,
-          y: panel.y + 0.27,
-          z: panel.z,
-          yaw: 'yaw' in panel ? panel.yaw : plant.phase,
-          phase: plant.phase + ('tileId' in panel ? panel.tileId * 0.017 : 0),
-          scale: plant.panels.length > 0 ? 0.82 : 1.25,
+      if (plant.kind === 'solar' && plant.panels.length > 0) {
+        if (tier !== LodTier.far) {
+          for (const panel of plant.panels) solar.push({
+            x: panel.x,
+            y: panel.y + 0.27,
+            z: panel.z,
+            yaw: panel.yaw,
+            phase: plant.phase + panel.tileId * 0.017,
+            scale: 0.82,
+          })
+        }
+        continue
+      }
+      const campus = MUNICIPAL_POWER_BY_KIND[plant.kind]
+      for (const effect of campus.effects) {
+        const count = effectDensity(effect, tier)
+        const [x, y, z] = transformMunicipalAnchor(
+          [plant.x, plant.y, plant.z], plant.yaw, effect.position,
+        )
+        const target = effectList(effect.type, rotors, vapor, solar)
+        for (let index = 0; index < count; index++) target.push({
+          x, y, z,
+          yaw: plant.yaw,
+          phase: plant.phase + (count > 1 ? index / count * Math.PI * 2 : 0),
+          scale: effect.scale,
         })
       }
     }
     if (rotors.length) this.add('municipal-wind-rotors', rotorGeometry(), this.rotorMaterial, rotors)
     if (vapor.length) this.add('municipal-stack-vapor', new THREE.SphereGeometry(1, 7, 5), this.vaporMaterial, vapor)
     if (solar.length) this.add('municipal-solar-shimmer', new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), this.solarMaterial, solar)
+    this.stats = {
+      plants: visiblePlants.length,
+      instances: rotors.length + vapor.length + solar.length,
+      drawCalls: this.meshes.length,
+      triangles: this.meshes.reduce((sum, mesh) => sum + triangleCount(mesh.geometry) * mesh.count, 0),
+    }
   }
 
   setFrame(timeSeconds: number): void { this.time.value = timeSeconds }
@@ -92,6 +114,7 @@ export class MunicipalPowerLayer {
     this.vaporMaterial.dispose()
     this.solarMaterial.dispose()
     this.root.clear()
+    this.stats = emptyStats()
   }
 
   private add(name: string, geometry: THREE.BufferGeometry, material: THREE.Material, effects: readonly PowerEffect[]): void {
@@ -127,7 +150,25 @@ export class MunicipalPowerLayer {
       mesh.dispose()
     }
     this.meshes.length = 0
+    this.stats = emptyStats()
   }
+}
+
+function effectList(
+  type: MunicipalEffectType,
+  rotors: PowerEffect[],
+  vapor: PowerEffect[],
+  solar: PowerEffect[],
+): PowerEffect[] {
+  return type === 'rotor' ? rotors : type === 'vapor' ? vapor : solar
+}
+
+function triangleCount(geometry: THREE.BufferGeometry): number {
+  return geometry.index ? geometry.index.count / 3 : geometry.getAttribute('position').count / 3
+}
+
+function emptyStats(): MunicipalPowerLayerStats {
+  return { plants: 0, instances: 0, drawCalls: 0, triangles: 0 }
 }
 
 function rotorGeometry(): THREE.BufferGeometry {

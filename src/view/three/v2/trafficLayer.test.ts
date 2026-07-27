@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import * as THREE from 'three'
+import type { DirectedLane, RoadNetworkSnapshot, RoadSegment, TileId } from '../../../sim/world'
 import { ArchetypeRegistry } from './archetypes'
 import { ViewportChunkManager } from './chunks'
 import { TrafficLayer } from './trafficLayer'
@@ -46,6 +47,8 @@ describe('TrafficLayer', () => {
     const matrices = meshes.map((mesh) => Array.from(mesh.instanceMatrix.array))
     const meshIdentities = [...meshes]
     const readsAfterProjection = fixture.readSurface.mock.calls.length
+    const rebuildsAfterProjection = traffic.stats.rebuilds
+    const uploadsAfterProjection = traffic.stats.uploadBytes
 
     traffic.setFrame(1.25)
     traffic.setFrame(9.5)
@@ -57,6 +60,8 @@ describe('TrafficLayer', () => {
       matrices,
     )
     expect(fixture.readSurface).toHaveBeenCalledTimes(readsAfterProjection)
+    expect(traffic.stats.rebuilds).toBe(rebuildsAfterProjection)
+    expect(traffic.stats.uploadBytes).toBe(uploadsAfterProjection)
     for (const mesh of meshes) {
       expect(mesh.instanceMatrix.usage).toBe(THREE.StaticDrawUsage)
       expect(mesh.geometry.getAttribute('trafficDelta')).toBeInstanceOf(
@@ -207,6 +212,43 @@ describe('TrafficLayer', () => {
     expect(proportions.size).toBeGreaterThanOrEqual(6)
     traffic.dispose()
   })
+
+  it('reconciles daily utilization density into stable mesh slots', () => {
+    const network = trafficNetwork(24)
+    let transport = transportLoads(network, 1, 0)
+    const source: ViewportRenderSource = {
+      width: network.width,
+      height: network.height,
+      tileSize: 1,
+      getRoadNetwork: () => network,
+      getTransportRuntimeState: () => transport,
+      readSurface: () => undefined,
+      getChunkInstances: () => [],
+      getChunkRevision: () => 1,
+      getSurfaceRevision: () => 1,
+    }
+    const traffic = new TrafficLayer()
+    const chunks = new ViewportChunkManager(network.width, network.height, 32, 1)
+    const visible = new Set<ChunkId>([0])
+    traffic.update(visible, chunks, source)
+    const meshes = trafficMeshes(traffic)
+    const rebuilds = traffic.stats.rebuilds
+    const lowDensity = traffic.stats.vehicles
+    const firstRoute = (meshes.find((mesh) => mesh.name === 'traffic-bodies')!
+      .userData.trafficVehicles[0].state as { route: number[] }).route
+
+    transport = transportLoads(network, 2, 2)
+    traffic.update(visible, chunks, source)
+
+    expect(traffic.stats.vehicles).toBeGreaterThan(lowDensity)
+    expect(trafficMeshes(traffic)).toEqual(meshes)
+    expect(traffic.stats.rebuilds).toBe(rebuilds)
+    const retained = trafficMeshes(traffic).find((mesh) => mesh.name === 'traffic-bodies')!
+      .userData.trafficVehicles.find((vehicle: { state?: { route: number[] } }) =>
+        vehicle.state?.route === firstRoute)
+    expect(retained).toBeDefined()
+    traffic.dispose()
+  })
 })
 
 function geometryRegistry(entries: readonly (readonly [number, THREE.BufferGeometry])[]): ArchetypeRegistry {
@@ -221,6 +263,96 @@ function geometryRegistry(entries: readonly (readonly [number, THREE.BufferGeome
     })
   }
   return registry
+}
+
+function transportLoads(network: RoadNetworkSnapshot, day: number, utilization: number) {
+  return {
+    version: 1 as const,
+    day,
+    networkRevision: network.revision,
+    segmentLoads: network.segments.map((segment) => ({
+      segmentId: segment.index,
+      flow: 0,
+      capacity: 1,
+      utilization,
+      travelTimeMult: 1,
+    })),
+    junctionLoads: [],
+    regionCongestion: {},
+    cityAccess: {},
+    facilityAccess: {},
+  }
+}
+
+function trafficNetwork(count: number): RoadNetworkSnapshot {
+  const segments: RoadSegment[] = []
+  const lanes: DirectedLane[] = []
+  for (let index = 0; index < count; index++) {
+    const points = [
+      { tileId: index as TileId, x: index + 0.5, y: 0.5, elevation: 0 },
+      { tileId: (index + 1) as TileId, x: index + 1.5, y: 0.5, elevation: 0 },
+    ]
+    segments.push({
+      index,
+      id: `segment:${index}`,
+      fromJunctionId: `junction:${index}`,
+      toJunctionId: `junction:${index + 1}`,
+      tileIds: [index as TileId, (index + 1) as TileId],
+      points,
+      roadClass: 4,
+      flags: 0,
+      bridge: false,
+      length: 1,
+      profile: {
+        roadClass: 4,
+        lanesPerDirection: 2,
+        speedLimit: 110,
+        capacityPerDay: 5_600,
+        halfWidth: 0.42,
+        shoulderWidth: 0.08,
+      },
+    })
+    lanes.push({
+      index,
+      id: `lane:${index}`,
+      segmentId: `segment:${index}`,
+      direction: 'forward',
+      laneIndex: 0,
+      fromJunctionId: `junction:${index}`,
+      toJunctionId: `junction:${index + 1}`,
+      lateralOffset: 0.1,
+      speedLimit: 110,
+      points,
+    })
+  }
+  return {
+    revision: 7,
+    width: count + 1,
+    height: 1,
+    chunkSize: 32,
+    chunksWide: 1,
+    drivingSide: 'left',
+    profiles: {} as RoadNetworkSnapshot['profiles'],
+    segments,
+    junctions: [],
+    lanes,
+    connectors: lanes.slice(0, -1).map((lane, index) => ({
+      id: `connector:${index}`,
+      junctionId: `junction:${index + 1}`,
+      fromLaneId: lane.id,
+      toLaneId: lanes[index + 1]!.id,
+      turn: 'straight',
+      signalGroup: null,
+    })),
+    terminals: [],
+    chunks: new Map([[0, {
+      segmentIds: segments.map((segment) => segment.id),
+      junctionIds: [],
+      terminalIds: [],
+    }]]),
+    nearestSegmentByTile: new Int32Array(count + 1),
+    accessDistanceByTile: new Uint16Array(count + 1),
+  }
 }
 
 function transportSource(packedTransport: number): ViewportRenderSource {

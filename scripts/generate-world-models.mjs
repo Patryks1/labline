@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdir, readdir, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import * as THREE from 'three'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
@@ -19,6 +19,12 @@ globalThis.FileReader ??= class FileReader {
 }
 
 const outputDir = path.resolve('public/assets/world-v4')
+const municipalLayouts = JSON.parse(await readFile(
+  path.resolve('src/view/three/assets/municipalPowerLayouts.json'), 'utf8',
+))
+if (municipalLayouts.version !== 1 || municipalLayouts.campuses?.length !== 4) {
+  throw new Error('Malformed municipal power layout descriptor')
+}
 const whiteMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true })
 const C = {
   leaf: 0x4f8745, leafDark: 0x2f6339, leafLight: 0x82a94d, bark: 0x76543b,
@@ -47,6 +53,10 @@ const definitions = [
   ...catalog('facilities', [
     ['facility-small',100],['facility-medium',101],['facility-large',102],['headquarters',110],['solar-field',111],['grid-substation',112],['power-generation',113],['chip-fabrication',114],['cooling-campus',115],['gas-generation',116],['battery-yard',117],['office-campus',118],['headquarters-small',119],['headquarters-medium',120],['research-lab',121],'training-centre','network-operations','construction-shell','utility-plant','security-centre',
   ], 'owner', [2,2], (lod, i) => i === 4 ? solarField(lod) : dataCentre(lod)),
+  ...municipalLayouts.campuses.map(campus => model(
+    'municipal', campus.key, campus.archetypeId, 'base', municipalLayouts.footprint,
+    lod => municipalCampus(campus, lod),
+  )),
   ...catalog('vehicles', [
     ['city-bus',300],'compact-car','sedan-car','estate-car','delivery-van','cargo-van','pickup-truck','box-truck','semi-truck','tanker-truck','service-truck','electric-shuttle',
   ], 'base', [1,1], lod => bus(lod)),
@@ -175,6 +185,35 @@ function solarField(lod) {
   const p=[box([1.35,.05,1.1],[0,.025,0],C.dark)], rows=lod==='near'?3:lod==='mid'?2:1
   for(let r=0;r<rows;r++){const z=(r-(rows-1)/2)*.34;p.push(box([1.05,.035,.25],[0,.23,z],C.glass,[-.28,0,0]));if(lod!=='far')for(let x=-1;x<=1;x++)p.push(cyl(.018,.018,.28,6,[x*.42,.13,z],C.metal))}
   return merge(p)
+}
+
+/** Build the same descriptor-driven campus silhouettes used by runtime fallbacks. */
+function municipalCampus(campus, lod) {
+  const parts = []
+  for (const structure of campus.structures) {
+    const [x, y, z] = structure.position
+    const [sx, sy, sz] = structure.scale
+    const color = structure.color
+    if (structure.shape === 'box') parts.push(box([sx, sy, sz], [x, y, z], color))
+    else if (structure.shape === 'cylinder') parts.push(cyl(sx, sx * .84, sy, lod === 'near' ? 12 : 7, [x, y, z], color))
+    else if (structure.shape === 'sphere') parts.push(sphere(.5, lod === 'near' ? 1 : 0, [x, y, z], color, [sx * 2, sy * 2, sz * 2]))
+    else if (structure.shape === 'coolingTower') {
+      parts.push(cyl(sx * .72, sx, sy, lod === 'near' ? 16 : lod === 'mid' ? 10 : 7, [x, y, z], color))
+      if (lod === 'near') parts.push(cyl(sx, sx * .72, sy * .3, 16, [x, y + sy * .36, z], color))
+    } else if (structure.shape === 'solarCluster') {
+      // Panels are emitted as one merged geometry per LOD, never per-panel meshes.
+      const rows = lod === 'near' ? 4 : lod === 'mid' ? 3 : 2
+      const columns = lod === 'near' ? 4 : lod === 'mid' ? 3 : 2
+      for (let row = 0; row < rows; row++) for (let column = 0; column < columns; column++) {
+        const px = x + (column - (columns - 1) / 2) * sx / columns
+        const pz = z + (row - (rows - 1) / 2) * sz / rows
+        parts.push(box([sx / columns * .82, .025, sz / rows * .62], [px, y, pz], color, [-.24, 0, 0]))
+      }
+    }
+  }
+  const result = merge(parts)
+  result.userData = { municipalKind: campus.kind, solarClusterMerged: campus.kind === 'solar' }
+  return result
 }
 function bus(lod) {
   if(lod==='far') return merge([box([.72,.26,.28],[0,.2,0],C.red)])

@@ -7,6 +7,7 @@ import {
   WORLD_FORMAT_VERSION,
   WORLD_GENERATOR_VERSION_V3,
   compileRoadNetwork,
+  createDynamicWorld,
   generateStaticWorldV4,
   generateStaticWorldV5,
   regenerateStaticWorld,
@@ -81,6 +82,23 @@ describe('compiled road network', () => {
       segment.tileIds.some((tile, index) => tile === 5 && segment.tileIds[index + 1] === 11),
     )
     expect(diagonal).toBe(false)
+  })
+
+  it('retains the compiled snapshot across unrelated world revisions', () => {
+    const world = createDynamicWorld(networkFixture())
+    const initial = compileRoadNetwork(world)
+    const initialRoadRevision = world.roadRevision
+    const nonRoad = world.beginBatch().patchTerrain(24 as never, { feature: 7 }).commit()
+    expect(nonRoad.committed).toBe(true)
+    expect(world.revision).toBeGreaterThan(initial.revision)
+    expect(world.roadRevision).toBe(initialRoadRevision)
+    expect(compileRoadNetwork(world)).toBe(initial)
+
+    const roadTile = 5 as never
+    const packed = world.getTransport(roadTile)
+    world.beginBatch().patchTerrain(roadTile, { transport: packed & ~0xff }).commit()
+    expect(world.roadRevision).toBe(initialRoadRevision + 1)
+    expect(compileRoadNetwork(world)).not.toBe(initial)
   })
 })
 

@@ -18,6 +18,22 @@ export interface WorldAssetSnapshot {
   readonly failedFamilies: ReadonlySet<WorldAssetFamily>
 }
 
+export interface WorldAssetFamilySnapshot {
+  readonly family: WorldAssetFamily
+  readonly archetypeIds: readonly number[]
+  readonly snapshot: WorldAssetSnapshot
+  readonly metrics?: WorldAssetFamilyMetrics
+}
+
+export interface WorldAssetFamilyMetrics {
+  readonly bytes: number
+  readonly models: number
+  readonly fetchAndHashMs: number
+  readonly decodeMs: number
+  readonly extractMs: number
+  readonly totalMs: number
+}
+
 type FetchLike = typeof fetch
 
 /**
@@ -29,6 +45,7 @@ export class WorldAssetCache {
   private readonly familyRequests = new Map<WorldAssetFamily, Promise<void>>()
   private readonly geometryByArchetype = new Map<number, AuthoredGeometrySet>()
   private readonly failedFamilies = new Set<WorldAssetFamily>()
+  private readonly familyMetrics = new Map<WorldAssetFamily, WorldAssetFamilyMetrics>()
   private readonly controller = new AbortController()
   private loaderPromise: Promise<GLTFLoader> | null = null
   private revisionValue = 0
@@ -47,7 +64,7 @@ export class WorldAssetCache {
   get revision(): number { return this.revisionValue }
 
   async loadCritical(): Promise<WorldAssetSnapshot> {
-    await this.loadFamilies(['residential', 'urban', 'industrial', 'facilities'])
+    await this.loadFamilies(['residential', 'urban', 'industrial', 'facilities', 'municipal'])
     return this.snapshot()
   }
 
@@ -72,6 +89,30 @@ export class WorldAssetCache {
       await yieldToHost()
     }
     return this.snapshot()
+  }
+
+  /**
+   * Stream one fully validated family at a time. Consumers can replace only
+   * affected live batches instead of rebuilding the complete map projection
+   * when the final bundle finishes.
+   */
+  async *streamAll(): AsyncGenerator<WorldAssetFamilySnapshot> {
+    const manifest = await this.manifest()
+    for (const bundle of manifest.bundles) {
+      await this.loadFamilies([bundle.family])
+      const archetypeIds = this.failedFamilies.has(bundle.family)
+        ? []
+        : manifest.models
+          .filter(model => model.family === bundle.family)
+          .map(model => model.archetypeId)
+      yield {
+        family: bundle.family,
+        archetypeIds: Object.freeze(archetypeIds),
+        snapshot: this.snapshot(),
+        metrics: this.familyMetrics.get(bundle.family),
+      }
+      await yieldToHost()
+    }
   }
 
   snapshot(): WorldAssetSnapshot {
@@ -122,15 +163,18 @@ export class WorldAssetCache {
   }
 
   private async loadFamily(manifest: WorldAssetManifest, family: WorldAssetFamily): Promise<void> {
+    const started = now()
     const bundle = manifest.bundles.find(candidate => candidate.family === family)
     if (!bundle) throw new Error(`Missing ${family} bundle`)
     const response = await this.fetcher(bundle.url, { signal: this.controller.signal }).then(assertResponse)
     const bytes = await response.arrayBuffer()
     if (bytes.byteLength !== bundle.bytes) throw new Error(`${family} bundle length mismatch`)
     if (await sha256(bytes) !== bundle.sha256) throw new Error(`${family} bundle hash mismatch`)
+    const validated = now()
     const loader = await this.loader()
     const gltf = await loader.parseAsync(bytes, bundle.url.slice(0, bundle.url.lastIndexOf('/') + 1))
     gltf.scene.updateMatrixWorld(true)
+    const decoded = now()
     const staged = new Map<number, AuthoredGeometrySet>()
     for (const model of manifest.models.filter(candidate => candidate.family === family)) {
       staged.set(model.archetypeId, extractModel(gltf.scene, model))
@@ -138,6 +182,15 @@ export class WorldAssetCache {
     for (const [id, geometry] of staged) this.geometryByArchetype.set(id, geometry)
     this.failedFamilies.delete(family)
     this.revisionValue++
+    const completed = now()
+    this.familyMetrics.set(family, {
+      bytes: bundle.bytes,
+      models: staged.size,
+      fetchAndHashMs: validated - started,
+      decodeMs: decoded - validated,
+      extractMs: completed - decoded,
+      totalMs: completed - started,
+    })
   }
 
   private loader(): Promise<GLTFLoader> {
@@ -153,10 +206,19 @@ export class WorldAssetCache {
   }
 }
 
+function now(): number {
+  return typeof performance === 'undefined' ? Date.now() : performance.now()
+}
+
 /** Swap authored LOD geometry into an existing procedural registry. */
-export function applyWorldAssetSnapshot(registry: ArchetypeRegistry, snapshot: WorldAssetSnapshot): number {
+export function applyWorldAssetSnapshot(
+  registry: ArchetypeRegistry,
+  snapshot: WorldAssetSnapshot,
+  archetypeIds?: ReadonlySet<number>,
+): number {
   let applied = 0
   for (const [archetypeId, geometry] of snapshot.geometryByArchetype) {
+    if (archetypeIds && !archetypeIds.has(archetypeId)) continue
     if (!registry.has(archetypeId)) continue
     const previous = registry.get(archetypeId)
     // A registry owns and disposes its definitions, while the cache must stay

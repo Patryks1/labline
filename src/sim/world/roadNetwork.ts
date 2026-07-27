@@ -125,6 +125,8 @@ export interface RoadNetworkSnapshot {
 export interface RoadNetworkCompileSource {
   readonly staticWorld: StaticWorld
   readonly revision?: number
+  /** Revision of packed road cells only; avoids recompiles for unrelated world changes. */
+  readonly roadRevision?: number
   getTransport?(tileId: TileId): number
   getTileElevation?(x: number, y: number): number
 }
@@ -148,7 +150,7 @@ function normalizeSource(source: StaticWorld | RoadNetworkCompileSource): Normal
   if ('staticWorld' in source) return {
     staticWorld: source.staticWorld,
     identity: source as object,
-    revision: source.revision,
+    revision: source.roadRevision ?? source.revision,
     getTransport: source.getTransport ? (id) => source.getTransport!(id) : undefined,
     getTileElevation: source.getTileElevation ? (x, y) => source.getTileElevation!(x, y) : undefined,
   }

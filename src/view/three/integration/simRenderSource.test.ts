@@ -528,9 +528,34 @@ describe('SimViewportRenderSource', () => {
     const plant = world.staticWorld.municipalPowerPlants?.[0]
     expect(plant).toBeDefined()
     const equipmentTileId = plant!.layout?.equipmentTileId ?? plant!.footprint[0]
-    const records = source.getChunkInstances(chunkFor(equipmentTileId, source), LodTier.near)!
-
-    expect(records.some((record) => record.pickTileId === equipmentTileId)).toBe(true)
+    const usesPanelArray = plant!.kind === 'solar' && (plant!.layout?.panelTileIds.length ?? 0) > 0
+    const pickTileId = usesPanelArray ? equipmentTileId : plant!.footprint[0]
+    const record = allChunkInstances(source).find((candidate) =>
+      candidate.pickTileId === pickTileId && candidate.entityId !== pickTileId + 1)
+    expect(record).toBeDefined()
+    const xs = plant!.footprint.map((id) => id % source.width)
+    const ys = plant!.footprint.map((id) => Math.floor(id / source.width))
+    const expectedX = usesPanelArray
+      ? equipmentTileId % source.width
+      : (Math.min(...xs) + Math.max(...xs)) * 0.5
+    const expectedY = usesPanelArray
+      ? Math.floor(equipmentTileId / source.width)
+      : (Math.min(...ys) + Math.max(...ys)) * 0.5
+    expect(record).toMatchObject({
+      x: expectedX * source.tileSize,
+      z: expectedY * source.tileSize,
+      yaw: plant!.layout
+        ? plant!.layout.orientationQuarterTurns * Math.PI * 0.5
+        : plant!.animationPhase * Math.PI * 2,
+      scaleX: source.tileSize,
+      scaleY: source.tileSize,
+      scaleZ: source.tileSize,
+    })
+    expect(source.getMunicipalPowerPlants()[0]).toMatchObject({
+      tileX: (Math.min(...xs) + Math.max(...xs)) * 0.5,
+      tileY: (Math.min(...ys) + Math.max(...ys)) * 0.5,
+      yaw: (plant!.layout?.orientationQuarterTurns ?? 0) * Math.PI * 0.5,
+    })
     for (const id of plant!.footprint) {
       expect(source.isSelectable(id % source.width, Math.floor(id / source.width))).toBe(true)
       expect(source.getSelectionFootprint(id % source.width, Math.floor(id / source.width)))

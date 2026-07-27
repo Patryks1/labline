@@ -14,6 +14,7 @@ import {
   AUTHORED_VEGETATION_ARCHETYPES,
   FacilityArchetype,
   IntegrationArchetype,
+  MunicipalPowerArchetype,
   SINGLE_BUILDING_ARCHETYPES,
   SINGLE_BUILDING_PROFILES,
   SceneryArchetype,
@@ -131,10 +132,11 @@ describe('art-directed instanced archetypes', () => {
       ...[301, ...rangeForTest(484, 487)],
       ...[302, ...rangeForTest(488, 489)],
       ...[210, 207, 303, ...rangeForTest(490, 498)],
+      ...Object.values(MunicipalPowerArchetype),
     ]
 
-    expect(catalogIds).toHaveLength(128)
-    expect(new Set(catalogIds).size).toBe(128)
+    expect(catalogIds).toHaveLength(132)
+    expect(new Set(catalogIds).size).toBe(132)
     for (const id of catalogIds) {
       const definition = registry.get(id)
       expect(definition.geometry.near, `near geometry for ${id}`).not.toBeNull()
@@ -145,7 +147,27 @@ describe('art-directed instanced archetypes', () => {
     // Before authored GLBs arrive, aliases converge onto a small number of
     // family fallbacks instead of creating one draw call per catalog entry.
     const fallbackGeometries = new Set(catalogIds.map(id => registry.get(id).geometry.far))
-    expect(fallbackGeometries.size).toBeLessThan(28)
+    expect(fallbackGeometries.size).toBeLessThanOrEqual(30)
+    registry.dispose()
+  })
+
+  it('registers four collision-free municipal campuses with distinct simplifying LODs', () => {
+    const registry = createArtDirectedArchetypeRegistry()
+    const ids = Object.values(MunicipalPowerArchetype)
+    expect(ids).toEqual([506, 507, 508, 509])
+    expect(new Set(ids).size).toBe(4)
+    const signatures = new Set<string>()
+    for (const id of ids) {
+      const definition = registry.get(id)
+      const tiers = [definition.geometry.near!, definition.geometry.mid!, definition.geometry.far!]
+      expect(tiers.every(Boolean)).toBe(true)
+      expect(tiers[0].getAttribute('position').count).toBeGreaterThanOrEqual(tiers[1].getAttribute('position').count)
+      expect(tiers[1].getAttribute('position').count).toBeGreaterThanOrEqual(tiers[2].getAttribute('position').count)
+      signatures.add(tiers.map(geometry => geometry.getAttribute('position').count).join(':'))
+    }
+    expect(signatures.size).toBeGreaterThan(1)
+    expect(registry.get(MunicipalPowerArchetype.solar).geometry.near!.userData.municipalCampus)
+      .toMatchObject({ footprint: [2, 2], solarClusterMerged: true })
     registry.dispose()
   })
 

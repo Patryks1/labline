@@ -47,6 +47,11 @@ export interface FrameMetricSample {
   gpuChunkLayers: number
   activeInstances: number
   uploadBytes: number
+  trafficSteps?: number
+  trafficReconciles?: number
+  trafficRebuilds?: number
+  trafficUploadBytes?: number
+  municipalEffectInstances?: number
   chunkWorkMs: number
   journalBacklog: number
   missingTiles: number

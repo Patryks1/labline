@@ -12,11 +12,11 @@ describe('authored world asset pipeline', () => {
   it('ships a validated vertical slice with every required visual family', async () => {
     const raw = JSON.parse(await readFile(path.join(assetRoot, 'assets/world-v4/manifest.json'), 'utf8'))
     const manifest = parseWorldAssetManifest(raw)
-    expect(manifest.bundles).toHaveLength(10)
-    expect(manifest.models).toHaveLength(128)
+    expect(manifest.bundles).toHaveLength(11)
+    expect(manifest.models).toHaveLength(132)
     expect(new Set(manifest.models.map(model => model.family))).toEqual(new Set([
       'terrain', 'vegetation', 'residential', 'urban', 'industrial',
-      'facilities', 'vehicles', 'boats', 'ducks', 'props',
+      'facilities', 'vehicles', 'boats', 'ducks', 'props', 'municipal',
     ]))
     expect(manifest.models.filter(model => model.family === 'props').map(model => model.key)).toEqual([
       'road-lamp', 'park-details', 'park-bench', 'traffic-light',
@@ -49,8 +49,8 @@ describe('authored world asset pipeline', () => {
     const [a, b] = await Promise.all([cache.loadAll(), cache.loadAll()])
 
     expect(a.failedFamilies.size).toBe(0)
-    expect(a.geometryByArchetype.size).toBe(128)
-    expect(b.revision).toBe(10)
+    expect(a.geometryByArchetype.size).toBe(132)
+    expect(b.revision).toBe(11)
     expect([...requests.values()].every(count => count === 1)).toBe(true)
     for (const tiers of a.geometryByArchetype.values()) {
       for (const geometry of Object.values(tiers)) {
@@ -83,16 +83,42 @@ describe('authored world asset pipeline', () => {
 
     const registry = createArtDirectedArchetypeRegistry()
     const previous = registry.get(2).geometry.near
-    expect(applyWorldAssetSnapshot(registry, a)).toBe(128)
+    expect(applyWorldAssetSnapshot(registry, a)).toBe(132)
     expect(registry.get(2).geometry.near).not.toBe(previous)
     expect(registry.get(2).geometry.near?.name).toBe('house-single__near')
     registry.dispose()
     // Registry disposal must not invalidate the cache used by a replacement
     // map projection.
     const replacement = createArtDirectedArchetypeRegistry()
-    expect(applyWorldAssetSnapshot(replacement, cache.snapshot())).toBe(128)
+    expect(applyWorldAssetSnapshot(replacement, cache.snapshot())).toBe(132)
     expect(replacement.get(2).geometry.near?.getAttribute('position').count).toBeGreaterThan(0)
     replacement.dispose()
+    cache.dispose()
+  })
+
+  it('streams validated families with bounded publication metadata', async () => {
+    const fetcher: typeof fetch = async input => {
+      const body = await readFile(path.join(assetRoot, String(input).replace(/^\//, '')))
+      return new Response(body, { status: 200 })
+    }
+    const cache = new WorldAssetCache(fetcher)
+    const publications = []
+    for await (const publication of cache.streamAll()) publications.push(publication)
+
+    expect(publications).toHaveLength(11)
+    expect(publications.map(item => item.snapshot.revision)).toEqual(
+      Array.from({ length: 11 }, (_, index) => index + 1),
+    )
+    expect(publications.flatMap(item => item.archetypeIds)).toHaveLength(
+      publications.at(-1)!.snapshot.geometryByArchetype.size,
+    )
+    for (const publication of publications) {
+      expect(publication.metrics).toMatchObject({
+        bytes: expect.any(Number),
+        models: publication.archetypeIds.length,
+        totalMs: expect.any(Number),
+      })
+    }
     cache.dispose()
   })
 

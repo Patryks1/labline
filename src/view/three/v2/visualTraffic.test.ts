@@ -48,6 +48,51 @@ describe('visual lane traffic', () => {
     expect(first.vehicles).toEqual(second.vehicles)
   })
 
+  it('distributes a capped logical pool across road chunks instead of starving later chunks', () => {
+    const base = linearNetwork(48)
+    const firstSegments = base.segments.slice(0, 24).map(segment => segment.id)
+    const secondSegments = base.segments.slice(24).map(segment => segment.id)
+    const network: RoadNetworkSnapshot = {
+      ...base,
+      chunksWide: 2,
+      chunks: new Map([
+        [0, { segmentIds: firstSegments, junctionIds: [], terminalIds: [] }],
+        [1, { segmentIds: secondSegments, junctionIds: [], terminalIds: [] }],
+      ]),
+    }
+    const loads = new Map(network.segments.map(segment => [segment.index, 0]))
+    const simulation = new VisualTrafficSimulation(network, new Set([0, 1]), 1, loads, 2)
+
+    expect(simulation.vehicles).toHaveLength(2)
+    expect(simulation.vehiclesInSegments(new Set(firstSegments))).toHaveLength(1)
+    expect(simulation.vehiclesInSegments(new Set(secondSegments))).toHaveLength(1)
+  })
+
+  it('refreshes daily utilization without rebuilding routes or topology', () => {
+    const network = linearNetwork(24)
+    const simulation = new VisualTrafficSimulation(network, new Set([0]), 1, new Map(), 320)
+    const routes = simulation.vehicles.map((vehicle) => vehicle.route)
+    const freeFlow = simulation.vehicles.map((vehicle) => vehicle.speed)
+
+    simulation.refreshUtilization(new Map(network.segments.map((segment) => [segment.index, 2])))
+
+    expect(simulation.network).toBe(network)
+    expect(simulation.vehicles.map((vehicle) => vehicle.route)).toEqual(routes)
+    expect(simulation.vehicles.every((vehicle, index) => vehicle.speed < freeFlow[index]!)).toBe(true)
+    expect(simulation.stats.utilizationRefreshes).toBe(1)
+  })
+
+  it('does no fixed-step work while paused', () => {
+    const simulation = new VisualTrafficSimulation(linearNetwork(24), new Set([0]), 1)
+    simulation.setFrame(0, false)
+    const before = simulation.vehicles.map((vehicle) => ({ ...vehicle.current }))
+
+    expect(simulation.setFrame(10, true)).toBe(false)
+    expect(simulation.lastFrameSteps).toBe(0)
+    expect(simulation.stats.steps).toBe(0)
+    expect(simulation.vehicles.map((vehicle) => vehicle.current)).toEqual(before)
+  })
+
   it('crosses lateral lane gaps through connectors without teleporting', () => {
     const base = linearNetwork(24)
     const lanes = base.lanes.map((lane, index) => index === 1

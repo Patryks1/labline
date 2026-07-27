@@ -55,6 +55,11 @@ export function installDitherTransition(material: THREE.Material): DitherState {
 
 export class ArchetypeRegistry {
   private readonly definitions = new Map<ArchetypeId, ArchetypeDefinition>()
+  // Definitions can be replaced while authored bundles stream in. Resident
+  // chunks may still reference the previous geometry until their targeted
+  // invalidation runs, so retain ownership and dispose every generation only
+  // when the registry itself is retired.
+  private readonly retiredDefinitions: ArchetypeDefinition[] = []
 
   register(definition: ArchetypeDefinition): void {
     if (!Number.isInteger(definition.id) || definition.id < 0) {
@@ -68,9 +73,11 @@ export class ArchetypeRegistry {
 
   /** Replace an existing definition after an asynchronous authored asset load. */
   replace(definition: ArchetypeDefinition): void {
-    if (!this.definitions.has(definition.id)) {
+    const previous = this.definitions.get(definition.id)
+    if (!previous) {
       throw new Error(`Cannot replace unknown archetype ${definition.id}`)
     }
+    this.retiredDefinitions.push(previous)
     this.definitions.set(definition.id, definition)
   }
 
@@ -91,7 +98,7 @@ export class ArchetypeRegistry {
   ): void {
     const clamped = Math.max(0, Math.min(1, coverage))
     const visited = new Set<THREE.Material>()
-    for (const definition of this.definitions.values()) {
+    for (const definition of [...this.definitions.values(), ...this.retiredDefinitions]) {
       const material = definition.material[tier]
       if (!material || visited.has(material)) continue
       visited.add(material)
@@ -106,7 +113,7 @@ export class ArchetypeRegistry {
   dispose(): void {
     const geometries = new Set<THREE.BufferGeometry>()
     const materials = new Set<THREE.Material>()
-    for (const definition of this.definitions.values()) {
+    for (const definition of [...this.definitions.values(), ...this.retiredDefinitions]) {
       for (const tier of LOD_TIERS) {
         const geometry = definition.geometry[tier]
         const material = definition.material[tier]
@@ -117,6 +124,7 @@ export class ArchetypeRegistry {
     for (const geometry of geometries) geometry.dispose()
     for (const material of materials) material.dispose()
     this.definitions.clear()
+    this.retiredDefinitions.length = 0
   }
 }
 

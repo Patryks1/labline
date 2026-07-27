@@ -419,6 +419,9 @@ export class SimViewportRenderSource implements ViewportRenderSource {
         elevation = Math.max(elevation, this.getTileElevation(id % this.width, Math.floor(id / this.width)))
       }
       const orientation = (plant.layout?.orientationQuarterTurns ?? 0) * Math.PI * 0.5
+      const bounds = this.tileFootprintBounds(plant.footprint)
+      const centerX = (bounds.minX + bounds.maxX) * 0.5
+      const centerY = (bounds.minY + bounds.maxY) * 0.5
       const panels = (plant.layout?.panelTileIds ?? []).map((tileId) => {
         const x = tileId % this.width
         const y = Math.floor(tileId / this.width)
@@ -433,11 +436,12 @@ export class SimViewportRenderSource implements ViewportRenderSource {
       return Object.freeze({
         id: stableStringId(plant.id),
         kind: plant.kind,
-        tileX: plant.cx,
-        tileY: plant.cy,
-        x: (plant.cx + 0.5) * MAP_TILE_SIZE,
+        tileX: centerX,
+        tileY: centerY,
+        x: centerX * MAP_TILE_SIZE,
         y: (Number.isFinite(elevation) ? elevation : 0) + 0.015,
-        z: (plant.cy + 0.5) * MAP_TILE_SIZE,
+        z: centerY * MAP_TILE_SIZE,
+        yaw: orientation,
         phase: plant.animationPhase * Math.PI * 2,
         footprintTileIds: plant.footprint,
         panels: Object.freeze(panels),
@@ -770,21 +774,25 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     const equipmentTileId = plant.layout?.equipmentTileId
     const equipmentX = equipmentTileId === undefined ? plant.cx + 0.5 : equipmentTileId % this.width
     const equipmentY = equipmentTileId === undefined ? plant.cy + 0.5 : Math.floor(equipmentTileId / this.width)
+    const bounds = this.tileFootprintBounds(plant.footprint)
+    const centerX = (bounds.minX + bounds.maxX) * 0.5
+    const centerY = (bounds.minY + bounds.maxY) * 0.5
+    const usesPanelArray = plant.kind === 'solar' && (plant.layout?.panelTileIds.length ?? 0) > 0
     return {
       entityId: stableStringId(plant.id),
-      pickTileId: equipmentTileId ?? plant.footprint[0],
-      archetypeId: plant.kind === 'solar' && plant.layout
+      pickTileId: usesPanelArray ? equipmentTileId : plant.footprint[0],
+      archetypeId: usesPanelArray
         ? IntegrationArchetype.grid
         : MunicipalPowerArchetype[plant.kind],
-      x: equipmentX * MAP_TILE_SIZE,
+      x: (usesPanelArray ? equipmentX : centerX) * MAP_TILE_SIZE,
       y: (Number.isFinite(elevation) ? elevation : 0) + 0.015,
-      z: equipmentY * MAP_TILE_SIZE,
+      z: (usesPanelArray ? equipmentY : centerY) * MAP_TILE_SIZE,
       yaw: plant.layout
         ? plant.layout.orientationQuarterTurns * Math.PI * 0.5
         : plant.animationPhase * Math.PI * 2,
-      scaleX: plant.kind === 'wind' ? 1.65 : 1.55,
-      scaleY: plant.kind === 'nuclear' ? 1.5 : 1.25,
-      scaleZ: plant.kind === 'wind' ? 1.65 : 1.55,
+      scaleX: MAP_TILE_SIZE,
+      scaleY: MAP_TILE_SIZE,
+      scaleZ: MAP_TILE_SIZE,
       color: plant.kind === 'coal' ? 0x706b62 : plant.kind === 'wind' ? 0xe7ece9 :
         plant.kind === 'solar' ? 0x527aa0 : 0xc8d0c9,
     }
@@ -829,7 +837,27 @@ export class SimViewportRenderSource implements ViewportRenderSource {
   }
 
   private municipalPowerRenderChunk(plant: MunicipalPowerPlant): ChunkId {
-    return Math.floor(plant.cy / this.chunkSize) * this.chunksWide + Math.floor(plant.cx / this.chunkSize)
+    const bounds = this.tileFootprintBounds(plant.footprint)
+    const centerX = (bounds.minX + bounds.maxX) * 0.5
+    const centerY = (bounds.minY + bounds.maxY) * 0.5
+    return Math.floor(centerY / this.chunkSize) * this.chunksWide +
+      Math.floor(centerX / this.chunkSize)
+  }
+
+  private tileFootprintBounds(footprint: readonly number[]) {
+    let minX = this.width
+    let minY = this.height
+    let maxX = 0
+    let maxY = 0
+    for (const tileId of footprint) {
+      const x = tileId % this.width
+      const y = Math.floor(tileId / this.width)
+      minX = Math.min(minX, x)
+      minY = Math.min(minY, y)
+      maxX = Math.max(maxX, x)
+      maxY = Math.max(maxY, y)
+    }
+    return { minX, minY, maxX, maxY }
   }
 
   /** Own a multi-tile prop from one deterministic centroid chunk only. */

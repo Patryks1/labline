@@ -45,6 +45,12 @@
       "bytes": 989044
     },
     {
+      "family": "municipal",
+      "url": "/assets/world-v4/municipal.e8ec44fbd29d.glb",
+      "sha256": "e8ec44fbd29df81d40cd4b14542d413b1b692814edca0f075da9ea5ebda83686",
+      "bytes": 233516
+    },
+    {
       "family": "vehicles",
       "url": "/assets/world-v4/vehicles.5c5ffb3eebbf.glb",
       "sha256": "5c5ffb3eebbf99c27fa57505a0eda763bf53be93911ff65e17a9654ef00399a6",
@@ -1605,6 +1611,70 @@
         "far": "security-centre__far"
       },
       "fallbackKey": "security-centre"
+    },
+    {
+      "family": "municipal",
+      "key": "municipal-coal-campus",
+      "archetypeId": 506,
+      "tintMode": "base",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "municipal-coal-campus__near",
+        "mid": "municipal-coal-campus__mid",
+        "far": "municipal-coal-campus__far"
+      },
+      "fallbackKey": "municipal-coal-campus"
+    },
+    {
+      "family": "municipal",
+      "key": "municipal-wind-campus",
+      "archetypeId": 507,
+      "tintMode": "base",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "municipal-wind-campus__near",
+        "mid": "municipal-wind-campus__mid",
+        "far": "municipal-wind-campus__far"
+      },
+      "fallbackKey": "municipal-wind-campus"
+    },
+    {
+      "family": "municipal",
+      "key": "municipal-solar-campus",
+      "archetypeId": 508,
+      "tintMode": "base",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "municipal-solar-campus__near",
+        "mid": "municipal-solar-campus__mid",
+        "far": "municipal-solar-campus__far"
+      },
+      "fallbackKey": "municipal-solar-campus"
+    },
+    {
+      "family": "municipal",
+      "key": "municipal-nuclear-campus",
+      "archetypeId": 509,
+      "tintMode": "base",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "municipal-nuclear-campus__near",
+        "mid": "municipal-nuclear-campus__mid",
+        "far": "municipal-nuclear-campus__far"
+      },
+      "fallbackKey": "municipal-nuclear-campus"
     },
     {
       "family": "vehicles",

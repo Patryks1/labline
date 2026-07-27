@@ -120,6 +120,8 @@ export interface RenderMunicipalPowerPlant {
   readonly x: number
   readonly y: number
   readonly z: number
+  /** Deterministic campus orientation, independent of animation phase. */
+  readonly yaw: number
   readonly phase: number
   /** Authoritative generator-owned campus footprint, used for visibility. */
   readonly footprintTileIds: readonly TileId[]
