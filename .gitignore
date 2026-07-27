@@ -12,6 +12,31 @@ dist
 dist-ssr
 *.local
 
+# Local configuration and secrets (commit only sanitized *.example templates)
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+credentials.json
+service-account*.json
+
+# Local deployment/provider state
+.wrangler/
+.dev.vars
+.terraform/
+*.tfstate
+*.tfstate.*
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
