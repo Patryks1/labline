@@ -30,12 +30,17 @@ export class MunicipalPowerLayer {
     const visiblePlants = plants.filter((plant) => {
       for (const chunkId of visible) {
         const bounds = chunks.chunkBounds(chunkId)
-        if (plant.tileX >= bounds.minX && plant.tileX < bounds.maxX &&
-          plant.tileY >= bounds.minY && plant.tileY < bounds.maxY) return true
+        if (plant.footprintTileIds.some((tileId) => {
+          const x = tileId % source.width
+          const y = Math.floor(tileId / source.width)
+          return x >= bounds.minX && x < bounds.maxX && y >= bounds.minY && y < bounds.maxY
+        })) return true
       }
       return false
     })
-    const signature = visiblePlants.map((plant) => `${plant.id}:${plant.kind}`).join(',')
+    const signature = visiblePlants.map((plant) =>
+      `${plant.id}:${plant.kind}:${plant.panels.map((panel) => panel.tileId).join('.')}`,
+    ).join(',')
     if (signature === this.signature) return
     this.signature = signature
     this.clear()
@@ -63,8 +68,15 @@ export class MunicipalPowerLayer {
           scale: plant.kind === 'nuclear' ? 0.22 : 0.14,
         })
       } else {
-        solar.push({ x: plant.x, y: plant.y + 0.27, z: plant.z, yaw: plant.phase,
-          phase: plant.phase, scale: 1.25 })
+        const panels = plant.panels.length > 0 ? plant.panels : [plant]
+        for (const panel of panels) solar.push({
+          x: panel.x,
+          y: panel.y + 0.27,
+          z: panel.z,
+          yaw: 'yaw' in panel ? panel.yaw : plant.phase,
+          phase: plant.phase + ('tileId' in panel ? panel.tileId * 0.017 : 0),
+          scale: plant.panels.length > 0 ? 0.82 : 1.25,
+        })
       }
     }
     if (rotors.length) this.add('municipal-wind-rotors', rotorGeometry(), this.rotorMaterial, rotors)

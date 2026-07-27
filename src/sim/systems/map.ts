@@ -31,7 +31,11 @@ import {
 import { tileCoords, tileId } from '../world/ids'
 import type { Facility } from '../world/types'
 import type { DynamicWorld } from '../world/dynamicWorld'
-import { WORLD_GENERATOR_VERSION_V4, WORLD_GENERATOR_VERSION_V5 } from '../world/types'
+import {
+  WORLD_GENERATOR_VERSION_V4,
+  WORLD_GENERATOR_VERSION_V5,
+  WORLD_GENERATOR_VERSION_V6,
+} from '../world/types'
 import {
   facilityTransportAccess,
   transportLandValueMultiplier,
@@ -903,7 +907,8 @@ export function canPlaceBuilding(
   let maxGrade = 0
   const compactWorld = state.map.world
   if ((compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V4 ||
-      compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5) && resolved.length > 0) {
+      compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
+      compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6) && resolved.length > 0) {
     minElevation = Number.POSITIVE_INFINITY
     maxElevation = Number.NEGATIVE_INFINITY
     for (const cell of resolved) {

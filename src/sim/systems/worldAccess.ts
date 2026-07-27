@@ -285,7 +285,6 @@ export function municipalPowerPlantAt(
     return undefined
   }
   const id = tileId(x, y, world.descriptor.width, world.descriptor.height)
-  if (world.staticWorld.district?.[id] !== 2) return undefined
   return world.staticWorld.municipalPowerPlants?.find((plant) => plant.footprint.includes(id))
 }
 

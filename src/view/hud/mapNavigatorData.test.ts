@@ -9,6 +9,7 @@ import {
   navigatorPointToWorld,
   navigatorView,
   navigatorZoomAround,
+  navigatorCitySummary,
   numberColor,
   regionOverlayFill,
 } from './mapNavigatorData'
@@ -19,6 +20,9 @@ describe('world navigator data', () => {
     const data = buildMapNavigatorData(state)
 
     expect(data.cities.length).toBeGreaterThan(0)
+    expect(data.cities[0]?.stats.cityId).toBe(data.cities[0]?.id)
+    expect(navigatorCitySummary(data.cities[0]!)).toContain('municipal capacity')
+    expect(navigatorCitySummary(data.cities[0]!)).toContain('reserve margin')
     expect(data.terrain.length).toBeGreaterThan(0)
     expect(data.terrain[0]?.size).toBeGreaterThan(0)
     expect(data.companies).toHaveLength(state.rivals.length + 1)

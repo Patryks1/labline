@@ -128,6 +128,27 @@ describe('save / load v9', () => {
     })
     expect(back.map.world?.metrics.facilities.count).toBe(originalFacilityCount)
     expect(back.map.cities?.[0]?.talentAvailable?.researcher).toBe(7)
+    expect(back.map.cities?.[0]?.population).toBe(city.population + 12_345)
+  })
+
+  it('lets the compact snapshot override conflicting compatibility population', () => {
+    const state = createGame({
+      seed: 74,
+      difficulty: 'normal',
+      advanced: { mapWidth: 128, mapHeight: 128, cityCount: 3, rivalCount: 1 },
+    })
+    const city = state.map.world!.cityRuntime.get(0)!
+    const snapshotPopulation = city.population + 44_444
+    state.map.world!.beginBatch().updateCity(0, { ...city, population: snapshotPopulation }).commit()
+    state.map.cities![0]!.population = snapshotPopulation - 33_333
+
+    const file = buildSaveFile(state, '1')
+    expect(file.state).not.toHaveProperty('cityStats')
+    expect(file.state.map).not.toHaveProperty('cityStats')
+    const back = parseSave(serializeSave(file)).state
+
+    expect(back.map.world!.cityRuntime.get(0)!.population).toBe(snapshotPopulation)
+    expect(back.map.cities![0]!.population).toBe(snapshotPopulation)
   })
 
   it('continues to accept v6 envelopes for preserved campaigns', () => {

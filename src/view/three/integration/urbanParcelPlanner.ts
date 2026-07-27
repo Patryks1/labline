@@ -1,4 +1,5 @@
 import {
+  DISTRICT_KIND,
   TERRAIN_KIND,
   cityIndexFromFeature,
   type StaticCity,
@@ -7,7 +8,7 @@ import {
 } from '../../../sim/world'
 
 export type UrbanParcelClass = 'small' | 'normal' | 'skyscraper'
-export type UrbanParcelStyle = 'suburban' | 'core'
+export type UrbanParcelStyle = 'suburban' | 'mixed' | 'core'
 
 export interface UrbanParcel {
   /** Stable render-only identity. The anchor is always the lowest footprint tile ID. */
@@ -87,7 +88,8 @@ export function planUrbanParcels(
     if (terrain !== TERRAIN_KIND.city && terrain !== TERRAIN_KIND.house) continue
     const transport = options.transportAt?.(tileId) ?? world.transport?.[id] ?? 0
     const district = options.districtAt?.(tileId) ?? world.district?.[id] ?? 0
-    if (transport !== 0 || district === 2) continue
+    if (transport !== 0 || district === DISTRICT_KIND.municipalCampus ||
+      district === DISTRICT_KIND.greenBuffer) continue
     const featureId = options.featureAt?.(tileId) ?? world.feature[id] ?? 0
     const cityIndex = cityIndexFromFeature(featureId)
     if (cityIndex === undefined) continue
@@ -174,7 +176,10 @@ function parcelStyle(
   terrain: number,
   district: number,
 ): UrbanParcelStyle {
-  if (terrain === TERRAIN_KIND.house || district === 1) return 'suburban'
+  if (district === DISTRICT_KIND.suburb) return 'suburban'
+  if (district === DISTRICT_KIND.core) return 'core'
+  if (district === DISTRICT_KIND.mixed) return 'mixed'
+  if (terrain === TERRAIN_KIND.house) return 'suburban'
   const x = id % world.descriptor.width
   const y = Math.floor(id / world.descriptor.width)
   return Math.hypot(x - city.cx, y - city.cy) <= Math.max(2, city.radius * 0.68)

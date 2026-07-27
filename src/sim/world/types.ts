@@ -69,11 +69,13 @@ export const WORLD_GENERATOR_VERSION = 2 as const
 export const WORLD_GENERATOR_VERSION_V3 = 3 as const
 export const WORLD_GENERATOR_VERSION_V4 = 4 as const
 export const WORLD_GENERATOR_VERSION_V5 = 5 as const
+export const WORLD_GENERATOR_VERSION_V6 = 6 as const
 export type WorldGeneratorVersion =
   | typeof WORLD_GENERATOR_VERSION
   | typeof WORLD_GENERATOR_VERSION_V3
   | typeof WORLD_GENERATOR_VERSION_V4
   | typeof WORLD_GENERATOR_VERSION_V5
+  | typeof WORLD_GENERATOR_VERSION_V6
 
 interface WorldDescriptorBase {
   readonly formatVersion: typeof WORLD_FORMAT_VERSION
@@ -117,7 +119,20 @@ export interface WorldDescriptorV5 extends WorldDescriptorBase {
   readonly transportAlgorithmVersion: 2
 }
 
-export type WorldDescriptor = WorldDescriptorV2 | WorldDescriptorV3 | WorldDescriptorV4 | WorldDescriptorV5
+/** V6 persists every algorithm boundary that can affect regenerated saves. */
+export interface WorldDescriptorV6 extends WorldDescriptorBase {
+  readonly generatorVersion: typeof WORLD_GENERATOR_VERSION_V6
+  readonly elevationScale: number
+  readonly seaLevel: number
+  readonly terrainAlgorithmVersion: 1
+  readonly biomeVersion: 1
+  readonly transportAlgorithmVersion: 2
+  readonly settlementAlgorithmVersion: 2
+  readonly municipalCampusAlgorithmVersion: 2
+  readonly cityStatsModelVersion: 1
+}
+
+export type WorldDescriptor = WorldDescriptorV2 | WorldDescriptorV3 | WorldDescriptorV4 | WorldDescriptorV5 | WorldDescriptorV6
 
 export const BIOME_KIND = {
   plains: 0,
@@ -202,6 +217,24 @@ export interface StaticLake {
 
 export type MunicipalPowerPlantKind = 'coal' | 'wind' | 'solar' | 'nuclear'
 
+/** Stable district codes shared by generation, rendering, and inspection. */
+export const DISTRICT_KIND = {
+  none: 0,
+  suburb: 1,
+  municipalCampus: 2,
+  core: 3,
+  mixed: 4,
+  greenBuffer: 5,
+} as const
+
+/** Renderer-independent placement metadata for an authored municipal campus. */
+export interface MunicipalPowerCampusLayout {
+  readonly version: 1
+  readonly orientationQuarterTurns: 0 | 1 | 2 | 3
+  readonly equipmentTileId: TileId
+  readonly panelTileIds: readonly TileId[]
+}
+
 /** Immutable, generator-owned utility campus serving one V5 settlement. */
 export interface MunicipalPowerPlant {
   readonly index: number
@@ -211,6 +244,8 @@ export interface MunicipalPowerPlant {
   readonly cx: number
   readonly cy: number
   readonly footprint: readonly TileId[]
+  /** Present on V6 campuses; omitted by the frozen V5 generator. */
+  readonly layout?: MunicipalPowerCampusLayout
   /** Nameplate output; nuclear > coal > wind > solar for equivalent demand. */
   readonly capacityMw: number
   readonly animationPhase: number
@@ -233,7 +268,7 @@ export interface StaticWorld {
   readonly elevation?: Int16Array
   /** V4 deterministic biome classification, one byte per logical tile. */
   readonly biome?: Uint8Array
-  /** V5 district layer: 0 none, 1 suburb, 2 municipal utility campus. */
+  /** District layer: 0 none, 1 suburb, 2 utility, 3 core, 4 mixed, 5 green buffer. */
   readonly district?: Uint8Array
   readonly cities: readonly StaticCity[]
   readonly regions: readonly StaticRegion[]

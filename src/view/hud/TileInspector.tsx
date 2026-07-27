@@ -15,6 +15,8 @@ import { money, num } from './format'
 import { BuildingNameField } from './ui/BuildingNameField'
 import { BuildingDisposeButtons } from './panels/MapPanel'
 import { mapTileAtAny, municipalPowerPlantAt } from '../../sim/systems/worldAccess'
+import { cityStatsForIndex } from '../../sim/systems/cityStats'
+import { cityIndexFromFeature } from '../../sim/world'
 import {
   transportAccessFactorAt,
   transportRegionalCongestionAt,
@@ -57,6 +59,13 @@ export function TileInspector() {
   const tile = mapTileAtAny(state, selected.x, selected.y)
   if (!tile) return null
   const municipalPlant = municipalPowerPlantAt(state, selected.x, selected.y)
+  const compactWorld = state.map.storage === 'compact' ? state.map.world : undefined
+  const selectedTileId = selected.y * state.map.width + selected.x
+  const featureCityIndex = compactWorld
+    ? cityIndexFromFeature(compactWorld.staticWorld.feature[selectedTileId] ?? 0)
+    : undefined
+  const cityIndex = municipalPlant?.cityIndex ?? featureCityIndex
+  const cityStats = cityIndex === undefined ? undefined : cityStatsForIndex(state, cityIndex)
 
   const isOurs = tile.owner === 'player'
   const isRival = tile.owner !== 'player' && tile.owner !== 'neutral'
@@ -105,6 +114,22 @@ export function TileInspector() {
     if (city) metrics.push({ label: 'Serves', value: city.name })
   }
 
+  if (cityStats) {
+    metrics.push({ label: 'Population', value: num(cityStats.population, 0) })
+    metrics.push({ label: 'Municipal', value: `${num(cityStats.municipalCapacityMw, 0)} MW` })
+    metrics.push({ label: 'Demand', value: `${num(cityStats.municipalDemandMw, 0)} MW` })
+    const contractCount = cityStats.cityPowerContractCount + cityStats.powerExportContractCount
+    metrics.push({
+      label: 'Contracts',
+      value: `${contractCount} · ${num(cityStats.cityPowerContractMw, 0)} MW out / ${num(cityStats.powerExportContractMw, 0)} MW in`,
+    })
+    metrics.push({
+      label: 'Reserve',
+      value: `${cityStats.reserveMargin >= 0 ? '+' : ''}${num(cityStats.reserveMargin * 100, 0)}%`,
+      tone: cityStats.reserveMargin < 0 ? 'text-amber' : 'text-mint',
+    })
+  }
+
   if (isDcKind(tile.kind) && isDcAnchor(tile)) {
     const bays = usage
       ? `${usage.used}/${usage.capacity}`
@@ -136,7 +161,7 @@ export function TileInspector() {
   })
   metrics.push({ label: 'Congestion', value: congestion < 0.15 ? 'Free flow' : `${Math.round(congestion * 100)}%` })
 
-  const shown = metrics.slice(0, 6)
+  const shown = metrics.slice(0, cityStats ? 10 : 6)
 
   return (
     <div

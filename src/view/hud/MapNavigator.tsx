@@ -28,6 +28,7 @@ import {
   layoutNavigatorCityLabels,
   minimapTerrainColor,
   navigatorPointToWorld,
+  navigatorCitySummary,
   navigatorView,
   navigatorZoomAround,
   regionOverlayFill,
@@ -522,19 +523,19 @@ export function MapNavigator() {
                 <rect key={region.id} x={region.originX} y={region.originY} width={region.width} height={region.height} fill={regionOverlayFill(region, data.regions, overlay, index)} fillOpacity={0.42} stroke="rgba(145,166,173,0.28)" strokeWidth={worldPerPixel * 0.6} pointerEvents="none"><title>{region.name}</title></rect>
               )) : null}
               {data.cities.map((city) => (
-                <g key={city.id} data-map-marker="city" role="button" tabIndex={0} aria-label={`Pan to ${city.name}`} onClick={() => pan(city.cx, city.cy)} onKeyDown={(event) => {
+                <g key={city.id} data-map-marker="city" role="button" tabIndex={0} aria-label={`Pan to ${navigatorCitySummary(city)}`} onClick={() => pan(city.cx, city.cy)} onKeyDown={(event) => {
                   if (event.key !== 'Enter' && event.key !== ' ') return
                   event.preventDefault()
                   pan(city.cx, city.cy)
                 }} className="cursor-pointer outline-none">
                   <circle cx={city.cx} cy={city.cy} r={Math.max(markerScale * 0.52, city.radius * 0.18)} fill={city.tier === 'metro' ? 'rgba(95,167,232,0.24)' : 'rgba(192,209,205,0.14)'} stroke={city.tier === 'metro' ? '#7bbdf0' : city.tier === 'satellite' ? '#9fbfc4' : '#8fa6a5'} strokeWidth={worldPerPixel * (city.tier === 'metro' ? 1.2 : 0.8)} />
                   <circle cx={city.cx} cy={city.cy} r={city.tier === 'metro' ? markerScale * 0.22 : markerScale * 0.14} fill={city.tier === 'metro' ? '#b9dcf5' : '#a9b9b7'} />
-                  <title>{city.name} · {city.tier ?? 'city'}</title>
+                  <title>{navigatorCitySummary(city)}</title>
                 </g>
               ))}
               {labels.map((label) => {
                 const city = cityById.get(label.id)
-                return <text key={label.id} data-map-marker="city-label" role="button" tabIndex={0} aria-label={`Pan to ${label.text}`} x={label.x} y={label.y} textAnchor={label.anchor} fontSize={worldPerPixel * 10} fontFamily="IBM Plex Mono, monospace" fontWeight={city?.tier === 'metro' ? 700 : 500} fill={city?.tier === 'metro' ? '#dceffc' : '#d8dfdc'} stroke="#071319" strokeWidth={worldPerPixel * 2.4} paintOrder="stroke" className="cursor-pointer select-none" onClick={() => city && pan(city.cx, city.cy)}>{label.text}</text>
+                return <text key={label.id} data-map-marker="city-label" role="button" tabIndex={0} aria-label={city ? `Pan to ${navigatorCitySummary(city)}` : `Pan to ${label.text}`} x={label.x} y={label.y} textAnchor={label.anchor} fontSize={worldPerPixel * 10} fontFamily="IBM Plex Mono, monospace" fontWeight={city?.tier === 'metro' ? 700 : 500} fill={city?.tier === 'metro' ? '#dceffc' : '#d8dfdc'} stroke="#071319" strokeWidth={worldPerPixel * 2.4} paintOrder="stroke" className="cursor-pointer select-none" onClick={() => city && pan(city.cx, city.cy)}>{city ? <title>{navigatorCitySummary(city)}</title> : null}{label.text}</text>
               })}
               {sites.map((site) => <SiteMarker key={`${site.ownerId}-${site.id}`} site={site} markerScale={markerScale} strokeScale={worldPerPixel} onFocus={focus} />)}
               {mapViewport ? <MapViewportOverlay viewport={mapViewport} worldPerPixel={worldPerPixel} /> : null}

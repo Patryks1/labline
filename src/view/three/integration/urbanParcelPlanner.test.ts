@@ -77,6 +77,25 @@ describe('render-time urban parcel planning', () => {
     expect(world.staticHash).toBe(hash)
     persistedLayers(world).forEach((layer, index) => expect(layer).toEqual(before[index]))
   })
+
+  it('keeps mixed-use city parcels distinct from detached-house suburbs', () => {
+    const world = generateStaticWorldV5(OPTIONS)
+    const urban = world.kind.findIndex((kind, id) =>
+      kind === TERRAIN_KIND.city && (world.transport?.[id] ?? 0) === 0 && world.feature[id] !== 0)
+    expect(urban).toBeGreaterThanOrEqual(0)
+    const other = world.kind.findIndex((kind, id) =>
+      id !== urban && kind === TERRAIN_KIND.city && (world.transport?.[id] ?? 0) === 0 && world.feature[id] !== 0)
+    expect(other).toBeGreaterThanOrEqual(0)
+
+    const plan = planUrbanParcels(world, {
+      tileIds: [urban, other],
+      districtAt: (id) => id === urban ? 4 : 1,
+    })
+
+    expect(plan.parcelForTile(urban)?.style).toBe('mixed')
+    expect(plan.parcelForTile(other)?.style).toBe('suburban')
+    expect(plan.parcelForTile(urban)?.class).not.toBe('skyscraper')
+  })
 })
 
 function persistedLayers(world: StaticWorld): readonly (Uint8Array | Uint16Array | Int16Array)[] {

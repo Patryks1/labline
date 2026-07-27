@@ -121,6 +121,16 @@ export interface RenderMunicipalPowerPlant {
   readonly y: number
   readonly z: number
   readonly phase: number
+  /** Authoritative generator-owned campus footprint, used for visibility. */
+  readonly footprintTileIds: readonly TileId[]
+  /** Authoritative V6 solar panel transforms; empty for legacy campuses. */
+  readonly panels: readonly {
+    readonly tileId: TileId
+    readonly x: number
+    readonly y: number
+    readonly z: number
+    readonly yaw: number
+  }[]
 }
 
 /**

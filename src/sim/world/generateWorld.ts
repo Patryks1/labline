@@ -4,6 +4,7 @@ export {
   createWorldDescriptorV3,
   createWorldDescriptorV4,
   createWorldDescriptorV5,
+  createWorldDescriptorV6,
   deriveCityCount,
   encodeCityFeature,
   encodeLakeFeature,
@@ -11,6 +12,7 @@ export {
   generateStaticWorldV3,
   generateStaticWorldV4,
   generateStaticWorldV5,
+  generateStaticWorldV6,
   getBiome,
   getCornerElevation,
   getTileElevation,
@@ -22,6 +24,7 @@ export {
   staticWorldV3Hash,
   staticWorldV4Hash,
   staticWorldV5Hash,
+  staticWorldV6Hash,
   tileAt,
   type WorldGenerationOptions,
 } from './generator'

@@ -1,5 +1,6 @@
 import { tileId } from './ids'
 import {
+  DISTRICT_KIND,
   TERRAIN_KIND,
   TRANSPORT_CLASS_MASK,
   TRANSPORT_CLASS_SHIFT,
@@ -10,6 +11,7 @@ import {
   WORLD_GENERATOR_VERSION_V3,
   WORLD_GENERATOR_VERSION_V4,
   WORLD_GENERATOR_VERSION_V5,
+  WORLD_GENERATOR_VERSION_V6,
   BIOME_KIND,
   type CityGrowthMetadata,
   type CityIndustry,
@@ -18,6 +20,7 @@ import {
   type StaticCity,
   type StaticLake,
   type MunicipalPowerPlant,
+  type MunicipalPowerCampusLayout,
   type MunicipalPowerPlantKind,
   type StaticRegion,
   type StaticWorld,
@@ -29,6 +32,7 @@ import {
   type WorldDescriptorV3,
   type WorldDescriptorV4,
   type WorldDescriptorV5,
+  type WorldDescriptorV6,
   type BiomeKind,
 } from './types'
 
@@ -211,11 +215,29 @@ export function createWorldDescriptorV5(options: WorldGenerationOptions): WorldD
   })
 }
 
-type ReliefWorldDescriptor = WorldDescriptorV4 | WorldDescriptorV5
+export function createWorldDescriptorV6(options: WorldGenerationOptions): WorldDescriptorV6 {
+  const base = createWorldDescriptor(options)
+  return Object.freeze({
+    ...base,
+    generatorVersion: WORLD_GENERATOR_VERSION_V6,
+    elevationScale: 0.04,
+    seaLevel: 0,
+    terrainAlgorithmVersion: 1,
+    biomeVersion: 1,
+    transportAlgorithmVersion: 2,
+    settlementAlgorithmVersion: 2,
+    municipalCampusAlgorithmVersion: 2,
+    cityStatsModelVersion: 1,
+  })
+}
+
+type ReliefWorldDescriptor = WorldDescriptorV4 | WorldDescriptorV5 | WorldDescriptorV6
+type HierarchicalWorldDescriptor = WorldDescriptorV5 | WorldDescriptorV6
 
 function isReliefDescriptor(descriptor: WorldDescriptor): descriptor is ReliefWorldDescriptor {
   return descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V4 ||
-    descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5
+    descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
+    descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6
 }
 
 function lakeSeeds(descriptor: WorldDescriptor, rng: RandomSource): LakeSeed[] {
@@ -1148,7 +1170,7 @@ function stampV3Settlements(
 
 /** Upgrade V5 settlement grids without changing the frozen V3/V4 stamping path. */
 function upgradeV5SettlementRoadHierarchy(
-  descriptor: WorldDescriptorV5,
+  descriptor: HierarchicalWorldDescriptor,
   cities: readonly V3Settlement[],
   kind: Uint8Array,
   transport: Uint16Array,
@@ -1272,7 +1294,7 @@ function routeRoad(
       if (nx < minX || nx > maxX || ny < minY || ny > maxY) continue
       const worldId = ny * descriptor.width + nx
       if (avoidWater && kind[worldId] === TERRAIN_KIND.lake) continue
-      if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 && dx !== 0 && dy !== 0) {
+      if (descriptor.generatorVersion >= WORLD_GENERATOR_VERSION_V5 && dx !== 0 && dy !== 0) {
         // A pair of opposite diagonals through the same 2x2 cell has no shared
         // tile at which to form a junction. Reject that move while routing so
         // the compiled surface can never contain an at-grade X overlap.
@@ -1465,7 +1487,7 @@ function paintV3RegionalRoads(
 }
 
 function v5GatewayToward(
-  descriptor: WorldDescriptorV5,
+  descriptor: HierarchicalWorldDescriptor,
   city: V3Settlement,
   other: V3Settlement,
 ): RoutePoint {
@@ -1480,7 +1502,7 @@ function v5GatewayToward(
 }
 
 function paintV5Route(
-  descriptor: WorldDescriptorV5,
+  descriptor: HierarchicalWorldDescriptor,
   kind: Uint8Array,
   transport: Uint16Array,
   elevation: Int16Array,
@@ -1510,7 +1532,7 @@ function paintV5Route(
 
 /** V5 terminates highways at metro perimeter gateways and uses arterial approaches. */
 function paintV5RegionalRoads(
-  descriptor: WorldDescriptorV5,
+  descriptor: HierarchicalWorldDescriptor,
   cities: readonly V3Settlement[],
   kind: Uint8Array,
   transport: Uint16Array,
@@ -1827,6 +1849,252 @@ function addV5SuburbsAndMunicipalPower(
   return plants
 }
 
+const V6_DISTRICT_SUBURB = DISTRICT_KIND.suburb
+const V6_DISTRICT_UTILITY = DISTRICT_KIND.municipalCampus
+const V6_DISTRICT_CORE = DISTRICT_KIND.core
+const V6_DISTRICT_MIXED = DISTRICT_KIND.mixed
+const V6_DISTRICT_GREEN_BUFFER = DISTRICT_KIND.greenBuffer
+
+function v6Footprint(
+  descriptor: WorldDescriptorV6,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): TileId[] {
+  const result: TileId[] = []
+  for (let oy = 0; oy < height; oy++) {
+    for (let ox = 0; ox < width; ox++) result.push(tileId(x + ox, y + oy, descriptor.width))
+  }
+  return result
+}
+
+function v6CampusBuildable(
+  descriptor: WorldDescriptorV6,
+  kind: Uint8Array,
+  feature: Uint16Array,
+  transport: Uint16Array,
+  elevation: Int16Array,
+  reserved: ReadonlySet<number>,
+  x: number,
+  y: number,
+  footprintWidth: number,
+  footprintHeight: number,
+): boolean {
+  if (x < 1 || y < 1 || x + footprintWidth >= descriptor.width - 1 || y + footprintHeight >= descriptor.height - 1) return false
+  let minHeight = Infinity
+  let maxHeight = -Infinity
+  for (let oy = 0; oy < footprintHeight; oy++) {
+    for (let ox = 0; ox < footprintWidth; ox++) {
+      const px = x + ox
+      const py = y + oy
+      const id = py * descriptor.width + px
+      if (reserved.has(id) || kind[id] === TERRAIN_KIND.lake || feature[id] !== 0 ||
+          transportClass(transport[id]!) !== TRANSPORT_ROAD_CLASS.none) return false
+      if (rawTileSlope(descriptor, elevation, px, py) > 0.12) return false
+      const height = tileElevationSum(elevation, descriptor.width, px, py) * descriptor.elevationScale / 4
+      minHeight = Math.min(minHeight, height)
+      maxHeight = Math.max(maxHeight, height)
+    }
+  }
+  if (maxHeight - minHeight > 0.18) return false
+  // A campus is valid only when at least one perimeter tile has cardinal road access.
+  for (let oy = 0; oy < footprintHeight; oy++) {
+    for (let ox = 0; ox < footprintWidth; ox++) {
+      if (ox > 0 && ox + 1 < footprintWidth && oy > 0 && oy + 1 < footprintHeight) continue
+      const px = x + ox
+      const py = y + oy
+      for (const [dx, dy] of [[0, -1], [1, 0], [0, 1], [-1, 0]] as const) {
+        const neighbor = (py + dy) * descriptor.width + px + dx
+        if (transportClass(transport[neighbor] ?? 0) !== TRANSPORT_ROAD_CLASS.none) return true
+      }
+    }
+  }
+  return false
+}
+
+/** V6 compiles roads first, then assigns explicit concentric land-use zones. */
+function addV6ZoningAndMunicipalPower(
+  descriptor: WorldDescriptorV6,
+  cities: readonly StaticCity[],
+  kind: Uint8Array,
+  feature: Uint16Array,
+  transport: Uint16Array,
+  elevation: Int16Array,
+  biome: Uint8Array,
+  district: Uint8Array,
+): MunicipalPowerPlant[] {
+  // Remove the inherited V3 land-use stamp while retaining its road skeleton.
+  // This makes the following pass genuinely transport-first without changing
+  // any of the compatibility generator functions.
+  for (let id = 0; id < kind.length; id++) {
+    if (cityIndexFromFeature(feature[id]!) === undefined) continue
+    if (transportClass(transport[id]!) !== TRANSPORT_ROAD_CLASS.none) continue
+    if (kind[id] !== TERRAIN_KIND.lake) kind[id] = TERRAIN_KIND.empty
+    feature[id] = 0
+  }
+
+  // Extend four legible local streets through the buffer and outer suburb.
+  for (const city of cities) {
+    const start = Math.max(2, Math.ceil(city.radius * 0.68))
+    const end = Math.max(start + 3, Math.ceil(city.radius * 1.38))
+    for (const [dx, dy] of [[1, 0], [0, 1], [-1, 0], [0, -1]] as const) {
+      let previous: RoutePoint | undefined
+      for (let distance = start; distance <= end; distance++) {
+        const x = city.cx + dx * distance
+        const y = city.cy + dy * distance
+        if (x <= 0 || y <= 0 || x >= descriptor.width - 1 || y >= descriptor.height - 1) break
+        const id = y * descriptor.width + x
+        if (kind[id] === TERRAIN_KIND.lake || rawTileSlope(descriptor, elevation, x, y) > 0.18) break
+        markRoad(transport, id, TRANSPORT_ROAD_CLASS.local, TRANSPORT_FLAGS.settlement, kind)
+        if (previous) connectRoadPoints(descriptor, transport, previous, { x, y })
+        previous = { x, y }
+      }
+    }
+
+    // Tangential streets turn the four radial approaches into a connected
+    // outer-neighborhood fabric. Each branch starts on a radial, so even a
+    // slope-truncated branch cannot become an isolated road component.
+    const branchRadius = Math.max(start + 1, Math.round(city.radius * 1.08))
+    const branchLength = Math.max(2, Math.round(city.radius * 0.5))
+    for (const [radialX, radialY] of [[1, 0], [0, 1], [-1, 0], [0, -1]] as const) {
+      const anchor = { x: city.cx + radialX * branchRadius, y: city.cy + radialY * branchRadius }
+      if (anchor.x <= 0 || anchor.y <= 0 || anchor.x >= descriptor.width - 1 || anchor.y >= descriptor.height - 1) continue
+      for (const side of [-1, 1] as const) {
+        let previous = anchor
+        for (let step = 1; step <= branchLength; step++) {
+          const x = anchor.x + -radialY * side * step
+          const y = anchor.y + radialX * side * step
+          if (x <= 0 || y <= 0 || x >= descriptor.width - 1 || y >= descriptor.height - 1) break
+          const id = y * descriptor.width + x
+          if (kind[id] === TERRAIN_KIND.lake || rawTileSlope(descriptor, elevation, x, y) > 0.18) break
+          markRoad(transport, id, TRANSPORT_ROAD_CLASS.local, TRANSPORT_FLAGS.settlement, kind)
+          connectRoadPoints(descriptor, transport, previous, { x, y })
+          previous = { x, y }
+        }
+      }
+    }
+  }
+
+  const plants: MunicipalPowerPlant[] = []
+  const reserved = new Set<number>()
+  for (const city of cities) {
+    const plantKind = municipalPlantKind(city, descriptor.seed)
+    const orientationQuarterTurns = (coordinateHash(city.index, city.cx + city.cy, descriptor.seed ^ 0x6ca1) & 3) as 0 | 1 | 2 | 3
+    // Solar selects one of five compact array templates. Conventional plants keep the
+    // established 2x2 footprint, while sharing the authoritative layout schema.
+    const solar = plantKind === 'solar'
+    const solarTemplates = [[2, 3], [2, 4], [3, 3], [2, 5], [3, 4]] as const
+    const template = solarTemplates[coordinateHash(city.cx, city.cy, descriptor.seed ^ 0x501a) % solarTemplates.length]!
+    let footprintWidth = solar ? (orientationQuarterTurns % 2 === 0 ? template[0] : template[1]) : 2
+    let footprintHeight = solar ? (orientationQuarterTurns % 2 === 0 ? template[1] : template[0]) : 2
+    const minRadius = Math.max(4, Math.ceil(city.radius * 1.42))
+    const maxRadius = Math.max(minRadius + 12, Math.ceil(city.radius * 2.25))
+    const findCandidates = (candidateWidth: number, candidateHeight: number) => {
+      const candidates: { x: number; y: number; score: number }[] = []
+      const minX = Math.max(1, city.cx - maxRadius)
+      const maxX = Math.min(descriptor.width - candidateWidth - 2, city.cx + maxRadius)
+      const minY = Math.max(1, city.cy - maxRadius)
+      const maxY = Math.min(descriptor.height - candidateHeight - 2, city.cy + maxRadius)
+      for (let y = minY; y <= maxY; y++) {
+        for (let x = minX; x <= maxX; x++) {
+          const centerX = x + (candidateWidth - 1) / 2
+          const centerY = y + (candidateHeight - 1) / 2
+          const distance = Math.hypot(centerX - city.cx, centerY - city.cy)
+          if (distance < minRadius || distance > maxRadius) continue
+          if (!v6CampusBuildable(descriptor, kind, feature, transport, elevation, reserved,
+            x, y, candidateWidth, candidateHeight)) continue
+          candidates.push({
+            x,
+            y,
+            score: Math.round(distance * 4096) +
+              (coordinateHash(x, y, descriptor.seed ^ (city.index * 0x41f + 0xa271)) & 0xfff),
+          })
+        }
+      }
+      candidates.sort((a, b) => a.score - b.score || a.y - b.y || a.x - b.x)
+      return candidates
+    }
+    let candidates = findCandidates(footprintWidth, footprintHeight)
+    if (solar && candidates.length === 0 && footprintWidth * footprintHeight > 6) {
+      footprintWidth = orientationQuarterTurns % 2 === 0 ? 2 : 3
+      footprintHeight = orientationQuarterTurns % 2 === 0 ? 3 : 2
+      candidates = findCandidates(footprintWidth, footprintHeight)
+    }
+    const site = candidates[0]
+    if (!site) continue
+    const footprint = v6Footprint(descriptor, site.x, site.y, footprintWidth, footprintHeight)
+    for (const id of footprint) {
+      reserved.add(id)
+      district[id] = V6_DISTRICT_UTILITY
+      kind[id] = TERRAIN_KIND.warehouse
+      feature[id] = 0
+    }
+    const equipmentTileId = footprint[orientationQuarterTurns % footprint.length]!
+    const panelTileIds = solar ? footprint.filter((id) => id !== equipmentTileId) : []
+    const layout: MunicipalPowerCampusLayout = Object.freeze({
+      version: 1,
+      orientationQuarterTurns,
+      equipmentTileId,
+      panelTileIds: Object.freeze(panelTileIds),
+    })
+    plants.push(Object.freeze({
+      index: plants.length,
+      id: `municipal-power-${city.id}`,
+      cityIndex: city.index,
+      kind: plantKind,
+      cx: site.x,
+      cy: site.y,
+      footprint: Object.freeze(footprint),
+      layout,
+      capacityMw: municipalCapacityMw(city, plantKind),
+      animationPhase: (coordinateHash(site.x, site.y, descriptor.seed ^ 0x8f31) & 0xffff) / 0xffff,
+    }))
+  }
+
+  for (const city of cities) {
+    const featureId = encodeCityFeature(city.index)
+    const extent = Math.ceil(city.radius * 1.55)
+    for (let y = Math.max(1, city.cy - extent); y <= Math.min(descriptor.height - 2, city.cy + extent); y++) {
+      for (let x = Math.max(1, city.cx - extent); x <= Math.min(descriptor.width - 2, city.cx + extent); x++) {
+        const id = y * descriptor.width + x
+        if (district[id] === V6_DISTRICT_UTILITY || kind[id] === TERRAIN_KIND.lake ||
+            transportClass(transport[id]!) !== TRANSPORT_ROAD_CLASS.none) continue
+        if (feature[id] !== 0 && feature[id] !== featureId) continue
+        if (!settlementBiomeIsFriendly(biome[id]!) || rawTileSlope(descriptor, elevation, x, y) > 0.16) continue
+        const distance = settlementDistance(city, x, y)
+        if (distance <= 0.44) {
+          district[id] = V6_DISTRICT_CORE
+          kind[id] = TERRAIN_KIND.city
+        } else if (distance <= 0.72) {
+          district[id] = V6_DISTRICT_MIXED
+          kind[id] = coordinateHash(x, y, descriptor.seed ^ (city.index * 0x10d + 0x4d21)) % 100 < 86
+            ? TERRAIN_KIND.city : TERRAIN_KIND.park
+        } else if (distance <= 0.9) {
+          district[id] = V6_DISTRICT_GREEN_BUFFER
+          kind[id] = TERRAIN_KIND.park
+        } else if (distance <= 1.38) {
+          let serviced = false
+          for (let oy = -2; oy <= 2 && !serviced; oy++) {
+            for (let ox = -2; ox <= 2; ox++) {
+              if (Math.abs(ox) + Math.abs(oy) > 2) continue
+              if (transportClass(transport[(y + oy) * descriptor.width + x + ox] ?? 0) !== TRANSPORT_ROAD_CLASS.none) {
+                serviced = true
+                break
+              }
+            }
+          }
+          if (!serviced) continue
+          district[id] = V6_DISTRICT_SUBURB
+          kind[id] = TERRAIN_KIND.house
+        } else continue
+        feature[id] = featureId
+      }
+    }
+  }
+  return plants
+}
+
 /**
  * Keep the civic centre of every V5 town or larger settlement as a canonical
  * cardinal crossroads. Regional A* routes are allowed to approach diagonally,
@@ -1836,7 +2104,7 @@ function addV5SuburbsAndMunicipalPower(
  * diagonal, so this changes junction shape without disconnecting the network.
  */
 function establishV5SettlementCrossroads(
-  descriptor: WorldDescriptorV5,
+  descriptor: HierarchicalWorldDescriptor,
   cities: readonly StaticCity[],
   kind: Uint8Array,
   transport: Uint16Array,
@@ -1900,7 +2168,7 @@ function finalizeTransportTopology(
         // V5 routes write their own edges. Only the generated settlement grid
         // needs adjacency-derived topology; auto-joining nearby regional roads
         // creates parallel-road rungs and abrupt accidental intersections.
-        const inferAdjacency = descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V5 ||
+        const inferAdjacency = descriptor.generatorVersion < WORLD_GENERATOR_VERSION_V5 ||
           ((transport[id]! & TRANSPORT_FLAGS.settlement) !== 0 &&
             (transport[neighbor]! & TRANSPORT_FLAGS.settlement) !== 0)
         if (inferAdjacency) {
@@ -2374,7 +2642,8 @@ function generateBiomes(
   base: Pick<StaticWorld, 'kind'>,
   elevation: Int16Array,
 ): Uint8Array {
-  if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5) {
+  if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
+      descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6) {
     return generateV5Biomes(descriptor, base, elevation)
   }
   const biome = new Uint8Array(descriptor.width * descriptor.height)
@@ -2413,7 +2682,7 @@ function generateBiomes(
  * islands without ever interpolating or mutating the resulting gameplay IDs.
  */
 function generateV5Biomes(
-  descriptor: WorldDescriptorV5,
+  descriptor: HierarchicalWorldDescriptor,
   base: Pick<StaticWorld, 'kind'>,
   elevation: Int16Array,
 ): Uint8Array {
@@ -2532,7 +2801,7 @@ function addV4RuralTerrain(
       if (kind[id] !== TERRAIN_KIND.empty) continue
       // V4 is a frozen compatibility generator. V5 road surfaces are an
       // independent overlay, so never seed a grove beneath an occupied road.
-      if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 &&
+      if (descriptor.generatorVersion >= WORLD_GENERATOR_VERSION_V5 &&
           transportClass(transport[id]!) !== TRANSPORT_ROAD_CLASS.none) continue
       const coarse = coordinateHash(x >> 2, y >> 2, descriptor.seed + 911)
       const fine = coordinateHash(x, y, descriptor.seed + 1217)
@@ -2547,10 +2816,11 @@ function addV4RuralTerrain(
 
 /** Keep V5's transport-owned surface clear of every non-water land use. */
 function clearV5RoadEnvironment(
-  descriptor: WorldDescriptorV5,
+  descriptor: HierarchicalWorldDescriptor,
   kind: Uint8Array,
   transport: Uint16Array,
   district: Uint8Array,
+  feature?: Uint16Array,
 ): void {
   for (let id = 0; id < transport.length; id++) {
     if (transportClass(transport[id]!) === TRANSPORT_ROAD_CLASS.none) continue
@@ -2576,7 +2846,13 @@ function clearV5RoadEnvironment(
         }
       }
     }
-    if (!serviced) district[id] = 0
+    if (!serviced) {
+      district[id] = 0
+      if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6) {
+        if (kind[id] === TERRAIN_KIND.house) kind[id] = TERRAIN_KIND.empty
+        if (feature) feature[id] = 0
+      }
+    }
   }
 }
 
@@ -2689,6 +2965,68 @@ export function staticWorldV5Hash(
   return hash.toString(16).padStart(8, '0')
 }
 
+/** Canonical V6 fingerprint, including zoning and authoritative campus layouts. */
+export function staticWorldV6Hash(
+  descriptor: WorldDescriptorV6,
+  layers: readonly ArrayLike<number>[],
+  cities: readonly StaticCity[],
+  regions: readonly StaticRegion[],
+  lakes: readonly StaticLake[],
+  starterPads: readonly TileId[],
+  municipalPowerPlants: readonly MunicipalPowerPlant[] = [],
+): string {
+  let hash = 0x811c9dc5
+  hash = hashNumber(hash, 0x0601)
+  for (const value of [descriptor.formatVersion, descriptor.generatorVersion, descriptor.seed,
+    descriptor.width, descriptor.height, descriptor.chunkSize, descriptor.cityCount,
+    descriptor.transportAlgorithmVersion, descriptor.settlementAlgorithmVersion,
+    descriptor.municipalCampusAlgorithmVersion, descriptor.cityStatsModelVersion]) hash = hashUint32(hash, value)
+  for (const value of [descriptor.landValueBase, descriptor.landValueCityPeak,
+    descriptor.energyPricePerMWh, descriptor.waterCoverage, descriptor.elevationScale,
+    descriptor.seaLevel, descriptor.terrainAlgorithmVersion, descriptor.biomeVersion]) hash = hashFloat64(hash, value)
+  for (const layer of layers) {
+    hash = hashUint32(hash, layer.length)
+    for (let index = 0; index < layer.length; index++) hash = hashNumber(hash, layer[index]!)
+  }
+  hash = hashUint32(hash, cities.length)
+  for (const city of cities) {
+    hash = hashString(hash, city.id); hash = hashString(hash, city.name); hash = hashString(hash, city.industry); hash = hashString(hash, city.tier ?? '')
+    for (const value of [city.index, city.cx, city.cy, city.radius, city.population, city.powerRadius,
+      city.parentCityIndex ?? -1, city.regionIndex ?? -1, city.palette?.primary ?? -1,
+      city.palette?.secondary ?? -1, city.palette?.accent ?? -1]) hash = hashUint32(hash, value)
+    for (const value of [city.powerBuyMw, city.powerBuyPriceMult, city.talentWageMult,
+      city.growth?.rate ?? 0, city.growth?.directionX ?? 0, city.growth?.directionY ?? 0,
+      city.growth?.irregularity ?? 0]) hash = hashFloat64(hash, value)
+  }
+  hash = hashUint32(hash, regions.length)
+  for (const region of regions) {
+    hash = hashString(hash, region.id); hash = hashString(hash, region.name)
+    for (const value of [region.index, region.originX, region.originY, region.width, region.height]) hash = hashUint32(hash, value)
+    for (const value of [region.energyPriceMult, region.latencyToMarket, region.regulationRisk]) hash = hashFloat64(hash, value)
+  }
+  hash = hashUint32(hash, lakes.length)
+  for (const lake of lakes) {
+    hash = hashString(hash, lake.id); hash = hashString(hash, lake.name)
+    for (const value of [lake.index, lake.cx, lake.cy, lake.radiusX, lake.radiusY, lake.tileCount]) hash = hashUint32(hash, value)
+  }
+  hash = hashUint32(hash, starterPads.length)
+  for (const pad of starterPads) hash = hashUint32(hash, pad)
+  hash = hashUint32(hash, municipalPowerPlants.length)
+  for (const plant of municipalPowerPlants) {
+    hash = hashString(hash, plant.id); hash = hashString(hash, plant.kind)
+    for (const value of [plant.index, plant.cityIndex, plant.cx, plant.cy, plant.capacityMw]) hash = hashUint32(hash, value)
+    hash = hashFloat64(hash, plant.animationPhase)
+    hash = hashUint32(hash, plant.footprint.length)
+    for (const id of plant.footprint) hash = hashUint32(hash, id)
+    hash = hashUint32(hash, plant.layout?.version ?? 0)
+    hash = hashUint32(hash, plant.layout?.orientationQuarterTurns ?? 0)
+    hash = hashUint32(hash, plant.layout?.equipmentTileId ?? 0xffff_ffff)
+    hash = hashUint32(hash, plant.layout?.panelTileIds.length ?? 0)
+    for (const id of plant.layout?.panelTileIds ?? []) hash = hashUint32(hash, id)
+  }
+  return hash.toString(16).padStart(8, '0')
+}
+
 function generateStaticWorldV4FromDescriptor(descriptor: WorldDescriptorV4): StaticWorld {
   const elevation = generateV4Elevation(descriptor)
   const hydrology = deriveV4Hydrology(descriptor, elevation)
@@ -2794,6 +3132,56 @@ export function generateStaticWorldV5(options: WorldGenerationOptions): StaticWo
   return generateStaticWorldV5FromDescriptor(createWorldDescriptorV5(options))
 }
 
+function generateStaticWorldV6FromDescriptor(descriptor: WorldDescriptorV6): StaticWorld {
+  const elevation = generateV4Elevation(descriptor)
+  const hydrology = deriveV4Hydrology(descriptor, elevation)
+  const kind = hydrology.kind
+  const feature = hydrology.feature
+  const size = descriptor.width * descriptor.height
+  const region = new Uint8Array(size)
+  const variantMask = new Uint8Array(size)
+  const transport = new Uint16Array(size)
+  const district = new Uint8Array(size)
+  const biome = generateBiomes(descriptor, { kind }, elevation)
+  const rng = createRandom(descriptor.seed + 9001)
+  const metroBase = placeCities(descriptor, kind, rng, elevation, biome)
+  const cities = deriveV3Settlements(descriptor, metroBase, kind, rng, elevation, biome)
+  stampV3Settlements(descriptor, cities, kind, feature, transport)
+  upgradeV5SettlementRoadHierarchy(descriptor, cities, kind, transport)
+  paintV5RegionalRoads(descriptor, cities, kind, transport, elevation, biome)
+  const municipalPowerPlants = addV6ZoningAndMunicipalPower(
+    descriptor, cities, kind, feature, transport, elevation, biome, district,
+  )
+  establishV5SettlementCrossroads(descriptor, cities, kind, transport)
+  finalizeTransportTopology(descriptor, transport, { x: cities[0]!.cx, y: cities[0]!.cy }, elevation)
+  const starterPads = collectV3StarterPads(descriptor, cities[0]!, kind, transport, elevation)
+  addV4RuralTerrain(descriptor, kind, feature, transport, biome)
+  clearV5RoadEnvironment(descriptor, kind, transport, district, feature)
+  const regions = assignRegions(descriptor, cities.slice(0, descriptor.cityCount), region)
+  buildVariantMasks(descriptor, kind, variantMask)
+  let water = 0
+  let urban = 0
+  let forest = 0
+  for (let id = 0; id < size; id++) {
+    if (kind[id] === TERRAIN_KIND.lake) water++
+    if (cityIndexFromFeature(feature[id]!) !== undefined) urban++
+    if (kind[id] === TERRAIN_KIND.forest) forest++
+  }
+  const layers = [kind, region, feature, variantMask, transport, elevation, biome, district]
+  return {
+    descriptor, kind, region, feature, variantMask, transport, elevation, biome, district,
+    cities: Object.freeze(cities), regions: Object.freeze(regions), lakes: hydrology.lakes,
+    municipalPowerPlants: Object.freeze(municipalPowerPlants),
+    starterPads: Object.freeze(starterPads),
+    staticHash: staticWorldV6Hash(descriptor, layers, cities, regions, hydrology.lakes, starterPads, municipalPowerPlants),
+    coverage: Object.freeze({ water: water / size, urban: urban / size, forest: forest / size }),
+  }
+}
+
+export function generateStaticWorldV6(options: WorldGenerationOptions): StaticWorld {
+  return generateStaticWorldV6FromDescriptor(createWorldDescriptorV6(options))
+}
+
 function descriptorElevationScale(world: StaticWorld): number {
   return isReliefDescriptor(world.descriptor) ? world.descriptor.elevationScale : 0
 }
@@ -2839,6 +3227,7 @@ export function regenerateStaticWorld(descriptor: WorldDescriptor): StaticWorld 
   if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V3) return generateStaticWorldV3(descriptor)
   if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V4) return generateStaticWorldV4FromDescriptor(descriptor)
   if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5) return generateStaticWorldV5FromDescriptor(descriptor)
+  if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6) return generateStaticWorldV6FromDescriptor(descriptor)
   throw new Error('unsupported compact world descriptor version')
 }
 
