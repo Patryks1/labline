@@ -16,11 +16,12 @@ import { MANUAL_SLOTS, type SaveSlotId } from '../../sim/save'
 import { useGameStore } from '../../store/gameStore'
 import { money } from './format'
 import { formatLastPlayed } from './menuTime'
-import { RENDER_PRESETS, type RenderPreset, useUiStore } from '../../store/uiStore'
+import { useUiStore } from '../../store/uiStore'
 import { FeedPost } from './ui/FeedPost'
+import { LablineMenuShell } from './menu/LablineMenuShell'
+import { SettingsPanel } from './menu/SettingsPanel'
 import {
   ArrowRight,
-  Atom,
   ArrowLeft,
   Database,
   DiceFive,
@@ -115,12 +116,6 @@ export function NewGameMenu() {
   const lifecycleError = useGameStore((s) => s.lifecycleError)
   const clearLifecycleError = useGameStore((s) => s.clearLifecycleError)
   const requestConfirm = useUiStore((s) => s.requestConfirm)
-  const interfaceScale = useUiStore((s) => s.interfaceScale)
-  const setInterfaceScale = useUiStore((s) => s.setInterfaceScale)
-  const renderPreset = useUiStore((s) => s.renderPreset)
-  const setRenderPreset = useUiStore((s) => s.setRenderPreset)
-  const reducedMotion = useUiStore((s) => s.reducedMotion)
-  const setReducedMotion = useUiStore((s) => s.setReducedMotion)
 
   const [tab, setTab] = useState<MenuTab>('home')
   const [status, setStatus] = useState<string | null>(null)
@@ -235,45 +230,25 @@ export function NewGameMenu() {
   }
 
   return (
-    <main className="main-menu-shell pointer-events-auto absolute inset-0 z-50 overflow-hidden bg-void">
-      <img
-        src="/assets/labline-menu-campus.png"
-        alt=""
-        aria-hidden="true"
-        fetchPriority="high"
-        decoding="async"
-        className="main-menu-art absolute inset-0 h-full w-full object-cover"
-      />
-      <img
-        src="/assets/labline-menu-campus.png"
-        alt=""
-        aria-hidden="true"
-        decoding="async"
-        className="main-menu-art main-menu-art--lights pointer-events-none absolute inset-0 h-full w-full object-cover"
-      />
-      <div className="main-menu-shade absolute inset-0" />
-      <div className="main-menu-grid absolute inset-0" />
-
-      <header className="absolute inset-x-0 top-0 z-10 flex h-20 items-center px-6 sm:px-10 xl:px-14">
-        <div className="flex items-center gap-3">
-          <span className="grid size-10 place-items-center border border-mint/35 bg-void/70 text-mint backdrop-blur-md">
-            <Atom size="1.35rem" weight="duotone" />
-          </span>
-          <div>
-            <p className="text-[1rem] font-semibold leading-none tracking-[-0.03em] text-bone">LABLINE</p>
-            <p className="mt-1 font-mono text-[0.5625rem] uppercase tracking-[0.24em] text-muted">Frontier operations</p>
-          </div>
-        </div>
-      </header>
-
-      <section className="relative z-[1] grid h-full grid-cols-1 items-center gap-8 px-4 pb-5 pt-20 sm:px-8 xl:grid-cols-[minmax(22rem,1fr)_minmax(34rem,40rem)] xl:px-14 2xl:grid-cols-[minmax(30rem,1fr)_40rem] 2xl:px-[7vw]">
-        <aside className="hidden max-w-[38rem] self-end pb-[8vh] xl:block">
-          <h2 className="max-w-[9ch] text-[clamp(3.5rem,5vw,6rem)] font-semibold leading-[0.86] tracking-[-0.065em] text-bone">
-            Build the<br />frontier.
-          </h2>
-        </aside>
-
-        <section className="main-menu-console panel-scroll relative mx-auto max-h-[calc(100dvh-6.5rem)] w-full max-w-[40rem] overflow-y-auto border border-line/80 bg-panel/94 shadow-[0_30px_100px_rgba(0,8,12,.62)] backdrop-blur-xl">
+    <LablineMenuShell
+      variant="title"
+      titleId="labline-main-title"
+      contentClassName="main-menu-console max-h-[calc(100dvh-11.5rem)] max-w-[48rem]"
+      utilityNav={(
+        <button
+          type="button"
+          aria-current={tab === 'news' ? 'page' : undefined}
+          onClick={() => selectTab('news')}
+          className={`flex min-h-11 items-center gap-2 border px-3.5 font-mono text-[0.6875rem] uppercase tracking-[0.14em] backdrop-blur transition ${
+            tab === 'news'
+              ? 'border-mint/50 bg-mint/15 text-mint'
+              : 'border-line bg-void/75 text-muted hover:border-mint/40 hover:text-bone'
+          }`}
+        >
+          <Newspaper size="1rem" weight="duotone" /> News
+        </button>
+      )}
+    >
           <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-mint/80 via-mint/20 to-transparent" />
           <div className="main-menu-console-head border-b border-line/70 px-5 pb-4 pt-5 sm:px-7 sm:pt-6">
             <div className="flex items-start justify-between gap-5">
@@ -289,7 +264,7 @@ export function NewGameMenu() {
                           ? 'Settings'
                           : 'Command'}
                 </p>
-                <h1 className="mt-2 text-[2rem] font-semibold leading-none tracking-[-0.045em] text-bone">
+                <h2 className="mt-2 text-[2rem] font-semibold leading-none tracking-[-0.045em] text-bone">
                   {tab === 'new'
                     ? 'Create your company'
                     : tab === 'load'
@@ -297,9 +272,9 @@ export function NewGameMenu() {
                       : tab === 'news'
                         ? 'What changed'
                         : tab === 'settings'
-                          ? 'Display & motion'
+                          ? 'Preferences'
                           : 'Build the frontier'}
-                </h1>
+                </h2>
               </div>
               {tab === 'new' ? (
                 <button
@@ -327,7 +302,7 @@ export function NewGameMenu() {
               {tab === 'new' && 'Name the company, choose its mark, then set the market.'}
               {tab === 'load' && 'Autosave plus eight manual slots.'}
               {tab === 'news' && 'Changelog posts and simulation notes.'}
-              {tab === 'settings' && 'Render quality, interface scale, and motion.'}
+              {tab === 'settings' && 'Interface, video, and audio preferences.'}
             </p>
           </div>
 
@@ -352,13 +327,10 @@ export function NewGameMenu() {
         {tab !== 'new' && (
           <nav
             aria-label="Main menu sections"
-            className="grid grid-cols-4 border border-line/80 bg-void/50 p-1"
+            className="grid grid-cols-3 border border-line/80 bg-void/50 p-1"
           >
             <TabChip active={tab === 'home'} onClick={() => selectTab('home')}>
               Command
-            </TabChip>
-            <TabChip active={tab === 'news'} onClick={() => selectTab('news')}>
-              News
             </TabChip>
             <TabChip active={tab === 'load'} onClick={() => selectTab('load')}>
               Saves
@@ -459,82 +431,7 @@ export function NewGameMenu() {
           </div>
         )}
 
-        {tab === 'settings' && (
-          <div className="mt-5 space-y-3">
-            <section className="rounded-lg border border-line/70 bg-panel-2/70 p-3.5">
-              <h3 className="text-sm font-semibold text-bone">Render preset</h3>
-              <p className="mt-1 text-[0.75rem] text-muted">Controls pixel ratio, decorative traffic, and LOD transition speed.</p>
-              <div className="mt-3 grid grid-cols-3 gap-1.5">
-                {([
-                  ['performance', 'Performance'],
-                  ['balanced', 'Balanced'],
-                  ['quality', 'Quality'],
-                ] as const).map(([id, label]) => {
-                  const preset = RENDER_PRESETS[id as RenderPreset]
-                  return (
-                    <button
-                      key={id}
-                      type="button"
-                      aria-pressed={renderPreset === id}
-                      onClick={() => setRenderPreset(id)}
-                      className={`rounded-md border px-2 py-2 text-left transition ${
-                        renderPreset === id
-                          ? 'border-mint/50 bg-mint/15 text-mint'
-                          : 'border-line bg-void/35 text-muted hover:text-bone'
-                      }`}
-                    >
-                      <strong className="block text-[0.75rem]">{label}</strong>
-                      <span className="mt-1 block font-mono text-[0.625rem] tabular-nums opacity-80">
-                        {preset.pixelRatio}× · {preset.decorativeTraffic ? 'traffic' : 'no traffic'} · {preset.lodTransitionMs}ms
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
-            </section>
-
-            <section className="rounded-lg border border-line/70 bg-panel-2/70 p-3.5">
-              <h3 className="text-sm font-semibold text-bone">Interface scale</h3>
-              <div className="mt-3 grid grid-cols-4 gap-1.5">
-                {([
-                  ['auto', 'Auto'],
-                  [0.8, '80%'],
-                  [0.9, '90%'],
-                  [1, '100%'],
-                  [1.1, '110%'],
-                  [1.25, '125%'],
-                  [1.5, '150%'],
-                ] as const).map(([value, label]) => (
-                  <button
-                    key={String(value)}
-                    type="button"
-                    onClick={() => setInterfaceScale(value)}
-                    className={`min-h-9 rounded-md border px-2 font-mono text-[0.6875rem] transition ${
-                      interfaceScale === value
-                        ? 'border-mint/50 bg-mint/15 text-mint'
-                        : 'border-line bg-void/35 text-muted hover:text-bone'
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </section>
-
-            <button
-              type="button"
-              aria-pressed={reducedMotion}
-              onClick={() => setReducedMotion(!reducedMotion)}
-              className="flex w-full items-center justify-between gap-3 rounded-lg border border-line/70 bg-panel-2/70 px-3.5 py-3 text-left hover:border-mint/30"
-            >
-              <span>
-                <strong className="block text-[0.875rem] text-bone">Reduce motion</strong>
-                <span className="mt-1 block text-[0.75rem] text-muted">Disable panel transitions and animated status changes.</span>
-              </span>
-              <span className={`status-chip ${reducedMotion ? 'status-chip--positive' : ''}`}>{reducedMotion ? 'On' : 'Off'}</span>
-            </button>
-          </div>
-        )}
+        {tab === 'settings' && <SettingsPanel />}
 
         {tab === 'load' && (
           <div className="mt-5 space-y-1.5">
@@ -926,9 +823,7 @@ export function NewGameMenu() {
           </>
         )}
           </div>
-        </section>
-      </section>
-    </main>
+    </LablineMenuShell>
   )
 }
 

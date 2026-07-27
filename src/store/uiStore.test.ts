@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { migrateUiPreferences, partializeUiPreferences, useUiStore } from './uiStore'
+import {
+  DEFAULT_AUDIO_PREFERENCES,
+  migrateUiPreferences,
+  partializeUiPreferences,
+  useUiStore,
+} from './uiStore'
 
 describe('map camera UI preferences', () => {
   afterEach(() => {
@@ -49,5 +54,53 @@ describe('cloud visibility UI preference', () => {
     expect(migrateUiPreferences({ cloudsVisible: false })).toMatchObject({
       cloudsVisible: false,
     })
+  })
+})
+
+describe('audio UI preferences', () => {
+  it('adds safe audio defaults to legacy persisted state', () => {
+    expect(migrateUiPreferences({ renderPreset: 'quality', reducedMotion: true })).toMatchObject({
+      renderPreset: 'quality',
+      reducedMotion: true,
+      ...DEFAULT_AUDIO_PREFERENCES,
+    })
+  })
+
+  it('preserves valid values and clamps damaged persisted volumes', () => {
+    expect(migrateUiPreferences({
+      audioMuted: true,
+      masterVolume: 0.45,
+      musicVolume: -2,
+      effectsVolume: 3,
+    })).toMatchObject({
+      audioMuted: true,
+      masterVolume: 0.45,
+      musicVolume: 0,
+      effectsVolume: 1,
+    })
+    expect(migrateUiPreferences({
+      audioMuted: 'yes',
+      masterVolume: Number.NaN,
+      musicVolume: '0.5',
+      effectsVolume: Number.POSITIVE_INFINITY,
+    })).toMatchObject(DEFAULT_AUDIO_PREFERENCES)
+  })
+
+  it('persists audio preferences with the existing visual preferences', () => {
+    const partial = partializeUiPreferences({
+      ...useUiStore.getState(),
+      audioMuted: true,
+      masterVolume: 0.6,
+      musicVolume: 0.4,
+      effectsVolume: 0.2,
+    })
+    expect(partial).toMatchObject({
+      audioMuted: true,
+      masterVolume: 0.6,
+      musicVolume: 0.4,
+      effectsVolume: 0.2,
+    })
+    expect(partial).not.toHaveProperty('toast')
+    expect(partial).not.toHaveProperty('confirmRequest')
   })
 })

@@ -18,6 +18,20 @@ export type InterfaceScale = 'auto' | 0.8 | 0.9 | 1 | 1.1 | 1.25 | 1.5
 
 export type RenderPreset = 'performance' | 'balanced' | 'quality'
 
+export interface AudioPreferences {
+  audioMuted: boolean
+  masterVolume: number
+  musicVolume: number
+  effectsVolume: number
+}
+
+export const DEFAULT_AUDIO_PREFERENCES: AudioPreferences = {
+  audioMuted: false,
+  masterVolume: 1,
+  musicVolume: 0.7,
+  effectsVolume: 0.8,
+}
+
 export interface RenderSettings {
   pixelRatio: number
   decorativeTraffic: boolean
@@ -50,7 +64,7 @@ export interface ReleaseEvent {
   capability: number
 }
 
-interface UiPreferences {
+interface UiPreferences extends AudioPreferences {
   interfaceScale: InterfaceScale
   renderPreset: RenderPreset
   reducedMotion: boolean
@@ -77,6 +91,10 @@ interface UiPreferences {
   cycleMapCameraTilt: () => void
   resetMapCamera: () => void
   toggleClouds: () => void
+  setAudioMuted: (muted: boolean) => void
+  setMasterVolume: (volume: number) => void
+  setMusicVolume: (volume: number) => void
+  setEffectsVolume: (volume: number) => void
 }
 
 export function resolveAutoScale(viewportHeight: number): number {
@@ -88,6 +106,12 @@ export function resolveAutoScale(viewportHeight: number): number {
 
 export function resolveRenderSettings(preset: RenderPreset): RenderSettings {
   return RENDER_PRESETS[preset]
+}
+
+function validVolume(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.min(1, value))
+    : fallback
 }
 
 export function migrateUiPreferences(persisted: unknown) {
@@ -103,6 +127,12 @@ export function migrateUiPreferences(persisted: unknown) {
       ? state.mapCameraTilt
       : DEFAULT_MAP_CAMERA_TILT,
     cloudsVisible: typeof state.cloudsVisible === 'boolean' ? state.cloudsVisible : true,
+    audioMuted: typeof state.audioMuted === 'boolean'
+      ? state.audioMuted
+      : DEFAULT_AUDIO_PREFERENCES.audioMuted,
+    masterVolume: validVolume(state.masterVolume, DEFAULT_AUDIO_PREFERENCES.masterVolume),
+    musicVolume: validVolume(state.musicVolume, DEFAULT_AUDIO_PREFERENCES.musicVolume),
+    effectsVolume: validVolume(state.effectsVolume, DEFAULT_AUDIO_PREFERENCES.effectsVolume),
   }
 }
 
@@ -114,6 +144,10 @@ export function partializeUiPreferences(state: UiPreferences) {
     mapCameraHeading: state.mapCameraHeading,
     mapCameraTilt: state.mapCameraTilt,
     cloudsVisible: state.cloudsVisible,
+    audioMuted: state.audioMuted,
+    masterVolume: state.masterVolume,
+    musicVolume: state.musicVolume,
+    effectsVolume: state.effectsVolume,
   }
 }
 
@@ -131,6 +165,7 @@ export const useUiStore = create<UiPreferences>()(
       mapCameraHeading: DEFAULT_MAP_CAMERA_HEADING,
       mapCameraTilt: DEFAULT_MAP_CAMERA_TILT,
       cloudsVisible: true,
+      ...DEFAULT_AUDIO_PREFERENCES,
       setInterfaceScale: (interfaceScale) => set({ interfaceScale }),
       setRenderPreset: (renderPreset) => set({ renderPreset }),
       setReducedMotion: (reducedMotion) => set({ reducedMotion }),
@@ -155,10 +190,14 @@ export const useUiStore = create<UiPreferences>()(
         mapCameraTilt: DEFAULT_MAP_CAMERA_TILT,
       }),
       toggleClouds: () => set((state) => ({ cloudsVisible: !state.cloudsVisible })),
+      setAudioMuted: (audioMuted) => set({ audioMuted }),
+      setMasterVolume: (masterVolume) => set({ masterVolume: validVolume(masterVolume, 1) }),
+      setMusicVolume: (musicVolume) => set({ musicVolume: validVolume(musicVolume, 0.7) }),
+      setEffectsVolume: (effectsVolume) => set({ effectsVolume: validVolume(effectsVolume, 0.8) }),
     }),
     {
       name: 'labline-ui-v1',
-      version: 3,
+      version: 4,
       migrate: migrateUiPreferences,
       partialize: partializeUiPreferences,
     },

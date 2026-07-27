@@ -8,6 +8,7 @@ import {
   MapTrifold,
   ShieldWarning,
   Timer,
+  X,
 } from '@phosphor-icons/react'
 import {
   useCallback,
@@ -126,6 +127,19 @@ export function CloudVisibilityButton({
     >
       <Cloud size="0.95rem" weight={cloudsVisible ? 'fill' : 'duotone'} />
     </button>
+  )
+}
+
+export function NavigatorCompass() {
+  return (
+    <div
+      className="pointer-events-none absolute left-1.5 top-1.5 z-10 grid size-8 place-items-center rounded-full border border-mint/45 bg-void/90 font-mono text-[0.625rem] font-semibold text-mint shadow backdrop-blur-sm"
+      role="img"
+      aria-label="North up"
+      title="North up"
+    >
+      N
+    </div>
   )
 }
 
@@ -274,14 +288,17 @@ export function MapNavigator() {
   const resetMapCamera = useUiStore((store) => store.resetMapCamera)
   const [buildingFilter, setBuildingFilter] = useState<BuildingFilter>('all')
   const [buildingIndex, setBuildingIndex] = useState(0)
-  const [zoom, setZoom] = useState<NavigatorZoom>(1)
+  const [zoom, setZoom] = useState<NavigatorZoom>(2)
   const [center, setCenter] = useState(() => ({ x: state.map.width / 2, y: state.map.height / 2 }))
   const [followViewport, setFollowViewport] = useState(true)
   const [size, setSize] = useState({ width: 268, height: 144 })
-  const [zoomAnnouncement, setZoomAnnouncement] = useState('Minimap zoom 1 times')
+  const [zoomAnnouncement, setZoomAnnouncement] = useState('Minimap zoom 2 times, following camera')
+  const [navigatorExpanded, setNavigatorExpanded] = useState(false)
   const frameRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement>(null)
   const dragRef = useRef<DragState | null>(null)
+  const launcherRef = useRef<HTMLButtonElement>(null)
+  const compactCloseRef = useRef<HTMLButtonElement>(null)
   const map = state.map
   const config = state.config
   const terrain = useMemo(() => buildMinimapTerrain({ map, config }), [config, map])
@@ -309,7 +326,7 @@ export function MapNavigator() {
 
   useEffect(() => {
     setCenter({ x: data.width / 2, y: data.height / 2 })
-    setZoom(1)
+    setZoom(2)
     setFollowViewport(true)
   }, [data.height, data.width])
 
@@ -332,6 +349,7 @@ export function MapNavigator() {
     size.height,
     [
       { x: size.width - 112, y: 0, width: 112, height: 36 },
+      { x: 0, y: 0, width: 42, height: 36 },
       { x: 0, y: size.height - 28, width: 145, height: 28 },
     ],
   ), [data.cities, size.height, size.width, view, zoom])
@@ -366,9 +384,27 @@ export function MapNavigator() {
   const fit = useCallback(() => {
     setZoom(1)
     setCenter({ x: data.width / 2, y: data.height / 2 })
-    setFollowViewport(true)
+    setFollowViewport(false)
     setZoomAnnouncement('Minimap fit to world')
   }, [data.height, data.width])
+
+  const follow = useCallback(() => {
+    if (mapViewport) {
+      setCenter({ x: mapViewport.x + mapViewport.w / 2, y: mapViewport.y + mapViewport.h / 2 })
+    }
+    setFollowViewport(true)
+    setZoomAnnouncement(`Minimap zoom ${zoom} times, following camera`)
+  }, [mapViewport, zoom])
+
+  const openNavigator = () => {
+    setNavigatorExpanded(true)
+    window.requestAnimationFrame(() => compactCloseRef.current?.focus())
+  }
+
+  const closeNavigator = () => {
+    setNavigatorExpanded(false)
+    window.requestAnimationFrame(() => launcherRef.current?.focus())
+  }
 
   const localPoint = (event: { clientX: number; clientY: number }) => {
     const rect = svgRef.current?.getBoundingClientRect()
@@ -449,7 +485,36 @@ export function MapNavigator() {
   }
 
   return (
-    <aside className="map-navigator hud-surface pointer-events-auto absolute z-[18] w-[min(17.5rem,calc(100vw-1rem))] overflow-hidden rounded-lg">
+    <>
+      <button
+        ref={launcherRef}
+        type="button"
+        aria-label="Open world navigator"
+        aria-expanded={navigatorExpanded}
+        aria-controls="world-navigator-panel"
+        onClick={openNavigator}
+        className="map-navigator-launcher hud-surface pointer-events-auto absolute z-[18] min-h-11 items-center gap-2 rounded-lg px-3 text-[0.75rem] font-semibold text-mint"
+      >
+        <MapTrifold size="1rem" weight="duotone" /> Map
+      </button>
+      <aside
+        id="world-navigator-panel"
+        className="map-navigator hud-surface pointer-events-auto absolute z-[18] overflow-hidden rounded-lg"
+        data-expanded={navigatorExpanded ? 'true' : 'false'}
+        aria-label="World navigator"
+      >
+      <div className="map-navigator-compact-heading min-h-10 items-center border-b border-line/70 px-3 font-mono text-[0.625rem] uppercase tracking-[0.14em] text-mint">
+        World navigator
+      </div>
+      <button
+        ref={compactCloseRef}
+        type="button"
+        aria-label="Close world navigator"
+        onClick={closeNavigator}
+        className="map-navigator-compact-close absolute right-1.5 top-1.5 z-20 min-h-9 min-w-9 items-center justify-center rounded-md border border-line bg-void/90 text-muted hover:text-bone"
+      >
+        <X size="0.95rem" />
+      </button>
       <div className="relative z-10">
         <div className="flex items-center gap-1.5 border-b border-line/70 px-2 py-1.5">
           <button type="button" aria-label="Previous building" disabled={sites.length === 0} onClick={() => {
@@ -501,7 +566,7 @@ export function MapNavigator() {
         </div>
 
         <div className="relative border-b border-line/70 bg-[#071319] p-1.5">
-          <div ref={frameRef} className="relative h-36 w-full overflow-hidden rounded-md border border-line/80 bg-void shadow-inner">
+          <div ref={frameRef} className="map-navigator-frame relative w-full overflow-hidden rounded-md border border-line/80 bg-void shadow-inner">
             <TerrainCanvas data={data} view={view} />
             <svg
               ref={svgRef}
@@ -509,7 +574,7 @@ export function MapNavigator() {
               preserveAspectRatio="none"
               role="application"
               tabIndex={0}
-              aria-label={`World minimap at ${zoom} times zoom. Click to pan the main map; drag to explore.`}
+              aria-label={`North-up world minimap at ${zoom} times zoom${followViewport ? ', following camera' : ''}. Click to pan the main map; drag to explore.`}
               aria-describedby="map-navigator-help"
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
@@ -544,11 +609,13 @@ export function MapNavigator() {
                 <line x1={selectedTile.x + 0.5 - markerScale} y1={selectedTile.y + 0.5} x2={selectedTile.x + 0.5 + markerScale} y2={selectedTile.y + 0.5} stroke="#f3c969" strokeWidth={worldPerPixel * 0.55} />
               </g> : null}
             </svg>
+            <NavigatorCompass />
             <div className="absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md border border-line/70 bg-void/90 p-0.5 shadow backdrop-blur-sm">
-              <button type="button" aria-label="Zoom minimap out" disabled={zoom === 1} onClick={() => applyZoom(zoomStep(zoom, -1))} className="h-6 w-6 rounded text-sm text-bone hover:bg-panel-2 disabled:opacity-35">−</button>
+              <button type="button" aria-label="Zoom minimap out" disabled={zoom === 1} onClick={() => applyZoom(zoomStep(zoom, -1))} className="h-7 w-7 rounded text-sm text-bone hover:bg-panel-2 disabled:opacity-35">−</button>
               <span className="min-w-7 text-center font-mono text-[0.5625rem] text-muted" aria-hidden="true">{zoom}×</span>
-              <button type="button" aria-label="Zoom minimap in" disabled={zoom === 4} onClick={() => applyZoom(zoomStep(zoom, 1))} className="h-6 w-6 rounded text-sm text-bone hover:bg-panel-2 disabled:opacity-35">+</button>
-              <button type="button" aria-label="Fit minimap to world" onClick={fit} className="h-6 rounded px-1.5 font-mono text-[0.5rem] uppercase text-muted hover:bg-panel-2 hover:text-bone">Fit</button>
+              <button type="button" aria-label="Zoom minimap in" disabled={zoom === 4} onClick={() => applyZoom(zoomStep(zoom, 1))} className="h-7 w-7 rounded text-sm text-bone hover:bg-panel-2 disabled:opacity-35">+</button>
+              <button type="button" aria-label="Fit minimap to world" onClick={fit} className="h-7 rounded px-1.5 font-mono text-[0.5rem] uppercase text-muted hover:bg-panel-2 hover:text-bone">Fit</button>
+              <button type="button" aria-label="Follow main map camera" aria-pressed={followViewport} onClick={follow} className={`h-7 rounded px-1.5 font-mono text-[0.5rem] uppercase ${followViewport ? 'bg-mint/15 text-mint' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}>Follow</button>
             </div>
             <div className="pointer-events-none absolute bottom-1.5 left-1.5 flex items-center gap-1.5 rounded-md border border-line/70 bg-void/85 px-1.5 py-0.5 font-mono text-[0.5rem] uppercase tracking-[0.06em] text-muted backdrop-blur-sm">
               <span className="h-1.5 w-1.5 rounded-sm bg-mint" /> Yours
@@ -556,11 +623,12 @@ export function MapNavigator() {
               <span className="hidden sm:inline">Road</span><span className="h-[2px] w-2 bg-[#d8d1bd]" />
             </div>
           </div>
-          <span id="map-navigator-help" className="sr-only">Terrain color shows biome and elevation. Roads use distinct widths and colors for local roads, collectors, arterials, and highways. City names appear as the navigator zooms. The outlined camera footprint reflects the main map perspective and its mint edge points forward. Use plus and minus to zoom, drag the footprint to pan the main map, drag the background to pan this navigator, or press Home to fit.</span>
+          <span id="map-navigator-help" className="sr-only">The map is north up. Terrain color shows biome and elevation. Roads use distinct widths and colors for local roads, collectors, arterials, and highways. City names appear as the navigator zooms. The outlined camera footprint reflects the exact main map perspective and its mint edge points forward. Use plus and minus to zoom, Follow to track the camera, drag the footprint to pan the main map, drag the background to explore this navigator, or press Home to fit the world.</span>
           <span className="sr-only" aria-live="polite">{zoomAnnouncement}</span>
         </div>
       </div>
-    </aside>
+      </aside>
+    </>
   )
 }
 
