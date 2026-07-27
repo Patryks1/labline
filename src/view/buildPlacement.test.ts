@@ -67,6 +67,7 @@ describe('build blueprint placement helpers', () => {
     expect(cost).toEqual({
       buildCash,
       landCash: tile.landValue,
+      gradingCash: 0,
       totalCash: buildCash + tile.landValue,
     })
   })

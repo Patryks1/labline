@@ -2,8 +2,10 @@ import type { MapTile, SimState, TileKind, TileOwner } from '../types'
 import { tileCoords, tileId } from '../world/ids'
 import {
   TERRAIN_KIND_NAME,
+  TRANSPORT_CLASS_MASK,
   type Facility,
   type FacilityQuery,
+  type MunicipalPowerPlant,
   type TileId,
   type WorldOwnerId,
 } from '../world/types'
@@ -140,6 +142,38 @@ export function usesCompactWorld(state: Pick<SimState, 'map'>): boolean {
 }
 
 function emptyLandValue(state: Pick<SimState, 'config' | 'map'>, x: number, y: number): number {
+  const world = state.map.world
+  if (world && Number(world.descriptor.generatorVersion) >= 3) {
+    let settlementInfluence = 0
+    for (const city of world.staticWorld.cities) {
+      const distance = Math.hypot(x - city.cx, y - city.cy)
+      const reach = Math.max(4, city.radius * 3.5)
+      const proximity = Math.max(0, 1 - distance / reach)
+      const tierWeight = city.tier === 'village'
+        ? 0.38
+        : city.tier === 'town'
+          ? 0.56
+          : city.tier === 'satellite'
+            ? 0.78
+            : 1
+      settlementInfluence = Math.max(settlementInfluence, proximity * proximity * tierWeight)
+    }
+    const id = tileId(x, y, world.descriptor.width, world.descriptor.height)
+    const directTransport = (world.getTransport(id) & TRANSPORT_CLASS_MASK) !== 0
+    const adjacentTransport = directTransport || cardinalTransportNeighbor(world, id)
+    const transportMultiplier = directTransport ? 1.2 : adjacentTransport ? 1.1 : 1
+    const regionIndex = world.staticWorld.region[id]
+    const latency = regionIndex === undefined
+      ? undefined
+      : world.staticWorld.regions[regionIndex]?.latencyToMarket
+    // Latency is already a stable generated regional input (lower is better),
+    // so it can safely add a modest location premium without inventing traffic.
+    const regionalMultiplier = latency === undefined ? 1 : 0.9 + (1 - latency) * 0.2
+    return Math.floor(
+      (state.config.landValueBase + state.config.landValueCityPeak * settlementInfluence) *
+      transportMultiplier * regionalMultiplier,
+    )
+  }
   let nearest = Number.POSITIVE_INFINITY
   let radius = 1
   for (const city of state.map.cities ?? []) {
@@ -154,6 +188,15 @@ function emptyLandValue(state: Pick<SimState, 'config' | 'map'>, x: number, y: n
   return Math.floor(
     state.config.landValueBase + state.config.landValueCityPeak * influence * influence,
   )
+}
+
+function cardinalTransportNeighbor(world: DynamicWorld, id: TileId): boolean {
+  const width = world.descriptor.width
+  const { x, y } = tileCoords(id, width)
+  return (y > 0 && (world.getTransport((id - width) as TileId) & TRANSPORT_CLASS_MASK) !== 0) ||
+    (x + 1 < width && (world.getTransport((id + 1) as TileId) & TRANSPORT_CLASS_MASK) !== 0) ||
+    (y + 1 < world.descriptor.height && (world.getTransport((id + width) as TileId) & TRANSPORT_CLASS_MASK) !== 0) ||
+    (x > 0 && (world.getTransport((id - 1) as TileId) & TRANSPORT_CLASS_MASK) !== 0)
 }
 
 /** Materialize a single compatibility tile, never a full compact world. */
@@ -172,7 +215,12 @@ export function compactTileAt(
   const region = world.staticWorld.regions[view.regionIndex]
   const data = facility ? facilityData(facility) : undefined
   const isAnchor = facility?.anchor === id
-  const terrainKind = TERRAIN_KIND_NAME[view.kind] ?? 'empty'
+  // V3 transport is an overlay over the ecological/land-use terrain. The
+  // compatibility MapTile must nevertheless expose it as a road so placement
+  // and legacy callers cannot buy/build on the right-of-way.
+  const terrainKind = !facility && (view.transport & TRANSPORT_CLASS_MASK) !== 0
+    ? 'road'
+    : (TERRAIN_KIND_NAME[view.kind] ?? 'empty')
   const kind = (facility?.kind ?? terrainKind) as TileKind
   const cityIndex = view.feature > 0 && (view.feature & 0x8000) === 0 ? view.feature - 1 : -1
   const cityId = cityIndex >= 0 ? world.staticWorld.cities[cityIndex]?.id : undefined
@@ -224,6 +272,21 @@ export function mapTileAtAny(
   const direct = state.map.tiles[index]
   if (direct?.x === x && direct.y === y) return direct
   return state.map.tiles.find((tile) => tile.x === x && tile.y === y)
+}
+
+/** Generated municipal campuses are world structures, not player facilities. */
+export function municipalPowerPlantAt(
+  state: Pick<SimState, 'map'>,
+  x: number,
+  y: number,
+): MunicipalPowerPlant | undefined {
+  const world = state.map.storage === 'compact' ? state.map.world : undefined
+  if (!world || x < 0 || y < 0 || x >= world.descriptor.width || y >= world.descriptor.height) {
+    return undefined
+  }
+  const id = tileId(x, y, world.descriptor.width, world.descriptor.height)
+  if (world.staticWorld.district?.[id] !== 2) return undefined
+  return world.staticWorld.municipalPowerPlants?.find((plant) => plant.footprint.includes(id))
 }
 
 export function facilityAnchorTiles(
@@ -278,6 +341,30 @@ export function facilityFootprintTiles(state: SimState, facilityId: string): Map
       return compactTileAt(state, x, y)
     })
     .filter((tile): tile is MapTile => tile !== undefined)
+}
+
+/** Resolve every logical cell represented by a selected building or campus. */
+export function selectionFootprintTiles(
+  state: SimState,
+  x: number,
+  y: number,
+): MapTile[] {
+  const municipal = municipalPowerPlantAt(state, x, y)
+  if (municipal && state.map.world) {
+    return municipal.footprint
+      .map((id) => {
+        const point = tileCoords(id, state.map.width)
+        return mapTileAtAny(state, point.x, point.y)
+      })
+      .filter((tile): tile is MapTile => tile !== undefined)
+  }
+  const selected = mapTileAtAny(state, x, y)
+  if (!selected) return []
+  if (selected.campusId) {
+    const footprint = facilityFootprintTiles(state, selected.campusId)
+    if (footprint.length > 0) return footprint
+  }
+  return [selected]
 }
 
 export function compactTileIdAt(state: Pick<SimState, 'map'>, x: number, y: number): TileId | undefined {

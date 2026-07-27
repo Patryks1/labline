@@ -27,12 +27,25 @@ function largeConfig(seed = 5_601): GameConfig {
 }
 
 describe('compact million-tile simulation', () => {
+  it('uses layered generator V5 for small new sandboxes too', () => {
+    const state = createGame({
+      seed: 5_600,
+      advanced: { mapWidth: 48, mapHeight: 48, cityCount: 2, rivalCount: 1 },
+    })
+    expect(state.map.storage).toBe('compact')
+    expect(state.map.world?.descriptor.generatorVersion).toBe(5)
+    expect(state.map.world?.staticWorld.elevation).toHaveLength(49 * 49)
+    expect(state.map.world?.staticWorld.biome).toHaveLength(48 * 48)
+    expect(state.map.world?.staticWorld.lakes.length).toBeGreaterThan(0)
+    expect(state.map.world?.staticWorld.transport?.some((cell) => cell !== 0)).toBe(true)
+  })
+
   it('keeps static terrain compact and rivals in the shared facility index', () => {
     const state = createGame({ config: largeConfig() })
     expect(state.map.storage).toBe('compact')
     expect(state.map.tiles).toHaveLength(0)
     expect(state.map.world).toBeTruthy()
-    expect(staticWorldByteLength(state.map.world!.staticWorld)).toBeLessThanOrEqual(5_000_000)
+    expect(staticWorldByteLength(state.map.world!.staticWorld)).toBe(10_004_002)
     for (const rival of state.rivals) {
       expect(state.map.world!.queryFacilities({ ownerId: rival.id }).length).toBeGreaterThan(0)
     }
@@ -85,13 +98,16 @@ describe('compact million-tile simulation', () => {
     expect(next.map.world!.queryFacilities({ ownerId: 'player', kind: 'fab' })).toHaveLength(1)
   })
 
-  it('grows every city offscreen deterministically every seven days', () => {
-    const a = tickMany(createGame({ config: largeConfig(5_603) }), 12)
-    const b = tickMany(createGame({ config: largeConfig(5_603) }), 12)
+  it('grows every settlement offscreen on the staggered v3 cadence', () => {
+    const a = tickMany(createGame({ config: largeConfig(5_603) }), 365)
+    const b = tickMany(createGame({ config: largeConfig(5_603) }), 365)
     const snapshotsA = [...a.map.world!.cityRuntime.values()]
     const snapshotsB = [...b.map.world!.cityRuntime.values()]
-    expect(snapshotsA.every((city) => city.growthEvents === 1)).toBe(true)
-    expect(snapshotsA.every((city) => city.lastGrowthDay >= 7 && city.lastGrowthDay <= 13)).toBe(true)
+    expect(snapshotsA.every((runtime) => {
+      const tier = a.map.world!.staticWorld.cities[runtime.cityIndex]?.tier
+      return runtime.growthEvents === (tier === 'village' ? 1 : tier === 'town' ? 2 : 4)
+    })).toBe(true)
+    expect(snapshotsA.every((city) => city.lastGrowthDay >= 336 && city.lastGrowthDay <= 363)).toBe(true)
     expect(snapshotsA).toEqual(snapshotsB)
     expect(a.map.world!.toSnapshot().terrainOverrides).toEqual(
       b.map.world!.toSnapshot().terrainOverrides,

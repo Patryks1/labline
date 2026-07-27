@@ -11,6 +11,7 @@ import { commitWorldBatch, facilityAnchorTiles, usesCompactWorld } from './world
 import { tileCoords } from '../world'
 import { seededId } from '../rng'
 import { queueAcceleratorBid } from './sharedMarkets'
+import { transportAccessFactorAt } from './transport'
 
 function alert(state: SimState, severity: 'info' | 'warn' | 'danger', message: string): SimState {
   return {
@@ -420,7 +421,8 @@ export function tickRackDeliveries(state: SimState): SimState {
       fleet.push({ ...r })
       continue
     }
-    if (r.daysLeft <= 1) {
+    const dailyProgress = transportAccessFactorAt(state, r.y * state.map.width + r.x)
+    if (r.daysLeft <= dailyProgress) {
       // Merge into live group of same sku on hall
       const live = fleet.find(
         (x) => x.x === r.x && x.y === r.y && x.skuId === r.skuId && x.status === 'live',
@@ -435,7 +437,7 @@ export function tickRackDeliveries(state: SimState): SimState {
       }
       delivered += r.count
     } else {
-      fleet.push({ ...r, daysLeft: r.daysLeft - 1 })
+      fleet.push({ ...r, daysLeft: r.daysLeft - dailyProgress })
     }
   }
 

@@ -35,7 +35,8 @@ The closest engine precedents reinforce these choices. Unity's [Tilemap Renderer
 
 ### Static layers
 
-The generated base world uses exactly five bytes per tile:
+Generator v2 uses five bytes per tile. Generator v3 adds an independent packed
+transport overlay and uses seven bytes per tile:
 
 | Layer | Type | Bytes/tile | Purpose |
 | --- | --- | ---: | --- |
@@ -43,8 +44,9 @@ The generated base world uses exactly five bytes per tile:
 | `region` | `Uint8Array` | 1 | Region/palette/economy index |
 | `feature` | `Uint16Array` | 2 | City/lake feature identity |
 | `variantMask` | `Uint8Array` | 1 | Deterministic variant plus NESW connectivity |
+| `transport` (v3) | `Uint16Array` | 2 | Explicit eight-way road topology, class, and bridge/regional flags |
 
-A 1,000 x 1,000 base layer is therefore 5,000,000 bytes, excluding small descriptor/city/region metadata. No `MapTile[1_000_000]` is created.
+A 1,000 x 1,000 v3 base layer is therefore 7,000,000 bytes, excluding small descriptor/settlement/region metadata. V2 worlds remain 5,000,000 bytes and hash-identical. No `MapTile[1_000_000]` is created.
 
 ### Dynamic layers
 
@@ -60,7 +62,12 @@ All writes happen through an atomic `WorldMutationBatch`. Collision validation c
 
 ### Deterministic city growth
 
-Every seven game days, each eligible city plans a deterministic frontier update from seed, city identity, day, and prior growth count. A growth event is capped at 24 cells, refuses lakes and occupied/facility cells, commits atomically, updates city runtime population, and publishes changed tiles/chunks. The algorithm does not read camera visibility.
+V2 worlds retain their seven-day deterministic frontier updates. V3 evaluates
+growth monthly and applies tiered, staggered projects: metros and satellites
+quarterly, towns twice yearly, and villages yearly. Each project is capped at
+24 cells, extends connected transport before claiming road-served parcels,
+supports infill/upzoning, refuses protected land, and commits atomically. The
+algorithm never reads camera visibility.
 
 ## Renderer pipeline
 
@@ -82,12 +89,18 @@ camera bounds -> visible 32x32 chunks -> per-archetype InstancedMesh batches
 
 The base surface is four vertices and two triangles. A nearest-filtered, non-mipmapped RGBA8 `DataTexture` contains one categorical texel per tile:
 
-- R: surface kind
-- G: cardinal neighbor mask
-- B: region/palette
+- R: surface kind, plus a v3 transport-mode marker
+- G: cardinal surface mask or explicit eight-way transport topology
+- B: region/palette or v3 road class/flags
 - A: player/rival ownership, selected, construction, buildable, powered flags
 
 Categorical texture values use `texelFetch`; procedural edges use `fwidth` for pixel-stable antialiasing. This avoids texture-atlas gutters and a mesh/draw call per tile. Changed cells are coalesced into contiguous ranges per row.
+
+The same shader supplies continuous eight-way road distance fields, animated
+lake ripples and soft shores, low-frequency hill lighting, contours, and sparse
+soil variation while leaving the physical picking plane flat. Visible lake
+chunks add bounded, static-buffer instances for ducks and boats; motion stays
+shader-side and does not write instance buffers per frame.
 
 ### Props and facilities
 
@@ -158,7 +171,7 @@ Global gates:
 - Chunk preparation/rebuild work <= 2 ms per measured frame.
 - Retained CPU chunks <= 96.
 - Missing tiles, instance-capacity rejects, and close-up LOD placeholders: zero.
-- A 1,000 x 1,000 world has a five-byte-per-cell base and no million-object allocation.
+- A v3 1,000 x 1,000 world has a seven-byte-per-cell base; preserved v2 worlds remain five bytes per cell. Neither path creates a million-object allocation.
 
 Tests cover a 64-square baseline, dense 256-square metro, contiguous 256-square lake, mixed 1,000-square world, developed 1,000-square world with 10,000 facilities, and deterministic camera pan/zoom/teleport/idle replays. Shared-simulation differential tests compare player/rival calculations and prove rival expansion is deterministic, visibility-independent, and unable to overwrite player sites.
 

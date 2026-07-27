@@ -31,6 +31,12 @@ import {
 import { tileCoords, tileId } from '../world/ids'
 import type { Facility } from '../world/types'
 import type { DynamicWorld } from '../world/dynamicWorld'
+import { WORLD_GENERATOR_VERSION_V4, WORLD_GENERATOR_VERSION_V5 } from '../world/types'
+import {
+  facilityTransportAccess,
+  transportLandValueMultiplier,
+  transportLogisticsOpexSurcharge,
+} from './transport'
 import { energyContractCapacityMw } from './energyAccounting'
 
 export const BUILDABLE_KINDS: BuildableKind[] = [
@@ -799,6 +805,11 @@ export type PlaceCheck = {
   totalCash: number
   buildCash: number
   landCash: number
+  gradingCash: number
+  minElevation: number
+  maxElevation: number
+  maxGrade: number
+  foundationHeight: number
 }
 
 /** Non-mutating placement check — used by ghost preview + placeBuilding. */
@@ -821,6 +832,11 @@ export function canPlaceBuilding(
     totalCash: 0,
     buildCash: 0,
     landCash: 0,
+    gradingCash: 0,
+    minElevation: 0,
+    maxElevation: 0,
+    maxGrade: 0,
+    foundationHeight: 0,
   }
 
   if (kind === 'nuclear' && state.day < 70) {
@@ -877,9 +893,39 @@ export function canPlaceBuilding(
   const buildCash = Math.floor(def.cash * econ)
   let landCash = 0
   for (const c of resolved) {
-    if (c.ok) landCash += Math.max(0, c.tile.landValue ?? 0)
+    if (c.ok) {
+      const accessMultiplier = c.idx >= 0 ? transportLandValueMultiplier(state, c.idx) : 1
+      landCash += Math.max(0, c.tile.landValue ?? 0) * accessMultiplier
+    }
   }
-  const totalCash = buildCash + landCash
+  let minElevation = 0
+  let maxElevation = 0
+  let maxGrade = 0
+  const compactWorld = state.map.world
+  if ((compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V4 ||
+      compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5) && resolved.length > 0) {
+    minElevation = Number.POSITIVE_INFINITY
+    maxElevation = Number.NEGATIVE_INFINITY
+    for (const cell of resolved) {
+      if (cell.idx < 0) continue
+      maxGrade = Math.max(maxGrade, compactWorld.getTileSlope(cell.x, cell.y))
+      for (const [cornerX, cornerY] of [
+        [cell.x, cell.y], [cell.x + 1, cell.y], [cell.x, cell.y + 1], [cell.x + 1, cell.y + 1],
+      ] as const) {
+        const elevation = compactWorld.getCornerElevation(cornerX, cornerY)
+        minElevation = Math.min(minElevation, elevation)
+        maxElevation = Math.max(maxElevation, elevation)
+      }
+    }
+    if (!Number.isFinite(minElevation)) minElevation = 0
+    if (!Number.isFinite(maxElevation)) maxElevation = 0
+  }
+  const foundationHeight = Math.max(0, maxElevation - minElevation)
+  const gradingRate = maxGrade <= 0.08
+    ? 0
+    : 0.1 + Math.min(1, (maxGrade - 0.08) / 0.08) * 0.25
+  const gradingCash = Math.floor(buildCash * gradingRate)
+  const totalCash = buildCash + landCash + gradingCash
   const cashOk = state.player.cash >= totalCash
 
   if (!landOk) {
@@ -898,7 +944,23 @@ export function canPlaceBuilding(
         reason = 'Footprint must stay inside a developable region.'
       }
     }
-    return { ok: false, reason, cells, totalCash, buildCash, landCash }
+    return { ok: false, reason, cells, totalCash, buildCash, landCash, gradingCash,
+      minElevation, maxElevation, maxGrade, foundationHeight }
+  }
+  if (maxGrade > 0.16) {
+    return {
+      ok: false,
+      reason: `${def.label} footprint is too steep (${Math.round(maxGrade * 100)}% grade; maximum 16%).`,
+      cells: cells.map((cell) => ({ ...cell, ok: false })),
+      totalCash,
+      buildCash,
+      landCash,
+      gradingCash,
+      minElevation,
+      maxElevation,
+      maxGrade,
+      foundationHeight,
+    }
   }
   if (!cashOk) {
     return {
@@ -908,9 +970,15 @@ export function canPlaceBuilding(
       totalCash,
       buildCash,
       landCash,
+      gradingCash,
+      minElevation,
+      maxElevation,
+      maxGrade,
+      foundationHeight,
     }
   }
-  return { ok: true, cells, totalCash, buildCash, landCash }
+  return { ok: true, cells, totalCash, buildCash, landCash, gradingCash,
+    minElevation, maxElevation, maxGrade, foundationHeight }
 }
 
 export function placeBuilding(
@@ -986,6 +1054,9 @@ export function placeBuilding(
         note,
         dcSize: def.dcSize,
         hqSize: def.hqSize,
+        foundationElevation: (check.minElevation + check.maxElevation) / 2,
+        foundationHeight: check.foundationHeight,
+        gradingCash: check.gradingCash,
       },
     }
     const batch = world.beginBatch().addFacility(facility)
@@ -1056,6 +1127,8 @@ export function placeBuilding(
 
 /** Land + construction total for UI (sums land under full footprint). */
 export function buildingTotalCost(state: SimState, tile: MapTile, kind: BuildableKind): number {
+  const exact = canPlaceBuilding(state, tile.x, tile.y, kind)
+  if (usesCompactWorld(state) && exact.totalCash > 0) return exact.totalCash
   const def = getBuildDef(kind)
   const econ = state.config?.economyMult ?? 1
   let land = 0
@@ -1566,9 +1639,15 @@ export function gridScarcity(state: SimState): GridScarcitySnapshot {
  */
 export function playerBuildingOpex(state: SimState): number {
   let opex = 0
+  let logistics = 0
   if (usesCompactWorld(state)) {
     for (const facility of compactCompletedFacilitiesForOwner(state, state.playerLabId) ?? []) {
-      opex += facility.stats?.opexPerDay ?? 0
+      const shellOpex = facility.stats?.opexPerDay ?? 0
+      opex += shellOpex
+      logistics += transportLogisticsOpexSurcharge(
+        shellOpex,
+        facilityTransportAccess(state, facility.id),
+      )
     }
   } else {
     for (const t of facilityAnchorTiles(state, { ownerId: state.playerLabId })) {
@@ -1596,7 +1675,7 @@ export function playerBuildingOpex(state: SimState): number {
   }
   opex += liveGpus * (ECONOMY.rackOpexPerGpuDay ?? 420)
   opex += liveMw * (ECONOMY.rackOpexPerMwDay ?? 18_000)
-  return opex * (ECONOMY.facilityOpexMultiplier ?? 1)
+  return opex * (ECONOMY.facilityOpexMultiplier ?? 1) + logistics
 }
 
 export function ownerLabel(owner: TileOwner, state: SimState): string {
@@ -1621,7 +1700,7 @@ export function tickMap(state: SimState): SimState {
       const facility = currentFacility(original)
       const progress = Math.min(
         facility.constructionTarget,
-        facility.constructionProgress + 1,
+        facility.constructionProgress + facilityTransportAccess(state, facility.id),
       )
       if (progress === facility.constructionProgress) continue
       const completed = progress >= facility.constructionTarget

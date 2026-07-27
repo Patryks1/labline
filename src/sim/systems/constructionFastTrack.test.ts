@@ -8,7 +8,7 @@ import {
 import { placeBuilding } from './map'
 
 function fundedLegacyGame(seed: number) {
-  const created = createGame(seed)
+  const created = createGame({ seed, legacyMapFixture: true })
   return {
     ...created,
     player: { ...created.player, cash: 2_000_000_000 },

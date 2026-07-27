@@ -30,8 +30,6 @@ export interface NavGroup {
   description: string
   /** Digit for group jump */
   key: string
-  /** Letter hotkey (shown in tooltips) */
-  letter: string
   items: NavItem[]
 }
 
@@ -43,7 +41,6 @@ export const NAV_GROUPS: NavGroup[] = [
     short: 'Strategy',
     description: 'P&L, rivals, forecasts & world signals',
     key: '1',
-    letter: 'Q',
     items: [
       { id: 'stats', label: 'Command', hint: 'P&L · compute · trends', key: '1', presentation: 'workbench' },
       { id: 'rivals', label: 'Rivals', hint: 'Intentions, capacity & launches', key: '2' },
@@ -55,7 +52,6 @@ export const NAV_GROUPS: NavGroup[] = [
     short: 'Lab',
     description: 'Models, datasets, research pods & evaluation',
     key: '2',
-    letter: 'E',
     items: [
       { id: 'models', label: 'Models', hint: 'Train · intervene · release', key: '1', presentation: 'workbench' },
       { id: 'data', label: 'Data', hint: 'Assets, rights, manifests & synth', key: '2', presentation: 'workbench' },
@@ -69,7 +65,6 @@ export const NAV_GROUPS: NavGroup[] = [
     short: 'Infra',
     description: 'Cloud, sites, fleet, grid & silicon',
     key: '3',
-    letter: 'F',
     items: [
       { id: 'map', label: 'Overview', hint: 'Fleet, facilities, construction & map', key: '1' },
       { id: 'computeMarket', label: 'Compute', hint: 'Cloud, reserved, spot & rival PF', key: '2' },
@@ -83,7 +78,6 @@ export const NAV_GROUPS: NavGroup[] = [
     short: 'Build',
     description: 'Place facilities and expand campus capacity',
     key: '4',
-    letter: 'R',
     items: [
       { id: 'build', label: 'Build', hint: 'Facilities, people, power & silicon', key: '1' },
     ],
@@ -94,7 +88,6 @@ export const NAV_GROUPS: NavGroup[] = [
     short: 'Market',
     description: 'Products, pricing, demand & capacity',
     key: '5',
-    letter: 'T',
     items: [
       { id: 'plans', label: 'Plans', hint: 'Tiers & API list', key: '1', presentation: 'workbench' },
       { id: 'market', label: 'Market', hint: 'Share & segments', key: '2' },
@@ -106,7 +99,6 @@ export const NAV_GROUPS: NavGroup[] = [
     short: 'Marketing',
     description: 'Reach, acquisition channels, brand & competitive spend',
     key: '6',
-    letter: 'Y',
     items: [
       { id: 'marketing', label: 'Marketing', hint: 'Budget, channels, reach & brand' },
     ],
@@ -117,7 +109,6 @@ export const NAV_GROUPS: NavGroup[] = [
     short: 'Company',
     description: 'People, capital, ownership & recovery',
     key: '7',
-    letter: 'U',
     items: [
       { id: 'org', label: 'Company', hint: 'Leads, staff, equity & debt', key: '1' },
     ],
@@ -131,6 +122,26 @@ export const COMMAND_VIEWS: { id: CommandViewId; label: string; key: string }[] 
   { id: 'rivals', label: 'Rivals', key: 'F2' },
   { id: 'feed', label: 'World', key: 'F3' },
 ]
+
+/** Function-row shortcuts follow the visible panel order beneath map tools. */
+export const FUNCTION_PANEL_SHORTCUTS: readonly { key: string; panel: PanelId; label: string }[] = [
+  { key: 'F1', panel: 'stats', label: 'Demand' },
+  { key: 'F2', panel: 'rivals', label: 'Rivals' },
+  { key: 'F3', panel: 'models', label: 'Models' },
+  { key: 'F4', panel: 'data', label: 'Data' },
+  { key: 'F5', panel: 'research', label: 'Research' },
+  { key: 'F6', panel: 'benchmarks', label: 'Evals' },
+  { key: 'F7', panel: 'map', label: 'Overview' },
+  { key: 'F8', panel: 'computeMarket', label: 'Compute' },
+  { key: 'F9', panel: 'racks', label: 'Hardware' },
+  { key: 'F10', panel: 'power', label: 'Power' },
+  { key: 'F11', panel: 'plans', label: 'Plans' },
+  { key: 'F12', panel: 'market', label: 'Market' },
+] as const
+
+export function panelForFunctionKey(key: string): PanelId | null {
+  return FUNCTION_PANEL_SHORTCUTS.find((shortcut) => shortcut.key === key)?.panel ?? null
+}
 
 export function groupForPanel(panel: PanelId): NavGroup {
   if (panel === 'chips') {

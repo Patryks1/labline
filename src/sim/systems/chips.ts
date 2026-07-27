@@ -4,6 +4,7 @@ import type { SimState } from '../types'
 import { mapEnergy } from './map'
 import { fleetStats } from './racks'
 import { eventChipLeadMult, eventExportBanGen } from './events'
+import { transportDeliveryAccess } from './transport'
 
 export function buyChips(state: SimState, defId: string, count: number): SimState {
   const def = getChipDef(defId)
@@ -101,12 +102,13 @@ export function buyChips(state: SimState, defId: string, count: number): SimStat
 }
 
 export function tickChipDeliveries(state: SimState): SimState {
+  const dailyProgress = transportDeliveryAccess(state)
   const chips = state.player.chips.map((inv) => {
     const arriving: typeof inv.arriving = []
     let count = inv.count
     for (const a of inv.arriving) {
-      if (a.daysLeft <= 1) count += a.count
-      else arriving.push({ daysLeft: a.daysLeft - 1, count: a.count })
+      if (a.daysLeft <= dailyProgress) count += a.count
+      else arriving.push({ daysLeft: a.daysLeft - dailyProgress, count: a.count })
     }
     return { ...inv, count, arriving }
   })

@@ -45,7 +45,7 @@ const SCENARIOS: { id: ScenarioId; label: string; blurb: string }[] = [
   {
     id: 'normal',
     label: 'Normal',
-    blurb: 'Balanced rivals on the 150×150 frontier.',
+    blurb: 'Balanced rivals on the 300×300 frontier.',
   },
   {
     id: 'hard',
@@ -768,8 +768,8 @@ export function NewGameMenu() {
                     onChange={(v) => setAdvField('mapHeight', v)}
                   />
                   <NumField
-                    label="Cities"
-                    hint="Metro hubs that create regional markets, talent pools, land values and power demand."
+                    label="Metro regions"
+                    hint="Major metro anchors. Compact worlds derive satellite cities, towns and villages around them from the seed."
                     value={adv.cityCount ?? preview.cityCount}
                     min={MIN_CITY_COUNT}
                     max={MAX_CITY_COUNT}
@@ -784,6 +784,32 @@ export function NewGameMenu() {
                     onChange={(v) => setAdvField('rivalCount', v)}
                   />
                 </div>
+                <fieldset className="rounded-lg border border-line/70 bg-void/45 px-3 py-2.5">
+                  <legend className="px-1 text-[0.75rem] font-semibold text-bone">Driving side</legend>
+                  <p className="mb-2 text-[0.6875rem] leading-relaxed text-muted">
+                    Controls lane direction, junction turns, and visual traffic for this sandbox.
+                  </p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {(['left', 'right'] as const).map((side) => {
+                      const selected = (adv.drivingSide ?? preview.drivingSide) === side
+                      return (
+                        <button
+                          key={side}
+                          type="button"
+                          aria-pressed={selected}
+                          onClick={() => setAdvField('drivingSide', side)}
+                          className={`min-h-9 rounded-md border px-3 text-[0.75rem] font-semibold transition ${
+                            selected
+                              ? 'border-mint/50 bg-mint/15 text-mint'
+                              : 'border-line bg-panel-2 text-muted hover:text-bone'
+                          }`}
+                        >
+                          {side === 'left' ? 'Left-hand' : 'Right-hand'}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </fieldset>
                 <div className="flex items-start gap-3 rounded-lg border border-line/70 bg-void/45 px-3 py-2.5 text-[0.75rem] text-muted">
                   <input
                     id="new-game-governance"
@@ -871,7 +897,7 @@ export function NewGameMenu() {
               </div>
               <div className="grid grid-cols-3 divide-x divide-line/60">
                 <BriefingStat label="Territory" value={`${preview.mapWidth}×${preview.mapHeight}`} detail={`${preview.mapWidth * preview.mapHeight} tiles`} />
-                <BriefingStat label="Opposition" value={`${preview.rivalCount} rivals`} detail={`${preview.cityCount} markets`} />
+                <BriefingStat label="Opposition" value={`${preview.rivalCount} rivals`} detail={`${preview.cityCount} metros + derived towns`} />
                 <BriefingStat label="Capital" value={money(ECONOMY.startingCash * preview.startingCashMult)} detail="$3M credits · 24 PF cloud" />
               </div>
             </div>

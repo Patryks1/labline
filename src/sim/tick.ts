@@ -38,6 +38,7 @@ import { boundHistories } from './systems/history'
 import { tickResearchPrograms } from './systems/researchPrograms'
 import { tickSafetyCampaign } from './systems/safetyCampaigns'
 import { tickExternalities } from './systems/externalities'
+import { tickTransport } from './systems/transport'
 import { tickAutomation } from './systems/automation'
 import { tickEnergyContracts, tickSiteProjects } from './systems/siteEnergy'
 
@@ -99,12 +100,16 @@ export function tickDay(state: SimState): SimState {
   s = tickComputeMarket(s)
   s = tickComputeContracts(s)
 
-  // 4–5. Deliveries and construction resolve before compute is observed.
+  // 4. Growth settles first, then the canonical transport assignment is
+  // available to every delivery and construction consumer below.
+  s = tickCityGrowth(s)
+  s = tickTransport(s)
+
+  // 5. Deliveries and construction resolve before compute is observed.
   s = tickChipDeliveries(s)
   s = tickRackDeliveries(s)
   s = tickFab(s)
   s = tickMap(s)
-  s = tickCityGrowth(s)
   s = maybeListRivalHalls(s)
   s = tickCityPowerContracts(s)
   s = tickPowerExportContracts(s)

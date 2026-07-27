@@ -33,7 +33,7 @@ import {
 import {
   TERRAIN_KIND,
   createDynamicWorld,
-  generateStaticWorldV2,
+  generateStaticWorldV5,
   tileId,
   type DynamicWorld,
   type Facility,
@@ -52,6 +52,8 @@ export interface CreateGameOpts {
   advanced?: AdvancedOverrides
   /** Full config wins over difficulty/advanced when provided */
   config?: GameConfig
+  /** Compatibility-fixture escape hatch. Normal campaigns always use V4. */
+  legacyMapFixture?: boolean
 }
 
 /** Legacy tiles stay available for established small-map consumers/tests. */
@@ -71,6 +73,11 @@ function compactCities(world: StaticWorld): MapCity[] {
       powerBuyMw: city.powerBuyMw,
       powerBuyPriceMult: city.powerBuyPriceMult,
       industry: city.industry,
+      tier: city.tier,
+      parentCityIndex: city.parentCityIndex,
+      regionIndex: city.regionIndex,
+      palette: city.palette,
+      growth: city.growth,
       talentCapacity,
       talentAvailable: cityTalentInitial(talentCapacity, 0.36),
       talentWageMult: city.talentWageMult,
@@ -97,7 +104,10 @@ function findRivalStart(
   rivalIndex: number,
   reserved: ReadonlySet<TileId> = new Set(),
 ): TileId | undefined {
-  const city = world.staticWorld.cities[(rivalIndex + 1) % world.staticWorld.cities.length]
+  const regionalCenters = world.staticWorld.cities.filter(
+    (city) => city.tier === undefined || city.tier === 'metro' || city.tier === 'satellite',
+  )
+  const city = regionalCenters[(rivalIndex + 1) % regionalCenters.length]
   if (!city) return world.staticWorld.starterPads[rivalIndex]
   for (let radius = city.radius + 2; radius <= city.radius + 24; radius++) {
     const perimeter = radius * 8
@@ -108,7 +118,12 @@ function findRivalStart(
       const y = side === 0 ? city.cy - radius : side === 1 ? city.cy + offset : side === 2 ? city.cy + radius : city.cy - offset
       if (x < 0 || y < 0 || x >= world.descriptor.width || y >= world.descriptor.height) continue
       const id = tileId(x, y, world.descriptor.width, world.descriptor.height)
-      if (reserved.has(id) || world.getFacilityAt(id) || world.getOwner(id) !== 'neutral') continue
+      if (
+        reserved.has(id) ||
+        world.getFacilityAt(id) ||
+        world.getOwner(id) !== 'neutral' ||
+        world.getTransport(id) !== 0
+      ) continue
       const kind = world.getKind(id)
       if (kind === TERRAIN_KIND.empty || kind === TERRAIN_KIND.forest) return id
     }
@@ -169,6 +184,7 @@ function toRunConfig(cfg: GameConfig): RunConfig {
     startingCashMult: cfg.startingCashMult,
     landValueBase: cfg.landValueBase,
     landValueCityPeak: cfg.landValueCityPeak,
+    drivingSide: cfg.drivingSide === 'right' ? 'right' : 'left',
     campaignRules: cfg.campaignRules ?? defaultCampaignRules(),
   }
 }
@@ -189,9 +205,12 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
 
   const seed = cfg.seed
   const startingCash = Math.floor(ECONOMY.startingCash * cfg.startingCashMult)
-  const compact = cfg.mapWidth * cfg.mapHeight >= COMPACT_WORLD_MIN_TILES
+  // Every newly-created campaign uses the deterministic layered world. The
+  // size threshold is retained only as historical documentation; legacy maps
+  // are still supported when loading old saves, but are no longer created.
+  const compact = opts.legacyMapFixture !== true
   const staticWorld = compact
-    ? generateStaticWorldV2({
+    ? generateStaticWorldV5({
         seed,
         width: cfg.mapWidth,
         height: cfg.mapHeight,
@@ -259,6 +278,16 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
     tick: 0,
     speed: 1,
     paused: true,
+    transport: {
+      version: 1,
+      day: 0,
+      networkRevision: 0,
+      segmentLoads: [],
+      junctionLoads: [],
+      regionCongestion: {},
+      cityAccess: {},
+      facilityAccess: {},
+    },
     config: toRunConfig(cfg),
     industryDataPack,
     calendar,
@@ -500,7 +529,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       },
     ],
     news: [
-      `Market open across ${map.cities?.length ?? 0} metros. ${rivals.length} rivals already have footholds.`,
+      `Market open across ${map.cities?.length ?? 0} settlements in ${map.regions.length} metro regions. ${rivals.length} rivals already have footholds.`,
     ],
     onboardingStep: 0,
     onboardingDismissed: false,

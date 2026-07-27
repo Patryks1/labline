@@ -40,7 +40,7 @@ export function StatsPanel() {
           variant="ghost"
           className="!px-2.5 !py-1 text-[0.75rem]"
           onClick={() => setCommandView('pnl')}
-          title="Open dock P&L (F1)"
+          title="Open dock P&L"
         >
           Dock
         </HudButton>

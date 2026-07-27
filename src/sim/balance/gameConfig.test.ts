@@ -4,8 +4,8 @@ import { buildGameConfig, defaultGameConfig } from './gameConfig'
 describe('new game configuration', () => {
   it('uses the large frontier world defaults', () => {
     expect(defaultGameConfig()).toMatchObject({
-      mapWidth: 150,
-      mapHeight: 150,
+      mapWidth: 300,
+      mapHeight: 300,
       cityCount: 4,
       rivalCount: 5,
     })
@@ -29,6 +29,18 @@ describe('new game configuration', () => {
       cityCount: 6,
       rivalCount: 3,
       startingCashMult: 2.5,
+    })
+  })
+
+  it('does not resize explicit maps when defaults change', () => {
+    expect(
+      buildGameConfig({
+        difficulty: 'hard',
+        advanced: { mapWidth: 150, mapHeight: 120 },
+      }),
+    ).toMatchObject({
+      mapWidth: 150,
+      mapHeight: 120,
     })
   })
 })

@@ -1,16 +1,29 @@
 export {
   cityIndexFromFeature,
   createWorldDescriptor,
+  createWorldDescriptorV3,
+  createWorldDescriptorV4,
+  createWorldDescriptorV5,
   deriveCityCount,
   encodeCityFeature,
   encodeLakeFeature,
   generateStaticWorldV2,
+  generateStaticWorldV3,
+  generateStaticWorldV4,
+  generateStaticWorldV5,
+  getBiome,
+  getCornerElevation,
+  getTileElevation,
+  getTileSlope,
+  getWaterElevation,
   lakeIndexFromFeature,
   regenerateStaticWorld,
   staticWorldByteLength,
+  staticWorldV3Hash,
+  staticWorldV4Hash,
+  staticWorldV5Hash,
   tileAt,
   type WorldGenerationOptions,
 } from './generator'
 
 export { generateStaticWorldV2 as generateWorld } from './generator'
-

@@ -14,7 +14,20 @@ import { useUiStore } from '../../store/uiStore'
 import { money, num } from './format'
 import { BuildingNameField } from './ui/BuildingNameField'
 import { BuildingDisposeButtons } from './panels/MapPanel'
-import { mapTileAtAny } from '../../sim/systems/worldAccess'
+import { mapTileAtAny, municipalPowerPlantAt } from '../../sim/systems/worldAccess'
+import {
+  transportAccessFactorAt,
+  transportRegionalCongestionAt,
+  transportRoadClassAt,
+} from '../../sim/systems/transport'
+
+const ROAD_CLASS_LABELS = ['No road', 'Local', 'Collector', 'Arterial', 'Highway'] as const
+const MUNICIPAL_KIND_LABELS = {
+  coal: 'Coal power station',
+  wind: 'Municipal wind farm',
+  solar: 'Municipal solar farm',
+  nuclear: 'Nuclear power station',
+} as const
 
 function typeLabel(kind: string): string {
   if (isDcKind(kind) && isBuildableKind(kind as never)) {
@@ -43,6 +56,7 @@ export function TileInspector() {
   if (!selected) return null
   const tile = mapTileAtAny(state, selected.x, selected.y)
   if (!tile) return null
+  const municipalPlant = municipalPowerPlantAt(state, selected.x, selected.y)
 
   const isOurs = tile.owner === 'player'
   const isRival = tile.owner !== 'player' && tile.owner !== 'neutral'
@@ -57,7 +71,9 @@ export function TileInspector() {
   const region = state.map.regions.find((r) => r.id === tile.regionId)
   const statusLabel = constructing
     ? 'Building'
-    : tile.powered === false && isDcKind(tile.kind)
+    : municipalPlant
+      ? 'Municipal utility'
+      : tile.powered === false && isDcKind(tile.kind)
       ? 'Power down'
       : isBuildableKind(tile.kind)
         ? 'Online'
@@ -81,7 +97,13 @@ export function TileInspector() {
 
   const metrics: Array<{ label: string; value: string; tone?: string }> = []
   if (region) metrics.push({ label: 'Zone', value: region.name })
-  metrics.push({ label: 'Type', value: typeLabel(tile.kind) })
+  metrics.push({ label: 'Type', value: municipalPlant ? MUNICIPAL_KIND_LABELS[municipalPlant.kind] : typeLabel(tile.kind) })
+
+  if (municipalPlant) {
+    const city = state.map.world?.staticWorld.cities[municipalPlant.cityIndex]
+    metrics.push({ label: 'Output', value: `${num(municipalPlant.capacityMw, 0)} MW` })
+    if (city) metrics.push({ label: 'Serves', value: city.name })
+  }
 
   if (isDcKind(tile.kind) && isDcAnchor(tile)) {
     const bays = usage
@@ -102,8 +124,19 @@ export function TileInspector() {
     })
   }
 
-  // Identity + one context metric max for a dumb, action-led inspector.
-  const shown = metrics.slice(0, 3)
+  const tileId = tile.y * state.map.width + tile.x
+  const roadClass = transportRoadClassAt(state, tileId)
+  const access = transportAccessFactorAt(state, tileId)
+  const congestion = transportRegionalCongestionAt(state, tileId)
+  metrics.push({ label: 'Road', value: ROAD_CLASS_LABELS[roadClass] ?? 'Road' })
+  metrics.push({
+    label: 'Access',
+    value: `${Math.round(access * 100)}% · ${Math.round((1 / access - 1) * 100)}% delay`,
+    tone: access < 0.9 ? 'text-amber' : 'text-mint',
+  })
+  metrics.push({ label: 'Congestion', value: congestion < 0.15 ? 'Free flow' : `${Math.round(congestion * 100)}%` })
+
+  const shown = metrics.slice(0, 6)
 
   return (
     <div
@@ -126,7 +159,7 @@ export function TileInspector() {
               <BuildingNameField tile={tile} compact />
             ) : (
               <div className="truncate text-sm font-medium text-bone">
-                {tile.name || typeLabel(tile.kind)}
+                {municipalPlant ? MUNICIPAL_KIND_LABELS[municipalPlant.kind] : tile.name || typeLabel(tile.kind)}
               </div>
             )}
           </div>

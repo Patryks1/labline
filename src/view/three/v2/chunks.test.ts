@@ -42,7 +42,7 @@ describe('viewport chunks', () => {
   it('derives each InstancedMesh capacity from actual chunk contents', () => {
     const registry = createDefaultArchetypeRegistry()
     const records: RenderInstance[] = [
-      instance(1, DefaultArchetype.tree, 0, 0),
+      { ...instance(1, DefaultArchetype.tree, 0, 0), pickTileId: 41 },
       instance(2, DefaultArchetype.tree, 1, 0),
       instance(3, DefaultArchetype.tree, 2, 0),
       instance(4, DefaultArchetype.house, 0, 1),
@@ -55,6 +55,8 @@ describe('viewport chunks', () => {
     expect(chunk.stats.drawCalls).toBe(2)
     expect(chunk.capacityFor(DefaultArchetype.tree)).toBe(3)
     expect(chunk.capacityFor(DefaultArchetype.house)).toBe(2)
+    const treeMesh = chunk.root.children.find((child) => child.name.includes('archetypes-1'))
+    expect(treeMesh?.userData.pickTileIds).toEqual([41, null, null])
 
     chunk.dispose()
     registry.dispose()

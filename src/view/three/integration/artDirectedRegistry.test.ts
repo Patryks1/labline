@@ -7,9 +7,17 @@ import {
   type RenderInstance,
 } from '../v2'
 import {
+  AUTHORED_INDUSTRIAL_ARCHETYPES,
+  AUTHORED_RESIDENTIAL_ARCHETYPES,
+  AUTHORED_TERRAIN_ARCHETYPES,
+  AUTHORED_URBAN_ARCHETYPES,
+  AUTHORED_VEGETATION_ARCHETYPES,
   FacilityArchetype,
   IntegrationArchetype,
+  SINGLE_BUILDING_ARCHETYPES,
+  SINGLE_BUILDING_PROFILES,
   SceneryArchetype,
+  SingleBuildingArchetype,
   createArtDirectedArchetypeRegistry,
 } from './artDirectedRegistry'
 import { facilityArchetypeFor } from './simRenderSource'
@@ -102,10 +110,116 @@ describe('art-directed instanced archetypes', () => {
     ]
     for (const archetypeId of sceneryIds) {
       const definition = registry.get(archetypeId)
-      expect(definition.geometry.near).toBe(definition.geometry.mid)
+      expect(definition.geometry.near).not.toBeNull()
+      expect(definition.geometry.mid).not.toBeNull()
       expect(definition.geometry.far).not.toBeNull()
       expect(definition.material.far).not.toBeNull()
     }
+    registry.dispose()
+  })
+
+  it('registers every committed World V4 catalog archetype with a batched fallback', () => {
+    const registry = createArtDirectedArchetypeRegistry()
+    const catalogIds = [
+      ...AUTHORED_TERRAIN_ARCHETYPES,
+      ...AUTHORED_VEGETATION_ARCHETYPES,
+      ...AUTHORED_RESIDENTIAL_ARCHETYPES,
+      ...AUTHORED_URBAN_ARCHETYPES,
+      ...AUTHORED_INDUSTRIAL_ARCHETYPES,
+      ...[100, 101, 102, ...rangeForTest(110, 121), ...rangeForTest(468, 472)],
+      ...[300, ...rangeForTest(473, 483)],
+      ...[301, ...rangeForTest(484, 487)],
+      ...[302, ...rangeForTest(488, 489)],
+      ...[210, 207, 303, ...rangeForTest(490, 498)],
+    ]
+
+    expect(catalogIds).toHaveLength(128)
+    expect(new Set(catalogIds).size).toBe(128)
+    for (const id of catalogIds) {
+      const definition = registry.get(id)
+      expect(definition.geometry.near, `near geometry for ${id}`).not.toBeNull()
+      expect(definition.geometry.mid, `mid geometry for ${id}`).not.toBeNull()
+      expect(definition.geometry.far, `far geometry for ${id}`).not.toBeNull()
+    }
+
+    // Before authored GLBs arrive, aliases converge onto a small number of
+    // family fallbacks instead of creating one draw call per catalog entry.
+    const fallbackGeometries = new Set(catalogIds.map(id => registry.get(id).geometry.far))
+    expect(fallbackGeometries.size).toBeLessThan(28)
+    registry.dispose()
+  })
+
+  it('uses road-safe procedural fallbacks for streamed prop catalog entries', () => {
+    const registry = createArtDirectedArchetypeRegistry()
+    const parkGeometry = registry.get(SceneryArchetype.park).geometry
+    const roadLampGeometry = registry.get(SceneryArchetype.roadLamp).geometry
+
+    for (const id of [303, ...rangeForTest(490, 498)]) {
+      const fallback = registry.get(id).geometry
+      expect(fallback.near, `prop ${id} must not resolve to the park kit`).not.toBe(parkGeometry.near)
+      expect(fallback.mid, `prop ${id} must not resolve to the park kit`).not.toBe(parkGeometry.mid)
+      expect(fallback.far, `prop ${id} must not resolve to the park kit`).not.toBe(parkGeometry.far)
+      expect(fallback.near).toBe(roadLampGeometry.near)
+    }
+
+    registry.dispose()
+  })
+
+  it('keeps 18 legacy scenery IDs on the bounded single-building/logistics set', () => {
+    const registry = createArtDirectedArchetypeRegistry()
+    const residential = [
+      SceneryArchetype.houseCourtyard,
+      SceneryArchetype.houseGarden,
+      SceneryArchetype.houseTownhome,
+      SceneryArchetype.houseStilt,
+      SceneryArchetype.houseRow,
+      SceneryArchetype.houseCorner,
+    ]
+    const urban = [
+      SceneryArchetype.cityPodium,
+      SceneryArchetype.cityArcade,
+      SceneryArchetype.cityCivicHall,
+      SceneryArchetype.cityLibrary,
+      SceneryArchetype.cityMarket,
+      SceneryArchetype.cityHotel,
+      SceneryArchetype.cityTransitHub,
+    ]
+    const logistics = [
+      SceneryArchetype.warehouseSawtooth,
+      SceneryArchetype.warehouseColdStore,
+      SceneryArchetype.warehouseDepot,
+      SceneryArchetype.warehouseSilos,
+      SceneryArchetype.warehouseFreight,
+    ]
+    const added = [...residential, ...urban, ...logistics]
+
+    expect(added).toHaveLength(18)
+    for (const id of added) expect(registry.has(id)).toBe(true)
+    expect(new Set(added.map((id) => registry.get(id).geometry.near)).size).toBeGreaterThanOrEqual(8)
+    for (const family of [residential, urban, logistics]) {
+      expect(new Set(family.map((id) => registry.get(id).geometry.far)).size).toBeLessThanOrEqual(3)
+      expect(new Set(family.map((id) => registry.get(id).material.far)).size).toBe(1)
+    }
+
+    registry.dispose()
+  })
+
+  it('registers clustered forest biomes and sparse ground-detail archetypes', () => {
+    const registry = createArtDirectedArchetypeRegistry()
+    const ids = [
+      SceneryArchetype.forestConiferTall,
+      SceneryArchetype.forestAspen,
+      SceneryArchetype.forestOak,
+      SceneryArchetype.forestScrub,
+      SceneryArchetype.forestDeadwood,
+      SceneryArchetype.forestRocky,
+      SceneryArchetype.groundScrub,
+      SceneryArchetype.groundRock,
+      SceneryArchetype.groundLog,
+      SceneryArchetype.hillMound,
+    ]
+    for (const id of ids) expect(registry.has(id)).toBe(true)
+    expect(new Set(ids.map((id) => registry.get(id).geometry.near)).size).toBe(ids.length)
     registry.dispose()
   })
 
@@ -156,7 +270,7 @@ describe('art-directed instanced archetypes', () => {
     expect(chunk.stats).toMatchObject({
       instances: archetypes.length,
       capacity: archetypes.length,
-      drawCalls: 4,
+      drawCalls: 7,
       missingInstances: 0,
     })
     for (const archetypeId of archetypes) expect(chunk.capacityFor(archetypeId)).toBe(1)
@@ -186,6 +300,77 @@ describe('art-directed instanced archetypes', () => {
     chunk.dispose()
     registry.dispose()
   })
+
+  it('registers six stable single-building styles with complete, simplifying LODs', () => {
+    const registry = createArtDirectedArchetypeRegistry()
+
+    expect(SINGLE_BUILDING_ARCHETYPES).toEqual([500, 501, 502, 503, 504, 505])
+    expect(new Set(SINGLE_BUILDING_ARCHETYPES).size).toBe(6)
+    expect(new Set(SINGLE_BUILDING_ARCHETYPES.map((id) => registry.get(id).geometry.near)).size).toBe(6)
+    for (const [style, profile] of Object.entries(SINGLE_BUILDING_PROFILES)) {
+      expect(profile.id).toBe(SingleBuildingArchetype[style as keyof typeof SingleBuildingArchetype])
+      const definition = registry.get(profile.id)
+      const tiers = [definition.geometry.near!, definition.geometry.mid!, definition.geometry.far!]
+      expect(tiers.every(Boolean)).toBe(true)
+      expect(tiers[0]).not.toBe(tiers[1])
+      expect(tiers[1]).not.toBe(tiers[2])
+      expect(tiers[0].getAttribute('position').count).toBeGreaterThan(tiers[1].getAttribute('position').count)
+      expect(tiers[1].getAttribute('position').count).toBeGreaterThan(tiers[2].getAttribute('position').count)
+
+      for (const geometry of tiers) {
+        const metadata = geometry.userData.singleBuilding
+        expect(metadata).toMatchObject({ style, buildingCount: 1, footprint: [...profile.footprint] })
+        geometry.computeBoundingBox()
+        const size = geometry.boundingBox!.getSize(new THREE.Vector3())
+        expect(size.x).toBeLessThanOrEqual(0.96)
+        expect(size.z).toBeLessThanOrEqual(0.96)
+        expect(size.y).toBeGreaterThan(0.3)
+        expect(size.y).toBeLessThanOrEqual(profile.height + 0.01)
+        expect(geometry.getAttribute('color').count).toBe(geometry.getAttribute('position').count)
+        expect(uniqueVertexColors(geometry)).toBeGreaterThanOrEqual(2)
+      }
+    }
+
+    registry.dispose()
+  })
+
+  it('keeps the skyscraper centered and proportional across supported parcel spans', () => {
+    const registry = createArtDirectedArchetypeRegistry()
+    const geometry = registry.get(SingleBuildingArchetype.skyscraper).geometry.near!
+    const expectedSpans = [[1, 1], [2, 1], [1, 2], [2, 2]]
+    expect(SINGLE_BUILDING_PROFILES.skyscraper.parcelSpans).toEqual(expectedSpans)
+
+    for (const [width, depth] of expectedSpans) {
+      const scaled = geometry.clone().scale(width, 1, depth)
+      scaled.computeBoundingBox()
+      const bounds = scaled.boundingBox!
+      const size = bounds.getSize(new THREE.Vector3())
+      expect(bounds.getCenter(new THREE.Vector3()).x).toBeCloseTo(0)
+      expect(bounds.getCenter(new THREE.Vector3()).z).toBeCloseTo(0)
+      expect(size.x).toBeLessThanOrEqual(width)
+      expect(size.z).toBeLessThanOrEqual(depth)
+      expect(size.y).toBeCloseTo(SINGLE_BUILDING_PROFILES.skyscraper.height, 2)
+      scaled.dispose()
+    }
+
+    registry.dispose()
+  })
+
+  it('recreates the single-building geometry deterministically', () => {
+    const first = createArtDirectedArchetypeRegistry()
+    const second = createArtDirectedArchetypeRegistry()
+
+    for (const id of SINGLE_BUILDING_ARCHETYPES) {
+      for (const tier of [LodTier.near, LodTier.mid, LodTier.far]) {
+        const firstPositions = first.get(id).geometry[tier]!.getAttribute('position').array
+        const secondPositions = second.get(id).geometry[tier]!.getAttribute('position').array
+        expect(Array.from(firstPositions)).toEqual(Array.from(secondPositions))
+      }
+    }
+
+    first.dispose()
+    second.dispose()
+  })
 })
 
 function facilityInstance(entityId: number, color: number, x: number): RenderInstance {
@@ -201,4 +386,17 @@ function facilityInstance(entityId: number, color: number, x: number): RenderIns
     scaleZ: 1,
     color,
   }
+}
+
+function rangeForTest(first: number, last: number): number[] {
+  return Array.from({ length: last - first + 1 }, (_, index) => first + index)
+}
+
+function uniqueVertexColors(geometry: THREE.BufferGeometry): number {
+  const color = geometry.getAttribute('color')
+  const unique = new Set<string>()
+  for (let index = 0; index < color.count; index++) {
+    unique.add(`${color.getX(index).toFixed(3)}:${color.getY(index).toFixed(3)}:${color.getZ(index).toFixed(3)}`)
+  }
+  return unique.size
 }

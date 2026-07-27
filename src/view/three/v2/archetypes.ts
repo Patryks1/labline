@@ -66,6 +66,14 @@ export class ArchetypeRegistry {
     this.definitions.set(definition.id, definition)
   }
 
+  /** Replace an existing definition after an asynchronous authored asset load. */
+  replace(definition: ArchetypeDefinition): void {
+    if (!this.definitions.has(definition.id)) {
+      throw new Error(`Cannot replace unknown archetype ${definition.id}`)
+    }
+    this.definitions.set(definition.id, definition)
+  }
+
   get(id: ArchetypeId): ArchetypeDefinition {
     const definition = this.definitions.get(id)
     if (!definition) throw new Error(`Unknown archetype ${id}`)
@@ -337,6 +345,10 @@ function buildInstanceMesh(
   mesh.userData.lodTier = tier
   mesh.userData.archetypeId = archetypeIds[0]
   mesh.userData.archetypeIds = [...archetypeIds]
+  // Instance order is stable within this immutable batch. Keep the logical
+  // owner cell beside the GPU buffer so raycast instanceId can resolve a
+  // visible prop without guessing from its overhanging world-space geometry.
+  mesh.userData.pickTileIds = records.map((record) => record.pickTileId ?? null)
   mesh.count = capacity
   mesh.castShadow = false
   mesh.receiveShadow = false

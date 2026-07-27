@@ -47,6 +47,7 @@ import * as THREE from 'three'
 import {
   BUILD_DEFS,
   buildingDisplayName,
+  canPlaceBuilding,
   dcFootprint,
   placeBuilding,
   renameBuilding,
@@ -1395,7 +1396,8 @@ function findFootprintSpot(
     )
   }
   const fits = (x: number, y: number) =>
-    footprint.every(({ dx, dy }) => isEmpty(x + dx, y + dy))
+    footprint.every(({ dx, dy }) => isEmpty(x + dx, y + dy)) &&
+    canPlaceBuilding(state, x, y, kind).ok
 
   if (usesCompactWorld(state) && state.map.world) {
     const world = state.map.world

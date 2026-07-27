@@ -25,7 +25,7 @@ import {
   writeSaveSlot,
 } from './save'
 
-describe('save / load v4', () => {
+describe('save / load v9', () => {
   beforeEach(async () => {
     await clearAllSaves()
   })
@@ -35,6 +35,7 @@ describe('save / load v4', () => {
       seed: 42,
       labName: 'TestLab',
       difficulty: 'normal',
+      legacyMapFixture: true,
       advanced: { mapWidth: 24, mapHeight: 24, cityCount: 2, rivalCount: 2 },
     })
     state.day = 17
@@ -49,6 +50,20 @@ describe('save / load v4', () => {
     expect(back.map.tiles.length).toBe(state.map.tiles.length)
     expect(back.map.energyPricePerMWh).toBe(ECONOMY.energyBasePrice * 0.7)
     expect(back.config.difficulty).toBe('normal')
+  })
+
+  it('preserves explicit pre-default-change dimensions through save and load', () => {
+    const state = createGame({
+      seed: 43,
+      difficulty: 'normal',
+      legacyMapFixture: true,
+      advanced: { mapWidth: 150, mapHeight: 120, cityCount: 4, rivalCount: 2 },
+    })
+
+    const back = roundTripState(state)
+
+    expect(back.map).toMatchObject({ width: 150, height: 120 })
+    expect(back.config).toMatchObject({ mapWidth: 150, mapHeight: 120, cityCount: 4 })
   })
 
   it('migrates implicit legacy auto-pause rules to opt-in settings', () => {
@@ -113,6 +128,21 @@ describe('save / load v4', () => {
     })
     expect(back.map.world?.metrics.facilities.count).toBe(originalFacilityCount)
     expect(back.map.cities?.[0]?.talentAvailable?.researcher).toBe(7)
+  })
+
+  it('continues to accept v6 envelopes for preserved campaigns', () => {
+    const state = createGame({
+      seed: 706,
+      difficulty: 'normal',
+      legacyMapFixture: true,
+      advanced: { mapWidth: 24, mapHeight: 24, cityCount: 2, rivalCount: 1 },
+    })
+    const legacy = JSON.parse(serializeSave(buildSaveFile(state, '1')))
+    legacy.version = 6
+    legacy.meta.version = 6
+    const loaded = parseSave(JSON.stringify(legacy))
+    expect(loaded.state.seed).toBe(706)
+    expect(loaded.state.map.storage).toBe('legacy')
   })
 
   it('never serializes million-tile static buffers or runtime indexes', () => {
@@ -313,7 +343,7 @@ describe('save / load v4', () => {
     expect(await mostRecentSlotId()).toBe('1')
   })
 
-  it('serializeSave pins the v4 format and content pack', () => {
+  it('serializeSave pins the current format and content pack', () => {
     const state = createGame({ seed: 2, difficulty: 'easy' })
     const parsed = JSON.parse(serializeSave(buildSaveFile(state, 'auto')))
     expect(parsed.format).toBe(SAVE_FORMAT)

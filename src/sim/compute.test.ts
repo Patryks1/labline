@@ -14,6 +14,11 @@ import type { SimState, SiteCapacity } from './types'
 
 /** Give a bootstrapped lab for unit tests (player starts empty in real games). */
 function withCompute(s: SimState, racks = 64): SimState {
+  // These unit fixtures directly edit the legacy tile array. New campaigns use
+  // compact V5 worlds, so explicitly recreate the historical fixture shape.
+  if (s.map.storage === 'compact') {
+    s = createGame({ config: { ...s.config, seed: s.seed }, legacyMapFixture: true })
+  }
   const empties = s.map.tiles.filter(
     (t) => t.kind === 'empty' && t.owner === 'neutral' && t.regionId !== 'void',
   )

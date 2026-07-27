@@ -44,7 +44,6 @@ import {
   placeBuilding,
   upgradeBuilding,
   renameBuilding,
-  isScenicKind,
   mapTileAt,
 } from "../sim/systems/map";
 import {
@@ -135,6 +134,21 @@ function placeholderState(): SimState {
   });
 }
 
+export interface MapViewport {
+  /** Conservative axis-aligned bounds retained for navigator follow behavior. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Exact footprint: screen bottom-left, bottom-right, top-right, top-left. */
+  corners?: [
+    { x: number; y: number },
+    { x: number; y: number },
+    { x: number; y: number },
+    { x: number; y: number },
+  ];
+}
+
 interface GameStore {
   phase: GamePhase;
   loading: GameLoadingState | null;
@@ -148,9 +162,15 @@ interface GameStore {
   selectedRivalId: string | null;
   mapTool: MapToolMode;
   mapOverlay: MapOverlayMode;
-  mapViewport: { x: number; y: number; w: number; h: number } | null;
+  mapViewport: MapViewport | null;
   fleetOwnerFilter: string | null;
-  mapFocusRequest: { x: number; y: number; sequence: number } | null;
+  mapFocusRequest: {
+    x: number;
+    y: number;
+    sequence: number;
+    /** Keep the current main-map zoom when panning from the navigator. */
+    preserveZoom: boolean;
+  } | null;
   researchFocusRequest: { nodeId: string; sequence: number } | null;
   buildMode: BuildKind | null;
   /** Left workspace drawer open */
@@ -175,10 +195,12 @@ interface GameStore {
   setMapTool: (tool: MapToolMode) => void;
   setMapOverlay: (overlay: MapOverlayMode) => void;
   setMapViewport: (
-    viewport: { x: number; y: number; w: number; h: number } | null,
+    viewport: MapViewport | null,
   ) => void;
   selectTile: (x: number, y: number | null) => void;
   focusMapTile: (x: number, y: number) => void;
+  /** Pan without changing selection, build mode, or main-map zoom. */
+  panMapToTile: (x: number, y: number) => void;
   clearSelection: () => void;
   setBuildMode: (k: BuildKind | null) => void;
   setLeftRailOpen: (open: boolean) => void;
@@ -604,6 +626,17 @@ export const useGameStore = create<GameStore>((set, get) => ({
         x,
         y,
         sequence: (store.mapFocusRequest?.sequence ?? 0) + 1,
+        preserveZoom: false,
+      },
+    })),
+
+  panMapToTile: (x, y) =>
+    set((store) => ({
+      mapFocusRequest: {
+        x,
+        y,
+        sequence: (store.mapFocusRequest?.sequence ?? 0) + 1,
+        preserveZoom: true,
       },
     })),
 
@@ -642,8 +675,9 @@ export const useGameStore = create<GameStore>((set, get) => ({
       return;
     }
 
-    // Scenery (roads, lakes, forests, houses, parks, city fabric) is not selectable
-    if (isScenicKind(tile.kind) && tile.owner === "neutral") {
+    // Physical ambient props and municipal campuses are inspectable. Flat
+    // transport/water surfaces retain their historical non-selection behavior.
+    if ((tile.kind === "road" || tile.kind === "lake") && tile.owner === "neutral") {
       set({ selectedTile: null });
       return;
     }

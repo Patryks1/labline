@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { canPlaceBuilding, dcFootprint } from '../../sim/systems/map'
+import { selectionFootprintTiles } from '../../sim/systems/worldAccess'
+import { transportAccessFactorAt, transportRegionalCongestionAt } from '../../sim/systems/transport'
 import type { BuildableKind, MapOverlayMode, MapRegion, SimState } from '../../sim/types'
 import { useGameStore } from '../../store/gameStore'
 import { resolveRenderSettings, useUiStore } from '../../store/uiStore'
@@ -11,6 +13,11 @@ import {
   readBuildBlueprintDrag,
 } from '../buildPlacement'
 import { money } from '../hud/format'
+import {
+  applyWorldAssetSnapshot,
+  WorldAssetCache,
+  type WorldAssetSnapshot,
+} from './assets/worldAssetCache'
 import { regionOverlayFill } from '../hud/mapNavigatorData'
 import { currentInteraction, createMapPerfSession, type MapPerfSession } from './integration/perfSession'
 import { createArtDirectedArchetypeRegistry } from './integration/artDirectedRegistry'
@@ -27,9 +34,25 @@ import {
   type ViewportUpdateResult,
 } from './v2'
 import {
+  BALANCED_LOGICAL_VEHICLES,
+  BALANCED_VISIBLE_VEHICLES,
+  QUALITY_LOGICAL_VEHICLES,
+  QUALITY_VISIBLE_VEHICLES,
+} from './v2/visualTraffic'
+import {
+  cameraRelativePanVector,
+  createMapCameraRotation,
   grabbedWorldPanDelta,
   hasPointerDragged,
+  mapCameraPose,
   mapCameraDistanceScale,
+  mapViewportPlaneBounds,
+  mapViewportPlaneFootprint,
+  retargetMapCameraRotation,
+  rotateMapWorldOffset,
+  sampleMapCameraRotation,
+  type MapCameraHeading,
+  type MapCameraTilt,
 } from './mapControls'
 import {
   primaryRivalMapSites,
@@ -59,6 +82,10 @@ const MAX_FRUSTUM = 30
 // below four world units. Keep one conservative unit of headroom without
 // loading an unnecessary half-chunk around every close-up viewport.
 const MAX_PROP_HEIGHT_WORLD = 4
+// Uint8 terrain elevations top out near ten world units. Cover the complete
+// relief range around the camera target so quarter-turn chunk selection never
+// depends on terrain meshes retained from the previous heading.
+const VIEWPORT_HEIGHT_ENVELOPE_WORLD = 12
 
 function activePixelRatio(): number {
   const preset = useUiStore.getState().renderPreset
@@ -101,6 +128,7 @@ export function GameMap() {
   const mountRef = useRef<HTMLDivElement>(null)
   const placementTooltipRef = useRef<HTMLDivElement>(null)
   const placementLandRef = useRef<HTMLSpanElement>(null)
+  const placementGradeRef = useRef<HTMLSpanElement>(null)
   const placementTotalRef = useRef<HTMLSpanElement>(null)
   // This primitive subscription exists only for the cursor class. All map and
   // simulation updates are consumed imperatively inside the Three lifecycle.
@@ -136,6 +164,11 @@ export function GameMap() {
     let renderedHeight = initialHeight
     let aspect = renderedWidth / Math.max(1, renderedHeight)
     let frustum = DEFAULT_FRUSTUM
+    const initialUi = useUiStore.getState()
+    let cameraHeading: MapCameraHeading = initialUi.mapCameraHeading
+    let visualCameraHeading: number = cameraHeading
+    let cameraRotation = createMapCameraRotation(cameraHeading)
+    let cameraTilt: MapCameraTilt = initialUi.mapCameraTilt
     const camera = new THREE.OrthographicCamera(
       -frustum * aspect,
       frustum * aspect,
@@ -185,11 +218,10 @@ export function GameMap() {
       opacity: 0.52,
       depthWrite: false,
     })
-    const selectionMarker = new THREE.Mesh(selectionGeometry, selectionMaterial)
-    selectionMarker.name = 'selected-tile-marker'
+    const selectionMarker = new THREE.Group()
+    selectionMarker.name = 'selected-building-footprint-marker'
     selectionMarker.visible = false
-    selectionMarker.position.y = 0.05
-    selectionMarker.renderOrder = 10
+    const selectionCells: THREE.Mesh[] = []
     scene.add(selectionMarker)
 
     const preview = createBuildPreview()
@@ -199,12 +231,11 @@ export function GameMap() {
     const pickHit = new THREE.Vector3()
     const raycaster = new THREE.Raycaster()
     const pointer = new THREE.Vector2()
-    const boundsRaycaster = new THREE.Raycaster()
-    const boundsPointer = new THREE.Vector2()
-    const boundsHit = new THREE.Vector3()
     const projectA = new THREE.Vector3()
     const projectB = new THREE.Vector3()
     const cameraForward = new THREE.Vector3()
+    const assetCache = new WorldAssetCache()
+    let assetSnapshot: WorldAssetSnapshot = assetCache.snapshot()
 
     let projection = createProjection(
       initialStore.state,
@@ -237,6 +268,13 @@ export function GameMap() {
     ): LiveMapProjection {
       const source = new SimViewportRenderSource(state, selectedTile, nextBuildMode)
       const registry = createArtDirectedArchetypeRegistry()
+      applyWorldAssetSnapshot(registry, assetSnapshot)
+      const trafficPreset = useUiStore.getState().renderPreset
+      const trafficLimits = trafficPreset === 'performance'
+        ? { logical: 0, visible: 0 }
+        : trafficPreset === 'quality'
+          ? { logical: QUALITY_LOGICAL_VEHICLES, visible: QUALITY_VISIBLE_VEHICLES }
+          : { logical: BALANCED_LOGICAL_VEHICLES, visible: BALANCED_VISIBLE_VEHICLES }
       const viewport = new ViewportMapRenderer({
         renderer,
         scene,
@@ -246,7 +284,9 @@ export function GameMap() {
         // The normal game opens in the close-up band. Starting with the full
         // tier avoids a synthetic mid→near transition on the first frame.
         initialLod: LodTier.near,
+        trafficLimits,
       })
+      viewport.setCloudsVisible(useUiStore.getState().cloudsVisible)
       return { source, viewport, registry, regions: state.map.regions }
     }
 
@@ -256,16 +296,23 @@ export function GameMap() {
       // above the ground plane. Without this, maximum zoom-out exposes a
       // horizontal band of the sky clear color above the operations HUD.
       const distanceScale = mapCameraDistanceScale(frustum, DEFAULT_FRUSTUM)
+      const pose = mapCameraPose(visualCameraHeading, cameraTilt)
       camera.position.set(
-        target.x + 14 * distanceScale,
-        16 * distanceScale,
-        target.z + 14 * distanceScale,
+        target.x + pose.offsetX * distanceScale,
+        target.y + pose.offsetY * distanceScale,
+        target.z + pose.offsetZ * distanceScale,
       )
       camera.lookAt(target)
-      sun.position.set(target.x + 18, 28, target.z + 12)
+      // Viewport bounds are raycast before the next renderer.render() call.
+      // Keep matrixWorld synchronous with keyboard rotation so culling cannot
+      // select chunks using the previous heading and leave the new view blank.
+      camera.updateMatrixWorld(true)
+      const sunOffset = rotateMapWorldOffset(visualCameraHeading, 18, 12)
+      const fillOffset = rotateMapWorldOffset(visualCameraHeading, -14, -10)
+      sun.position.set(target.x + sunOffset.x, target.y + 28, target.z + sunOffset.z)
       sun.target.position.copy(target)
       sun.target.updateMatrixWorld()
-      fill.position.set(target.x - 14, 12, target.z - 10)
+      fill.position.set(target.x + fillOffset.x, target.y + 12, target.z + fillOffset.z)
       fill.target.position.copy(target)
       fill.target.updateMatrixWorld()
     }
@@ -285,7 +332,11 @@ export function GameMap() {
       const firstCity = state.map.cities?.[0]
       const x = firstCity?.cx ?? state.map.width / 2
       const y = firstCity?.cy ?? state.map.height / 2
-      target.set(x * MAP_TILE_SIZE, 0, y * MAP_TILE_SIZE)
+      target.set(
+        x * MAP_TILE_SIZE,
+        projection.source.getTileElevation(x, y),
+        y * MAP_TILE_SIZE,
+      )
       clampTarget()
       applyCamera()
       viewportDirty = true
@@ -315,8 +366,8 @@ export function GameMap() {
       lastViewportUpdate = null
       lastJournalBacklog = 0
       warmupPending = true
-      rebuildRegionLabels(labels, projection.regions)
-      rebuildRegionOverlays(regionOverlays, projection.regions, useGameStore.getState().mapOverlay)
+      rebuildRegionLabels(labels, projection.regions, projection.source)
+      rebuildRegionOverlays(regionOverlays, projection.regions, useGameStore.getState().mapOverlay, projection.source)
       centerCamera(state)
       moveSelectionMarker(selected)
       viewportDirty = true
@@ -335,6 +386,24 @@ export function GameMap() {
       if (signature === rivalLabelSignature) return
       rivalLabelSignature = signature
       rebuildRivalFacilityLabels(rivalLabels, sites)
+      elevateWorldLabels(rivalLabels, projection.source, 2.7)
+    }
+
+    function intersectTerrain(activeRaycaster: THREE.Raycaster, out: THREE.Vector3): THREE.Vector3 | null {
+      const meshHit = projection.viewport.raycastTerrain(activeRaycaster)
+      if (meshHit) return out.copy(meshHit.point)
+      // During the first chunk prewarm (or just outside the resident guard
+      // ring), converge against the deterministic height sampler rather than
+      // falling back to a permanently flat picking plane.
+      let height = target.y
+      for (let iteration = 0; iteration < 4; iteration++) {
+        pickPlane.constant = -height
+        const hit = activeRaycaster.ray.intersectPlane(pickPlane, out)
+        if (!hit) return null
+        height = projection.viewport.sampleTerrainHeight(out.x, out.z)
+      }
+      out.y = height
+      return out
     }
 
     function pickGroundAt(clientX: number, clientY: number): THREE.Vector3 | null {
@@ -343,13 +412,19 @@ export function GameMap() {
       pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1
       pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1
       raycaster.setFromCamera(pointer, camera)
-      const hit = raycaster.ray.intersectPlane(pickPlane, pickHit)
-      return hit ? pickHit : null
+      return intersectTerrain(raycaster, pickHit)
     }
 
     function pickTileAt(clientX: number, clientY: number): SelectedTile {
       const hit = pickGroundAt(clientX, clientY)
       if (!hit) return null
+      const objectHit = projection.viewport.raycastSelectable(raycaster)
+      if (objectHit) {
+        return {
+          x: objectHit.tileId % projection.source.width,
+          y: Math.floor(objectHit.tileId / projection.source.width),
+        }
+      }
       const x = Math.round(hit.x / MAP_TILE_SIZE)
       const y = Math.round(hit.z / MAP_TILE_SIZE)
       if (x < 0 || y < 0 || x >= projection.source.width || y >= projection.source.height) {
@@ -363,12 +438,27 @@ export function GameMap() {
         selectionMarker.visible = false
         return
       }
+      const footprint = projection.source.getSelectionFootprint?.(selected.x, selected.y)
+        ?? selectionFootprintTiles(useGameStore.getState().state, selected.x, selected.y)
+      while (selectionCells.length < footprint.length) {
+        const cell = new THREE.Mesh(selectionGeometry, selectionMaterial)
+        cell.name = `selected-footprint-cell-${selectionCells.length}`
+        cell.renderOrder = 10
+        selectionCells.push(cell)
+        selectionMarker.add(cell)
+      }
+      for (let index = 0; index < selectionCells.length; index++) {
+        const cell = selectionCells[index]!
+        const tile = footprint[index]
+        cell.visible = tile !== undefined
+        if (!tile) continue
+        cell.position.set(
+          tile.x * MAP_TILE_SIZE,
+          projection.source.getTileElevation(tile.x, tile.y) + 0.05,
+          tile.y * MAP_TILE_SIZE,
+        )
+      }
       selectionMarker.visible = true
-      selectionMarker.position.set(
-        selected.x * MAP_TILE_SIZE,
-        0.05,
-        selected.y * MAP_TILE_SIZE,
-      )
     }
 
     function clearBuildPreview(): void {
@@ -409,11 +499,19 @@ export function GameMap() {
         }
         const mesh = preview.meshes[index]!
         mesh.visible = true
-        mesh.position.set(cell.x * MAP_TILE_SIZE, 0.08, cell.y * MAP_TILE_SIZE)
+        mesh.position.set(
+          cell.x * MAP_TILE_SIZE,
+          projection.source.getTileElevation(cell.x, cell.y) + 0.08,
+          cell.y * MAP_TILE_SIZE,
+        )
         mesh.material = check.ok ? preview.okMaterial : preview.badMaterial
       }
       preview.volume.visible = true
-      preview.volume.position.set(tile.x * MAP_TILE_SIZE, 0.35, tile.y * MAP_TILE_SIZE)
+      const finishedElevation = check.cells.reduce(
+        (height, cell) => Math.max(height, projection.source.getTileElevation(cell.x, cell.y)),
+        projection.source.getTileElevation(tile.x, tile.y),
+      )
+      preview.volume.position.set(tile.x * MAP_TILE_SIZE, finishedElevation + 0.35, tile.y * MAP_TILE_SIZE)
       const color = check.ok ? PREVIEW_OK : PREVIEW_BAD
       preview.volume.material.color.setHex(color)
       const heightScale = kind === 'dc_l' ? 1.35 : kind === 'dc_m' ? 1.1 : kind === 'dc' ? 0.85 : 1
@@ -424,13 +522,19 @@ export function GameMap() {
 
       const cost = placementCostAt(store.state, tile.x, tile.y, kind)
       const tooltip = placementTooltipRef.current
-      if (cost && tooltip && placementLandRef.current && placementTotalRef.current) {
+      if (cost && tooltip && placementLandRef.current && placementGradeRef.current && placementTotalRef.current) {
         const bounds = renderer.domElement.getBoundingClientRect()
         const position = placementTooltipPosition(clientX, clientY, bounds)
         placementLandRef.current.textContent = `Land ${money(cost.landCash)}`
+        placementGradeRef.current.textContent = cost.gradingCash > 0
+          ? `Grading ${money(cost.gradingCash)} · ${Math.round(check.maxGrade * 100)}% slope`
+          : `Level site · ${Math.round(check.maxGrade * 100)}% slope`
+        const tileId = tile.y * store.state.map.width + tile.x
+        const access = transportAccessFactorAt(store.state, tileId)
+        const congestion = transportRegionalCongestionAt(store.state, tileId)
         placementTotalRef.current.textContent = `${money(cost.totalCash)} total · ${
           check.ok ? 'ready' : 'blocked'
-        }`
+        } · access ${Math.round(access * 100)}% · traffic ${Math.round(congestion * 100)}%`
         tooltip.dataset.placeable = check.ok ? 'true' : 'false'
         tooltip.style.left = `${position.left}px`
         tooltip.style.top = `${position.top}px`
@@ -439,44 +543,13 @@ export function GameMap() {
     }
 
     function viewportBounds(): TileBounds {
-      let minX = Number.POSITIVE_INFINITY
-      let maxX = Number.NEGATIVE_INFINITY
-      let minY = Number.POSITIVE_INFINITY
-      let maxY = Number.NEGATIVE_INFINITY
-      const corners: readonly [number, number][] = [
-        [-1, -1],
-        [1, -1],
-        [1, 1],
-        [-1, 1],
-      ]
-      for (const [x, y] of corners) {
-        boundsPointer.set(x, y)
-        boundsRaycaster.setFromCamera(boundsPointer, camera)
-        const hit = boundsRaycaster.ray.intersectPlane(pickPlane, boundsHit)
-        if (!hit) continue
-        minX = Math.min(minX, hit.x / MAP_TILE_SIZE)
-        maxX = Math.max(maxX, hit.x / MAP_TILE_SIZE)
-        minY = Math.min(minY, hit.z / MAP_TILE_SIZE)
-        maxY = Math.max(maxY, hit.z / MAP_TILE_SIZE)
-      }
-      if (!Number.isFinite(minX)) {
-        const centerX = target.x / MAP_TILE_SIZE
-        const centerY = target.z / MAP_TILE_SIZE
-        const margin = projectedPropMarginTiles()
-        return {
-          minX: centerX - margin,
-          maxX: centerX + margin,
-          minY: centerY - margin,
-          maxY: centerY + margin,
-        }
-      }
-      const margin = projectedPropMarginTiles()
-      return {
-        minX: Math.floor(minX) - margin,
-        maxX: Math.ceil(maxX) + margin,
-        minY: Math.floor(minY) - margin,
-        maxY: Math.ceil(maxY) + margin,
-      }
+      return mapViewportPlaneBounds(
+        camera,
+        target.y,
+        MAP_TILE_SIZE,
+        projectedPropMarginTiles(),
+        VIEWPORT_HEIGHT_ENVELOPE_WORLD,
+      )
     }
 
     function projectedPropMarginTiles(): number {
@@ -501,6 +574,7 @@ export function GameMap() {
     function reconcileViewport(now: number): void {
       const pixels = pixelsPerTile()
       const bounds = viewportBounds()
+      const corners = mapViewportPlaneFootprint(camera, target.y, MAP_TILE_SIZE)
       projection.source.consumeChunkPreparationMs()
       lastViewportUpdate = enforceCloseUpNearOnly(
         projection.registry,
@@ -518,14 +592,20 @@ export function GameMap() {
         y: bounds.minY,
         w: Math.max(1, bounds.maxX - bounds.minX),
         h: Math.max(1, bounds.maxY - bounds.minY),
+        corners,
       }
       const prev = store.mapViewport
+      const footprintChanged = !prev?.corners || prev.corners.some((point, index) => {
+        const candidate = corners[index]!
+        return Math.abs(point.x - candidate.x) > 0.01 || Math.abs(point.y - candidate.y) > 0.01
+      })
       if (
         !prev ||
         Math.abs(prev.x - next.x) > 0.25 ||
         Math.abs(prev.y - next.y) > 0.25 ||
         Math.abs(prev.w - next.w) > 0.25 ||
-        Math.abs(prev.h - next.h) > 0.25
+        Math.abs(prev.h - next.h) > 0.25 ||
+        footprintChanged
       ) {
         store.setMapViewport(next)
       }
@@ -535,7 +615,7 @@ export function GameMap() {
       if (!replayFrame) return
       target.set(
         replayFrame.pose.targetX * MAP_TILE_SIZE,
-        0,
+        projection.source.getTileElevation(replayFrame.pose.targetX, replayFrame.pose.targetY),
         replayFrame.pose.targetY * MAP_TILE_SIZE,
       )
       frustum = THREE.MathUtils.clamp(
@@ -551,28 +631,24 @@ export function GameMap() {
 
     function moveFromKeys(dtSeconds: number): boolean {
       const speed = 10 * (keys.has('shift') ? 2.2 : 1)
-      let x = 0
-      let z = 0
+      let forward = 0
+      let right = 0
       if (keys.has('w') || keys.has('arrowup')) {
-        x -= 1
-        z -= 1
+        forward += 1
       }
       if (keys.has('s') || keys.has('arrowdown')) {
-        x += 1
-        z += 1
+        forward -= 1
       }
       if (keys.has('a') || keys.has('arrowleft')) {
-        x -= 1
-        z += 1
+        right -= 1
       }
       if (keys.has('d') || keys.has('arrowright')) {
-        x += 1
-        z -= 1
+        right += 1
       }
-      if (x === 0 && z === 0) return false
-      const length = Math.hypot(x, z) || 1
-      target.x += (x / length) * speed * dtSeconds
-      target.z += (z / length) * speed * dtSeconds
+      if (forward === 0 && right === 0) return false
+      const movement = cameraRelativePanVector(visualCameraHeading, forward, right)
+      target.x += movement.x * speed * dtSeconds
+      target.z += movement.z * speed * dtSeconds
       clampTarget()
       applyCamera()
       viewportDirty = true
@@ -631,10 +707,12 @@ export function GameMap() {
       animationFrame = 0
       if (disposed || document.hidden) return
       scheduleAnimation()
+      const rotationSample = sampleMapCameraRotation(cameraRotation, now)
       const interactive =
         !!perfSession ||
         drag.active ||
         keys.size > 0 ||
+        !rotationSample.complete ||
         viewportDirty ||
         now - lastInteractionAt < INTERACTION_TAIL_MS
       const interval = interactive ? ACTIVE_FRAME_MS : IDLE_FRAME_MS
@@ -648,6 +726,11 @@ export function GameMap() {
       lastRenderAt = now
 
       applyReplayFrame()
+      if (Math.abs(rotationSample.heading - visualCameraHeading) > 1e-6) {
+        visualCameraHeading = rotationSample.heading
+        applyCamera()
+        viewportDirty = true
+      }
       if (moveFromKeys(dt)) markInteraction()
       if (viewportDirty) reconcileViewport(now)
       projection.viewport.render(camera, now * 0.001)
@@ -797,9 +880,30 @@ export function GameMap() {
     }
 
     function onKeyDown(event: KeyboardEvent): void {
-      const tagName = (event.target as HTMLElement | null)?.tagName
-      if (tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT') return
+      const targetElement = event.target as HTMLElement | null
+      const tagName = targetElement?.tagName
+      if (targetElement?.isContentEditable || tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT') return
       const key = event.key.toLowerCase()
+      if (!event.repeat && key === 'q') {
+        useUiStore.getState().rotateMapCamera(-1)
+        event.preventDefault()
+        return
+      }
+      if (!event.repeat && key === 'e') {
+        useUiStore.getState().rotateMapCamera(1)
+        event.preventDefault()
+        return
+      }
+      if (!event.repeat && key === 't') {
+        useUiStore.getState().cycleMapCameraTilt()
+        event.preventDefault()
+        return
+      }
+      if (!event.repeat && key === 'r') {
+        useUiStore.getState().resetMapCamera()
+        event.preventDefault()
+        return
+      }
       if (!['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'shift'].includes(key)) {
         return
       }
@@ -875,8 +979,8 @@ export function GameMap() {
           }
           if (next.state.map.regions !== projection.regions) {
             projection.regions = next.state.map.regions
-            rebuildRegionLabels(labels, projection.regions)
-            rebuildRegionOverlays(regionOverlays, projection.regions, next.mapOverlay)
+            rebuildRegionLabels(labels, projection.regions, projection.source)
+            rebuildRegionOverlays(regionOverlays, projection.regions, next.mapOverlay, projection.source)
             visualChange = true
           }
           const loadedEarlierDay = next.state.day < previous.state.day
@@ -893,7 +997,7 @@ export function GameMap() {
         moveSelectionMarker(next.selectedTile)
         if (!next.buildMode) clearBuildPreview()
         if (next.mapOverlay !== previous.mapOverlay || next.state.map.regions !== previous.state.map.regions) {
-          rebuildRegionOverlays(regionOverlays, projection.regions, next.mapOverlay)
+          rebuildRegionOverlays(regionOverlays, projection.regions, next.mapOverlay, projection.source)
         }
         // Destroy tool uses red selection marker so eligible sells are obvious.
         selectionMaterial.color.setHex(next.mapTool === 'destroy' ? PREVIEW_BAD : PREVIEW_OK)
@@ -905,7 +1009,9 @@ export function GameMap() {
           0,
           next.mapFocusRequest.y * MAP_TILE_SIZE,
         )
-        frustum = Math.min(frustum, DEFAULT_FRUSTUM)
+        if (!(next.mapFocusRequest as { preserveZoom?: boolean }).preserveZoom) {
+          frustum = Math.min(frustum, DEFAULT_FRUSTUM)
+        }
         clampTarget()
         updateProjectionMatrix()
         applyCamera()
@@ -913,6 +1019,41 @@ export function GameMap() {
         visualChange = true
       }
       if (visualChange) markInteraction()
+    })
+
+    const unsubscribeUiStore = useUiStore.subscribe((next, previous) => {
+      const headingChanged = next.mapCameraHeading !== previous.mapCameraHeading
+      const tiltChanged = next.mapCameraTilt !== previous.mapCameraTilt
+      const reducedMotionEnabled = next.reducedMotion && !previous.reducedMotion
+      const cloudsChanged = next.cloudsVisible !== previous.cloudsVisible
+      if (cloudsChanged) {
+        projection.viewport.setCloudsVisible(next.cloudsVisible)
+        markInteraction()
+        scheduleAnimation()
+      }
+      if (!headingChanged && !tiltChanged && !reducedMotionEnabled) return
+
+      const now = performance.now()
+      if (headingChanged) {
+        cameraRotation = retargetMapCameraRotation(
+          cameraRotation,
+          previous.mapCameraHeading,
+          next.mapCameraHeading,
+          now,
+          next.reducedMotion ? 0 : undefined,
+        )
+        cameraHeading = next.mapCameraHeading
+      }
+      if (reducedMotionEnabled) {
+        cameraRotation = createMapCameraRotation(cameraHeading)
+      }
+      cameraTilt = next.mapCameraTilt
+      visualCameraHeading = sampleMapCameraRotation(cameraRotation, now).heading
+      updateProjectionMatrix()
+      applyCamera()
+      viewportDirty = true
+      markInteraction()
+      scheduleAnimation()
     })
 
     renderer.domElement.addEventListener('pointerdown', onPointerDown)
@@ -933,18 +1074,30 @@ export function GameMap() {
 
     updateProjectionMatrix()
     centerCamera(initialStore.state)
-    rebuildRegionLabels(labels, projection.regions)
-    rebuildRegionOverlays(regionOverlays, projection.regions, initialStore.mapOverlay)
+    rebuildRegionLabels(labels, projection.regions, projection.source)
+    rebuildRegionOverlays(regionOverlays, projection.regions, initialStore.mapOverlay, projection.source)
     syncRivalLabels(initialStore.state)
     moveSelectionMarker(initialStore.selectedTile)
     reconcileViewport(performance.now())
     scheduleAnimation()
+
+    // Keep first paint immediate through the procedural resilience registry,
+    // then atomically rebuild once all authored families that can load are
+    // ready. Failed families remain on their matching procedural fallbacks.
+    void assetCache.loadAll().then((snapshot) => {
+      if (disposed) return
+      assetSnapshot = snapshot
+      const live = useGameStore.getState()
+      replaceProjection(live.state, live.selectedTile, live.buildMode)
+      markInteraction()
+    })
 
     return () => {
       disposed = true
       if (animationFrame) cancelAnimationFrame(animationFrame)
       if (resizeFrame) cancelAnimationFrame(resizeFrame)
       unsubscribeStore()
+      unsubscribeUiStore()
       resizeObserver.disconnect()
       perfSession?.dispose()
       document.removeEventListener('visibilitychange', onVisibilityChange)
@@ -962,12 +1115,14 @@ export function GameMap() {
       renderer.domElement.removeEventListener('drop', onBlueprintDrop)
       projection.viewport.dispose()
       projection.registry.dispose()
+      assetCache.dispose()
       disposeRegionLabels(labels)
       disposeRegionOverlays(regionOverlays)
       disposeRivalFacilityLabels(rivalLabels)
       disposeBuildPreview(preview)
       selectionGeometry.dispose()
       selectionMaterial.dispose()
+      selectionMarker.clear()
       scene.remove(selectionMarker, preview.group, labels, rivalLabels)
       renderer.dispose()
       renderer.domElement.remove()
@@ -979,7 +1134,7 @@ export function GameMap() {
       ref={mountRef}
       tabIndex={0}
       className={`absolute inset-0 outline-none ${buildMode || mapTool === 'destroy' ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
-      title="WASD / arrows to pan · drag · scroll zoom"
+      title="WASD / arrows to pan · Q/E rotate · T tilt · R reset view · drag · scroll zoom"
     >
       <div
         ref={placementTooltipRef}
@@ -987,6 +1142,7 @@ export function GameMap() {
         className="build-placement-tooltip pointer-events-none absolute z-30 min-w-40 rounded-lg border border-mint/45 bg-void/95 px-2.5 py-2 font-mono shadow-xl backdrop-blur-md"
       >
         <span ref={placementLandRef} className="block text-[0.6875rem] font-semibold text-bone" />
+        <span ref={placementGradeRef} className="mt-0.5 block text-[0.5625rem] text-bone/70" />
         <span ref={placementTotalRef} className="build-placement-total mt-0.5 block text-[0.5625rem] text-mint" />
       </div>
     </div>
@@ -1062,6 +1218,7 @@ function rebuildRegionOverlays(
   group: THREE.Group,
   regions: readonly MapRegion[],
   overlay: MapOverlayMode,
+  source?: SimViewportRenderSource,
 ): void {
   disposeRegionOverlays(group)
   if (overlay === 'none') return
@@ -1080,7 +1237,10 @@ function rebuildRegionOverlays(
     mesh.rotation.x = -Math.PI / 2
     mesh.position.set(
       (region.originX + region.width / 2 - 0.5) * MAP_TILE_SIZE,
-      0.04,
+      (source?.getTileElevation(
+        Math.floor(region.originX + region.width / 2),
+        Math.floor(region.originY + region.height / 2),
+      ) ?? 0) + 0.04,
       (region.originY + region.height / 2 - 0.5) * MAP_TILE_SIZE,
     )
     mesh.renderOrder = 2
@@ -1099,7 +1259,11 @@ function disposeRegionOverlays(group: THREE.Group): void {
   }
 }
 
-function rebuildRegionLabels(group: THREE.Group, regions: readonly MapRegion[]): void {
+function rebuildRegionLabels(
+  group: THREE.Group,
+  regions: readonly MapRegion[],
+  source?: SimViewportRenderSource,
+): void {
   disposeRegionLabels(group)
   for (const region of regions) {
     const canvas = document.createElement('canvas')
@@ -1128,10 +1292,25 @@ function rebuildRegionLabels(group: THREE.Group, regions: readonly MapRegion[]):
     sprite.scale.set(4.2, 1.05, 1)
     sprite.position.set(
       (region.originX + region.width / 2) * MAP_TILE_SIZE,
-      2.2,
+      (source?.getTileElevation(
+        Math.floor(region.originX + region.width / 2),
+        Math.floor(region.originY + region.height / 2),
+      ) ?? 0) + 2.2,
       (region.originY + region.height / 2) * MAP_TILE_SIZE,
     )
     group.add(sprite)
+  }
+}
+
+function elevateWorldLabels(
+  group: THREE.Group,
+  source: SimViewportRenderSource,
+  clearance: number,
+): void {
+  for (const child of group.children) {
+    const x = Math.round(child.position.x / MAP_TILE_SIZE)
+    const y = Math.round(child.position.z / MAP_TILE_SIZE)
+    child.position.y = source.getTileElevation(x, y) + clearance
   }
 }
 

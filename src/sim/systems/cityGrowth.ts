@@ -1,6 +1,7 @@
 import { cityTalentCapacity } from '../balance/staff'
 import type { SimState, StaffHeadcount } from '../types'
 import {
+  cityGrowthInterval,
   isCityGrowthDue,
   planCityGrowth,
   stageCityGrowth,
@@ -8,6 +9,7 @@ import {
   type TileId,
 } from '../world'
 import { commitWorldBatch, usesCompactWorld } from './worldAccess'
+import { transportCityGrowthMultiplier } from './transport'
 
 function growAvailable(
   available: StaffHeadcount | undefined,
@@ -51,21 +53,30 @@ export function reserveCityGrowthPlan(
 export function tickCityGrowth(state: SimState): SimState {
   if (!usesCompactWorld(state)) return state
   const world = state.map.world!
-  // Spread metros across the seven-day cadence so a large world never grows
-  // every city in one frame. Each individual city still advances exactly once
-  // per seven game days after its deterministic initial offset.
-  const due = world.staticWorld.cities.filter(
-    (city) =>
-      state.day % 7 === city.index % 7 &&
-      isCityGrowthDue(world, city.index, state.day, 7),
-  )
+  // V2 retains its weekly offset exactly. V3 checks each settlement monthly,
+  // with a deterministic day-of-cycle offset, then applies its tier interval.
+  const v3 = Number(world.descriptor.generatorVersion) >= 3
+  const cadence = v3 ? 28 : 7
+  const due = world.staticWorld.cities.filter((city) => {
+    const interval = cityGrowthInterval(world, city.index)
+    return state.day % cadence === city.index % cadence &&
+      isCityGrowthDue(world, city.index, state.day, interval)
+  })
   if (due.length === 0) return state
 
   const batch = world.beginBatch()
   const reserved = new Set<TileId>()
   for (const city of due) {
-    const plan = planCityGrowth(world, city.index, state.day, { maxTiles: 24 })
-    stageCityGrowth(world, batch, reserveCityGrowthPlan(plan, reserved))
+    const plan = planCityGrowth(world, city.index, state.day, {
+      maxTiles: 24,
+      reserved: v3 ? reserved : undefined,
+    })
+    const reservedPlan = reserveCityGrowthPlan(plan, reserved)
+    stageCityGrowth(world, batch, Object.freeze({
+      ...reservedPlan,
+      populationDelta:
+        reservedPlan.populationDelta * transportCityGrowthMultiplier(state, city.id),
+    }))
   }
   const committed = commitWorldBatch(state, batch)
   const cities = (committed.map.cities ?? []).map((city, index) => {

@@ -1,4 +1,9 @@
 import type { DynamicWorld } from "./world/dynamicWorld";
+import type {
+  CityGrowthMetadata,
+  CityPalette,
+  CityTier,
+} from "./world/types";
 
 export type LabId = string;
 export type LabController = "player" | "rival";
@@ -2340,7 +2345,7 @@ export interface MapRegion {
   regulationRisk: number;
 }
 
-/** Metro anchor with demand / power-service stats. */
+/** Metro or derived settlement anchor with demand / power-service stats. */
 export interface MapCity {
   id: string;
   name: string;
@@ -2355,6 +2360,12 @@ export interface MapCity {
   /** Mult on wholesale for city offtake (usually < 1) */
   powerBuyPriceMult: number;
   industry: string;
+  /** Generator-v3 settlement metadata; absent on legacy and v2 maps. */
+  tier?: CityTier;
+  parentCityIndex?: number;
+  regionIndex?: number;
+  palette?: CityPalette;
+  growth?: CityGrowthMetadata;
   /**
    * Shared free talent pool (player + rivals hire from this).
    * Regenerates slowly toward capacity each day.
@@ -2769,7 +2780,32 @@ export interface RunConfig {
   startingCashMult: number;
   landValueBase: number;
   landValueCityPeak: number;
+  drivingSide: import("./balance/gameConfig").DrivingSide;
   campaignRules: CampaignRules;
+}
+
+export interface TransportSegmentLoad {
+  segmentId: number;
+  flow: number;
+  capacity: number;
+  utilization: number;
+  travelTimeMult: number;
+}
+
+export interface TransportJunctionLoad {
+  junctionId: number;
+  queuePressure: number;
+}
+
+export interface TransportRuntimeState {
+  version: 1;
+  day: number;
+  networkRevision: number;
+  segmentLoads: TransportSegmentLoad[];
+  junctionLoads: TransportJunctionLoad[];
+  regionCongestion: Record<string, number>;
+  cityAccess: Record<string, number>;
+  facilityAccess: Record<string, number>;
 }
 
 export interface SimState {
@@ -2778,6 +2814,8 @@ export interface SimState {
   tick: number;
   speed: Speed;
   paused: boolean;
+  /** Canonical daily road demand/congestion; visual cars are never persisted. */
+  transport: TransportRuntimeState;
   /** Applied new-game config */
   config: RunConfig;
   /** Immutable calibration snapshot pinned into this campaign and its save. */

@@ -61,6 +61,8 @@ function overlappingCitiesWorld(base: StaticWorld): StaticWorld {
   })
   return {
     ...base,
+    descriptor: { ...base.descriptor, generatorVersion: 2 },
+    transport: undefined,
     kind,
     feature,
     region,

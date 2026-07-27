@@ -1,5 +1,5 @@
 /**
- * Async save format v5.
+ * Async save format v9.
  *
  * Compact worlds persist only their deterministic descriptor and sparse
  * dynamic snapshot. Static typed layers, indexes, metrics, journals, and any
@@ -39,7 +39,7 @@ import {
 } from './world'
 
 export const SAVE_FORMAT = 'labline-save' as const
-export const SAVE_VERSION = 6 as const
+export const SAVE_VERSION = 9 as const
 export const V1_INCOMPATIBILITY_REASON =
   'Save format v1 is incompatible with the compact-world renderer. This campaign cannot be migrated; start a new operation.'
 export const V2_INCOMPATIBILITY_REASON =
@@ -592,7 +592,27 @@ function restoreState(stateRaw: unknown, snapshot: DynamicWorldSnapshotV2 | null
     }
   }
 
-  const restored = { ...state, map } as SimState
+  const restored = {
+    ...state,
+    map,
+    config: {
+      ...state.config,
+      drivingSide: state.config.drivingSide === 'right' ? 'right' : 'left',
+    },
+    transport:
+      state.transport && state.transport.version === 1
+        ? state.transport
+        : {
+            version: 1 as const,
+            day: 0,
+            networkRevision: 0,
+            segmentLoads: [],
+            junctionLoads: [],
+            regionCongestion: {},
+            cityAccess: {},
+            facilityAccess: {},
+          },
+  } as SimState
   // Old campaigns may persist a spot price from the earlier, cheaper energy
   // economy. Bring them onto the current industrial-power floor immediately
   // instead of waiting for the first map tick.
@@ -895,7 +915,14 @@ function validateSaveEnvelope(data: unknown): SaveFile {
       'newer-version',
     )
   }
-  if (candidate.version !== SAVE_VERSION && candidate.version !== 5 && candidate.version !== 4) {
+  if (
+    candidate.version !== SAVE_VERSION &&
+    candidate.version !== 8 &&
+    candidate.version !== 7 &&
+    candidate.version !== 6 &&
+    candidate.version !== 5 &&
+    candidate.version !== 4
+  ) {
     throw new SaveError(`Unsupported save version ${candidate.version}.`, 'incompatible-version')
   }
   const file = data as SaveFile

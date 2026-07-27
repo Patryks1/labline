@@ -12,8 +12,12 @@ import {
 } from './chunks'
 import { ScreenSpaceLod, type LodSnapshot } from './lod'
 import { ViewportRendererMetrics } from './metrics'
+import { CloudLayer } from './cloudLayer'
+import { EnvironmentLifeLayer } from './environmentLifeLayer'
+import { MunicipalPowerLayer } from './municipalPowerLayer'
 import { MapSurfaceLayer } from './surfaceLayer'
 import { TrafficLayer } from './trafficLayer'
+import { WorldVoidLayer } from './worldVoidLayer'
 import {
   LOD_TIERS,
   LodTier,
@@ -34,6 +38,7 @@ export interface ViewportMapRendererOptions {
   maxRetainedChunks?: number
   initialLod?: LodTier
   lodTransitionMs?: number
+  trafficLimits?: { logical?: number; visible?: number }
 }
 
 interface ChunkLayerRecord {
@@ -45,6 +50,11 @@ export interface ViewportUpdateResult {
   chunks: ChunkSelection
   lod: LodSnapshot
   prewarming: boolean
+}
+
+export interface ViewportObjectPick {
+  readonly point: THREE.Vector3
+  readonly tileId: TileId
 }
 
 const PREWARM_BUILD_BUDGET_MS = 0.8
@@ -63,7 +73,11 @@ export class ViewportMapRenderer {
   readonly registry: ArchetypeRegistry
   readonly lod: ScreenSpaceLod
   readonly metrics: ViewportRendererMetrics
-  readonly traffic = new TrafficLayer()
+  readonly clouds: CloudLayer
+  readonly traffic: TrafficLayer
+  readonly environmentLife: EnvironmentLifeLayer
+  readonly municipalPower: MunicipalPowerLayer
+  readonly worldVoid: WorldVoidLayer
   readonly chunkRoot = new THREE.Group()
 
   private readonly ownsRegistry: boolean
@@ -77,6 +91,19 @@ export class ViewportMapRenderer {
     this.source = options.source
     this.ownsRegistry = options.registry === undefined
     this.registry = options.registry ?? createDefaultArchetypeRegistry()
+    this.clouds = new CloudLayer({
+      width: this.source.width,
+      height: this.source.height,
+      tileSize: this.source.tileSize,
+    })
+    this.traffic = new TrafficLayer(this.registry, options.trafficLimits)
+    this.environmentLife = new EnvironmentLifeLayer(this.registry)
+    this.municipalPower = new MunicipalPowerLayer()
+    this.worldVoid = new WorldVoidLayer({
+      width: this.source.width,
+      height: this.source.height,
+      tileSize: this.source.tileSize,
+    })
     const initialLod = options.initialLod ?? LodTier.mid
     this.lod = new ScreenSpaceLod(initialLod, options.lodTransitionMs ?? 200)
     this.metrics = new ViewportRendererMetrics(initialLod)
@@ -90,14 +117,20 @@ export class ViewportMapRenderer {
       width: this.source.width,
       height: this.source.height,
       tileSize: this.source.tileSize,
+      source: this.source,
+      chunkSize: options.chunkSize ?? DEFAULT_CHUNK_SIZE,
     })
     this.surface.data.fill((tileId, out) => this.source.readSurface(tileId, out))
     // Guarantee the complete initial image is resident before partial updates.
     this.renderer.initTexture(this.surface.data.texture)
     this.chunkRoot.name = 'viewport-prop-chunks'
+    this.scene.add(this.worldVoid.mesh)
     this.scene.add(this.surface.mesh)
     this.scene.add(this.chunkRoot)
     this.scene.add(this.traffic.root)
+    this.scene.add(this.environmentLife.root)
+    this.scene.add(this.municipalPower.root)
+    this.scene.add(this.clouds.root)
     this.metrics.addSurfaceUpload(this.surface.data.data.length, this.surface.data.tileCount)
   }
 
@@ -106,6 +139,7 @@ export class ViewportMapRenderer {
     this.assertLive()
     const out: SurfaceTexel = { kind: 0, neighborMask: 0, region: 0, flags: 0 }
     for (const tileId of tileIds) {
+      out.transport = undefined
       this.source.readSurface(tileId, out)
       this.surface.data.set(tileId, out)
     }
@@ -129,6 +163,14 @@ export class ViewportMapRenderer {
     this.assertLive()
     this.lastPixelsPerTile = Math.max(0, pixelsPerTile)
     const selection = this.chunks.update(bounds)
+    // Surface chunks are immutable for a revision. Retain recently visible
+    // buffers in the bounded resident cache so a short pan does not rebuild
+    // terrain, roads, water, and bridges on the return trip.
+    this.surface.updateVisibleChunks(
+      selection.visible,
+      (chunkId) => this.chunks.chunkBounds(chunkId),
+      selection.resident,
+    )
     const recordCache = new Map<string, readonly RenderInstance[] | null>()
     const recordsFor = (chunkId: ChunkId, tier: LodTier) => {
       const key = chunkLayerKey(chunkId, tier)
@@ -208,10 +250,14 @@ export class ViewportMapRenderer {
 
     // Materialize the one-chunk guard ring while it is hidden. Boundary pans
     // then toggle existing buffers instead of rebuilding or exposing a blank.
-    // Keep all finite geometry tiers hot inside the visible + guard ring. LOD
-    // changes then only toggle already-uploaded buffers instead of rebuilding
-    // every visible city chunk on the threshold frame.
-    const retainedTiers = new Set<LodTier>(LOD_TIERS)
+    // Keep only tiers participating in the current/next transition hot. The
+    // old strategy retained near+mid+far for every guarded chunk, tripling GPU
+    // instance buffers even though at most two tiers can be displayed.
+    const retainedTiers = new Set<LodTier>([
+      lod.active,
+      lod.desired,
+      ...lod.layers.map(layer => layer.tier),
+    ])
     const prewarmCandidates: Array<readonly [ChunkId, LodTier]> = []
     for (const chunkId of selection.visible) {
       for (const tier of retainedTiers) {
@@ -249,6 +295,8 @@ export class ViewportMapRenderer {
       else this.removeChunkLayer(key, record)
     }
     this.traffic.update(selection.visible, this.chunks, this.source)
+    this.environmentLife.update(selection.visible, this.chunks, this.source)
+    this.municipalPower.update(selection.visible, this.chunks, this.source)
     this.updateMetrics(selection, lod, pendingChunks, performance.now() - buildStarted)
     return { chunks: selection, lod, prewarming: pendingPrewarm > 0 }
   }
@@ -256,7 +304,27 @@ export class ViewportMapRenderer {
   setFrame(timeSeconds: number, pixelsPerTile = this.lastPixelsPerTile): void {
     this.assertLive()
     this.lastPixelsPerTile = Math.max(0, pixelsPerTile)
-    this.surface.setFrame(timeSeconds, this.lastPixelsPerTile)
+    this.surface.setFrame(
+      timeSeconds,
+      this.lastPixelsPerTile,
+      this.source.isSimulationPaused?.() ?? false,
+    )
+    this.setTrafficFrame(timeSeconds)
+    this.environmentLife.setFrame(timeSeconds)
+    this.municipalPower.setFrame(timeSeconds)
+    this.worldVoid.setFrame(timeSeconds)
+    this.clouds.setFrame(timeSeconds, this.source.isSimulationPaused?.() ?? false)
+  }
+
+  /** External UI integrations can toggle clouds without rebuilding the world. */
+  setCloudsVisible(visible: boolean): void {
+    this.assertLive()
+    this.clouds.setVisible(visible)
+  }
+
+  /** Advance render-only lane traffic; gameplay congestion remains canonical. */
+  setTrafficFrame(timeSeconds: number): void {
+    this.assertLive()
     this.traffic.setFrame(timeSeconds)
   }
 
@@ -264,6 +332,30 @@ export class ViewportMapRenderer {
     this.setFrame(timeSeconds)
     this.renderer.render(this.scene, camera)
     this.metrics.captureRenderer(this.renderer)
+  }
+
+  /** Nearest true terrain/deck hit; water is intentionally not selectable. */
+  raycastTerrain(raycaster: THREE.Raycaster): THREE.Intersection | null {
+    this.assertLive()
+    const hits = raycaster.intersectObjects(this.surface.pickObjects, true)
+    return hits[0] ?? null
+  }
+
+  /** Resolve a rendered prop to its authoritative logical owner cell. */
+  raycastSelectable(raycaster: THREE.Raycaster): ViewportObjectPick | null {
+    this.assertLive()
+    const hits = raycaster.intersectObject(this.chunkRoot, true)
+    for (const hit of hits) {
+      if (hit.instanceId === undefined) continue
+      const ids = hit.object.userData.pickTileIds as readonly (TileId | null)[] | undefined
+      const tileId = ids?.[hit.instanceId]
+      if (tileId !== null && tileId !== undefined) return { point: hit.point, tileId }
+    }
+    return null
+  }
+
+  sampleTerrainHeight(worldX: number, worldZ: number): number {
+    return this.surface.sampleHeight(worldX, worldZ)
   }
 
   /** Compile the finite surface/archetype shader set without a first-pan hitch. */
@@ -279,9 +371,17 @@ export class ViewportMapRenderer {
     this.scene.remove(this.chunkRoot)
     this.scene.remove(this.surface.mesh)
     this.scene.remove(this.traffic.root)
+    this.scene.remove(this.environmentLife.root)
+    this.scene.remove(this.municipalPower.root)
+    this.scene.remove(this.worldVoid.mesh)
+    this.scene.remove(this.clouds.root)
     this.chunkRoot.clear()
     this.surface.dispose()
     this.traffic.dispose()
+    this.environmentLife.dispose()
+    this.municipalPower.dispose()
+    this.worldVoid.dispose()
+    this.clouds.dispose()
     if (this.ownsRegistry) this.registry.dispose()
   }
 
@@ -299,8 +399,30 @@ export class ViewportMapRenderer {
   ): void {
     let instances = 0
     let capacity = 0
-    let drawCalls = 1
-    let triangles = 2
+    let drawCalls = 0
+    let triangles = 0
+    drawCalls += 1
+    triangles += 2
+    for (const root of [
+      this.surface.terrainRoot,
+      this.surface.waterRoot,
+      this.surface.foamRoot,
+      this.surface.roadRoot,
+      this.surface.bridgeRoot,
+      this.surface.edgeRoot,
+    ]) {
+      root.traverse((object) => {
+        if (!(object instanceof THREE.Mesh) || !object.visible) return
+        const geometry = object.geometry
+        const primitiveCount = geometry.index?.count
+          ? geometry.index.count / 3
+          : geometry.getAttribute('position').count / 3
+        triangles += primitiveCount
+        drawCalls += Array.isArray(object.material)
+          ? Math.max(1, geometry.groups.length)
+          : 1
+      })
+    }
     let missingInstances = 0
     for (const record of this.chunkLayers.values()) {
       if (!record.chunk.root.visible) continue
@@ -310,10 +432,18 @@ export class ViewportMapRenderer {
       triangles += record.chunk.stats.triangles
       missingInstances += record.chunk.stats.missingInstances
     }
-    instances += this.traffic.stats.vehicles * 2
-    capacity += this.traffic.stats.vehicles * 2
+    instances += this.traffic.stats.instances
+    capacity += this.traffic.stats.instances
     drawCalls += this.traffic.stats.drawCalls
     triangles += this.traffic.stats.triangles
+    instances += this.environmentLife.stats.instances
+    capacity += this.environmentLife.stats.instances
+    drawCalls += this.environmentLife.stats.drawCalls
+    triangles += this.environmentLife.stats.triangles
+    if (this.clouds.root.visible) {
+      drawCalls += this.clouds.stats.drawCalls
+      triangles += this.clouds.stats.triangles
+    }
     this.metrics.set({
       visibleChunks: selection.visible.size,
       prefetchedChunks: selection.prefetch.size,

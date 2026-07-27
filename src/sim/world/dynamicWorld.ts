@@ -10,6 +10,8 @@ import {
   TERRAIN_KIND,
   WORLD_CHANGE_FLAGS,
   WORLD_FORMAT_VERSION,
+  WORLD_GENERATOR_VERSION_V4,
+  WORLD_GENERATOR_VERSION_V5,
   type ChunkId,
   type CityRuntimeState,
   type DynamicWorldSnapshotV2,
@@ -27,6 +29,13 @@ import {
   type WorldMetrics,
   type WorldOwnerId,
 } from './types'
+import {
+  getBiome as staticBiome,
+  getCornerElevation as staticCornerElevation,
+  getTileElevation as staticTileElevation,
+  getTileSlope as staticTileSlope,
+  getWaterElevation as staticWaterElevation,
+} from './generator'
 
 type MutableAggregate = {
   count: number
@@ -130,6 +139,12 @@ function validateTerrainOverride(override: TerrainOverride, world: StaticWorld):
   ) {
     throw new RangeError('terrain variant mask must be a uint8')
   }
+  if (
+    override.transport !== undefined &&
+    (!Number.isInteger(override.transport) || override.transport < 0 || override.transport > 0xffff)
+  ) {
+    throw new RangeError('terrain transport must be a uint16')
+  }
   return Object.freeze({ ...override })
 }
 
@@ -139,6 +154,7 @@ function isNoopOverride(override: TerrainOverride, world: StaticWorld): boolean 
     (override.kind === undefined || override.kind === world.kind[id]) &&
     (override.feature === undefined || override.feature === world.feature[id]) &&
     (override.variantMask === undefined || override.variantMask === world.variantMask[id]) &&
+    (override.transport === undefined || override.transport === (world.transport?.[id] ?? 0)) &&
     (override.ownerId === undefined || override.ownerId === 'neutral')
   )
 }
@@ -205,7 +221,15 @@ export class DynamicWorld {
       staticWorld.kind.length !== size ||
       staticWorld.region.length !== size ||
       staticWorld.feature.length !== size ||
-      staticWorld.variantMask.length !== size
+      staticWorld.variantMask.length !== size ||
+      (staticWorld.transport !== undefined && staticWorld.transport.length !== size) ||
+      (staticWorld.elevation !== undefined && staticWorld.elevation.length !==
+        (staticWorld.descriptor.width + 1) * (staticWorld.descriptor.height + 1)) ||
+      (staticWorld.biome !== undefined && staticWorld.biome.length !== size) ||
+      (staticWorld.district !== undefined && staticWorld.district.length !== size) ||
+      ((staticWorld.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V4 ||
+        staticWorld.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5) &&
+        (staticWorld.elevation === undefined || staticWorld.biome === undefined))
     ) {
       throw new Error('static world layer lengths do not match its descriptor')
     }
@@ -249,6 +273,26 @@ export class DynamicWorld {
 
   get sequence(): number {
     return this.journal.sequence
+  }
+
+  getCornerElevation(x: number, y: number): number {
+    return staticCornerElevation(this.staticWorld, x, y)
+  }
+
+  getTileElevation(x: number, y: number): number {
+    return staticTileElevation(this.staticWorld, x, y)
+  }
+
+  getWaterElevation(x: number, y: number): number {
+    return staticWaterElevation(this.staticWorld, x, y)
+  }
+
+  getTileSlope(x: number, y: number): number {
+    return staticTileSlope(this.staticWorld, x, y)
+  }
+
+  getBiome(x: number, y: number) {
+    return staticBiome(this.staticWorld, x, y)
   }
 
   get metrics(): WorldMetrics {
@@ -302,6 +346,11 @@ export class DynamicWorld {
     return high | mask
   }
 
+  getTransport(id: TileId): number {
+    this.requireTile(id)
+    return this.terrainOverrides.get(id)?.transport ?? this.staticWorld.transport?.[id] ?? 0
+  }
+
   getFacilityAt(id: TileId): Facility | undefined {
     this.requireTile(id)
     const facilityId = this.occupancy.get(id)
@@ -321,6 +370,7 @@ export class DynamicWorld {
       regionIndex: this.staticWorld.region[id]!,
       feature: this.getFeature(id),
       variantMask: this.getVariantMask(id),
+      transport: this.getTransport(id),
       ownerId: this.getOwner(id),
       facility: this.getFacilityAt(id),
     }

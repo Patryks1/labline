@@ -1,6 +1,18 @@
 import { useEffect, useState } from 'react'
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import {
+  DEFAULT_MAP_CAMERA_HEADING,
+  DEFAULT_MAP_CAMERA_TILT,
+  isMapCameraHeading,
+  isMapCameraTilt,
+  nextMapCameraTilt,
+  rotateMapCameraHeading,
+  type MapCameraHeading,
+  type MapCameraTilt,
+} from '../view/three/mapControls'
+
+export type { MapCameraHeading, MapCameraTilt } from '../view/three/mapControls'
 
 export type InterfaceScale = 'auto' | 0.8 | 0.9 | 1 | 1.1 | 1.25 | 1.5
 
@@ -47,6 +59,9 @@ interface UiPreferences {
   confirmRequest: ConfirmRequest | null
   toast: HudToast | null
   releaseEvent: ReleaseEvent | null
+  mapCameraHeading: MapCameraHeading
+  mapCameraTilt: MapCameraTilt
+  cloudsVisible: boolean
   setInterfaceScale: (scale: InterfaceScale) => void
   setRenderPreset: (preset: RenderPreset) => void
   setReducedMotion: (reduced: boolean) => void
@@ -58,6 +73,10 @@ interface UiPreferences {
   clearToast: () => void
   announceRelease: (event: { name: string; capability: number }) => void
   clearRelease: () => void
+  rotateMapCamera: (quarterTurns: number) => void
+  cycleMapCameraTilt: () => void
+  resetMapCamera: () => void
+  toggleClouds: () => void
 }
 
 export function resolveAutoScale(viewportHeight: number): number {
@@ -71,6 +90,33 @@ export function resolveRenderSettings(preset: RenderPreset): RenderSettings {
   return RENDER_PRESETS[preset]
 }
 
+export function migrateUiPreferences(persisted: unknown) {
+  const state = (persisted && typeof persisted === 'object')
+    ? persisted as Record<string, unknown>
+    : {}
+  return {
+    ...state,
+    mapCameraHeading: isMapCameraHeading(state.mapCameraHeading)
+      ? state.mapCameraHeading
+      : DEFAULT_MAP_CAMERA_HEADING,
+    mapCameraTilt: isMapCameraTilt(state.mapCameraTilt)
+      ? state.mapCameraTilt
+      : DEFAULT_MAP_CAMERA_TILT,
+    cloudsVisible: typeof state.cloudsVisible === 'boolean' ? state.cloudsVisible : true,
+  }
+}
+
+export function partializeUiPreferences(state: UiPreferences) {
+  return {
+    interfaceScale: state.interfaceScale,
+    renderPreset: state.renderPreset,
+    reducedMotion: state.reducedMotion,
+    mapCameraHeading: state.mapCameraHeading,
+    mapCameraTilt: state.mapCameraTilt,
+    cloudsVisible: state.cloudsVisible,
+  }
+}
+
 export const useUiStore = create<UiPreferences>()(
   persist(
     (set) => ({
@@ -82,6 +128,9 @@ export const useUiStore = create<UiPreferences>()(
       confirmRequest: null,
       toast: null,
       releaseEvent: null,
+      mapCameraHeading: DEFAULT_MAP_CAMERA_HEADING,
+      mapCameraTilt: DEFAULT_MAP_CAMERA_TILT,
+      cloudsVisible: true,
       setInterfaceScale: (interfaceScale) => set({ interfaceScale }),
       setRenderPreset: (renderPreset) => set({ renderPreset }),
       setReducedMotion: (reducedMotion) => set({ reducedMotion }),
@@ -95,14 +144,23 @@ export const useUiStore = create<UiPreferences>()(
       announceRelease: (event) =>
         set({ releaseEvent: { id: Date.now(), name: event.name, capability: event.capability } }),
       clearRelease: () => set({ releaseEvent: null }),
+      rotateMapCamera: (quarterTurns) => set((state) => ({
+        mapCameraHeading: rotateMapCameraHeading(state.mapCameraHeading, quarterTurns),
+      })),
+      cycleMapCameraTilt: () => set((state) => ({
+        mapCameraTilt: nextMapCameraTilt(state.mapCameraTilt),
+      })),
+      resetMapCamera: () => set({
+        mapCameraHeading: DEFAULT_MAP_CAMERA_HEADING,
+        mapCameraTilt: DEFAULT_MAP_CAMERA_TILT,
+      }),
+      toggleClouds: () => set((state) => ({ cloudsVisible: !state.cloudsVisible })),
     }),
     {
       name: 'labline-ui-v1',
-      partialize: (state) => ({
-        interfaceScale: state.interfaceScale,
-        renderPreset: state.renderPreset,
-        reducedMotion: state.reducedMotion,
-      }),
+      version: 3,
+      migrate: migrateUiPreferences,
+      partialize: partializeUiPreferences,
     },
   ),
 )
