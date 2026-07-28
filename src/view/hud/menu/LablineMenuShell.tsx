@@ -109,7 +109,7 @@ export function LablineMenuShell({
       <header className="labline-menu-logo pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center px-16 text-center">
         <div className="labline-menu-brand flex flex-col items-center">
           <img
-            src="/assets/labline-emblem-v2.png"
+            src="/assets/labline-emblem-v2.png?v=2"
             alt=""
             aria-hidden="true"
             className="labline-menu-emblem object-contain"
