@@ -8,6 +8,9 @@ import {
 } from './generator'
 import {
   TERRAIN_KIND,
+  TRANSPORT_CLASS_MASK,
+  TRANSPORT_CLASS_SHIFT,
+  TRANSPORT_ROAD_CLASS,
   WORLD_GENERATOR_VERSION_V6,
   type MunicipalPowerPlant,
   type TileId,
@@ -22,7 +25,7 @@ describe('world generator V6', () => {
     const b = generateStaticWorldV6(options)
     expect(a.descriptor).toMatchObject({
       generatorVersion: WORLD_GENERATOR_VERSION_V6,
-      settlementAlgorithmVersion: 2,
+      settlementAlgorithmVersion: 5,
       municipalCampusAlgorithmVersion: 2,
       cityStatsModelVersion: 1,
     })
@@ -60,6 +63,68 @@ describe('world generator V6', () => {
       expect(roadAccess).toBe(true)
     }
   })
+
+  it('opens short local-road loops instead of stamping neighborhood rings across streets', () => {
+    for (const seed of [17, 73, 417, 9001]) {
+      const world = generateStaticWorldV6({ ...options, seed })
+      expect(hasShortLocalRoadCycle(world.transport!, world.descriptor.width, world.descriptor.height, 8),
+        `seed ${seed}: short local-road cycle`).toBe(false)
+      expect(hasAdjacentParallelLocalRoads(world.transport!, world.descriptor.width, world.descriptor.height),
+        `seed ${seed}: adjacent parallel local roads`).toBe(false)
+      const descriptor = world.descriptor as WorldDescriptorV6
+      const legacy = regenerateStaticWorld({ ...descriptor, settlementAlgorithmVersion: 3 })
+      let oneTileGaps = 0
+      for (let id = 0; id < world.transport!.length; id++) {
+        const wasLocal = ((legacy.transport![id]! & TRANSPORT_CLASS_MASK) >>> TRANSPORT_CLASS_SHIFT) ===
+          TRANSPORT_ROAD_CLASS.local
+        if (!wasLocal || world.transport![id] !== 0) continue
+        const x = id % world.descriptor.width
+        const neighbors = [id - world.descriptor.width, id + 1, id + world.descriptor.width, id - 1]
+          .filter((neighbor) => neighbor >= 0 && neighbor < world.transport!.length &&
+            Math.abs(neighbor % world.descriptor.width - x) <= 1 && world.transport![neighbor] !== 0)
+        if (neighbors.length >= 2) oneTileGaps++
+      }
+      expect(oneTileGaps, `seed ${seed}: physical one-tile road gaps`).toBeGreaterThan(0)
+    }
+  }, 20_000)
+
+  it('grows asymmetric streets with bends and suburban dead ends instead of uniform crosses', () => {
+    for (const seed of [17, 73, 417, 9001]) {
+      const world = generateStaticWorldV6({ ...options, seed })
+      let settlementsWithTurns = 0
+      let settlementsWithDeadEnds = 0
+      let fourWayCentres = 0
+      const developedSettlements = world.cities.filter((city) => city.tier !== 'village')
+      const streetShapes: string[] = []
+      for (const city of developedSettlements) {
+        const centerId = city.cy * world.descriptor.width + city.cx
+        if (cardinalRoadDegree(world.transport!, centerId) === 4) fourWayCentres++
+        const extent = Math.ceil(city.radius * 1.55)
+        let turns = 0
+        let deadEnds = 0
+        for (let y = Math.max(1, city.cy - extent); y <= Math.min(world.descriptor.height - 2, city.cy + extent); y++) {
+          for (let x = Math.max(1, city.cx - extent); x <= Math.min(world.descriptor.width - 2, city.cx + extent); x++) {
+            const id = y * world.descriptor.width + x
+            const roadClass = (world.transport![id]! & TRANSPORT_CLASS_MASK) >>> TRANSPORT_CLASS_SHIFT
+            if (roadClass === TRANSPORT_ROAD_CLASS.none) continue
+            const mask = world.transport![id]! & 0x55
+            const degree = cardinalRoadDegree(world.transport!, id)
+            if (degree === 1) deadEnds++
+            if (degree === 2 && mask !== 0x11 && mask !== 0x44) turns++
+          }
+        }
+        if (turns >= 1) settlementsWithTurns++
+        if (deadEnds >= 2) settlementsWithDeadEnds++
+        streetShapes.push(`${city.tier}:${turns}/${deadEnds}`)
+      }
+      expect(settlementsWithTurns, `seed ${seed}: settlements with curved street paths (${streetShapes.join(', ')})`)
+        .toBeGreaterThanOrEqual(Math.ceil(developedSettlements.length * 0.7))
+      expect(settlementsWithDeadEnds, `seed ${seed}: settlements with suburban dead ends (${streetShapes.join(', ')})`)
+        .toBeGreaterThanOrEqual(Math.ceil(developedSettlements.length * 0.7))
+      expect(fourWayCentres, `seed ${seed}: uniform four-way civic centres`)
+        .toBeLessThan(developedSettlements.length)
+    }
+  }, 20_000)
 
   it('emits non-overlapping, connected, buildable campus layouts with road access', () => {
     const occupied = new Set<number>()
@@ -122,3 +187,85 @@ describe('world generator V6', () => {
     expect(changed).not.toBe(world.staticHash)
   })
 })
+
+function hasShortLocalRoadCycle(
+  transport: Uint16Array,
+  width: number,
+  height: number,
+  maxCycleEdges: number,
+): boolean {
+  const cardinal = [[0, -1, 0], [1, 0, 2], [0, 1, 4], [-1, 0, 6]] as const
+  const local = (id: number) =>
+    ((transport[id]! & TRANSPORT_CLASS_MASK) >>> TRANSPORT_CLASS_SHIFT) === TRANSPORT_ROAD_CLASS.local
+  const connected = (from: number, to: number, direction: number) =>
+    (transport[from]! & (1 << direction)) !== 0 &&
+    (transport[to]! & (1 << ((direction + 4) & 7))) !== 0
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const start = y * width + x
+      if (!local(start)) continue
+      for (const [dx, dy, direction] of [[1, 0, 2], [0, 1, 4]] as const) {
+        const nx = x + dx
+        const ny = y + dy
+        if (nx >= width || ny >= height) continue
+        const goal = ny * width + nx
+        if (!local(goal) || !connected(start, goal, direction)) continue
+        const queue: Array<{ id: number; depth: number }> = [{ id: start, depth: 0 }]
+        const seen = new Set<number>([start])
+        for (let cursor = 0; cursor < queue.length; cursor++) {
+          const current = queue[cursor]!
+          if (current.depth >= maxCycleEdges - 1) continue
+          const cx = current.id % width
+          const cy = Math.floor(current.id / width)
+          for (const [stepX, stepY, stepDirection] of cardinal) {
+            const tx = cx + stepX
+            const ty = cy + stepY
+            if (tx < 0 || ty < 0 || tx >= width || ty >= height) continue
+            const next = ty * width + tx
+            if ((current.id === start && next === goal) || !local(next) ||
+                !connected(current.id, next, stepDirection) || seen.has(next)) continue
+            if (next === goal && current.depth + 1 >= 2) return true
+            seen.add(next)
+            queue.push({ id: next, depth: current.depth + 1 })
+          }
+        }
+      }
+    }
+  }
+  return false
+}
+
+function hasAdjacentParallelLocalRoads(
+  transport: Uint16Array,
+  width: number,
+  height: number,
+): boolean {
+  const local = (id: number) =>
+    ((transport[id]! & TRANSPORT_CLASS_MASK) >>> TRANSPORT_CLASS_SHIFT) === TRANSPORT_ROAD_CLASS.local
+  const connected = (from: number, to: number, direction: number) =>
+    (transport[from]! & (1 << direction)) !== 0 &&
+    (transport[to]! & (1 << ((direction + 4) & 7))) !== 0
+  for (let y = 0; y + 1 < height; y++) {
+    for (let x = 0; x + 1 < width; x++) {
+      const nw = y * width + x
+      const ne = nw + 1
+      const sw = nw + width
+      const se = sw + 1
+      const includesLocal = [nw, ne, sw, se].some(local)
+      if (!includesLocal) continue
+      if (connected(nw, ne, 2) && connected(sw, se, 2)) return true
+      if (connected(nw, sw, 4) && connected(ne, se, 4)) return true
+    }
+  }
+  return false
+}
+
+function cardinalRoadDegree(transport: Uint16Array, id: number): number {
+  const topology = transport[id]! & 0x55
+  let degree = 0
+  for (const direction of [0, 2, 4, 6]) {
+    if ((topology & (1 << direction)) !== 0) degree++
+  }
+  return degree
+}

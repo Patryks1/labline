@@ -49,7 +49,9 @@ describe('compiled road network', () => {
     const left = compileRoadNetwork(world, 'left')
     expect(compileRoadNetwork(world, 'left')).toBe(left)
     expect(left.segments).toHaveLength(3)
-    expect(left.junctions.find((junction) => junction.tileId === 11)?.signalized).toBe(true)
+    const controlled = left.junctions.find((junction) => junction.tileId === 11)!
+    expect(controlled.hasStopLines).toBe(controlled.signalized)
+    expect(typeof controlled.hasCrosswalks).toBe('boolean')
     expect(left.segments.some((segment) => segment.points.length === 3)).toBe(true)
     expect(left.lanes.length).toBeGreaterThan(left.segments.length * 2)
     expect(left.connectors.every((connector) => connector.fromLaneId !== connector.toLaneId)).toBe(true)
@@ -160,11 +162,14 @@ describe('generator V5 transport hierarchy', () => {
     }
   }, 20_000)
 
-  it('builds reciprocal signalized cardinal crossroads inside towns across representative seeds', () => {
+  it('builds reciprocal cardinal crossroads with deterministic, non-universal street controls', () => {
     const cardinal = [
       [0, -1, 0], [1, 0, 2], [0, 1, 4], [-1, 0, 6],
     ] as const
     const cardinalMask = cardinal.reduce((mask, entry) => mask | (1 << entry[2]), 0)
+    let junctionCount = 0
+    let signalCount = 0
+    let crossingCount = 0
     for (const seed of [17, 73, 417, 9001]) {
       const world = generateStaticWorldV5({ seed, width: 96, height: 96, cityCount: 3 })
       const network = compileRoadNetwork(world)
@@ -186,10 +191,15 @@ describe('generator V5 transport hierarchy', () => {
         }
         const junction = network.junctions.find((candidate) => candidate.tileId === center)
         expect(junction?.ports, `seed ${seed}: ${town.id} compiled cross street`).toHaveLength(4)
-        expect(junction?.signalized, `seed ${seed}: ${town.id} traffic signals`).toBe(true)
-        expect(junction?.hasCrosswalks).toBe(true)
-        expect(junction?.hasStopLines).toBe(true)
+        expect(junction?.hasStopLines).toBe(junction?.signalized)
+        junctionCount++
+        if (junction?.signalized) signalCount++
+        if (junction?.hasCrosswalks) crossingCount++
       }
     }
+    expect(signalCount).toBeGreaterThan(0)
+    expect(signalCount).toBeLessThan(junctionCount)
+    expect(crossingCount).toBeGreaterThan(0)
+    expect(crossingCount).toBeLessThan(junctionCount)
   }, 20_000)
 })

@@ -61,6 +61,30 @@ const SCENARIOS: { id: ScenarioId; label: string; blurb: string }[] = [
 ]
 
 type MenuTab = 'home' | 'new' | 'load' | 'news' | 'settings'
+type NewGameStep = 0 | 1 | 2
+
+const MENU_NEWS_POSTS = [
+  {
+    source: 'Labline Ops', dayLabel: 'Today', timeLabel: 'Roads 0.6', tone: 'positive' as const,
+    title: 'Street generation pass shipped',
+    detail: 'Road furniture now sits on verges, junctions use seeded signals, and zebra crossings span eligible approaches.',
+  },
+  {
+    source: 'World Systems', dayLabel: 'Today', timeLabel: 'Generator V6.3', tone: 'research' as const,
+    title: 'Neighborhood loops opened',
+    detail: 'New worlds reject street branches that collide with existing roads and open short local-road cycles.',
+  },
+  {
+    source: 'Interface', dayLabel: 'Recent', timeLabel: 'Menu', tone: 'serve' as const,
+    title: 'Sandbox setup now uses steps',
+    detail: 'Identity, market controls, and launch review each fit into a compact screen without scrolling.',
+  },
+  {
+    source: 'Simulation', dayLabel: 'Recent', timeLabel: 'Systems', tone: 'warning' as const,
+    title: 'Larger living worlds',
+    detail: 'Expanded maps, city statistics, municipal power, traffic, and suburban growth now share one world model.',
+  },
+] as const
 
 const COMPANY_MARKS: { id: CompanyMarkId; label: string }[] = [
   { id: 'orbit', label: 'Orbit' },
@@ -127,6 +151,7 @@ export function NewGameMenu() {
   const [difficulty, setDifficulty] = useState<DifficultyId>('normal')
   const [scenario, setScenario] = useState<ScenarioId>('normal')
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [newGameStep, setNewGameStep] = useState<NewGameStep>(0)
   const [seed, setSeed] = useState(() => Math.floor(Math.random() * 99999))
   const [adv, setAdv] = useState<AdvancedOverrides>({})
   const initialTabResolved = useRef(false)
@@ -150,6 +175,7 @@ export function NewGameMenu() {
   const selectTab = (next: MenuTab) => {
     explicitMenuTabSelected = true
     initialTabResolved.current = true
+    if (next === 'new') setNewGameStep(0)
     setTab(next)
   }
 
@@ -160,6 +186,7 @@ export function NewGameMenu() {
   >
   const canContinue = compatibleSaveCount > 0
   const latestSave = saves.find((meta) => meta.compatible)
+  const showNewsFeed = tab !== 'load' && tab !== 'new'
 
   const preview = useMemo(
     () =>
@@ -233,21 +260,32 @@ export function NewGameMenu() {
     <LablineMenuShell
       variant="title"
       titleId="labline-main-title"
-      contentClassName="main-menu-console max-h-[calc(100dvh-11.5rem)] max-w-[48rem]"
-      utilityNav={(
-        <button
-          type="button"
-          aria-current={tab === 'news' ? 'page' : undefined}
-          onClick={() => selectTab('news')}
-          className={`flex min-h-11 items-center gap-2 border px-3.5 font-mono text-[0.6875rem] uppercase tracking-[0.14em] backdrop-blur transition ${
-            tab === 'news'
-              ? 'border-mint/50 bg-mint/15 text-mint'
-              : 'border-line bg-void/75 text-muted hover:border-mint/40 hover:text-bone'
-          }`}
-        >
-          <Newspaper size="1rem" weight="duotone" /> News
-        </button>
-      )}
+      contentClassName={`main-menu-console max-h-[calc(100dvh-11.5rem)] ${tab === 'new' ? 'main-menu-console--setup max-w-[64rem]' : 'max-w-[48rem]'}`}
+      utilityNav={showNewsFeed ? (
+        <aside className={`main-menu-news-feed overflow-hidden border bg-void/90 shadow-[0_22px_70px_rgba(0,8,12,.58)] backdrop-blur-xl ${tab === 'news' ? 'border-mint/55' : 'border-line/90'}`}>
+          <header className="flex items-center gap-2.5 border-b border-line/70 px-3 py-3">
+            <span className="grid size-9 shrink-0 place-items-center rounded-full border border-mint/45 bg-mint/10 font-mono text-xs font-semibold text-mint">L</span>
+            <span className="min-w-0 flex-1"><strong className="block truncate text-[0.8125rem] text-bone">Labline News</strong><span className="block truncate font-mono text-[0.625rem] text-muted">@LablineOps · changelog</span></span>
+            <span className="size-2 rounded-full bg-mint shadow-[0_0_10px_rgba(72,215,209,.7)]" title="Live feed" />
+          </header>
+          <div className="main-menu-news-posts">
+            {MENU_NEWS_POSTS.slice(0, 3).map((post) => (
+              <FeedPost
+                key={post.title}
+                source={post.source}
+                dayLabel={post.dayLabel}
+                timeLabel={post.timeLabel}
+                tone={post.tone}
+                className="main-menu-news-post"
+                body={<><strong className="text-bone">{post.title}</strong><span className="mt-1 block text-muted">{post.detail}</span></>}
+              />
+            ))}
+          </div>
+          <button type="button" aria-current={tab === 'news' ? 'page' : undefined} onClick={() => selectTab('news')} className="group flex min-h-10 w-full items-center justify-between border-t border-line/70 px-3 font-mono text-[0.625rem] uppercase tracking-[0.12em] text-mint hover:bg-mint/8">
+            View full feed <ArrowRight size="0.9rem" className="transition-transform group-hover:translate-x-1" />
+          </button>
+        </aside>
+      ) : undefined}
     >
           <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-mint/80 via-mint/20 to-transparent" />
           <div className="main-menu-console-head border-b border-line/70 px-5 pb-4 pt-5 sm:px-7 sm:pt-6">
@@ -266,7 +304,11 @@ export function NewGameMenu() {
                 </p>
                 <h2 className="mt-2 text-[2rem] font-semibold leading-none tracking-[-0.045em] text-bone">
                   {tab === 'new'
-                    ? 'Create your company'
+                    ? newGameStep === 0
+                      ? 'Name your company'
+                      : newGameStep === 1
+                        ? 'Shape the market'
+                        : 'Review your launch'
                     : tab === 'load'
                       ? 'Choose a save'
                       : tab === 'news'
@@ -279,8 +321,8 @@ export function NewGameMenu() {
               {tab === 'new' ? (
                 <button
                   type="button"
-                  onClick={() => selectTab('home')}
-                  aria-label="Back to command"
+                  onClick={() => newGameStep > 0 ? setNewGameStep((newGameStep - 1) as NewGameStep) : selectTab('home')}
+                  aria-label={newGameStep > 0 ? 'Previous setup step' : 'Back to command'}
                   className="mt-0.5 grid size-11 shrink-0 place-items-center border border-line bg-void/65 text-mint transition-colors hover:border-mint/40 hover:text-bone"
                 >
                   <ArrowLeft size="1.2rem" />
@@ -299,7 +341,13 @@ export function NewGameMenu() {
             </div>
             <p className="mt-3 max-w-[58ch] text-[0.8125rem] leading-5 text-muted">
               {tab === 'home' && 'Continue, start fresh, or manage saves.'}
-              {tab === 'new' && 'Name the company, choose its mark, then set the market.'}
+              {tab === 'new' && (
+                newGameStep === 0
+                  ? 'Choose the identity players and rivals will see.'
+                  : newGameStep === 1
+                    ? 'Select a scenario, then tune the world if needed.'
+                    : 'Confirm the operation and begin on day one.'
+              )}
               {tab === 'load' && 'Autosave plus eight manual slots.'}
               {tab === 'news' && 'Changelog posts and simulation notes.'}
               {tab === 'settings' && 'Interface, video, and audio preferences.'}
@@ -400,34 +448,9 @@ export function NewGameMenu() {
 
         {tab === 'news' && (
           <div className="anim-stagger mt-5 space-y-2">
-            <FeedPost
-              source="Labline Ops"
-              dayLabel="Today"
-              timeLabel="Changelog"
-              tone="positive"
-              body={<><strong className="text-bone">Company identity</strong> — name your company and choose a mark before launch.</>}
-            />
-            <FeedPost
-              source="Simulation"
-              dayLabel="Recent"
-              timeLabel="Changelog"
-              tone="research"
-              body={<><strong className="text-bone">Infrastructure economy</strong> — expanded facilities, silicon, and compute management.</>}
-            />
-            <FeedPost
-              source="Interface"
-              dayLabel="Recent"
-              timeLabel="Changelog"
-              tone="serve"
-              body={<><strong className="text-bone">Command clarity</strong> — lean menus, clearer saves, and actionable recovery errors.</>}
-            />
-            <FeedPost
-              source="World Feed"
-              dayLabel="Live"
-              timeLabel="Note"
-              tone="warning"
-              body="In-game World posts reuse this same feed layout for alerts, rival announcements, and live events."
-            />
+            {MENU_NEWS_POSTS.map((post) => (
+              <FeedPost key={post.title} source={post.source} dayLabel={post.dayLabel} timeLabel={post.timeLabel} tone={post.tone} body={<><strong className="text-bone">{post.title}</strong> — {post.detail}</>} />
+            ))}
           </div>
         )}
 
@@ -525,302 +548,108 @@ export function NewGameMenu() {
         )}
 
         {tab === 'new' && (
-          <>
-            <div className="main-menu-identity mt-5 block text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted">
-              <label htmlFor="new-game-company-name">Company name</label>
-              <span className="relative mt-2 block">
-                <input
-                  id="new-game-company-name"
-                  value={labName}
-                  onChange={(e) => setLabName(e.target.value.slice(0, 32))}
-                  maxLength={32}
-                  className="w-full border border-line bg-void/85 py-3 pl-3.5 pr-12 font-sans text-[0.9375rem] font-medium normal-case tracking-normal text-bone outline-none transition-colors focus:border-mint/50"
-                  placeholder="Labline"
-                  autoFocus
-                />
+          <div className="main-menu-setup">
+            <nav aria-label="New sandbox steps" className="grid grid-cols-3 border border-line/80 bg-void/45 p-1">
+              {(['Identity', 'Market & world', 'Launch'] as const).map((label, index) => (
                 <button
+                  key={label}
                   type="button"
-                  onClick={randomizeCompanyName}
-                  aria-label="Generate a company name"
-                  title="Generate a company name"
-                  className="group absolute inset-y-1.5 right-1.5 grid aspect-square place-items-center border border-line bg-panel-2 text-muted transition-colors hover:border-mint/45 hover:text-mint"
+                  aria-current={newGameStep === index ? 'step' : undefined}
+                  onClick={() => setNewGameStep(index as NewGameStep)}
+                  className={`flex min-h-10 items-center justify-center gap-2 px-2 text-[0.6875rem] font-semibold transition ${
+                    newGameStep === index ? 'bg-panel-2 text-mint shadow-[inset_0_-2px_0_#48d7d1]' : 'text-muted hover:bg-panel-2/60 hover:text-bone'
+                  }`}
                 >
-                  <DiceFive size="1.05rem" weight="duotone" />
-                  <span role="tooltip" className="pointer-events-none absolute bottom-[calc(100%+0.45rem)] right-0 z-30 w-max max-w-48 border border-line bg-void px-2 py-1.5 font-sans text-[0.6875rem] font-medium normal-case tracking-normal text-bone opacity-0 shadow-xl transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
-                    Generate a company name
+                  <span className="font-mono text-[0.5625rem] opacity-70">0{index + 1}</span>
+                  {label}
+                </button>
+              ))}
+            </nav>
+
+            {newGameStep === 0 && (
+              <section className="main-menu-setup-step mt-4 grid gap-4 lg:grid-cols-[minmax(15rem,.8fr)_minmax(30rem,1.4fr)]">
+                <div className="main-menu-identity border border-line/70 bg-void/45 p-4 text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted">
+                  <label htmlFor="new-game-company-name">Company name</label>
+                  <span className="relative mt-2 block">
+                    <input
+                      id="new-game-company-name"
+                      value={labName}
+                      onChange={(e) => setLabName(e.target.value.slice(0, 32))}
+                      maxLength={32}
+                      className="w-full border border-line bg-void/85 py-3 pl-3.5 pr-12 font-sans text-[0.9375rem] font-medium normal-case tracking-normal text-bone outline-none transition-colors focus:border-mint/50"
+                      placeholder="Labline"
+                      autoFocus
+                    />
+                    <button type="button" onClick={randomizeCompanyName} aria-label="Generate a company name" title="Generate a company name" className="absolute inset-y-1.5 right-1.5 grid aspect-square place-items-center border border-line bg-panel-2 text-muted transition-colors hover:border-mint/45 hover:text-mint">
+                      <DiceFive size="1.05rem" weight="duotone" />
+                    </button>
                   </span>
-                </button>
-              </span>
-            </div>
-
-            <fieldset className="mt-5">
-              <legend className="sr-only">Logo maker</legend>
-              <div className="flex items-end justify-between gap-3">
-                <div>
-                  <p className="text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted">Logo maker</p>
-                  <p className="mt-1 text-[0.6875rem] text-muted">Curated presets · {COMPANY_MARKS.find((mark) => mark.id === companyMark)?.label}</p>
+                  <div className="mt-4 flex items-center gap-3 border-t border-line/60 pt-4 normal-case tracking-normal">
+                    <span className="grid size-14 shrink-0 place-items-center border border-mint/40 bg-mint/10 text-mint"><CompanyMark mark={companyMark} /></span>
+                    <span><strong className="block text-sm text-bone">{labName.trim() || 'Labline'}</strong><small className="mt-1 block text-[0.6875rem] font-normal text-muted">Your identity across the world feed and market.</small></span>
+                  </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={randomizeCompanyMark}
-                  title="Choose another curated logo preset"
-                  className="flex min-h-8 items-center gap-2 border border-line bg-void/65 px-2.5 font-mono text-[0.625rem] uppercase tracking-[0.1em] text-muted transition-colors hover:border-mint/40 hover:text-mint"
-                >
-                  <DiceFive size="0.95rem" weight="duotone" />
-                  Random preset
-                </button>
-              </div>
-              <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-9">
-                {COMPANY_MARKS.map((mark) => {
-                  const selected = companyMark === mark.id
-                  return (
-                    <button
-                      key={mark.id}
-                      type="button"
-                      aria-label={`${mark.label} company mark`}
-                      aria-pressed={selected}
-                      title={mark.label}
-                      onClick={() => setCompanyMark(mark.id)}
-                      className={`company-mark-button grid aspect-square place-items-center border transition-colors ${
-                        selected
-                          ? 'border-mint bg-mint/10 text-mint shadow-[inset_0_0_22px_rgba(72,215,209,.08)]'
-                          : 'border-line bg-void/65 text-muted hover:border-mint/40 hover:text-bone'
-                      }`}
-                    >
-                      <CompanyMark mark={mark.id} />
-                    </button>
-                  )
-                })}
-              </div>
-            </fieldset>
 
-            <div className="main-menu-difficulty-group mt-5">
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted">Market pressure</p>
-                <span className="font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">Scenario setup</span>
-              </div>
-              <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                {SCENARIOS.map((d, index) => {
-                  const on = scenario === d.id
-                  return (
-                    <button
-                      key={d.id}
-                      type="button"
-                      onClick={() => applyScenario(d.id)}
-                      aria-pressed={on}
-                      className={`main-menu-difficulty group relative min-h-[8.25rem] border px-3 py-3 text-left transition ${
-                        on
-                          ? 'border-mint/55 bg-mint/10 shadow-[inset_0_0_24px_rgba(72,215,209,.045)]'
-                          : 'border-line bg-panel-2/80 hover:border-mint/30 hover:bg-panel-2'
-                      }`}
-                    >
-                      <span className="flex items-center justify-between gap-2">
-                        <span className={`text-sm font-semibold ${on ? 'text-mint' : 'text-bone'}`}>{d.label}</span>
-                        <span className={`font-mono text-[0.625rem] ${on ? 'text-mint' : 'text-muted'}`}>0{index + 1}</span>
-                      </span>
-                      <span className="mt-2 block text-[0.6875rem] leading-[1.45] text-muted">{d.blurb}</span>
-                      {d.id === 'normal' && (
-                        <span className="absolute bottom-2.5 left-3 font-mono text-[0.5625rem] uppercase tracking-[0.14em] text-mint">Recommended</span>
-                      )}
-                      {d.id === 'custom' && (
-                        <span className="absolute bottom-2.5 left-3 font-mono text-[0.5625rem] uppercase tracking-[0.14em] text-mint">Full control</span>
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => {
-                if (!showAdvanced && scenario !== 'custom') {
-                  setAdv(DIFFICULTY_PRESETS[difficulty])
-                }
-                setShowAdvanced((v) => !v)
-              }}
-              className="mt-5 flex min-h-8 items-center gap-2 font-mono text-[0.6875rem] font-medium uppercase tracking-[0.12em] text-mint hover:text-bone"
-            >
-              <span>{showAdvanced ? '−' : '+'}</span>
-              {showAdvanced ? 'Close world controls' : 'Open world controls'}
-            </button>
-
-            {showAdvanced && (
-              <div className="mt-3 space-y-3 border border-line bg-panel-2/90 p-3.5">
-                <div className="grid grid-cols-2 gap-3">
-                  <NumField
-                    label="Map width"
-                    hint="Horizontal tile count. Larger worlds offer more land but take longer to generate and render."
-                    value={adv.mapWidth ?? preview.mapWidth}
-                    min={MIN_MAP_DIMENSION}
-                    max={MAX_MAP_DIMENSION}
-                    onChange={(v) => setAdvField('mapWidth', v)}
-                  />
-                  <NumField
-                    label="Map height"
-                    hint="Vertical tile count. Together with width, this determines the total territory size."
-                    value={adv.mapHeight ?? preview.mapHeight}
-                    min={MIN_MAP_DIMENSION}
-                    max={MAX_MAP_DIMENSION}
-                    onChange={(v) => setAdvField('mapHeight', v)}
-                  />
-                  <NumField
-                    label="Metro regions"
-                    hint="Major metro anchors. Compact worlds derive satellite cities, towns and villages around them from the seed."
-                    value={adv.cityCount ?? preview.cityCount}
-                    min={MIN_CITY_COUNT}
-                    max={MAX_CITY_COUNT}
-                    onChange={(v) => setAdvField('cityCount', v)}
-                  />
-                  <NumField
-                    label="Rivals"
-                    hint="Competing AI labs that build infrastructure, train models and contest the same markets."
-                    value={adv.rivalCount ?? preview.rivalCount}
-                    min={1}
-                    max={5}
-                    onChange={(v) => setAdvField('rivalCount', v)}
-                  />
-                </div>
-                <fieldset className="rounded-lg border border-line/70 bg-void/45 px-3 py-2.5">
-                  <legend className="px-1 text-[0.75rem] font-semibold text-bone">Driving side</legend>
-                  <p className="mb-2 text-[0.6875rem] leading-relaxed text-muted">
-                    Controls lane direction, junction turns, and visual traffic for this sandbox.
-                  </p>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {(['left', 'right'] as const).map((side) => {
-                      const selected = (adv.drivingSide ?? preview.drivingSide) === side
-                      return (
-                        <button
-                          key={side}
-                          type="button"
-                          aria-pressed={selected}
-                          onClick={() => setAdvField('drivingSide', side)}
-                          className={`min-h-9 rounded-md border px-3 text-[0.75rem] font-semibold transition ${
-                            selected
-                              ? 'border-mint/50 bg-mint/15 text-mint'
-                              : 'border-line bg-panel-2 text-muted hover:text-bone'
-                          }`}
-                        >
-                          {side === 'left' ? 'Left-hand' : 'Right-hand'}
-                        </button>
-                      )
+                <fieldset className="border border-line/70 bg-panel-2/60 p-4">
+                  <legend className="sr-only">Logo maker</legend>
+                  <div className="flex items-center justify-between gap-3">
+                    <div><p className="text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted">Logo maker</p><p className="mt-1 text-[0.6875rem] text-muted">Selected · {COMPANY_MARKS.find((mark) => mark.id === companyMark)?.label}</p></div>
+                    <button type="button" onClick={randomizeCompanyMark} className="flex min-h-8 items-center gap-2 border border-line bg-void/65 px-2.5 font-mono text-[0.625rem] uppercase tracking-[0.1em] text-muted hover:border-mint/40 hover:text-mint"><DiceFive size="0.95rem" weight="duotone" /> Random</button>
+                  </div>
+                  <div className="mt-3 grid grid-cols-9 gap-2">
+                    {COMPANY_MARKS.map((mark) => {
+                      const selected = companyMark === mark.id
+                      return <button key={mark.id} type="button" aria-label={`${mark.label} company mark`} aria-pressed={selected} title={mark.label} onClick={() => setCompanyMark(mark.id)} className={`company-mark-button grid aspect-square place-items-center border transition-colors ${selected ? 'border-mint bg-mint/10 text-mint' : 'border-line bg-void/65 text-muted hover:border-mint/40 hover:text-bone'}`}><CompanyMark mark={mark.id} /></button>
                     })}
                   </div>
                 </fieldset>
-                <div className="flex items-start gap-3 rounded-lg border border-line/70 bg-void/45 px-3 py-2.5 text-[0.75rem] text-muted">
-                  <input
-                    id="new-game-governance"
-                    type="checkbox"
-                    checked={adv.campaignRules?.externalityMode === 'advanced'}
-                    onChange={(event) =>
-                      setAdvField(
-                        'campaignRules',
-                        defaultCampaignRules({
-                          externalityMode: event.target.checked ? 'advanced' : 'standard',
-                        }),
-                      )
-                    }
-                    className="mt-0.5 accent-mint"
-                  />
-                  <span>
-                    <span className="flex items-center gap-1.5">
-                      <label htmlFor="new-game-governance" className="cursor-pointer font-semibold text-bone">Advanced governance modules</label>
-                      <FieldHint text="Adds carbon, cooling-water, data-rights and deployment-audit systems for the player and every rival." />
-                    </span>
-                    <span className="mt-0.5 block leading-relaxed">
-                      Enables symmetric carbon, cooling-water, data-rights, and deployment-audit costs and incidents for every lab.
-                    </span>
-                  </span>
-                </div>
-                <SliderField
-                  label="Economy cost mult"
-                  hint="Scales construction and infrastructure upgrade costs. Lower values make expansion cheaper."
-                  value={adv.economyMult ?? preview.economyMult}
-                  min={0.4}
-                  max={2.5}
-                  step={0.05}
-                  onChange={(v) => setAdvField('economyMult', v)}
-                  format={(v) => `×${v.toFixed(2)}`}
-                />
-                <SliderField
-                  label="Research cost mult"
-                  hint="Scales the compute-days required to complete research. Lower values accelerate progress."
-                  value={adv.researchCostMult ?? preview.researchCostMult}
-                  min={0.4}
-                  max={2.5}
-                  step={0.05}
-                  onChange={(v) => setAdvField('researchCostMult', v)}
-                  format={(v) => `×${v.toFixed(2)}`}
-                />
-                <SliderField
-                  label="Starting capital"
-                  hint="Sets the cash available on day one, from $6M to $60M."
-                  value={adv.startingCashMult ?? preview.startingCashMult}
-                  min={0.3}
-                  max={3}
-                  step={0.05}
-                  onChange={(v) => setAdvField('startingCashMult', v)}
-                  format={(v) => money(ECONOMY.startingCash * v)}
-                />
-                <div className="block text-[0.8125rem] text-muted">
-                  <span className="flex items-center gap-1.5">
-                    <label htmlFor="new-game-seed">Seed</label>
-                    <FieldHint text="Controls procedural world generation. Reusing a seed recreates the same terrain and city layout." />
-                  </span>
-                  <div className="mt-1 flex gap-2">
-                    <input
-                      id="new-game-seed"
-                      type="number"
-                      value={seed}
-                      onChange={(e) => setSeed(Number(e.target.value) || 0)}
-                      className="w-full rounded-lg border border-line bg-void px-2 py-1.5 font-mono text-xs text-bone outline-none"
-                    />
-                    <button
-                      type="button"
-                      className="btn-ghost shrink-0 px-3 py-1 text-[0.8125rem]"
-                      onClick={() => setSeed(Math.floor(Math.random() * 99999))}
-                    >
-                      Roll
-                    </button>
-                  </div>
-                </div>
-              </div>
+              </section>
             )}
 
-            <div className="main-menu-briefing mt-5 border border-line/70 bg-void/55">
-              <div className="flex items-center justify-between border-b border-line/60 px-3.5 py-2.5">
-                <span className="flex items-center gap-2 text-[0.75rem] font-semibold text-bone"><GlobeHemisphereWest size="1rem" className="text-mint" /> World briefing</span>
-                <span className="font-mono text-[0.5625rem] uppercase tracking-[0.15em] text-muted">Seed {seed}</span>
-              </div>
-              <div className="grid grid-cols-3 divide-x divide-line/60">
-                <BriefingStat label="Territory" value={`${preview.mapWidth}×${preview.mapHeight}`} detail={`${preview.mapWidth * preview.mapHeight} tiles`} />
-                <BriefingStat label="Opposition" value={`${preview.rivalCount} rivals`} detail={`${preview.cityCount} metros + derived towns`} />
-                <BriefingStat label="Capital" value={money(ECONOMY.startingCash * preview.startingCashMult)} detail="$3M credits · 24 PF cloud" />
-              </div>
-            </div>
+            {newGameStep === 1 && !showAdvanced && (
+              <section className="main-menu-setup-step mt-4">
+                <div className="flex items-center justify-between gap-3"><p className="text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted">Market pressure</p><span className="font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">Choose one scenario</span></div>
+                <div className="mt-2 grid grid-cols-4 gap-2">
+                  {SCENARIOS.map((d, index) => {
+                    const on = scenario === d.id
+                    return <button key={d.id} type="button" onClick={() => applyScenario(d.id)} aria-pressed={on} className={`main-menu-difficulty group min-h-[7rem] border px-3 py-3 text-left transition ${on ? 'border-mint/55 bg-mint/10' : 'border-line bg-panel-2/80 hover:border-mint/30'}`}><span className="flex items-center justify-between gap-2"><span className={`text-sm font-semibold ${on ? 'text-mint' : 'text-bone'}`}>{d.label}</span><span className="font-mono text-[0.625rem] text-muted">0{index + 1}</span></span><span className="mt-2 block text-[0.6875rem] leading-[1.4] text-muted">{d.blurb}</span></button>
+                  })}
+                </div>
+                <button type="button" onClick={() => { if (scenario !== 'custom') setAdv(DIFFICULTY_PRESETS[difficulty]); setShowAdvanced(true) }} className="mt-3 flex min-h-10 w-full items-center justify-between border border-line bg-void/55 px-3.5 font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-mint hover:border-mint/40"><span>World controls</span><span>Open +</span></button>
+              </section>
+            )}
 
-            <button
-              type="button"
-              className="main-menu-launch mt-5 flex w-full items-center justify-between px-4 py-3.5 text-sm"
-              onClick={() => {
-                clearLifecycleError()
-                setStatus(null)
-                void startGame({
-                  labName: labName.trim() || 'Labline',
-                  companyMark,
-                  difficulty,
-                  seed,
-                  advanced: scenario === 'custom' ? adv : undefined,
-                })
-              }}
-            >
-              <span>
-                <strong className="block text-[0.875rem]">Launch Sandbox</strong>
-                <small className="mt-0.5 block font-mono text-[0.5625rem] uppercase tracking-[0.12em] opacity-70">Generate the market · begin on day one</small>
-              </span>
-              <ArrowRight size="1.25rem" weight="bold" />
-            </button>
-          </>
+            {newGameStep === 1 && showAdvanced && (
+              <section className="main-menu-setup-step mt-4">
+                <div className="flex items-center justify-between"><div><p className="text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-mint">Custom world</p><p className="mt-1 text-[0.6875rem] text-muted">Compact controls · changes apply immediately</p></div><button type="button" onClick={() => setShowAdvanced(false)} className="min-h-9 border border-line px-3 font-mono text-[0.625rem] uppercase tracking-[0.1em] text-muted hover:text-bone">Back to scenarios</button></div>
+                <div className="main-menu-world-controls mt-3 grid grid-cols-4 gap-3 border border-line bg-panel-2/80 p-3.5">
+                  <NumField label="Map width" hint="Horizontal tile count." value={adv.mapWidth ?? preview.mapWidth} min={MIN_MAP_DIMENSION} max={MAX_MAP_DIMENSION} onChange={(v) => setAdvField('mapWidth', v)} />
+                  <NumField label="Map height" hint="Vertical tile count." value={adv.mapHeight ?? preview.mapHeight} min={MIN_MAP_DIMENSION} max={MAX_MAP_DIMENSION} onChange={(v) => setAdvField('mapHeight', v)} />
+                  <NumField label="Metro regions" hint="Major metro anchors and derived towns." value={adv.cityCount ?? preview.cityCount} min={MIN_CITY_COUNT} max={MAX_CITY_COUNT} onChange={(v) => setAdvField('cityCount', v)} />
+                  <NumField label="Rivals" hint="Competing AI labs in the market." value={adv.rivalCount ?? preview.rivalCount} min={1} max={5} onChange={(v) => setAdvField('rivalCount', v)} />
+                  <SliderField label="Economy" hint="Construction and infrastructure costs." value={adv.economyMult ?? preview.economyMult} min={0.4} max={2.5} step={0.05} onChange={(v) => setAdvField('economyMult', v)} format={(v) => `×${v.toFixed(2)}`} />
+                  <SliderField label="Research" hint="Compute-days required for research." value={adv.researchCostMult ?? preview.researchCostMult} min={0.4} max={2.5} step={0.05} onChange={(v) => setAdvField('researchCostMult', v)} format={(v) => `×${v.toFixed(2)}`} />
+                  <SliderField label="Starting capital" hint="Cash available on day one." value={adv.startingCashMult ?? preview.startingCashMult} min={0.3} max={3} step={0.05} onChange={(v) => setAdvField('startingCashMult', v)} format={(v) => money(ECONOMY.startingCash * v)} />
+                  <div className="text-[0.8125rem] text-muted"><label htmlFor="new-game-seed">Seed</label><div className="mt-1 flex gap-2"><input id="new-game-seed" type="number" value={seed} onChange={(e) => setSeed(Number(e.target.value) || 0)} className="w-full border border-line bg-void px-2 py-1.5 font-mono text-xs text-bone outline-none" /><button type="button" className="border border-line px-2 text-xs hover:text-bone" onClick={() => setSeed(Math.floor(Math.random() * 99999))}>Roll</button></div></div>
+                  <fieldset className="col-span-2 border border-line/70 bg-void/45 px-3 py-2"><legend className="px-1 text-[0.75rem] font-semibold text-bone">Driving side</legend><div className="grid grid-cols-2 gap-1.5">{(['left', 'right'] as const).map((side) => { const selected = (adv.drivingSide ?? preview.drivingSide) === side; return <button key={side} type="button" aria-pressed={selected} onClick={() => setAdvField('drivingSide', side)} className={`min-h-8 border px-3 text-[0.75rem] font-semibold ${selected ? 'border-mint/50 bg-mint/15 text-mint' : 'border-line text-muted'}`}>{side === 'left' ? 'Left-hand' : 'Right-hand'}</button> })}</div></fieldset>
+                  <label htmlFor="new-game-governance" className="col-span-2 flex cursor-pointer items-center gap-3 border border-line/70 bg-void/45 px-3 py-2 text-[0.75rem] text-muted"><input id="new-game-governance" type="checkbox" checked={adv.campaignRules?.externalityMode === 'advanced'} onChange={(event) => setAdvField('campaignRules', defaultCampaignRules({ externalityMode: event.target.checked ? 'advanced' : 'standard' }))} className="accent-mint" /><span><strong className="block text-bone">Advanced governance</strong><span>Carbon, water, rights, and audit systems.</span></span></label>
+                </div>
+              </section>
+            )}
+
+            {newGameStep === 2 && (
+              <section className="main-menu-setup-step mt-4 grid gap-4 lg:grid-cols-[1fr_.72fr]">
+                <div className="main-menu-briefing border border-line/70 bg-void/55"><div className="flex items-center justify-between border-b border-line/60 px-3.5 py-2.5"><span className="flex items-center gap-2 text-[0.75rem] font-semibold text-bone"><GlobeHemisphereWest size="1rem" className="text-mint" /> World briefing</span><span className="font-mono text-[0.5625rem] uppercase tracking-[0.15em] text-muted">Seed {seed}</span></div><div className="grid grid-cols-3 divide-x divide-line/60"><BriefingStat label="Territory" value={`${preview.mapWidth}×${preview.mapHeight}`} detail={`${preview.mapWidth * preview.mapHeight} tiles`} /><BriefingStat label="Opposition" value={`${preview.rivalCount} rivals`} detail={`${preview.cityCount} metros + towns`} /><BriefingStat label="Capital" value={money(ECONOMY.startingCash * preview.startingCashMult)} detail="Day-one runway" /></div></div>
+                <div className="flex items-center gap-3 border border-mint/30 bg-mint/8 p-4"><span className="grid size-14 shrink-0 place-items-center border border-mint/40 bg-void/45 text-mint"><CompanyMark mark={companyMark} /></span><span><strong className="block text-base text-bone">{labName.trim() || 'Labline'}</strong><small className="mt-1 block text-[0.6875rem] text-muted">{SCENARIOS.find((item) => item.id === scenario)?.label} market · {preview.drivingSide}-hand traffic</small></span></div>
+                <button type="button" className="main-menu-launch flex w-full items-center justify-between px-4 py-3.5 text-sm lg:col-span-2" onClick={() => { clearLifecycleError(); setStatus(null); void startGame({ labName: labName.trim() || 'Labline', companyMark, difficulty, seed, advanced: scenario === 'custom' ? adv : undefined }) }}><span><strong className="block text-[0.875rem]">Launch Sandbox</strong><small className="mt-0.5 block font-mono text-[0.5625rem] uppercase tracking-[0.12em] opacity-70">Generate the market · begin on day one</small></span><ArrowRight size="1.25rem" weight="bold" /></button>
+              </section>
+            )}
+
+            <div className="mt-4 flex items-center justify-between border-t border-line/70 pt-3">
+              <button type="button" disabled={newGameStep === 0} onClick={() => setNewGameStep((newGameStep - 1) as NewGameStep)} className="min-h-9 border border-line px-4 text-[0.75rem] text-muted disabled:invisible hover:text-bone"><ArrowLeft size="0.95rem" className="mr-2 inline" /> Previous</button>
+              {newGameStep < 2 && <button type="button" onClick={() => setNewGameStep((newGameStep + 1) as NewGameStep)} className="min-h-9 border border-mint/50 bg-mint/10 px-4 text-[0.75rem] font-semibold text-mint hover:bg-mint/15">{newGameStep === 0 ? 'Market & world' : 'Review launch'} <ArrowRight size="0.95rem" className="ml-2 inline" /></button>}
+            </div>
+          </div>
         )}
           </div>
     </LablineMenuShell>

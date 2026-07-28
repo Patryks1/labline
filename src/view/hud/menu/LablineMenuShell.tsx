@@ -1,5 +1,5 @@
 import { useEffect, useRef, type KeyboardEvent, type ReactNode } from 'react'
-import { Atom, X } from '@phosphor-icons/react'
+import { X } from '@phosphor-icons/react'
 
 interface LablineMenuShellProps {
   variant: 'title' | 'pause'
@@ -74,6 +74,7 @@ export function LablineMenuShell({
       aria-labelledby={titleId}
       tabIndex={variant === 'pause' ? -1 : undefined}
       data-menu-variant={variant}
+      data-has-utility={utilityNav ? 'true' : undefined}
       className={`labline-menu-shell main-menu-shell pointer-events-auto absolute inset-0 z-50 overflow-hidden bg-void text-bone ${variant === 'pause' ? 'labline-menu-shell--pause' : 'labline-menu-shell--title'}`}
       onKeyDown={onKeyDown}
       onClick={variant === 'pause' && onRequestClose ? (event) => {
@@ -106,14 +107,17 @@ export function LablineMenuShell({
       <div className="main-menu-grid pointer-events-none absolute inset-0" />
 
       <header className="labline-menu-logo pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center px-16 text-center">
-        <div className="flex flex-col items-center">
-          <span className="mb-2 grid size-10 place-items-center border border-mint/35 bg-void/70 text-mint backdrop-blur-md" aria-hidden="true">
-            <Atom size="1.35rem" weight="duotone" />
-          </span>
-          <h1 id={titleId} className="text-[clamp(2.15rem,5vw,4.8rem)] font-semibold leading-[0.82] tracking-[-0.075em] text-bone">
+        <div className="labline-menu-brand flex flex-col items-center">
+          <img
+            src="/assets/labline-emblem-v2.png"
+            alt=""
+            aria-hidden="true"
+            className="labline-menu-emblem object-contain"
+          />
+          <h1 id={titleId} className="labline-menu-wordmark font-semibold uppercase text-bone">
             LABLINE
           </h1>
-          <p className="mt-2 font-mono text-[0.5625rem] uppercase tracking-[0.28em] text-mint">Frontier operations</p>
+          <p className="labline-menu-tagline font-mono uppercase text-mint">Frontier operations</p>
         </div>
       </header>
 
@@ -128,9 +132,14 @@ export function LablineMenuShell({
         </button>
       ) : null}
 
-      <div className="labline-menu-stage relative z-[1] flex h-full min-h-0 items-center justify-center px-4 pb-5 sm:px-8">
+      <div className={`labline-menu-stage relative z-[1] h-full min-h-0 px-4 pb-5 sm:px-8 ${utilityNav ? 'labline-menu-stage--with-utility' : 'flex items-center justify-center'}`}>
+        {utilityNav ? (
+          <nav aria-label="Menu utilities" className="labline-menu-utility min-w-0">
+            {utilityNav}
+          </nav>
+        ) : null}
         <section
-          className={`labline-menu-console panel-scroll relative w-full overflow-y-auto border border-line/80 bg-panel/94 shadow-[0_30px_100px_rgba(0,8,12,.62)] backdrop-blur-xl ${contentClassName}`}
+          className={`labline-menu-console panel-scroll relative w-full justify-self-center overflow-y-auto border border-line/80 bg-panel/94 shadow-[0_30px_100px_rgba(0,8,12,.62)] backdrop-blur-xl ${contentClassName}`}
           onClick={(event) => event.stopPropagation()}
         >
           <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-mint/80 via-mint/20 to-transparent" />
@@ -138,11 +147,6 @@ export function LablineMenuShell({
         </section>
       </div>
 
-      {utilityNav ? (
-        <nav aria-label="Menu utilities" className="labline-menu-utility absolute bottom-4 left-4 z-20 sm:bottom-6 sm:left-8">
-          {utilityNav}
-        </nav>
-      ) : null}
     </div>
   )
 }

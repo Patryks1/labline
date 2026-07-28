@@ -225,7 +225,7 @@ export function createWorldDescriptorV6(options: WorldGenerationOptions): WorldD
     terrainAlgorithmVersion: 1,
     biomeVersion: 1,
     transportAlgorithmVersion: 2,
-    settlementAlgorithmVersion: 2,
+    settlementAlgorithmVersion: 5,
     municipalCampusAlgorithmVersion: 2,
     cityStatsModelVersion: 1,
   })
@@ -1081,6 +1081,222 @@ function connectRoadPoints(
   transport[to.y * descriptor.width + to.x] |= 1 << opposite
 }
 
+/**
+ * Open short all-local cycles without touching collectors or regional roads.
+ * Dense inherited grids otherwise produce repeated one-block loops after V6
+ * zoning. A safe degree-two road tile is removed from each cycle so the
+ * renderer gets a real one-tile gap rather than two disconnected arms whose
+ * asphalt caps still read as an almost-closed ring.
+ */
+function pruneSmallLocalRoadLoops(
+  descriptor: WorldDescriptor,
+  transport: Uint16Array,
+  maxCycleEdges = 8,
+  protectedRoadTiles: ReadonlySet<number> = new Set(),
+  physicalTileGaps = true,
+): void {
+  const { width, height } = descriptor
+  const cardinal = [
+    [0, -1, 0], [1, 0, 2], [0, 1, 4], [-1, 0, 6],
+  ] as const
+  const local = (id: number) => transportClass(transport[id] ?? 0) === TRANSPORT_ROAD_CLASS.local
+  const connected = (from: number, to: number, direction: number) =>
+    (transport[from]! & (1 << direction)) !== 0
+    && (transport[to]! & (1 << ((direction + 4) & 7))) !== 0
+
+  const roadDegree = (id: number): number => {
+    const x = id % width
+    const y = Math.floor(id / width)
+    let degree = 0
+    for (let direction = 0; direction < ROUTE_STEPS.length; direction++) {
+      const [dx, dy] = ROUTE_STEPS[direction]!
+      const nx = x + dx
+      const ny = y + dy
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
+      const next = ny * width + nx
+      if (transportClass(transport[next]!) === TRANSPORT_ROAD_CLASS.none) continue
+      if ((transport[id]! & (1 << direction)) !== 0 &&
+          (transport[next]! & (1 << ((direction + 4) & 7))) !== 0) degree++
+    }
+    return degree
+  }
+
+  const clearRoadTile = (id: number): void => {
+    const x = id % width
+    const y = Math.floor(id / width)
+    for (let direction = 0; direction < ROUTE_STEPS.length; direction++) {
+      if ((transport[id]! & (1 << direction)) === 0) continue
+      const [dx, dy] = ROUTE_STEPS[direction]!
+      const nx = x + dx
+      const ny = y + dy
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
+      transport[ny * width + nx] &= ~(1 << ((direction + 4) & 7))
+    }
+    transport[id] = 0
+  }
+
+  const shortAlternatePath = (start: number, goal: number): number[] | undefined => {
+    const queue: Array<{ id: number; depth: number }> = [{ id: start, depth: 0 }]
+    const seen = new Set<number>([start])
+    const parent = new Map<number, number>()
+    for (let cursor = 0; cursor < queue.length; cursor++) {
+      const current = queue[cursor]!
+      if (current.depth >= maxCycleEdges - 1) continue
+      const x = current.id % width
+      const y = Math.floor(current.id / width)
+      for (const [dx, dy, direction] of cardinal) {
+        const nx = x + dx
+        const ny = y + dy
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
+        const next = ny * width + nx
+        if ((current.id === start && next === goal) || !local(next) ||
+            !connected(current.id, next, direction) || seen.has(next)) continue
+        if (next === goal && current.depth + 1 >= 2) {
+          const path = [goal]
+          let cursorId = current.id
+          while (cursorId !== start) {
+            path.push(cursorId)
+            cursorId = parent.get(cursorId)!
+          }
+          path.push(start)
+          return path.reverse()
+        }
+        seen.add(next)
+        parent.set(next, current.id)
+        queue.push({ id: next, depth: current.depth + 1 })
+      }
+    }
+    return undefined
+  }
+
+  // East/south enumerate every cardinal edge exactly once.
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const from = y * width + x
+      if (!local(from)) continue
+      for (const [dx, dy, direction] of [[1, 0, 2], [0, 1, 4]] as const) {
+        const nx = x + dx
+        const ny = y + dy
+        if (nx >= width || ny >= height) continue
+        const to = ny * width + nx
+        if (!local(to) || !connected(from, to, direction)) continue
+        const cyclePath = shortAlternatePath(from, to)
+        if (!cyclePath) continue
+        const removable = physicalTileGaps
+          ? cyclePath.slice(1, -1).find((id) =>
+            local(id) && roadDegree(id) === 2 && !protectedRoadTiles.has(id))
+          : undefined
+        if (removable !== undefined) {
+          clearRoadTile(removable)
+        } else {
+          // Complex junctions keep their tile; opening one edge still avoids
+          // changing collector access or disconnecting an attached branch.
+          transport[from] &= ~(1 << direction)
+          transport[to] &= ~(1 << ((direction + 4) & 7))
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Enforce a full tile between parallel road corridors. Final topology joins
+ * adjacent settlement road tiles automatically, so two neighboring streets
+ * otherwise become a dense 2x2 asphalt ladder even after cycle pruning.
+ */
+function pruneAdjacentParallelLocalRoads(
+  descriptor: WorldDescriptor,
+  transport: Uint16Array,
+  protectedRoadTiles: ReadonlySet<number>,
+): void {
+  const { width, height } = descriptor
+  const connected = (from: number, to: number, direction: number) =>
+    (transport[from]! & (1 << direction)) !== 0 &&
+    (transport[to]! & (1 << ((direction + 4) & 7))) !== 0
+  const road = (id: number) => transportClass(transport[id] ?? 0) !== TRANSPORT_ROAD_CLASS.none
+  const local = (id: number) => transportClass(transport[id] ?? 0) === TRANSPORT_ROAD_CLASS.local
+
+  const neighbors = (id: number): number[] => {
+    const x = id % width
+    const y = Math.floor(id / width)
+    const result: number[] = []
+    for (let direction = 0; direction < ROUTE_STEPS.length; direction++) {
+      if ((transport[id]! & (1 << direction)) === 0) continue
+      const [dx, dy] = ROUTE_STEPS[direction]!
+      const nx = x + dx
+      const ny = y + dy
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
+      const next = ny * width + nx
+      if (road(next) && (transport[next]! & (1 << ((direction + 4) & 7))) !== 0) result.push(next)
+    }
+    return result
+  }
+
+  const removalKeepsNetwork = (removed: number): boolean => {
+    const terminals = neighbors(removed)
+    if (terminals.length < 2) return false
+    const targets = new Set(terminals.slice(1))
+    const seen = new Set<number>([removed, terminals[0]!])
+    const queue: Array<{ id: number; depth: number }> = [{ id: terminals[0]!, depth: 0 }]
+    for (let cursor = 0; cursor < queue.length && targets.size > 0; cursor++) {
+      const current = queue[cursor]!
+      if (current.depth >= 12) continue
+      for (const next of neighbors(current.id)) {
+        if (seen.has(next)) continue
+        seen.add(next)
+        targets.delete(next)
+        queue.push({ id: next, depth: current.depth + 1 })
+      }
+    }
+    return targets.size === 0
+  }
+
+  const clearRoadTile = (id: number): void => {
+    const x = id % width
+    const y = Math.floor(id / width)
+    for (let direction = 0; direction < ROUTE_STEPS.length; direction++) {
+      if ((transport[id]! & (1 << direction)) === 0) continue
+      const [dx, dy] = ROUTE_STEPS[direction]!
+      const nx = x + dx
+      const ny = y + dy
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
+      transport[ny * width + nx] &= ~(1 << ((direction + 4) & 7))
+    }
+    transport[id] = 0
+  }
+
+  const tryOpen = (candidates: readonly number[]): boolean => {
+    const removable = [...new Set(candidates)]
+      .filter((id) => local(id) && !protectedRoadTiles.has(id))
+      .sort((a, b) => neighbors(a).length - neighbors(b).length || a - b)
+      .find(removalKeepsNetwork)
+    if (removable === undefined) return false
+    clearRoadTile(removable)
+    return true
+  }
+
+  // Re-run a few bounded passes because opening one dense cell can expose the
+  // neighboring cell's simpler, now-safe removal candidate.
+  for (let pass = 0; pass < 4; pass++) {
+    let changed = false
+    for (let y = 0; y + 1 < height; y++) {
+      for (let x = 0; x + 1 < width; x++) {
+        const nw = y * width + x
+        const ne = nw + 1
+        const sw = nw + width
+        const se = sw + 1
+        const horizontalPair = connected(nw, ne, 2) && connected(sw, se, 2)
+        const verticalPair = connected(nw, sw, 4) && connected(ne, se, 4)
+        if (horizontalPair) changed = tryOpen([sw, se, nw, ne]) || changed
+        if (verticalPair && road(nw) && road(ne) && road(sw) && road(se)) {
+          changed = tryOpen([ne, se, nw, sw]) || changed
+        }
+      }
+    }
+    if (!changed) break
+  }
+}
+
 function insideSettlement(city: V3Settlement, x: number, y: number, seed: number): boolean {
   const growth = city.growth
   const angle = Math.atan2(growth.directionY, growth.directionX) * 0.45
@@ -1891,7 +2107,7 @@ function v6CampusBuildable(
       const id = py * descriptor.width + px
       if (reserved.has(id) || kind[id] === TERRAIN_KIND.lake || feature[id] !== 0 ||
           transportClass(transport[id]!) !== TRANSPORT_ROAD_CLASS.none) return false
-      if (rawTileSlope(descriptor, elevation, px, py) > 0.12) return false
+      if (rawTileSlope(descriptor, elevation, px, py) > 0.12 - 1e-9) return false
       const height = tileElevationSum(elevation, descriptor.width, px, py) * descriptor.elevationScale / 4
       minHeight = Math.min(minHeight, height)
       maxHeight = Math.max(maxHeight, height)
@@ -1911,6 +2127,217 @@ function v6CampusBuildable(
     }
   }
   return false
+}
+
+/**
+ * Replace the inherited rectangular settlement grid with a sparse street tree.
+ * V3/V4/V5 keep their frozen grid, while V6 settlements grow asymmetric
+ * collector spines and short local side streets around the regional route.
+ * Candidate tiles may only touch their parent road cardinally, preventing the
+ * accidental 2x2 ladders and closed square blocks produced by adjacency-based
+ * topology finalisation.
+ */
+function rebuildV6OrganicSettlementRoads(
+  descriptor: WorldDescriptorV6,
+  cities: readonly StaticCity[],
+  kind: Uint8Array,
+  feature: Uint16Array,
+  transport: Uint16Array,
+  elevation: Int16Array,
+): void {
+  const { width, height } = descriptor
+  const cardinal = [[0, -1], [1, 0], [0, 1], [-1, 0]] as const
+  const road = (id: number) => transportClass(transport[id] ?? 0) !== TRANSPORT_ROAD_CLASS.none
+
+  const clearRoadTile = (id: number): void => {
+    const x = id % width
+    const y = Math.floor(id / width)
+    for (let direction = 0; direction < ROUTE_STEPS.length; direction++) {
+      if ((transport[id]! & (1 << direction)) === 0) continue
+      const [dx, dy] = ROUTE_STEPS[direction]!
+      const nx = x + dx
+      const ny = y + dy
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
+      transport[ny * width + nx] &= ~(1 << ((direction + 4) & 7))
+    }
+    transport[id] = 0
+  }
+
+  // Regional A* routes are authoritative. Everything inherited solely from
+  // the old settlement grid is cleared before the new street fabric is grown.
+  for (let id = 0; id < transport.length; id++) {
+    if ((transport[id]! & TRANSPORT_FLAGS.settlement) === 0 ||
+        (transport[id]! & TRANSPORT_FLAGS.regional) !== 0) continue
+    clearRoadTile(id)
+    if (kind[id] !== TERRAIN_KIND.lake) kind[id] = TERRAIN_KIND.empty
+    feature[id] = 0
+  }
+
+  const canPlace = (x: number, y: number, parentId: number): boolean => {
+    if (x <= 0 || y <= 0 || x >= width - 1 || y >= height - 1) return false
+    const id = y * width + x
+    if (road(id) || kind[id] === TERRAIN_KIND.lake || rawTileSlope(descriptor, elevation, x, y) > 0.18) return false
+    for (const [dx, dy] of cardinal) {
+      const neighbor = (y + dy) * width + x + dx
+      if (neighbor !== parentId && road(neighbor)) return false
+    }
+    return true
+  }
+
+  for (const city of cities) {
+    const centerId = city.cy * width + city.cx
+    markRoad(transport, centerId, TRANSPORT_ROAD_CLASS.collector,
+      TRANSPORT_FLAGS.settlement, kind)
+    const cityRoads: number[] = [centerId]
+
+    const growStreet = (
+      anchorId: number,
+      initialDirection: number,
+      length: number,
+      collectorSteps: number,
+      salt: number,
+    ): number[] => {
+      const created: number[] = []
+      let currentId = anchorId
+      let direction = initialDirection & 3
+      let segmentRemaining = 2 + coordinateHash(city.index, salt, descriptor.seed ^ 0x2f31) % 4
+      for (let step = 0; step < length; step++) {
+        const x = currentId % width
+        const y = Math.floor(currentId / width)
+        if (segmentRemaining-- <= 0) {
+          const turn = coordinateHash(x, y, descriptor.seed ^ (city.index * 0x191 + salt + step)) % 5
+          if (turn === 0) direction = (direction + 3) & 3
+          else if (turn === 1) direction = (direction + 1) & 3
+          segmentRemaining = 2 + coordinateHash(y, x, descriptor.seed ^ salt) % 5
+        }
+
+        const choices = [direction, (direction + 3) & 3, (direction + 1) & 3]
+        let selected: { id: number; direction: number; existing: boolean } | undefined
+        let selectedScore = -Infinity
+        for (let order = 0; order < choices.length; order++) {
+          const candidateDirection = choices[order]!
+          const [dx, dy] = cardinal[candidateDirection]!
+          const nx = x + dx
+          const ny = y + dy
+          if (nx <= 0 || ny <= 0 || nx >= width - 1 || ny >= height - 1) continue
+          const candidateId = ny * width + nx
+          const existing = road(candidateId)
+          // Regional approaches often occupy the first tile beside the civic
+          // centre. A new spine may follow that authoritative route briefly,
+          // then grow away from it; other existing streets remain barriers.
+          if (existing
+            ? (transport[candidateId]! & TRANSPORT_FLAGS.regional) === 0
+            : !canPlace(nx, ny, currentId)) continue
+          const outward = Math.hypot(nx - city.cx, ny - city.cy) - Math.hypot(x - city.cx, y - city.cy)
+          const jitter = (coordinateHash(nx, ny, descriptor.seed ^ (salt + step * 17)) & 31) / 128
+          // Honour the current segment direction whenever it is buildable;
+          // alternate directions are escape hatches for terrain and nearby
+          // streets, not a reason to straighten every planned bend.
+          const score = outward * 2.5 + jitter - order * 10
+          if (score > selectedScore) {
+            selected = { id: candidateId, direction: candidateDirection, existing }
+            selectedScore = score
+          }
+        }
+        if (!selected) break
+        const nextX = selected.id % width
+        const nextY = Math.floor(selected.id / width)
+        if (!selected.existing) {
+          markRoad(
+            transport,
+            selected.id,
+            step < collectorSteps ? TRANSPORT_ROAD_CLASS.collector : TRANSPORT_ROAD_CLASS.local,
+            TRANSPORT_FLAGS.settlement,
+            kind,
+          )
+        }
+        connectRoadPoints(descriptor, transport, { x, y }, { x: nextX, y: nextY })
+        if (!selected.existing) {
+          created.push(selected.id)
+          cityRoads.push(selected.id)
+        }
+        currentId = selected.id
+        direction = selected.direction
+      }
+      return created
+    }
+
+    // Three unequal centre spines create a recognisable town centre without
+    // imposing the same four-way cross on every settlement.
+    const orientation = coordinateHash(city.cx, city.cy, descriptor.seed ^ 0x73a9) & 3
+    const omitted = coordinateHash(city.index, city.radius, descriptor.seed ^ 0x19d7) & 3
+    const trunkDirections = [0, 1, 2, 3]
+      .map((direction) => (direction + orientation) & 3)
+      .filter((direction) => direction !== omitted)
+    const trunkLength = Math.max(5, Math.round(city.radius * 1.25))
+    const branchAnchors: number[] = []
+    for (let trunk = 0; trunk < trunkDirections.length; trunk++) {
+      const variance = coordinateHash(city.index, trunk, descriptor.seed ^ 0x51b3) % Math.max(2, Math.round(city.radius * 0.35))
+      const created = growStreet(
+        centerId,
+        trunkDirections[trunk]!,
+        trunkLength - Math.floor(city.radius * 0.12) + variance,
+        Math.max(2, Math.round(city.radius * 0.42)),
+        0x100 + trunk * 29,
+      )
+      for (let index = 3; index + 2 < created.length; index += 4 + (trunk & 1)) {
+        branchAnchors.push(created[index]!)
+      }
+    }
+
+    // Side streets are deliberately short, staggered and one-sided. They
+    // create suburban fingers and cul-de-sacs instead of closing into blocks.
+    const branchTarget = city.tier === 'metro' ? 11 : city.tier === 'satellite' ? 8 : city.tier === 'town' ? 6 : 4
+    for (let branch = 0; branch < Math.min(branchTarget, branchAnchors.length); branch++) {
+      const anchorId = branchAnchors[(branch * 3 + city.index) % branchAnchors.length]!
+      const anchorX = anchorId % width
+      const anchorY = Math.floor(anchorId / width)
+      const awayX = anchorX - city.cx
+      const awayY = anchorY - city.cy
+      const dominantDirection = Math.abs(awayX) >= Math.abs(awayY)
+        ? (awayX >= 0 ? 1 : 3)
+        : (awayY >= 0 ? 2 : 0)
+      const side = coordinateHash(anchorX, anchorY, descriptor.seed ^ (branch * 0x101 + city.index)) & 1
+      const direction = (dominantDirection + (side === 0 ? 1 : 3)) & 3
+      const length = Math.max(2, Math.round(city.radius * 0.22)) +
+        coordinateHash(branch, city.index, descriptor.seed ^ 0x42d1) % Math.max(2, Math.round(city.radius * 0.28))
+      growStreet(anchorId, direction, length, 0, 0x500 + branch * 37)
+    }
+
+    // A regional approach can occasionally occupy every immediate exit from
+    // a compact satellite centre. Find a nearby road shoulder and seed one
+    // proper local street so that the settlement never collapses to a bare
+    // through-road.
+    if (cityRoads.length === 1) {
+      const searchRadius = Math.max(3, Math.round(city.radius * 0.5))
+      outer: for (let radius = 1; radius <= searchRadius; radius++) {
+        for (let oy = -radius; oy <= radius; oy++) {
+          for (let ox = -radius; ox <= radius; ox++) {
+            if (Math.max(Math.abs(ox), Math.abs(oy)) !== radius) continue
+            const x = city.cx + ox
+            const y = city.cy + oy
+            if (x <= 0 || y <= 0 || x >= width - 1 || y >= height - 1) continue
+            const anchorId = y * width + x
+            if (!road(anchorId)) continue
+            for (let direction = 0; direction < cardinal.length; direction++) {
+              const [dx, dy] = cardinal[direction]!
+              if (!canPlace(x + dx, y + dy, anchorId)) continue
+              growStreet(anchorId, direction, Math.max(5, Math.round(city.radius * 0.55)), 0,
+                0x780 + radius * 17 + direction)
+              break outer
+            }
+          }
+        }
+      }
+    }
+
+    // A displaced fourth approach branches from an inner collector. This
+    // improves access while keeping the civic centre a T-junction or bend.
+    if (city.tier !== 'village' && cityRoads.length > 5) {
+      const anchorId = cityRoads[Math.min(cityRoads.length - 1, 3 + (city.index % 3))]!
+      growStreet(anchorId, omitted, Math.max(3, Math.round(city.radius * 0.48)), 2, 0x900 + city.index)
+    }
+  }
 }
 
 /** V6 compiles roads first, then assigns explicit concentric land-use zones. */
@@ -1934,8 +2361,12 @@ function addV6ZoningAndMunicipalPower(
     feature[id] = 0
   }
 
+  if (descriptor.settlementAlgorithmVersion >= 5) {
+    rebuildV6OrganicSettlementRoads(descriptor, cities, kind, feature, transport, elevation)
+  }
+
   // Extend four legible local streets through the buffer and outer suburb.
-  for (const city of cities) {
+  if (descriptor.settlementAlgorithmVersion < 5) for (const city of cities) {
     const start = Math.max(2, Math.ceil(city.radius * 0.68))
     const end = Math.max(start + 3, Math.ceil(city.radius * 1.38))
     for (const [dx, dy] of [[1, 0], [0, 1], [-1, 0], [0, -1]] as const) {
@@ -1968,12 +2399,26 @@ function addV6ZoningAndMunicipalPower(
           if (x <= 0 || y <= 0 || x >= descriptor.width - 1 || y >= descriptor.height - 1) break
           const id = y * descriptor.width + x
           if (kind[id] === TERRAIN_KIND.lake || rawTileSlope(descriptor, elevation, x, y) > 0.18) break
+          // The anchor is the only road this branch may reuse. Stop before a
+          // pre-existing radial/grid street so the branch cannot close a loop
+          // or stamp a second road through an occupied corridor.
+          if (descriptor.settlementAlgorithmVersion >= 3 &&
+              transportClass(transport[id]!) !== TRANSPORT_ROAD_CLASS.none) break
           markRoad(transport, id, TRANSPORT_ROAD_CLASS.local, TRANSPORT_FLAGS.settlement, kind)
           connectRoadPoints(descriptor, transport, previous, { x, y })
           previous = { x, y }
         }
       }
     }
+  }
+
+  // V6.5 makes the spaced street graph authoritative before any land use or
+  // utility campus chooses road access. Removed road tiles can then be zoned
+  // normally, and no later dependency forces a parallel pair to survive.
+  if (descriptor.settlementAlgorithmVersion >= 5) {
+    finalizeTransportTopology(descriptor, transport, { x: cities[0]!.cx, y: cities[0]!.cy }, elevation)
+    pruneSmallLocalRoadLoops(descriptor, transport, 8, new Set(), true)
+    pruneAdjacentParallelLocalRoads(descriptor, transport, new Set())
   }
 
   const plants: MunicipalPowerPlant[] = []
@@ -3152,8 +3597,36 @@ function generateStaticWorldV6FromDescriptor(descriptor: WorldDescriptorV6): Sta
   const municipalPowerPlants = addV6ZoningAndMunicipalPower(
     descriptor, cities, kind, feature, transport, elevation, biome, district,
   )
-  establishV5SettlementCrossroads(descriptor, cities, kind, transport)
+  if (descriptor.settlementAlgorithmVersion < 5) {
+    establishV5SettlementCrossroads(descriptor, cities, kind, transport)
+  }
   finalizeTransportTopology(descriptor, transport, { x: cities[0]!.cx, y: cities[0]!.cy }, elevation)
+  if (descriptor.settlementAlgorithmVersion >= 3 && descriptor.settlementAlgorithmVersion < 5) {
+    const protectedRoadTiles = new Set<number>()
+    for (const plant of municipalPowerPlants) {
+      for (const id of plant.footprint) {
+        const x = id % descriptor.width
+        for (const neighbor of [id - descriptor.width, id + 1, id + descriptor.width, id - 1]) {
+          if (neighbor < 0 || neighbor >= transport.length ||
+              Math.abs(neighbor % descriptor.width - x) > 1 || transportClass(transport[neighbor]!) === 0) continue
+          protectedRoadTiles.add(neighbor)
+        }
+      }
+    }
+    pruneSmallLocalRoadLoops(
+      descriptor,
+      transport,
+      8,
+      protectedRoadTiles,
+      descriptor.settlementAlgorithmVersion >= 4,
+    )
+  }
+  if (descriptor.settlementAlgorithmVersion >= 5) {
+    // Final topology may reconnect neighboring settlement tiles after the
+    // physical spacing pass. Open only those rebuilt edges: the real tile gaps
+    // were already established before zoning and campus placement.
+    pruneSmallLocalRoadLoops(descriptor, transport, 8, new Set(), false)
+  }
   const starterPads = collectV3StarterPads(descriptor, cities[0]!, kind, transport, elevation)
   addV4RuralTerrain(descriptor, kind, feature, transport, biome)
   clearV5RoadEnvironment(descriptor, kind, transport, district, feature)

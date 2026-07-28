@@ -6,7 +6,7 @@ import {
   tileId,
 } from '../../../sim/world'
 import { RoadPropArchetype, SceneryArchetype } from './artDirectedRegistry'
-import { roadPropInstancesForChunk } from './simRenderSource'
+import { MAP_TILE_SIZE, roadPropInstancesForChunk } from './simRenderSource'
 
 function segment(
   id: string,
@@ -77,11 +77,14 @@ describe('compiled road prop projection', () => {
     const count = (archetypeId: number) => props.filter(prop => prop.archetypeId === archetypeId).length
 
     expect(count(RoadPropArchetype.trafficLight)).toBe(4)
-    expect(count(RoadPropArchetype.pedestrianSignal)).toBe(4)
+    expect(count(RoadPropArchetype.pedestrianSignal)).toBe(0)
     expect(count(RoadPropArchetype.roadSign)).toBe(2)
     expect(count(RoadPropArchetype.highwayGuardrail)).toBeGreaterThanOrEqual(2)
     expect(count(SceneryArchetype.roadLamp)).toBeLessThanOrEqual(1)
     expect(props.every(prop => prop.y === 0.44)).toBe(true)
+    const junctionWorld = 8 * MAP_TILE_SIZE
+    const signals = props.filter(prop => prop.archetypeId === RoadPropArchetype.trafficLight)
+    expect(signals.every(prop => Math.hypot(prop.x - junctionWorld, prop.z - junctionWorld) > 0.4)).toBe(true)
     expect(roadPropInstancesForChunk(network('left'), 1)).toEqual([])
   })
 

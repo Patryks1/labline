@@ -1,10 +1,34 @@
 import { describe, expect, it } from 'vitest'
 import * as THREE from 'three'
 import { TRANSPORT_CLASS_SHIFT, TRANSPORT_FLAGS, TRANSPORT_ROAD_CLASS, WORLD_FORMAT_VERSION, WORLD_GENERATOR_VERSION_V3, compileRoadNetwork, type StaticWorld } from '../../../sim/world'
-import { MapSurfaceLayer } from './surfaceLayer'
+import { appendJunctionCrosswalks, MapSurfaceLayer } from './surfaceLayer'
 import { LodTier, RenderBiome, SurfaceKind, TransportVisual, type ChunkId, type SurfaceTexel, type ViewportRenderSource } from './types'
 
 describe('MapSurfaceLayer road autotiling', () => {
+  it('builds five real zebra stripes across every selected junction approach', () => {
+    const positions: number[] = []
+    const uvs: number[] = []
+    const indices: number[] = []
+    const groups: Array<{ start: number; count: number; materialIndex: number }> = []
+    appendJunctionCrosswalks(positions, uvs, indices, groups, {
+      index: 0, id: 'junction:test', tileId: 0 as never, x: 4.5, y: 4.5, elevation: 0,
+      segmentIds: ['n', 'e', 's', 'w'],
+      ports: [
+        { segmentId: 'n', tileId: 0 as never, headingX: 0, headingY: -1 },
+        { segmentId: 'e', tileId: 0 as never, headingX: 1, headingY: 0 },
+        { segmentId: 's', tileId: 0 as never, headingX: 0, headingY: 1 },
+        { segmentId: 'w', tileId: 0 as never, headingX: -1, headingY: 0 },
+      ],
+      signalized: true, hasCrosswalks: true, hasStopLines: true,
+    }, 0.25, 1, () => 0)
+
+    expect(groups).toHaveLength(20)
+    expect(groups.every((group) => group.count === 6 && group.materialIndex === 2)).toBe(true)
+    expect(indices).toHaveLength(120)
+    expect(positions).toHaveLength(20 * 4 * 3)
+    expect(uvs).toHaveLength(20 * 4 * 2)
+  })
+
   it('decodes transport mode and maps all clockwise topology bits to rounded arms', () => {
     const surface = new MapSurfaceLayer({ width: 2, height: 2, tileSize: 1 })
     const shader = surface.material.fragmentShader

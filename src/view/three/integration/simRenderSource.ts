@@ -1157,9 +1157,12 @@ export function roadPropInstancesForChunk(
     result.push({
       entityId: stableStringId(`road-prop:${key}`),
       archetypeId,
-      x: x * MAP_TILE_SIZE,
+      // Compiler points use tile centres (n + 0.5); render-world tile anchors
+      // use integer coordinates. Missing this conversion shifted furniture
+      // half a tile diagonally, frequently back onto the carriageway.
+      x: (x - 0.5) * MAP_TILE_SIZE,
       y: elevationAt(x, y) + 0.04,
-      z: y * MAP_TILE_SIZE,
+      z: (y - 0.5) * MAP_TILE_SIZE,
       yaw,
       scaleX,
       scaleY,
@@ -1180,25 +1183,13 @@ export function roadPropInstancesForChunk(
       const side = network.drivingSide === 'left' ? 1 : -1
       const normalX = -port.headingY * side
       const normalY = port.headingX * side
-      const along = 0.3
-      const lateral = maxHalfWidth + 0.09
+      const along = maxHalfWidth * 1.58
+      const lateral = maxHalfWidth + 0.16
       const x = junction.x + port.headingX * along + normalX * lateral
       const y = junction.y + port.headingY * along + normalY * lateral
       // Model forward is +X. Signal faces traffic approaching the junction.
       const yaw = Math.atan2(-port.headingY, -port.headingX)
       add(`${junction.id}:signal:${portIndex}`, RoadPropArchetype.trafficLight, x, y, yaw, 0.82, 0.82, 0.82)
-      if (junction.hasCrosswalks) {
-        add(
-          `${junction.id}:pedestrian:${portIndex}`,
-          RoadPropArchetype.pedestrianSignal,
-          junction.x + port.headingX * 0.16 - normalX * lateral,
-          junction.y + port.headingY * 0.16 - normalY * lateral,
-          yaw,
-          0.78,
-          0.78,
-          0.78,
-        )
-      }
     }
   }
 
@@ -1218,11 +1209,16 @@ export function roadPropInstancesForChunk(
       const normalX = -tangentY
       const normalY = tangentX
       const yaw = Math.atan2(tangentY, tangentX)
-      const roadside = segment.profile.halfWidth + segment.profile.shoulderWidth + 0.075
+      const roadside = segment.profile.halfWidth + segment.profile.shoulderWidth + 0.14
 
-      // Urban collector/arterial lighting is sparse and alternates verges.
-      if (segment.roadClass >= 2 && segment.roadClass < 4 && index % 6 === stableStringId(segment.id) % 6) {
-        const side = ((index / 6) & 1) === 0 ? 1 : -1
+      // Urban lighting is intentionally sparse, alternates verges, and stays
+      // at least two tiles clear of junction furniture and crossing paint.
+      const lampSpacing = segment.roadClass >= 3 ? 12 : 18
+      const lampPhase = stableStringId(segment.id) % lampSpacing
+      if (segment.roadClass >= 2 && segment.roadClass < 4
+        && index >= 2 && index <= points.length - 3
+        && index % lampSpacing === lampPhase) {
+        const side = (Math.floor(index / lampSpacing) & 1) === 0 ? 1 : -1
         add(`${segment.id}:lamp:${index}`, SceneryArchetype.roadLamp,
           point.x + normalX * roadside * side, point.y + normalY * roadside * side, yaw)
       }

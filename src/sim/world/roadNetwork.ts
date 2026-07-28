@@ -192,6 +192,14 @@ function hashPath(path: readonly number[]): string {
   return (hash >>> 0).toString(36)
 }
 
+/** Stable per-junction feature roll; generation order and camera visibility never affect it. */
+function junctionFeatureRoll(tile: number, seed: number, salt: number): number {
+  let hash = (tile ^ Math.imul(seed | 0, 0x9e3779b1) ^ salt) | 0
+  hash = Math.imul(hash ^ (hash >>> 16), 0x45d9f3b)
+  hash = Math.imul(hash ^ (hash >>> 16), 0x45d9f3b)
+  return ((hash ^ (hash >>> 16)) >>> 0) / 0x1_0000_0000
+}
+
 function freezeArray<T>(values: T[]): readonly T[] {
   return Object.freeze(values)
 }
@@ -468,11 +476,23 @@ export function compileRoadNetwork(
     // to a highway far outside town, but that must not suppress signals at a
     // settlement collector that happens to share the same maximal chain.
     const junctionClass = roadClass(value)
-    const signalized = entries.length >= 3 && (value & TRANSPORT_FLAGS.settlement) !== 0 && junctionClass >= TRANSPORT_ROAD_CLASS.collector && junctionClass < TRANSPORT_ROAD_CLASS.highway
+    const streetControlEligible = entries.length >= 3
+      && (value & TRANSPORT_FLAGS.settlement) !== 0
+      && junctionClass >= TRANSPORT_ROAD_CLASS.collector
+      && junctionClass < TRANSPORT_ROAD_CLASS.highway
+    // Four-way junctions are more likely to be controlled than T junctions,
+    // but not every town block needs a forest of signals and poles.
+    const signalChance = entries.length >= 4 ? 0.58 : 0.3
+    const signalized = streetControlEligible
+      && junctionFeatureRoll(tile, world.descriptor.seed, 0x51a7) < signalChance
+    // Crossings are an independent seeded feature: some unsignalized town
+    // junctions still get zebra stripes, and repeated seeds remain identical.
+    const hasCrosswalks = streetControlEligible
+      && junctionFeatureRoll(tile, world.descriptor.seed, 0xc2055) < 0.62
     const junction = Object.freeze({
       index, id: `junction:${tile}`, tileId: tile as TileId, x: point.x, y: point.y, elevation: point.elevation,
       segmentIds: freezeArray(entries.map((entry) => entry.id).sort()), ports: freezeArray(ports), signalized,
-      hasCrosswalks: signalized, hasStopLines: signalized,
+      hasCrosswalks, hasStopLines: signalized,
     })
     junctionByTile.set(tile, junction)
     return junction

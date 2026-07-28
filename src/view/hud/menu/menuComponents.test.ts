@@ -14,8 +14,9 @@ describe('LablineMenuShell', () => {
     }, createElement('h2', null, 'Command')))
     expect(markup).toContain('id="title-test"')
     expect(markup).toContain('>LABLINE</h1>')
+    expect(markup).toContain('src="/assets/labline-emblem-v2.png"')
     expect(markup).toContain('aria-label="Menu utilities"')
-    expect(markup.indexOf('labline-menu-console')).toBeLessThan(markup.indexOf('labline-menu-utility'))
+    expect(markup.indexOf('labline-menu-utility')).toBeLessThan(markup.indexOf('labline-menu-console'))
   })
 
   it('exposes pause mode as a labelled modal dialog', () => {

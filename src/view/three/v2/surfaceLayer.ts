@@ -963,6 +963,8 @@ export class MapSurfaceLayer {
         ROAD_SURFACE_LIFT, this.tileSize, sampleHeight)
       if (junction.hasStopLines) appendJunctionStopLines(positions, uvs, indices, groups,
         junction, halfWidth, this.tileSize, sampleHeight)
+      if (junction.hasCrosswalks) appendJunctionCrosswalks(positions, uvs, indices, groups,
+        junction, halfWidth, this.tileSize, sampleHeight)
     }
     const consolidated = consolidateRoadGroups(indices, groups, this.roadMaterials.length)
     const geometry = arrayGeometry(positions, uvs, consolidated.indices)
@@ -1481,7 +1483,7 @@ function appendJunctionStopLines(
   for (const port of junction.ports) {
     const nx = -port.headingY
     const ny = port.headingX
-    const distance = halfWidth * 1.15
+    const distance = halfWidth * 1.82
     const lineHalf = halfWidth * 0.76
     const thickness = tileSize * 0.018
     const px = cx + port.headingX * distance
@@ -1498,6 +1500,42 @@ function appendJunctionStopLines(
     const start = indices.length
     indices.push(base, base + 2, base + 1, base + 1, base + 2, base + 3)
     groups.push({ start, count: 6, materialIndex: 2 })
+  }
+}
+
+/** Seed-selected zebra crossings, built as real marking geometry across each approach. */
+/** @internal Exported for exact geometry regression coverage. */
+export function appendJunctionCrosswalks(
+  positions: number[], uvs: number[], indices: number[], groups: RoadGeometryGroup[],
+  junction: RoadJunction, halfWidth: number, tileSize: number, sampleHeight: HeightSampler,
+): void {
+  const cx = (junction.x - 0.5) * tileSize
+  const cz = (junction.y - 0.5) * tileSize
+  const stripeCount = 5
+  const stripeHalfLength = halfWidth * 0.82
+  const stripeHalfWidth = tileSize * 0.024
+  const startDistance = halfWidth * 1.08
+  const stripeGap = tileSize * 0.072
+  for (const port of junction.ports) {
+    const nx = -port.headingY
+    const ny = port.headingX
+    for (let stripe = 0; stripe < stripeCount; stripe++) {
+      const distance = startDistance + stripe * stripeGap
+      const px = cx + port.headingX * distance
+      const pz = cz + port.headingY * distance
+      const base = positions.length / 3
+      const corners = [
+        [px + nx * stripeHalfLength + port.headingX * stripeHalfWidth, pz + ny * stripeHalfLength + port.headingY * stripeHalfWidth],
+        [px - nx * stripeHalfLength + port.headingX * stripeHalfWidth, pz - ny * stripeHalfLength + port.headingY * stripeHalfWidth],
+        [px + nx * stripeHalfLength - port.headingX * stripeHalfWidth, pz + ny * stripeHalfLength - port.headingY * stripeHalfWidth],
+        [px - nx * stripeHalfLength - port.headingX * stripeHalfWidth, pz - ny * stripeHalfLength - port.headingY * stripeHalfWidth],
+      ] as const
+      for (const [x, z] of corners) positions.push(x, sampleHeight(x, z) + ROAD_MARKING_LIFT, z)
+      uvs.push(0, 0, 1, 0, 0, 1, 1, 1)
+      const start = indices.length
+      indices.push(base, base + 2, base + 1, base + 1, base + 2, base + 3)
+      groups.push({ start, count: 6, materialIndex: 2 })
+    }
   }
 }
 

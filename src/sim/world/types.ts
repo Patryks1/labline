@@ -127,7 +127,7 @@ export interface WorldDescriptorV6 extends WorldDescriptorBase {
   readonly terrainAlgorithmVersion: 1
   readonly biomeVersion: 1
   readonly transportAlgorithmVersion: 2
-  readonly settlementAlgorithmVersion: 2
+  readonly settlementAlgorithmVersion: 2 | 3 | 4 | 5
   readonly municipalCampusAlgorithmVersion: 2
   readonly cityStatsModelVersion: 1
 }
