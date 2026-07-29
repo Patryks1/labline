@@ -823,14 +823,35 @@ button:not(:disabled):active {
 .map-navigator {
   left: calc(var(--hud-rail) + 0.75rem);
   bottom: calc(var(--hud-ops) + 0.75rem);
-  width: clamp(22rem, 25vw, 26rem);
+  width: clamp(21.5rem, 23vw, 23rem);
   max-width: calc(100vw - var(--hud-rail) - var(--intel-width) - 1.5rem);
   max-height: calc(100dvh - var(--hud-top) - var(--hud-ops) - 1.5rem);
+  border-color: color-mix(in srgb, var(--color-mint) 22%, var(--color-line));
+  box-shadow: 0 20px 52px rgba(0, 7, 12, 0.52), inset 0 1px rgba(142, 236, 224, 0.05);
   transition: width 180ms ease, opacity 180ms ease;
 }
 
 .map-navigator-frame {
-  height: clamp(12rem, 22vh, 15rem);
+  height: clamp(11.25rem, 19vh, 13rem);
+}
+
+.map-navigator-sitebar {
+  background: linear-gradient(180deg, rgba(13, 32, 42, 0.9), rgba(8, 23, 31, 0.82));
+}
+
+.map-navigator-commandbar {
+  min-height: 2.6rem;
+}
+
+.map-navigator-commandbar > div:last-child > button {
+  width: 1.5rem;
+  min-width: 1.5rem;
+  height: 1.5rem;
+}
+
+.map-navigator-legend {
+  border-top: 1px solid color-mix(in srgb, var(--color-line) 68%, transparent);
+  background: linear-gradient(180deg, rgba(6, 18, 25, 0.55), rgba(6, 18, 25, 0.9));
 }
 
 .map-navigator-launcher,
@@ -859,10 +880,10 @@ button:not(:disabled):active {
 }
 
 .game-shell[data-workspace-open='true'][data-presentation='workbench'] .map-navigator[data-expanded='true'],
-.game-shell[data-workspace-open='true'][data-presentation='immersive'] .map-navigator[data-expanded='true'] {
+  .game-shell[data-workspace-open='true'][data-presentation='immersive'] .map-navigator[data-expanded='true'] {
   display: block;
   left: max(0.5rem, env(safe-area-inset-left));
-  width: min(26rem, calc(100vw - 1rem));
+  width: min(23rem, calc(100vw - 1rem));
   max-width: calc(100vw - 1rem);
   overflow-y: auto;
   z-index: 45;
@@ -886,7 +907,7 @@ button:not(:disabled):active {
     display: none;
     left: max(0.5rem, env(safe-area-inset-left));
     bottom: calc(var(--hud-ops) + 0.5rem);
-    width: min(26rem, calc(100vw - 1rem));
+    width: min(23rem, calc(100vw - 1rem));
     max-width: calc(100vw - 1rem);
     max-height: calc(100dvh - var(--hud-top) - var(--hud-ops) - 1rem);
     overflow-y: auto;
@@ -908,7 +929,7 @@ button:not(:disabled):active {
   }
 
   .map-navigator-frame {
-    height: clamp(12rem, 32vh, 15rem);
+    height: clamp(11rem, 28vh, 13rem);
   }
 }
 

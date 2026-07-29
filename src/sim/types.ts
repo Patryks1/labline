@@ -282,6 +282,44 @@ export interface SiteCapacity {
   firmMw: number;
   commissionedDay: number;
   status: "active";
+  /** Physical campus this interconnection belongs to. Absent on old saves. */
+  facilityId?: string;
+}
+
+export interface FacilityNavBreakdown {
+  land: number;
+  shell: number;
+  racks: number;
+  sitePower: number;
+  total: number;
+}
+
+export type FacilityAcquisitionStatus =
+  | "pending"
+  | "countered"
+  | "accepted"
+  | "rejected"
+  | "withdrawn"
+  | "expired";
+
+/** Lab-neutral, cash-backed offer for a physical data-centre campus. */
+export interface FacilityAcquisitionOffer {
+  id: string;
+  facilityId: string;
+  buyerLabId: LabId;
+  sellerLabId: LabId;
+  amount: number;
+  escrow: number;
+  submittedDay: number;
+  respondDay: number;
+  expiresDay: number;
+  status: FacilityAcquisitionStatus;
+  counterAmount?: number;
+  resolvedDay?: number;
+}
+
+export interface FacilityMarketState {
+  offers: FacilityAcquisitionOffer[];
 }
 
 /** Finite regional interconnection pool shared by every lab. */
@@ -507,6 +545,8 @@ export interface ModuleDef {
   psuMw?: number;
   /** Aggregate fabric bandwidth supplied by network modules. */
   networkGbps?: number;
+  /** Relative host compute capacity for loaders, research, and prefill. */
+  cpuScore?: number;
   tokPerSec?: number;
   color: string;
 }
@@ -551,6 +591,8 @@ export interface RackSku {
   systemRamGb?: number;
   /** Host CPU score (arbitrary units) — prefill, loaders, research workers */
   cpuScore?: number;
+  /** Aggregate rack fabric bandwidth, snapshotted for custom designs. */
+  networkGbps?: number;
   /** Power draw MW per rack (before PUE) */
   mw: number;
   tokPerSec: number;
@@ -586,6 +628,8 @@ export interface AcceleratorProfile {
 export interface RackInstall {
   id: string;
   skuId: string;
+  /** Stable owning campus. Coordinates remain for old saves and map lookup. */
+  facilityId?: string;
   x: number;
   y: number;
   count: number;
@@ -596,12 +640,91 @@ export interface RackInstall {
   paidEach: number;
   /** Bay slots per unit (cached so map tick need not resolve SKUs) */
   rackUnits: number;
+  /** Start bay for each physical rack unit. Missing entries use deterministic first-fit migration. */
+  bayStarts?: number[];
+  /** Stable identity for every physical chassis in this order/install batch. */
+  unitIds?: string[];
+}
+
+export type HallRotation = 0 | 90 | 180 | 270;
+export type DataHallShellId = "hall-small-v1" | "hall-medium-v1" | "hall-large-v1";
+export type DataHallObjectKind = "rack" | "cooling" | "power" | "network";
+export type HallAutoLayoutStrategy = "density" | "efficiency" | "resilience";
+
+export interface DataHallObjectPlacement {
+  id: string;
+  kind: DataHallObjectKind;
+  catalogId: string;
+  x: number;
+  z: number;
+  rotation: HallRotation;
+  rackUnitId?: string;
+  purchasePrice: number;
+}
+
+export interface DataHallWallSegment {
+  id: string;
+  x1: number;
+  z1: number;
+  x2: number;
+  z2: number;
+  purchasePrice: number;
+}
+
+export interface DataHallDoorPlacement {
+  id: string;
+  wallId: string;
+  offset: number;
+  width: number;
+  purchasePrice: number;
+}
+
+export interface DataHallLayoutAnalysis {
+  revision: number;
+  valid: boolean;
+  hardErrors: string[];
+  warnings: string[];
+  operationalRackUnitIds: string[];
+  offlineRackUnitIds: string[];
+  environmentScore: number;
+  coolingScore: number;
+  airflowScore: number;
+  aisleScore: number;
+  throughputMultiplier: number;
+  pueMultiplier: number;
+  incidentRiskMultiplier: number;
+  powerRoutes: Array<{ rackUnitId: string; equipmentId: string; cells: number[] }>;
+  networkRoutes: Array<{ rackUnitId: string; equipmentId: string; cells: number[] }>;
+}
+
+export interface DataHallLayout {
+  version: 1;
+  facilityId: string;
+  shellId: DataHallShellId;
+  revision: number;
+  autoPlaceDeliveries: boolean;
+  preferredStrategy: HallAutoLayoutStrategy;
+  objects: DataHallObjectPlacement[];
+  walls: DataHallWallSegment[];
+  doors: DataHallDoorPlacement[];
+  analysis: DataHallLayoutAnalysis;
+}
+
+export interface DataHallEditPlan {
+  facilityId: string;
+  expectedRevision: number;
+  objects: DataHallObjectPlacement[];
+  walls: DataHallWallSegment[];
+  doors: DataHallDoorPlacement[];
+  preferredStrategy?: HallAutoLayoutStrategy;
 }
 
 export interface RackDesignStats {
   flopsPf: number;
   vramGb: number;
   systemRamGb: number;
+  cpuScore: number;
+  networkGbps: number;
   mw: number;
   coolingMw: number;
   psuMw: number;
@@ -2844,6 +2967,10 @@ export interface SimState {
   /** Lab-neutral physical campus projects and commissioned site shells. */
   siteProjects: SiteProject[];
   siteCapacities: SiteCapacity[];
+  /** Optional for save compatibility; normalized lazily by the market system. */
+  facilityMarket?: FacilityMarketState;
+  /** Facility-local free-placement rooms. Absent in v10 and older saves. */
+  dataHallLayouts?: Record<string, DataHallLayout>;
   /** Long-term utility and PPA commitments settled take-or-pay. */
   energyContracts: EnergyContract[];
   /** Authoritative finite interconnection ledger by map region. */

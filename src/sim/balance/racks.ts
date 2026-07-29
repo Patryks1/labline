@@ -193,6 +193,7 @@ export const MODULE_CATALOG: ModuleDef[] = [
     cost: 3_800,
     blurb: 'Required for I/O. One per chassis recommended.',
     systemRamGb: 64,
+    cpuScore: 12,
     mw: 0.00015,
     color: '#fbbf24',
   },
@@ -204,6 +205,7 @@ export const MODULE_CATALOG: ModuleDef[] = [
     cost: 7_500,
     blurb: 'Faster data feed → slight train util.',
     systemRamGb: 128,
+    cpuScore: 24,
     mw: 0.00022,
     color: '#f59e0b',
   },
@@ -302,6 +304,8 @@ export function scoreDesign(design: RackDesign): RackDesignStats {
   let flopsPf = 0
   let vramGb = 0
   let systemRamGb = 0
+  let cpuScore = 0
+  let networkGbps = 0
   let mw = 0
   let coolingMw = 0
   let psuMw = 0
@@ -329,6 +333,8 @@ export function scoreDesign(design: RackDesign): RackDesignStats {
     flopsPf += mod.flopsPf ?? 0
     vramGb += mod.vramGb ?? 0
     systemRamGb += mod.systemRamGb ?? 0
+    cpuScore += mod.cpuScore ?? 0
+    networkGbps += mod.networkGbps ?? 0
     mw += mod.mw ?? 0
     coolingMw += mod.coolingMw ?? 0
     psuMw += mod.psuMw ?? 0
@@ -357,6 +363,8 @@ export function scoreDesign(design: RackDesign): RackDesignStats {
     flopsPf: flopsPf * RACK_PF_MULTIPLIER,
     vramGb,
     systemRamGb,
+    cpuScore,
+    networkGbps,
     mw,
     coolingMw,
     psuMw,

@@ -63,6 +63,13 @@ function rng(s: number) {
   }
 }
 
+export type DataCenterStyleVariant = 0 | 1 | 2
+
+/** Finite, deterministic variants only: safe for procedural registry caching. */
+export function dataCenterStyleVariant(tileX: number, tileY: number): DataCenterStyleVariant {
+  return (seed(tileX, tileY) % 3) as DataCenterStyleVariant
+}
+
 function mesh(
   geo: THREE.BufferGeometry,
   material: THREE.Material,
@@ -129,11 +136,11 @@ export function createBuildingKit(
     case 'empty':
       return kitEmpty(g, w, color, r)
     case 'dc':
-      return kitDcSmall(g, w, h, color)
+      return kitDcSmall(g, w, h, color, dataCenterStyleVariant(tileX, tileY))
     case 'dc_m':
-      return kitDcMedium(g, w, Math.max(h * 1.12, 0.42), color)
+      return kitDcMedium(g, w, Math.max(h * 1.12, 0.42), color, dataCenterStyleVariant(tileX, tileY))
     case 'dc_l':
-      return kitDcLarge(g, w, Math.max(h * 1.28, 0.55), color)
+      return kitDcLarge(g, w, Math.max(h * 1.28, 0.55), color, dataCenterStyleVariant(tileX, tileY))
     case 'substation':
       return kitSubstation(g, w, h, color)
     case 'solar':
@@ -300,7 +307,7 @@ function shellColor(ownerTint: number, base = 0x6a7580, amount = 0.28): number {
 }
 
 /** Small edge hall — compact 1-tile POP (96 bays). Single low box + dock + 2 chillers. */
-function kitDcSmall(g: THREE.Group, w: number, h: number, color: number) {
+function kitDcSmall(g: THREE.Group, w: number, h: number, color: number, variant: DataCenterStyleVariant) {
   const base = 0x6a7580
   const shell = shellColor(color, base, 0.22)
   const body = mat(shell, { rough: 0.55, metal: 0.22, shellBase: base })
@@ -334,6 +341,14 @@ function kitDcSmall(g: THREE.Group, w: number, h: number, color: number) {
         { lockColor: true },
       ),
     )
+  }
+  if (variant === 1) {
+    // Edge-compute variant: compact roof comms spine.
+    g.add(mesh(new THREE.BoxGeometry(w * 0.42, 0.035, 0.055), brand, 0, hallH + 0.18, -0.02, { brand: true }))
+    g.add(mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.18, 8), steel, 0, hallH + 0.1, -0.02, { lockColor: true }))
+  } else if (variant === 2) {
+    // Warm-climate variant: visibly larger heat rejection bank.
+    for (const x of [-0.2, 0, 0.2]) g.add(mesh(new THREE.CylinderGeometry(0.055, 0.07, 0.085, 10), steel, x, hallH + 0.1, -0.02, { lockColor: true }))
   }
 
   // Side loading dock (single bay)
@@ -402,7 +417,7 @@ function kitDcSmall(g: THREE.Group, w: number, h: number, color: number) {
 }
 
 /** Medium campus hall — 2×2 footprint massing: dual wings + cooling yard. */
-function kitDcMedium(g: THREE.Group, w: number, h: number, color: number) {
+function kitDcMedium(g: THREE.Group, w: number, h: number, color: number, variant: DataCenterStyleVariant) {
   const base = 0x5c6874
   const shell = shellColor(color, base, 0.2)
   const body = mat(shell, { rough: 0.5, metal: 0.25, shellBase: base })
@@ -457,6 +472,12 @@ function kitDcMedium(g: THREE.Group, w: number, h: number, color: number) {
         { brand: true },
       ),
     )
+  }
+  if (variant === 1) {
+    const solar = mat(0x173f66, { rough: 0.18, metal: 0.65, lockColor: true })
+    for (let i = 0; i < 3; i++) g.add(mesh(new THREE.BoxGeometry(0.11, 0.018, 0.2), solar, -0.22 + i * 0.14, hallH + 0.16, 0.17, { lockColor: true }))
+  } else if (variant === 2) {
+    g.add(mesh(new THREE.CylinderGeometry(0.075, 0.09, hallH * 0.72, 12), steel, 0, hallH * 0.4, -w * 0.38, { lockColor: true }))
   }
 
   // Rooftop chillers (row of 4)
@@ -540,7 +561,7 @@ function kitDcMedium(g: THREE.Group, w: number, h: number, color: number) {
 }
 
 /** Large mega campus — multi-volume hyperscale with tower, mast, cooling farm. */
-function kitDcLarge(g: THREE.Group, w: number, h: number, color: number) {
+function kitDcLarge(g: THREE.Group, w: number, h: number, color: number, variant: DataCenterStyleVariant) {
   const base = 0x4f5b68
   const shell = shellColor(color, base, 0.18)
   const body = mat(shell, { rough: 0.48, metal: 0.28, shellBase: base })
@@ -602,6 +623,13 @@ function kitDcLarge(g: THREE.Group, w: number, h: number, color: number) {
       -0.04,
     ),
   )
+  if (variant === 1) {
+    // Hyperscale colocation variant: paired cross-hall skybridges.
+    for (const z of [-0.16, 0.12]) g.add(mesh(new THREE.BoxGeometry(w * 0.7, 0.075, 0.07), brand, 0, hallH * 0.72, z, { brand: true }))
+  } else if (variant === 2) {
+    // Water-side cooling variant: unmistakable twin thermal stores.
+    for (const x of [-0.23, 0.02]) g.add(mesh(new THREE.CylinderGeometry(0.085, 0.1, hallH * 0.68, 12), steel, x, hallH * 0.36, -w * 0.37, { lockColor: true }))
+  }
 
   // Cooling farm — 6 stacks + 6 chillers
   for (let i = 0; i < 6; i++) {

@@ -13,6 +13,7 @@ import {
   WORLD_GENERATOR_VERSION_V4,
   WORLD_GENERATOR_VERSION_V5,
   WORLD_GENERATOR_VERSION_V6,
+  WORLD_GENERATOR_VERSION_V7,
   type BiomeKindName,
 } from '../../sim/world/types'
 import { rivalMapSites, rivalSiteKindLabel } from '../three/rivalMapSites'
@@ -245,7 +246,8 @@ function dominantTerrainKind(
   const elevation = staticWorld?.elevation
   const elevationScale = staticWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V4 ||
     staticWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
-    staticWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6
+    staticWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6 ||
+    staticWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7
     ? staticWorld.descriptor.elevationScale
     : 0
   for (let y = y0; y < y1; y += 1) {
@@ -438,8 +440,10 @@ export function navigatorView(
 ): NavigatorView {
   const safeAspect = Number.isFinite(viewportAspect) && viewportAspect > 0 ? viewportAspect : 1
   const worldAspect = worldWidth / Math.max(1, worldHeight)
-  const fitWidth = worldAspect < safeAspect ? worldHeight * safeAspect : worldWidth
-  const fitHeight = worldAspect < safeAspect ? worldHeight : worldWidth / safeAspect
+  // Cover the navigator frame rather than containing the whole world. The
+  // previous contain projection exposed out-of-world space as black bars.
+  const fitWidth = worldAspect < safeAspect ? worldWidth : worldHeight * safeAspect
+  const fitHeight = worldAspect < safeAspect ? worldWidth / safeAspect : worldHeight
   const width = fitWidth / zoom
   const height = fitHeight / zoom
   const clampAxis = (value: number, worldSize: number, viewSize: number) => {

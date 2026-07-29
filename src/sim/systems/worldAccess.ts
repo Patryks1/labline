@@ -1,7 +1,9 @@
 import type { MapTile, SimState, TileKind, TileOwner } from '../types'
 import { tileCoords, tileId } from '../world/ids'
 import {
+  TERRAIN_KIND,
   TERRAIN_KIND_NAME,
+  WORLD_GENERATOR_VERSION_V7,
   TRANSPORT_CLASS_MASK,
   type Facility,
   type FacilityQuery,
@@ -218,6 +220,8 @@ export function compactTileAt(
   // V3 transport is an overlay over the ecological/land-use terrain. The
   // compatibility MapTile must nevertheless expose it as a road so placement
   // and legacy callers cannot buy/build on the right-of-way.
+  const river = world.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7 &&
+    view.kind === TERRAIN_KIND.lake && (view.variantMask & 0x80) !== 0
   const terrainKind = !facility && (view.transport & TRANSPORT_CLASS_MASK) !== 0
     ? 'road'
     : (TERRAIN_KIND_NAME[view.kind] ?? 'empty')
@@ -237,7 +241,7 @@ export function compactTileAt(
         : `${data?.name ?? facility.kind} pad`
       : terrainKind === 'empty'
         ? ''
-        : terrainKind,
+        : river ? 'River' : terrainKind,
     level: facility?.level ?? 1,
     buildingProgress: facility?.constructionProgress ?? (terrainKind === 'empty' ? 0 : 1),
     buildingTarget: facility?.constructionTarget ?? (terrainKind === 'empty' ? 0 : 1),

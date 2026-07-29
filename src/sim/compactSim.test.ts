@@ -27,13 +27,13 @@ function largeConfig(seed = 5_601): GameConfig {
 }
 
 describe('compact million-tile simulation', () => {
-  it('uses layered generator V5 for small new sandboxes too', () => {
+  it('uses layered generator V7 for small new sandboxes too', () => {
     const state = createGame({
       seed: 5_600,
       advanced: { mapWidth: 48, mapHeight: 48, cityCount: 2, rivalCount: 1 },
     })
     expect(state.map.storage).toBe('compact')
-    expect(state.map.world?.descriptor.generatorVersion).toBe(5)
+    expect(state.map.world?.descriptor.generatorVersion).toBe(7)
     expect(state.map.world?.staticWorld.elevation).toHaveLength(49 * 49)
     expect(state.map.world?.staticWorld.biome).toHaveLength(48 * 48)
     expect(state.map.world?.staticWorld.lakes.length).toBeGreaterThan(0)
@@ -45,7 +45,8 @@ describe('compact million-tile simulation', () => {
     expect(state.map.storage).toBe('compact')
     expect(state.map.tiles).toHaveLength(0)
     expect(state.map.world).toBeTruthy()
-    expect(staticWorldByteLength(state.map.world!.staticWorld)).toBe(10_004_002)
+    // V6/V7 both retain the district byte introduced by explicit zoning.
+    expect(staticWorldByteLength(state.map.world!.staticWorld)).toBe(11_004_002)
     for (const rival of state.rivals) {
       expect(state.map.world!.queryFacilities({ ownerId: rival.id }).length).toBeGreaterThan(0)
     }

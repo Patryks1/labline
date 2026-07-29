@@ -25,7 +25,7 @@ import {
   writeSaveSlot,
 } from './save'
 
-describe('save / load v9', () => {
+describe('save / load v11', () => {
   beforeEach(async () => {
     await clearAllSaves()
   })
@@ -50,6 +50,62 @@ describe('save / load v9', () => {
     expect(back.map.tiles.length).toBe(state.map.tiles.length)
     expect(back.map.energyPricePerMWh).toBe(ECONOMY.energyBasePrice * 0.7)
     expect(back.config.difficulty).toBe('normal')
+  })
+
+  it('round-trips v11 facility-market and physical rack metadata', () => {
+    const state = createGame({
+      seed: 10010,
+      labName: 'Metadata Lab',
+      difficulty: 'easy',
+      advanced: { mapWidth: 24, mapHeight: 24, cityCount: 2, rivalCount: 1 },
+    })
+    const rival = state.rivals[0]!
+    const facility = state.map.world!.queryFacilities({ ownerId: rival.id, kind: 'dc' })[0]!
+    state.map.world!.beginBatch().updateFacility(facility.id, {
+      forSale: true,
+      listPrice: 123_456_789,
+      stats: { ...facility.stats, rackCapacity: 144 },
+    }).commit()
+    const playerRack = {
+      id: 'player-physical', skuId: 'rack_h100', facilityId: 'player-campus',
+      x: 1, y: 2, count: 2, rackUnits: 1, status: 'live' as const,
+      daysLeft: 0, paidEach: 100, bayStarts: [7, 23],
+    }
+    const rivalRack = {
+      id: 'rival-physical', skuId: 'rack_h100', facilityId: facility.id,
+      x: 3, y: 4, count: 2, rackUnits: 1, status: 'live' as const,
+      daysLeft: 0, paidEach: 100, bayStarts: [11, 29],
+    }
+    state.player.rackFleet = [playerRack]
+    state.rivals[0] = { ...rival, rackFleet: [rivalRack] }
+    state.facilityMarket = {
+      offers: [{
+        id: 'saved-offer',
+        facilityId: facility.id,
+        buyerLabId: state.playerLabId,
+        sellerLabId: rival.id,
+        amount: 100_000_000,
+        escrow: 100_000_000,
+        submittedDay: state.day,
+        respondDay: state.day + 2,
+        expiresDay: state.day + 7,
+        status: 'countered',
+        counterAmount: 110_000_000,
+      }],
+    }
+
+    const restored = roundTripState(state)
+    const restoredFacility = restored.map.world!.facilitiesById.get(facility.id)!
+    expect(restoredFacility).toMatchObject({
+      id: facility.id,
+      forSale: true,
+      listPrice: 123_456_789,
+      stats: { rackCapacity: 144 },
+    })
+    expect(restored.player.rackFleet).toEqual([{ ...playerRack, unitIds: ['player-physical:unit:0001', 'player-physical:unit:0002'] }])
+    expect(restored.rivals[0]!.rackFleet).toEqual([{ ...rivalRack, unitIds: ['rival-physical:unit:0001', 'rival-physical:unit:0002'] }])
+    expect(restored.dataHallLayouts?.[facility.id]).toMatchObject({ version: 1, facilityId: facility.id })
+    expect(restored.facilityMarket?.offers).toEqual(state.facilityMarket.offers)
   })
 
   it('preserves explicit pre-default-change dimensions through save and load', () => {

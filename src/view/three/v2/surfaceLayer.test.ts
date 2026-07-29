@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import * as THREE from 'three'
 import { TRANSPORT_CLASS_SHIFT, TRANSPORT_FLAGS, TRANSPORT_ROAD_CLASS, WORLD_FORMAT_VERSION, WORLD_GENERATOR_VERSION_V3, compileRoadNetwork, type StaticWorld } from '../../../sim/world'
 import { appendJunctionCrosswalks, MapSurfaceLayer } from './surfaceLayer'
-import { LodTier, RenderBiome, SurfaceKind, TransportVisual, type ChunkId, type SurfaceTexel, type ViewportRenderSource } from './types'
+import { LodTier, RenderBiome, SurfaceFlag, SurfaceKind, TransportVisual, type ChunkId, type SurfaceTexel, type ViewportRenderSource } from './types'
 
 describe('MapSurfaceLayer road autotiling', () => {
   it('builds five real zebra stripes across every selected junction approach', () => {
@@ -220,6 +220,65 @@ describe('MapSurfaceLayer road autotiling', () => {
     expect(shader.fragmentShader).toContain('float waterShimmer')
 
     surface.dispose()
+  })
+
+  it('batches marked rivers separately with slow directional flow and narrow bank foam', () => {
+    const source: ViewportRenderSource = {
+      width: 2, height: 1, tileSize: 1,
+      getWaterElevation: () => 0.1,
+      readSurface(tileId, out) {
+        out.kind = SurfaceKind.lake
+        out.neighborMask = 0
+        out.region = 0
+        out.flags = tileId === 1 ? SurfaceFlag.river : 0
+        out.transport = undefined
+      },
+      getChunkInstances: () => [], getChunkRevision: () => 0,
+    }
+    const surface = new MapSurfaceLayer({ width: 2, height: 1, tileSize: 1, source, chunkSize: 2 })
+    surface.updateVisibleChunks(new Set([0]), () => ({ minX: 0, maxX: 2, minY: 0, maxY: 1 }))
+
+    expect(surface.waterRoot.children).toHaveLength(1)
+    expect(surface.riverRoot.children).toHaveLength(1)
+    expect(surface.riverRoot.children[0]!.name).toBe('river-surface-0')
+    expect((surface.riverRoot.children[0] as THREE.Mesh).material).toBe(surface['riverMaterial'])
+    expect(surface['riverMaterial'].name).toBe('flowing-river-water')
+    expect(surface['riverMaterial'].customProgramCacheKey()).toBe('labline-flowing-river-v1')
+    expect(surface['riverMaterial'].normalMap?.repeat.y).toBeGreaterThan(surface['riverMaterial'].normalMap!.repeat.x)
+
+    const foam = (surface.foamRoot.children[0] as THREE.Mesh).geometry.getAttribute('position')
+    const riverBankXs = Array.from({ length: foam.count }, (_, index) => foam.getX(index))
+      .filter((x) => x > 0.5 && x < 1.5)
+    expect(Math.max(...riverBankXs) - Math.min(...riverBankXs)).toBeLessThan(1.2)
+
+    surface.setFrame(1, 20, false)
+    surface.setFrame(2, 20, false)
+    const flowingOffset = surface['riverMaterial'].normalMap!.offset.clone()
+    surface.setFrame(3, 20, true)
+    expect(surface['riverMaterial'].normalMap!.offset.equals(flowingOffset)).toBe(true)
+    surface.dispose()
+  })
+
+  it('keeps procedural bridge details chunk-batched and scales decks, parapets, and piers by class', () => {
+    const local = new MapSurfaceLayer({ width: 1, height: 1, tileSize: 1, source: bridgeSource(TransportVisual.local) })
+    const highway = new MapSurfaceLayer({ width: 1, height: 1, tileSize: 1, source: bridgeSource(TransportVisual.highway) })
+    const bounds = () => ({ minX: 0, maxX: 1, minY: 0, maxY: 1 })
+    local.updateVisibleChunks(new Set([0]), bounds)
+    highway.updateVisibleChunks(new Set([0]), bounds)
+
+    expect(local.bridgeRoot.children).toHaveLength(1)
+    expect(highway.bridgeRoot.children).toHaveLength(1)
+    const localGeometry = (local.bridgeRoot.children[0] as THREE.Mesh).geometry
+    const highwayGeometry = (highway.bridgeRoot.children[0] as THREE.Mesh).geometry
+    expect(localGeometry.getAttribute('position').count).toBeGreaterThan(16)
+    expect(highwayGeometry.getAttribute('position').count).toBe(localGeometry.getAttribute('position').count)
+    localGeometry.computeBoundingBox()
+    highwayGeometry.computeBoundingBox()
+    expect(highwayGeometry.boundingBox!.max.x - highwayGeometry.boundingBox!.min.x)
+      .toBeGreaterThan(localGeometry.boundingBox!.max.x - localGeometry.boundingBox!.min.x)
+    expect(highwayGeometry.boundingBox!.max.y).toBeGreaterThan(localGeometry.boundingBox!.max.y)
+    local.dispose()
+    highway.dispose()
   })
 
   it('builds terrain-conforming road ribbons with canonical cross-chunk seams', () => {
@@ -449,6 +508,21 @@ function transportRibbonSource(flat: boolean): ViewportRenderSource {
     },
     getChunkInstances: () => [],
     getChunkRevision: () => 0,
+  }
+}
+
+function bridgeSource(roadClass: number): ViewportRenderSource {
+  return {
+    width: 1, height: 1, tileSize: 1,
+    getWaterElevation: () => 0,
+    readSurface(_tileId, out) {
+      out.kind = SurfaceKind.lake
+      out.neighborMask = 0x11
+      out.region = 0
+      out.flags = 0
+      out.transport = ((roadClass | TransportVisual.bridge) << 8) | 0x11
+    },
+    getChunkInstances: () => [], getChunkRevision: () => 0,
   }
 }
 

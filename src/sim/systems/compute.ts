@@ -12,6 +12,7 @@ import {
   engineerTrainBonus,
   engineerUtilBonus,
 } from "./staff";
+import { playerHallPueMultiplier } from "./dataHallLayouts";
 
 export interface ComputeSnapshot {
   rawFlopsPf: number;
@@ -154,7 +155,7 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
   const energy = mapEnergy(state);
   const campus = campusBonuses(state);
   const utilCap = Math.min(0.98, player.utilCap);
-  const pue = Math.max(1.05, player.pue - campus.pueReduction);
+  const pue = Math.max(1.05, player.pue - campus.pueReduction) * playerHallPueMultiplier(state);
 
   const priorServeDuty =
     Math.max(0, state.lastMarket.servedPf ?? 0) / Math.max(1e-6, fleet.flopsPf);

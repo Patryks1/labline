@@ -41,6 +41,8 @@ import { tickExternalities } from './systems/externalities'
 import { tickTransport } from './systems/transport'
 import { tickAutomation } from './systems/automation'
 import { tickEnergyContracts, tickSiteProjects } from './systems/siteEnergy'
+import { tickFacilityMarket } from './systems/facilityMarket'
+import { tickDataHallLayouts } from './systems/dataHallLayouts'
 
 /**
  * Stable count of player-visible work that has crossed its completion
@@ -111,6 +113,7 @@ export function tickDay(state: SimState): SimState {
   s = tickFab(s)
   s = tickMap(s)
   s = maybeListRivalHalls(s)
+  s = tickFacilityMarket(s)
   s = tickCityPowerContracts(s)
   s = tickPowerExportContracts(s)
   s = tickSiteProjects(s)
@@ -120,6 +123,7 @@ export function tickDay(state: SimState): SimState {
   s = tickData(s)
   s = tickDataSupplierContracts(s)
   s = tickRivals(s)
+  s = tickDataHallLayouts(s)
   s = tickResearch(s)
   s = tickResearchPrograms(s)
   s = tickTraining(s)

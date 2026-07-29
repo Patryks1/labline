@@ -1365,6 +1365,30 @@ export function releaseFromJob(state: SimState, jobId?: string): SimState {
   return finalizeJob(state, "released", jobId);
 }
 
+/** Cheat surface: finish compute and post-training while preserving the release decision. */
+export function completeTrainingJobsNow(state: SimState): SimState {
+  const jobs = playerTrainingJobs(state);
+  const active = jobs.filter((job) => !job.failed);
+  if (active.length === 0) return state;
+  const completed = jobs.map((job) =>
+    job.failed
+      ? job
+      : {
+          ...job,
+          progressPfDays: Math.max(job.progressPfDays, job.targetPfDays, job.recommendedPfDays ?? 0),
+          postTrainProgress: Math.max(job.postTrainProgress, job.postTrainTarget),
+          awaitingDecision: true,
+          paused: false,
+          stallReason: null,
+        },
+  );
+  return withAlert(
+    withTrainingJobs(state, completed),
+    "info",
+    `${active.length} training run${active.length === 1 ? "" : "s"} completed — choose release or keep internal.`,
+  );
+}
+
 /** Materialize a private checkpoint and queue a non-public benchmark run. */
 export function benchmarkTrainingJob(state: SimState, jobId: string): SimState {
   const jobs = playerTrainingJobs(state);

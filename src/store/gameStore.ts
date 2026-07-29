@@ -46,6 +46,19 @@ import {
   renameBuilding,
   mapTileAt,
 } from "../sim/systems/map";
+import { buyRivalDataCenter } from "../sim/systems/facilities";
+import {
+  acceptFacilityOffer,
+  demolishFacility,
+  submitFacilityOffer,
+  withdrawFacilityOffer,
+} from "../sim/systems/facilityMarket";
+import {
+  applyInstantCheat,
+  type InstantCheatAction,
+} from "../sim/systems/cheats";
+import { applyHallPlan, migrateDataHallLayouts } from "../sim/systems/dataHallLayouts";
+import type { DataHallEditPlan } from "../sim/types";
 import {
   setChipDesignFocus,
   startFabCampaign,
@@ -158,6 +171,7 @@ interface GameStore {
   saveStatus: "idle" | "saving" | "saved" | "error";
   state: SimState;
   activePanel: PanelId;
+  hallEditorFacilityId: string | null;
   selectedTile: { x: number; y: number } | null;
   selectedRivalId: string | null;
   mapTool: MapToolMode;
@@ -183,6 +197,9 @@ interface GameStore {
   /** In-run pause / save-load menu */
   pauseMenuOpen: boolean;
   setPanel: (p: PanelId) => void;
+  openHallEditor: (facilityId: string) => void;
+  closeHallEditor: () => void;
+  applyHallEditorPlan: (plan: DataHallEditPlan) => { ok: boolean; error?: string; netCost: number };
   /** Open Infrastructure → Overview (map) and expand the left rail. */
   openSites: () => void;
   openInfrastructureOverview: () => void;
@@ -218,6 +235,10 @@ interface GameStore {
     key: keyof CampaignRules["autoPause"],
     enabled: boolean,
   ) => void;
+  /** Adjust player cash from the explicitly scoped in-run cheat settings. */
+  adjustCheatMoney: (delta: number) => boolean;
+  /** Complete a supported in-progress operation and return the affected count. */
+  runInstantCheat: (action: InstantCheatAction) => number;
   togglePause: () => void;
   stepDay: () => void;
   setAllocation: (a: Partial<Allocation>) => void;
@@ -289,6 +310,12 @@ interface GameStore {
   upgradeBuilding: () => void;
   /** Rename selected / given player building (multi-tile campuses included). */
   renameBuilding: (x: number, y: number, name: string) => void;
+  submitFacilityOffer: (facilityId: string, amount: number) => void;
+  withdrawFacilityOffer: (offerId: string) => void;
+  acceptFacilityOffer: (offerId: string) => void;
+  /** Compatibility purchase action for map/fleet callers. */
+  buyRivalDataCenter: (x: number, y: number) => void;
+  demolishFacility: (facilityId: string) => void;
   startFab: () => void;
   hireTalent: () => void;
   buyData: () => void;
@@ -475,6 +502,7 @@ function applyLoadedState(state: SimState) {
     lifecycleError: null,
     state: { ...state, paused: true },
     activePanel: "stats" as PanelId,
+    hallEditorFacilityId: null,
     selectedTile: null,
     selectedRivalId: null,
     mapTool: "select" as MapToolMode,
@@ -501,6 +529,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
   saveStatus: "idle",
   state: placeholderState(),
   activePanel: "stats",
+  hallEditorFacilityId: null,
   selectedTile: null,
   selectedRivalId: null,
   mapTool: "select" as MapToolMode,
@@ -548,6 +577,18 @@ export const useGameStore = create<GameStore>((set, get) => ({
         sequence: (store.researchFocusRequest?.sequence ?? 0) + 1,
       },
     })),
+  openHallEditor: (hallEditorFacilityId) => set((store) => ({
+    state: migrateDataHallLayouts(store.state),
+    hallEditorFacilityId,
+    leftRailOpen: false,
+    commandDockOpen: false,
+  })),
+  closeHallEditor: () => set({ hallEditorFacilityId: null }),
+  applyHallEditorPlan: (plan) => {
+    const result = applyHallPlan(get().state, plan)
+    if (result.ok) set({ state: result.state })
+    return { ok: result.ok, error: result.error, netCost: result.netCost }
+  },
 
   openFleet: () =>
     set({
@@ -725,6 +766,43 @@ export const useGameStore = create<GameStore>((set, get) => ({
         },
       },
     })),
+
+  adjustCheatMoney: (delta) => {
+    if (!Number.isFinite(delta) || delta === 0) return false;
+    const current = get().state.player.cash;
+    const cash = Math.max(0, current + delta);
+    if (!Number.isFinite(cash)) return false;
+    set((st) => {
+      const playerLab = st.state.labs[st.state.playerLabId];
+      return {
+        state: {
+          ...st.state,
+          player: {
+            ...st.state.player,
+            cash,
+            finance: { ...st.state.player.finance, cash },
+          },
+          labs: playerLab
+            ? {
+                ...st.state.labs,
+                [st.state.playerLabId]: {
+                  ...playerLab,
+                  cash,
+                  finance: { ...playerLab.finance, cash },
+                },
+              }
+            : st.state.labs,
+        },
+      };
+    });
+    return true;
+  },
+
+  runInstantCheat: (action) => {
+    const result = applyInstantCheat(get().state, action);
+    if (result.affected > 0) set({ state: result.state });
+    return result.affected;
+  },
 
   togglePause: () => {
     const paused = !get().state.paused;
@@ -928,6 +1006,21 @@ export const useGameStore = create<GameStore>((set, get) => ({
   renameBuilding: (x, y, name) =>
     set((st) => ({ state: renameBuilding(st.state, x, y, name) })),
 
+  submitFacilityOffer: (facilityId, amount) =>
+    set((st) => ({
+      state: submitFacilityOffer(st.state, facilityId, st.state.playerLabId, amount),
+    })),
+  withdrawFacilityOffer: (offerId) =>
+    set((st) => ({ state: withdrawFacilityOffer(st.state, offerId) })),
+  acceptFacilityOffer: (offerId) =>
+    set((st) => ({ state: acceptFacilityOffer(st.state, offerId) })),
+  buyRivalDataCenter: (x, y) =>
+    set((st) => ({ state: buyRivalDataCenter(st.state, x, y) })),
+  demolishFacility: (facilityId) =>
+    set((st) => ({
+      state: demolishFacility(st.state, facilityId, st.state.playerLabId),
+    })),
+
   startFab: () => set((st) => ({ state: startFabCampaign(st.state) })),
   setChipDesignFocus: (focus) =>
     set((st) => ({ state: setChipDesignFocus(st.state, focus) })),
@@ -1019,6 +1112,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       researchFocusRequest: null,
       buildMode: null,
       pauseMenuOpen: false,
+      hallEditorFacilityId: null,
     });
   },
 
@@ -1064,6 +1158,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
         commandView: "pnl",
         hotkeyHelpOpen: false,
         pauseMenuOpen: false,
+        hallEditorFacilityId: null,
       });
       return { ok: true as const };
     } catch (error) {

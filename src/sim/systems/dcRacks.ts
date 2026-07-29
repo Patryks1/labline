@@ -12,6 +12,24 @@ import { tileCoords } from '../world'
 import { seededId } from '../rng'
 import { queueAcceleratorBid } from './sharedMarkets'
 import { transportAccessFactorAt } from './transport'
+import {
+  applyRackLayoutToInstalls,
+  facilityIdForHall,
+  layoutRackInstalls,
+  moveRack,
+  rackAddressAt,
+  type RackAutoPlacePreview,
+} from './rackLayouts'
+import { ensureRackUnitIds, refreshDataHallAnalysis } from './dataHallLayouts'
+
+function appendRackUnitIds(install: RackInstall, amount: number): void {
+  const normalized = ensureRackUnitIds(install)
+  install.unitIds = [
+    ...(normalized.unitIds ?? []),
+    ...Array.from({ length: Math.max(0, amount) }, (_, index) =>
+      `${install.id}:unit:${String((normalized.unitIds?.length ?? 0) + index + 1).padStart(4, '0')}`),
+  ]
+}
 
 function alert(state: SimState, severity: 'info' | 'warn' | 'danger', message: string): SimState {
   return {
@@ -96,6 +114,7 @@ export function dcBayUsage(state: SimState, x: number, y: number): {
   const capacity = dc?.rackCapacity ?? 0
   const hallCompute = dc ? dataHallComputeMultiplier(dc) : 1
   let live = 0
+  let owned = 0
   let ordered = 0
   let mwLive = 0
   let flopsLive = 0
@@ -111,10 +130,16 @@ export function dcBayUsage(state: SimState, x: number, y: number): {
     }
     const units = (r.rackUnits || sku.rackUnits) * r.count
     if (r.status === 'live') {
-      live += units
-      mwLive += sku.mw * r.count
-      flopsLive += sku.flopsPf * r.count * hallCompute
-      vramLive += sku.vramGb * r.count
+      owned += units
+      const facilityId = r.facilityId ?? dc?.campusId
+      const layout = facilityId ? state.dataHallLayouts?.[facilityId] : undefined
+      const operational = layout ? new Set(layout.analysis.operationalRackUnitIds) : null
+      const normalized = ensureRackUnitIds(r)
+      const activeCount = operational ? (normalized.unitIds ?? []).filter((unitId) => operational.has(unitId)).length : r.count
+      live += (r.rackUnits || sku.rackUnits) * activeCount
+      mwLive += sku.mw * activeCount
+      flopsLive += sku.flopsPf * activeCount * hallCompute * (layout?.analysis.throughputMultiplier ?? 1)
+      vramLive += sku.vramGb * activeCount
     } else {
       ordered += units
     }
@@ -140,8 +165,10 @@ export function dcBayUsage(state: SimState, x: number, y: number): {
   }
   // Legacy hardware is live inventory and reserves bays before auto-balance
   // or a manual market bid can place more physical racks.
-  live += legacyBayUsageByHall(state).get(`${x},${y}`) ?? 0
-  const used = live + ordered
+  const legacy = legacyBayUsageByHall(state).get(`${x},${y}`) ?? 0
+  live += legacy
+  owned += legacy
+  const used = owned + ordered
   return {
     used,
     ordered,
@@ -156,6 +183,71 @@ export function dcBayUsage(state: SimState, x: number, y: number): {
 
 export function racksOnDc(state: SimState, x: number, y: number): RackInstall[] {
   return state.player.rackFleet.filter((r) => r.x === x && r.y === y)
+}
+
+/** Exact, deterministic operations layout for a completed player hall. */
+export function rackLayoutOnDc(state: SimState, x: number, y: number): RackAutoPlacePreview | null {
+  const dc = getPlayerDc(state, x, y)
+  if (!dc) return null
+  return layoutRackInstalls(
+    x,
+    y,
+    dc.rackCapacity,
+    state.player.rackFleet,
+    dc.campusId ?? facilityIdForHall(x, y),
+  )
+}
+
+/** Persist deterministic first-fit positions for every live and inbound rack in a hall. */
+export function autoArrangeRacksInDc(state: SimState, x: number, y: number): SimState {
+  const dc = getPlayerDc(state, x, y)
+  if (!dc) return alert(state, 'warn', 'Select a completed player data hall.')
+  // Auto-arrange is a full deterministic repack. Persisted manual starts are
+  // intentionally removed here so confirmation matches the UI preview.
+  const installs = state.player.rackFleet.map((install) =>
+    install.x === x && install.y === y ? { ...install, bayStarts: undefined } : install)
+  const preview = layoutRackInstalls(
+    x,
+    y,
+    dc.rackCapacity,
+    installs,
+    dc.campusId ?? facilityIdForHall(x, y),
+  )
+  if (!preview.valid) return alert(state, 'warn', preview.unplaced[0]?.reason ?? 'Rack layout is invalid.')
+  return {
+    ...state,
+    player: {
+      ...state.player,
+      rackFleet: applyRackLayoutToInstalls(state.player.rackFleet, x, y, preview.layout),
+    },
+  }
+}
+
+/** Move one physical rack to an exact bay; multi-unit racks remain contiguous. */
+export function moveRackInDc(
+  state: SimState,
+  x: number,
+  y: number,
+  placementId: string,
+  targetBay: number,
+): SimState {
+  const preview = rackLayoutOnDc(state, x, y)
+  if (!preview) return alert(state, 'warn', 'Select a completed player data hall.')
+  let target
+  try {
+    target = rackAddressAt(preview.layout.facilityId, preview.layout.templateId, targetBay)
+  } catch {
+    return alert(state, 'warn', 'That bay is outside the data hall.')
+  }
+  const moved = moveRack(preview.layout, placementId, target)
+  if (moved.errors.length > 0) return alert(state, 'warn', moved.errors[0]!)
+  return {
+    ...state,
+    player: {
+      ...state.player,
+      rackFleet: applyRackLayoutToInstalls(state.player.rackFleet, x, y, moved.layout),
+    },
+  }
 }
 
 /** Order complete racks into a live player data hall. */
@@ -237,10 +329,12 @@ export function orderRacksIntoDc(
   )
   if (existing) {
     const prevPaid = existing.paidEach * existing.count
+    appendRackUnitIds(existing, quote.qty)
     existing.count += quote.qty
     existing.paidEach = Math.round((prevPaid + unit * quote.qty) / existing.count)
     existing.daysLeft = Math.max(existing.daysLeft, lead)
     existing.rackUnits = sku.rackUnits
+    existing.facilityId = existing.facilityId ?? dc.campusId ?? facilityIdForHall(x, y)
   } else if (lead <= 0) {
     // Instant delivery (e.g. some custom stock)
     const live = fleet.find(
@@ -248,12 +342,14 @@ export function orderRacksIntoDc(
     )
     if (live) {
       const prevPaid = live.paidEach * live.count
+      appendRackUnitIds(live, quote.qty)
       live.count += quote.qty
       live.paidEach = Math.round((prevPaid + unit * quote.qty) / live.count)
       live.rackUnits = sku.rackUnits
     } else {
+      const id = seededId('rk', state.seed, state.day, x, y, skuId, fleet.length)
       fleet.push({
-        id: seededId('rk', state.seed, state.day, x, y, skuId, fleet.length),
+        id,
         skuId,
         x,
         y,
@@ -262,11 +358,14 @@ export function orderRacksIntoDc(
         daysLeft: 0,
         paidEach: unit,
         rackUnits: sku.rackUnits,
+        facilityId: dc.campusId ?? facilityIdForHall(x, y),
+        unitIds: Array.from({ length: quote.qty }, (_, index) => `${id}:unit:${String(index + 1).padStart(4, '0')}`),
       })
     }
   } else {
+    const id = seededId('rk', state.seed, state.day, x, y, skuId, fleet.length)
     fleet.push({
-      id: seededId('rk', state.seed, state.day, x, y, skuId, fleet.length),
+      id,
       skuId,
       x,
       y,
@@ -275,6 +374,8 @@ export function orderRacksIntoDc(
       daysLeft: lead,
       paidEach: unit,
       rackUnits: sku.rackUnits,
+      facilityId: dc.campusId ?? facilityIdForHall(x, y),
+      unitIds: Array.from({ length: quote.qty }, (_, index) => `${id}:unit:${String(index + 1).padStart(4, '0')}`),
     })
   }
 
@@ -326,11 +427,26 @@ export function sellRacksFromDc(
   }
 
   const refund = Math.floor(group.paidEach * sku.sellBackRate * count)
+  const normalizedGroup = ensureRackUnitIds(group)
+  const removedUnitIds = new Set((normalizedGroup.unitIds ?? []).slice(Math.max(0, group.count - count)))
   group.count -= count
+  if (group.bayStarts) group.bayStarts = group.bayStarts.slice(0, group.count)
+  group.unitIds = (normalizedGroup.unitIds ?? []).slice(0, group.count)
   const nextFleet = fleet.filter((r) => r.count > 0)
+  const facilityId = group.facilityId ?? dc.campusId ?? facilityIdForHall(x, y)
+  const layout = state.dataHallLayouts?.[facilityId]
+  const dataHallLayouts = layout ? {
+    ...state.dataHallLayouts,
+    [facilityId]: {
+      ...layout,
+      revision: layout.revision + 1,
+      objects: layout.objects.filter((object) => !object.rackUnitId || !removedUnitIds.has(object.rackUnitId)),
+    },
+  } : state.dataHallLayouts
 
-  return {
+  const soldState: SimState = {
     ...state,
+    dataHallLayouts,
     player: {
       ...state.player,
       cash: state.player.cash + refund,
@@ -346,6 +462,7 @@ export function sellRacksFromDc(
       ...state.alerts,
     ].slice(0, 40),
   }
+  return refreshDataHallAnalysis(soldState, facilityId)
 }
 
 /** Cancel pending order (partial refund). */
@@ -429,11 +546,13 @@ export function tickRackDeliveries(state: SimState): SimState {
       )
       if (live) {
         const prev = live.paidEach * live.count
+        const incoming = ensureRackUnitIds(r)
+        live.unitIds = [...(ensureRackUnitIds(live).unitIds ?? []), ...(incoming.unitIds ?? [])]
         live.count += r.count
         live.paidEach = Math.round((prev + r.paidEach * r.count) / live.count)
         live.rackUnits = r.rackUnits || live.rackUnits
       } else {
-        fleet.push({ ...r, status: 'live', daysLeft: 0 })
+        fleet.push({ ...ensureRackUnitIds(r), status: 'live', daysLeft: 0 })
       }
       delivered += r.count
     } else {
@@ -471,7 +590,7 @@ export function applyRackUsageToTiles(state: SimState): SimState {
       const { x, y } = tileCoords(facility.anchor, world.descriptor.width)
       const usage = dcBayUsage(state, x, y)
       const stats = facility.stats ?? {}
-      const racksUsed = Math.min(stats.rackCapacity ?? 0, usage.live + usage.ordered)
+      const racksUsed = Math.min(stats.rackCapacity ?? 0, usage.used)
       if (racksUsed === (stats.racksUsed ?? 0)) continue
       batch.updateFacility(facility.id, { stats: { ...stats, racksUsed } })
       changed = true
@@ -485,7 +604,7 @@ export function applyRackUsageToTiles(state: SimState): SimState {
   const tiles = state.map.tiles.map((t) => {
     if ((!isDcKind(t.kind) || !isDcAnchor(t)) || t.owner !== 'player') return t
     const usage = dcBayUsage(state, t.x, t.y)
-    return { ...t, racksUsed: Math.min(t.rackCapacity, usage.live + usage.ordered) }
+    return { ...t, racksUsed: Math.min(t.rackCapacity, usage.used) }
   })
   return { ...state, map: { ...state.map, tiles } }
 }

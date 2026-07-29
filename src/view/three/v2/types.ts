@@ -44,6 +44,8 @@ export const SurfaceFlag = {
   constructing: 1 << 3,
   buildable: 1 << 4,
   powered: 1 << 5,
+  /** Natural V7 watercourse; absent in legacy worlds and artificial lakes. */
+  river: 1 << 6,
 } as const
 
 /** Low byte topology order used by compact-world v3 transport data. */

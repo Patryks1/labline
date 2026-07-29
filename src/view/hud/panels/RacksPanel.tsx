@@ -5,7 +5,11 @@ import {
   getModule,
   scoreDesign,
 } from '../../../sim/balance/racks'
-import { dcBayUsage, fullOrderCatalog, racksOnDc } from '../../../sim/systems/dcRacks'
+import {
+  dcBayUsage,
+  fullOrderCatalog,
+  racksOnDc,
+} from '../../../sim/systems/dcRacks'
 import {
   clearSlot,
   designToSku,
@@ -22,6 +26,7 @@ import { aggregateEffects } from '../../../sim/systems/research'
 import { isDcAnchor, isDcKind } from '../../../sim/systems/map'
 import { BuildingNameField } from '../ui/BuildingNameField'
 import { mapTileAtAny } from '../../../sim/systems/worldAccess'
+import { facilityAnchorTiles } from '../../../sim/systems/worldAccess'
 import {
   EmptyState,
   HudButton,
@@ -38,6 +43,11 @@ import {
   StatRow,
 } from '../ui/kit'
 import { fleetStats } from '../../../sim/systems/racks'
+import {
+  recommendRackDesigns,
+  type RackDesignGoal,
+} from '../../../sim/systems/rackLayouts'
+import { facilityAcquisitionPresentation } from './hardware/facilityMarketPresentation'
 
 const KIND_ORDER: ModuleKind[] = ['gpu', 'ram', 'cpu', 'cooling', 'psu', 'nic']
 
@@ -47,12 +57,21 @@ export function RacksPanel() {
   const orderRacks = useGameStore((s) => s.orderRacks)
   const sellRacks = useGameStore((s) => s.sellRacks)
   const cancelRackOrder = useGameStore((s) => s.cancelRackOrder)
+  const submitFacilityOffer = useGameStore((s) => s.submitFacilityOffer)
+  const withdrawFacilityOffer = useGameStore((s) => s.withdrawFacilityOffer)
+  const acceptFacilityOffer = useGameStore((s) => s.acceptFacilityOffer)
+  const buyRivalDataCenter = useGameStore((s) => s.buyRivalDataCenter)
   const setState = (s: typeof state) => useGameStore.setState({ state: s })
+  const focusMapTile = useGameStore((s) => s.focusMapTile)
+  const openHallEditor = useGameStore((s) => s.openHallEditor)
+  const ownerFilter = useGameStore((s) => s.fleetOwnerFilter)
   const discount = aggregateEffects(state.player.researchUnlocked).chipDiscount ?? 0
   const fleet = fleetStats(state)
 
   const catalog = useMemo(() => fullOrderCatalog(state), [state])
   const tile = selected ? mapTileAtAny(state, selected.x, selected.y) : undefined
+  const tileX = tile?.x
+  const tileY = tile?.y
   const isLiveDc =
     tile &&
     isDcKind(tile.kind) &&
@@ -60,16 +79,45 @@ export function RacksPanel() {
     tile.owner === 'player' &&
     tile.buildingProgress >= tile.buildingTarget
   const usage = isLiveDc ? dcBayUsage(state, tile.x, tile.y) : null
-  const installs = isLiveDc ? racksOnDc(state, tile.x, tile.y) : []
+  const installs = useMemo(
+    () => isLiveDc && tileX != null && tileY != null ? racksOnDc(state, tileX, tileY) : [],
+    [isLiveDc, state, tileX, tileY],
+  )
   const orderedCount = installs.filter((r) => r.status === 'ordered').reduce((s, r) => s + r.count, 0)
   const liveCount = installs.filter((r) => r.status === 'live').reduce((s, r) => s + r.count, 0)
 
-  const [tab, setTab] = useState<'order' | 'designer'>('order')
+  const [tab, setTab] = useState<'fleet' | 'hall' | 'blueprints'>('fleet')
+  const [autoDesignGoal, setAutoDesignGoal] = useState<RackDesignGoal>('balanced')
   const [design, setDesign] = useState<RackDesign>(() => emptyDesign('case_8u', 'My Node'))
   const [selectedModule, setSelectedModule] = useState('gpu_h100')
   const [msg, setMsg] = useState('')
+  const [facilityBidMillions, setFacilityBidMillions] = useState('')
   const stats = useMemo(() => scoreDesign(design), [design])
   const chassis = CHASSIS_CATALOG.find((c) => c.id === design.chassisId)!
+  const halls = useMemo(
+    () => facilityAnchorTiles(state, ownerFilter ? { ownerId: ownerFilter } : undefined)
+      .filter((hall) => isDcKind(hall.kind) && isDcAnchor(hall))
+      .toSorted((a, b) => (a.owner === 'player' ? -1 : 1) - (b.owner === 'player' ? -1 : 1) || a.name.localeCompare(b.name)),
+    [ownerFilter, state],
+  )
+  const selectedOwner = tile?.owner === 'player' || tile?.owner === 'neutral' ? null : state.rivals.find((r) => r.id === tile?.owner)
+  const intelConfidence = selectedOwner?.publicEstimate?.confidence ?? 0
+  const intelLevel = intelConfidence < 0.28 ? 'unknown' : intelConfidence < 0.72 ? 'estimate' : 'exact'
+  const hallCapacity = tile && isDcKind(tile.kind) ? Math.max(0, tile.rackCapacity) : 0
+  const autoDesigns = useMemo(
+    () => recommendRackDesigns({ goal: autoDesignGoal, limit: 3 }),
+    [autoDesignGoal],
+  )
+  const selectedFacilityId = tile?.campusId ?? (tile ? `facility:${tile.x},${tile.y}` : '')
+  const activeFacilityOffer = state.facilityMarket?.offers.find(
+    (offer) =>
+      offer.facilityId === selectedFacilityId &&
+      offer.buyerLabId === state.playerLabId &&
+      (offer.status === 'pending' || offer.status === 'countered'),
+  )
+  const facilityAcquisition = tile
+    ? facilityAcquisitionPresentation(tile, activeFacilityOffer)
+    : { mode: 'bid' as const }
 
   const onSlotClick = (slotId: string) => {
     const occupied = design.placements.find((p) => p.slotId === slotId)
@@ -104,17 +152,161 @@ export function RacksPanel() {
         <SegmentedTabs
           ariaLabel="Racks sections"
           active={tab}
-          onChange={(id) => setTab(id as 'order' | 'designer')}
+          onChange={(id) => setTab(id as 'fleet' | 'hall' | 'blueprints')}
           items={[
-            { id: 'order', label: 'Order' },
-            { id: 'designer', label: `Blueprints (${state.player.rackDesigns.length})` },
+            { id: 'fleet', label: `Fleet (${halls.length})` },
+            { id: 'hall', label: 'Facility' },
+            { id: 'blueprints', label: `Blueprints (${state.player.rackDesigns.length})` },
           ]}
         />
 
         <div key={tab} className="panel-swap">
-          {tab === 'order' ? (
-            isLiveDc && usage && tile ? (
+          {tab === 'fleet' ? (
+            halls.length > 0 ? (
+              <div className="anim-stagger space-y-2">
+                {halls.map((hall) => {
+                  const playerOwned = hall.owner === 'player'
+                  const rival = playerOwned || hall.owner === 'neutral' ? null : state.rivals.find((entry) => entry.id === hall.owner)
+                  const confidence = rival?.publicEstimate?.confidence ?? 0
+                  const intel = confidence < 0.28 ? 'Unknown' : confidence < 0.72 ? 'Estimated' : 'Verified'
+                  const used = playerOwned || confidence >= 0.72 ? `${hall.racksUsed}` : confidence >= 0.28 ? `~${Math.round(hall.racksUsed / 8) * 8}` : '—'
+                  const facilityId = hall.campusId ?? `facility:${hall.x},${hall.y}`
+                  return (
+                    <div
+                      key={`${hall.x},${hall.y}`}
+                      className="rounded-xl border border-line bg-panel-2 p-3 transition hover:border-mint/45 hover:bg-mint/[0.04]"
+                    >
+                      <button
+                        type="button"
+                        className="w-full text-left"
+                        onClick={() => {
+                          focusMapTile(hall.x, hall.y)
+                          setTab('hall')
+                        }}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="text-sm font-medium text-bone">{hall.name || `${rival?.name ?? 'Data'} hall`}</div>
+                            <div className="mt-0.5 font-mono text-[0.6875rem] uppercase tracking-wider text-muted">{hall.dcSize ?? 'small'} · {playerOwned ? 'Owned' : rival?.name ?? hall.owner}</div>
+                          </div>
+                          <StatusChip tone={playerOwned ? 'positive' : confidence >= 0.72 ? 'neutral' : 'warning'}>{playerOwned ? `${hall.rackCapacity - hall.racksUsed} free` : intel}</StatusChip>
+                        </div>
+                        <div className="mt-2 grid grid-cols-3 gap-2 font-mono text-[0.75rem] text-muted">
+                          <span><b className="block text-bone">{used}</b> racks</span>
+                          <span><b className="block text-bone">{playerOwned || confidence >= 0.72 ? hall.rackCapacity : '—'}</b> capacity</span>
+                          <span><b className="block text-bone">{hall.powered === false ? 'OFF' : 'LIVE'}</b> plant</span>
+                        </div>
+                      </button>
+                      {playerOwned ? (
+                        <HudButton
+                          type="button"
+                          variant="primary"
+                          className="mt-3 w-full"
+                          onClick={() => {
+                            focusMapTile(hall.x, hall.y)
+                            openHallEditor(facilityId)
+                          }}
+                        >
+                          Open floor planner
+                        </HudButton>
+                      ) : null}
+                    </div>
+                  )
+                })}
+              </div>
+            ) : <EmptyState title="No data halls" description="Build a hall from Sites, or select a rival in the map to inspect their facilities." />
+          ) : tab === 'hall' ? (
+            tile && isDcKind(tile.kind) && isDcAnchor(tile) ? (
               <div className="space-y-3">
+                {tile.owner !== 'player' ? (
+                  <GameCard eyebrow={`${intelLevel} intelligence`} title={tile.name || `${selectedOwner?.name ?? 'Rival'} hall`} actions={<StatusChip tone={intelLevel === 'exact' ? 'positive' : 'warning'}>{Math.round(intelConfidence * 100)}% confidence</StatusChip>}>
+                    <StatRow label="Rack inventory" value={intelLevel === 'unknown' ? 'Unknown' : intelLevel === 'estimate' ? `~${Math.round(tile.racksUsed / 8) * 8}` : tile.racksUsed} />
+                    <StatRow label="Rack capacity" value={intelLevel === 'exact' ? tile.rackCapacity : intelLevel === 'estimate' ? `~${hallCapacity || (tile.dcSize === 'large' ? 960 : tile.dcSize === 'medium' ? 288 : 96)}` : 'Unknown'} />
+                    <p className="mt-2 text-[0.75rem] text-muted">Competitive intelligence is non-operational. Higher confidence resolves chassis patterns and exact counts.</p>
+                    {activeFacilityOffer ? (
+                      <div className="mt-3 space-y-2 rounded-lg border border-amber/30 bg-amber/5 p-2.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <StatusChip tone="warning">
+                            {activeFacilityOffer.status === 'countered' ? 'Countered' : 'Offer pending'}
+                          </StatusChip>
+                          <span className="font-mono text-[0.75rem] text-bone">
+                            {money(activeFacilityOffer.counterAmount ?? activeFacilityOffer.amount)}
+                          </span>
+                        </div>
+                        <p className="text-[0.75rem] text-muted">
+                          {money(activeFacilityOffer.escrow)} held in escrow
+                          {activeFacilityOffer.status === 'pending'
+                            ? ` · response due by day ${activeFacilityOffer.respondDay}`
+                            : ' · seller counter awaiting your decision'}
+                        </p>
+                        <div className="flex gap-2">
+                          <HudButton
+                            type="button"
+                            variant="ghost"
+                            className="flex-1"
+                            onClick={() => withdrawFacilityOffer(activeFacilityOffer.id)}
+                          >
+                            Withdraw
+                          </HudButton>
+                          {activeFacilityOffer.status === 'countered' ? (
+                            <HudButton
+                              type="button"
+                              variant="primary"
+                              className="flex-1"
+                              disabled={state.player.cash < Math.max(0, (activeFacilityOffer.counterAmount ?? activeFacilityOffer.amount) - activeFacilityOffer.escrow)}
+                              onClick={() => acceptFacilityOffer(activeFacilityOffer.id)}
+                            >
+                              Accept counter
+                            </HudButton>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : facilityAcquisition.mode === 'listed' && tile.listPrice ? (
+                      <HudButton
+                        type="button"
+                        variant="primary"
+                        className="mt-3 w-full"
+                        disabled={state.player.cash < tile.listPrice}
+                        onClick={() => buyRivalDataCenter(tile.x, tile.y)}
+                      >
+                        Buy now · {money(tile.listPrice)}
+                      </HudButton>
+                    ) : (
+                      <div className="mt-3 space-y-2">
+                        <label className="block font-mono text-[0.6875rem] uppercase tracking-wider text-muted" htmlFor="facility-bid">
+                          Offer amount ($M)
+                        </label>
+                        <input
+                          id="facility-bid"
+                          type="number"
+                          min="0.01"
+                          step="0.1"
+                          value={facilityBidMillions}
+                          onChange={(event) => setFacilityBidMillions(event.target.value)}
+                          placeholder="Enter a positive bid"
+                          className="w-full rounded-lg border border-line bg-void/60 px-3 py-2 font-mono text-sm text-bone outline-none focus:border-mint/60"
+                        />
+                        <HudButton
+                          type="button"
+                          variant="primary"
+                          className="w-full"
+                          disabled={!(Number(facilityBidMillions) > 0) || state.player.cash < Number(facilityBidMillions) * 1_000_000}
+                          onClick={() => {
+                            const amount = Math.floor(Number(facilityBidMillions) * 1_000_000)
+                            if (amount > 0) submitFacilityOffer(selectedFacilityId, amount)
+                          }}
+                        >
+                          Submit cash-backed offer
+                        </HudButton>
+                      </div>
+                    )}
+                  </GameCard>
+                ) : null}
+                {isLiveDc && usage ? (
+              <div className="space-y-3">
+                <HudButton type="button" variant="primary" className="w-full" onClick={() => openHallEditor(selectedFacilityId)}>
+                  Open full data hall editor
+                </HudButton>
                 <GameCard
                   tone="mint"
                   live={orderedCount > 0}
@@ -207,14 +399,45 @@ export function RacksPanel() {
                   )}
                 </GameCard>
               </div>
-            ) : (
-              <EmptyState
-                title="Select a live data hall"
-                description="Click a completed hall on the map (or open it from Fleet) to place an order with a live quote."
-              />
-            )
+                ) : null}
+              </div>
+            ) : <EmptyState title="Select a data hall" description="Choose a player or rival facility from Fleet to open its synchronized operations view." />
           ) : (
             <div className="space-y-3">
+              <GameCard eyebrow="Automation" title="Auto-design rack" tone="mint">
+                <div className="mb-2 flex flex-wrap gap-1" role="group" aria-label="Auto-design goal">
+                  {(['balanced', 'training', 'inference', 'memory'] as RackDesignGoal[]).map((goal) => (
+                    <button
+                      key={goal}
+                      type="button"
+                      aria-pressed={autoDesignGoal === goal}
+                      onClick={() => setAutoDesignGoal(goal)}
+                      className={`rounded-md px-2.5 py-1 text-[0.75rem] capitalize transition ${autoDesignGoal === goal ? 'bg-mint text-void' : 'bg-void text-muted hover:text-bone'}`}
+                    >{goal}</button>
+                  ))}
+                </div>
+                <p className="mb-2 text-[0.75rem] text-muted">Recommendations are deterministic previews. Choosing one loads it into the editor; nothing is saved or ordered automatically.</p>
+                <div className="space-y-1.5">
+                  {autoDesigns.map((recommendation) => (
+                    <button
+                      key={recommendation.blueprint.id}
+                      type="button"
+                      className="w-full rounded-lg border border-line/70 bg-void/45 px-2.5 py-2 text-left transition hover:border-mint/45"
+                      onClick={() => {
+                        setDesign({ ...recommendation.blueprint, id: emptyDesign(recommendation.blueprint.chassisId).id })
+                        setMsg(`Loaded ${autoDesignGoal} recommendation — review before saving`)
+                      }}
+                    >
+                      <span className="flex items-center justify-between gap-2 text-[0.8125rem] text-bone">
+                        <strong>{recommendation.blueprint.name}</strong>
+                        <span className="font-mono text-mint">{recommendation.stats.flopsPf.toFixed(2)} PF</span>
+                      </span>
+                      <span className="mt-0.5 block text-[0.6875rem] text-muted">{recommendation.reason} · {money(recommendation.stats.buildCost)}</span>
+                    </button>
+                  ))}
+                </div>
+              </GameCard>
+
               {state.player.rackDesigns.length > 0 ? (
                 <div className="anim-stagger space-y-1.5">
                   {state.player.rackDesigns.map((d) => {

@@ -28,6 +28,9 @@ export function PauseMenu() {
   const newGame = useGameStore((s) => s.newGame)
   const onboardingDismissed = useGameStore((s) => s.state.onboardingDismissed)
   const setOnboardingDismissed = useGameStore((s) => s.setOnboardingDismissed)
+  const cash = useGameStore((s) => s.state.player.cash)
+  const adjustCheatMoney = useGameStore((s) => s.adjustCheatMoney)
+  const runInstantCheat = useGameStore((s) => s.runInstantCheat)
   const [msg, setMsg] = useState<string | null>(null)
   const [tab, setTab] = useState<'main' | 'save' | 'load' | 'settings'>('main')
   const [confirm, setConfirm] = useState<{
@@ -212,7 +215,7 @@ export function PauseMenu() {
               setAutoPause,
               onboardingDismissed,
               setOnboardingDismissed,
-            }} />
+            }} cheats={{ cash, adjustMoney: adjustCheatMoney, runInstantAction: runInstantCheat }} />
           </div>
         )}
 

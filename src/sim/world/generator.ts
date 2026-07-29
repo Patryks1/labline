@@ -12,6 +12,8 @@ import {
   WORLD_GENERATOR_VERSION_V4,
   WORLD_GENERATOR_VERSION_V5,
   WORLD_GENERATOR_VERSION_V6,
+  WORLD_GENERATOR_VERSION_V7,
+  TERRAIN_VARIANT_RIVER,
   BIOME_KIND,
   type CityGrowthMetadata,
   type CityIndustry,
@@ -33,6 +35,7 @@ import {
   type WorldDescriptorV4,
   type WorldDescriptorV5,
   type WorldDescriptorV6,
+  type WorldDescriptorV7,
   type BiomeKind,
 } from './types'
 
@@ -231,13 +234,31 @@ export function createWorldDescriptorV6(options: WorldGenerationOptions): WorldD
   })
 }
 
-type ReliefWorldDescriptor = WorldDescriptorV4 | WorldDescriptorV5 | WorldDescriptorV6
-type HierarchicalWorldDescriptor = WorldDescriptorV5 | WorldDescriptorV6
+export function createWorldDescriptorV7(options: WorldGenerationOptions): WorldDescriptorV7 {
+  const base = createWorldDescriptor(options)
+  return Object.freeze({
+    ...base,
+    generatorVersion: WORLD_GENERATOR_VERSION_V7,
+    elevationScale: 0.04,
+    seaLevel: 0,
+    terrainAlgorithmVersion: 1,
+    biomeVersion: 1,
+    transportAlgorithmVersion: 2,
+    settlementAlgorithmVersion: 5,
+    municipalCampusAlgorithmVersion: 2,
+    cityStatsModelVersion: 1,
+    riverAlgorithmVersion: 1,
+  })
+}
+
+type ReliefWorldDescriptor = WorldDescriptorV4 | WorldDescriptorV5 | WorldDescriptorV6 | WorldDescriptorV7
+type HierarchicalWorldDescriptor = WorldDescriptorV5 | WorldDescriptorV6 | WorldDescriptorV7
 
 function isReliefDescriptor(descriptor: WorldDescriptor): descriptor is ReliefWorldDescriptor {
   return descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V4 ||
     descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
-    descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6
+    descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6 ||
+    descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7
 }
 
 function lakeSeeds(descriptor: WorldDescriptor, rng: RandomSource): LakeSeed[] {
@@ -762,7 +783,10 @@ function buildVariantMasks(
     for (let x = 0; x < width; x++) {
       const id = y * width + x
       const current = kind[id] as TerrainKind
-      let mask = (coordinateHash(x, y, descriptor.seed + 1777) & 0xf) << 4
+      const variantBits = descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7 && current === TERRAIN_KIND.lake
+        ? 0x7
+        : 0xf
+      let mask = (coordinateHash(x, y, descriptor.seed + 1777) & variantBits) << 4
       if (current === TERRAIN_KIND.road || current === TERRAIN_KIND.lake) {
         if (y > 0 && kind[id - width] === current) mask |= 1
         if (x + 1 < width && kind[id + 1] === current) mask |= 2
@@ -2072,7 +2096,7 @@ const V6_DISTRICT_MIXED = DISTRICT_KIND.mixed
 const V6_DISTRICT_GREEN_BUFFER = DISTRICT_KIND.greenBuffer
 
 function v6Footprint(
-  descriptor: WorldDescriptorV6,
+  descriptor: WorldDescriptorV6 | WorldDescriptorV7,
   x: number,
   y: number,
   width: number,
@@ -2086,7 +2110,7 @@ function v6Footprint(
 }
 
 function v6CampusBuildable(
-  descriptor: WorldDescriptorV6,
+  descriptor: WorldDescriptorV6 | WorldDescriptorV7,
   kind: Uint8Array,
   feature: Uint16Array,
   transport: Uint16Array,
@@ -2138,7 +2162,7 @@ function v6CampusBuildable(
  * topology finalisation.
  */
 function rebuildV6OrganicSettlementRoads(
-  descriptor: WorldDescriptorV6,
+  descriptor: WorldDescriptorV6 | WorldDescriptorV7,
   cities: readonly StaticCity[],
   kind: Uint8Array,
   feature: Uint16Array,
@@ -2342,7 +2366,7 @@ function rebuildV6OrganicSettlementRoads(
 
 /** V6 compiles roads first, then assigns explicit concentric land-use zones. */
 function addV6ZoningAndMunicipalPower(
-  descriptor: WorldDescriptorV6,
+  descriptor: WorldDescriptorV6 | WorldDescriptorV7,
   cities: readonly StaticCity[],
   kind: Uint8Array,
   feature: Uint16Array,
@@ -2970,6 +2994,11 @@ interface V4Hydrology {
   readonly lakes: readonly StaticLake[]
 }
 
+interface V7Hydrology extends V4Hydrology {
+  /** Temporary generation mask; folded into variantMask and then discarded. */
+  readonly riverMask: Uint8Array
+}
+
 function tileElevationSum(elevation: Int16Array, width: number, x: number, y: number): number {
   const stride = width + 1
   const nw = y * stride + x
@@ -3082,13 +3111,254 @@ function deriveV4Hydrology(descriptor: ReliefWorldDescriptor, elevation: Int16Ar
   return { kind, feature, lakes: Object.freeze(lakes) }
 }
 
+function relabelV7Water(
+  descriptor: WorldDescriptorV7,
+  kind: Uint8Array,
+): Pick<V4Hydrology, 'feature' | 'lakes'> {
+  const { width, height } = descriptor
+  const size = width * height
+  const feature = new Uint16Array(size)
+  const visited = new Uint8Array(size)
+  const queue = new Int32Array(size)
+  const lakes: StaticLake[] = []
+  for (let start = 0; start < size; start++) {
+    if (kind[start] !== TERRAIN_KIND.lake || visited[start]) continue
+    const lakeIndex = lakes.length
+    if (lakeIndex >= 0x7fff) throw new Error('V7 hydrology produced too many connected water features')
+    let read = 0
+    let write = 0
+    let minX = width
+    let minY = height
+    let maxX = 0
+    let maxY = 0
+    let sumX = 0
+    let sumY = 0
+    visited[start] = 1
+    queue[write++] = start
+    while (read < write) {
+      const id = queue[read++]!
+      const x = id % width
+      const y = Math.floor(id / width)
+      feature[id] = encodeLakeFeature(lakeIndex)
+      minX = Math.min(minX, x); minY = Math.min(minY, y)
+      maxX = Math.max(maxX, x); maxY = Math.max(maxY, y)
+      sumX += x; sumY += y
+      const neighbors = [id - width, id + 1, id + width, id - 1]
+      for (const neighbor of neighbors) {
+        if (neighbor < 0 || neighbor >= size || visited[neighbor] || kind[neighbor] !== TERRAIN_KIND.lake) continue
+        if (Math.abs(neighbor % width - x) > 1) continue
+        visited[neighbor] = 1
+        queue[write++] = neighbor
+      }
+    }
+    lakes.push(Object.freeze({
+      index: lakeIndex,
+      id: `lake_${lakeIndex}`,
+      name: lakeIndex === 0 ? 'Great Basin' : `Regional Lake ${lakeIndex + 1}`,
+      cx: Math.round(sumX / write),
+      cy: Math.round(sumY / write),
+      radiusX: Math.max(1, Math.ceil((maxX - minX + 1) / 2)),
+      radiusY: Math.max(1, Math.ceil((maxY - minY + 1) / 2)),
+      tileCount: write,
+    }))
+  }
+  return { feature, lakes: Object.freeze(lakes) }
+}
+
+function lowerRiverTile(
+  elevation: Int16Array,
+  width: number,
+  x: number,
+  y: number,
+  target: number,
+): void {
+  const stride = width + 1
+  const nw = y * stride + x
+  const level = Math.round(target)
+  elevation[nw] = Math.min(elevation[nw]!, level)
+  elevation[nw + 1] = Math.min(elevation[nw + 1]!, level)
+  elevation[nw + stride] = Math.min(elevation[nw + stride]!, level)
+  elevation[nw + stride + 1] = Math.min(elevation[nw + stride + 1]!, level)
+}
+
+/**
+ * V7 traces a few bounded drainage paths rather than retaining a map-sized
+ * flow-accumulation field. The temporary byte mask is folded into variantMask.
+ */
+function deriveV7Hydrology(descriptor: WorldDescriptorV7, elevation: Int16Array): V7Hydrology {
+  const base = deriveV4Hydrology(descriptor, elevation)
+  const { width, height } = descriptor
+  const size = width * height
+  const riverMask = new Uint8Array(size)
+  const originalWater = base.kind.slice()
+  const riverBudget = Math.max(8, Math.floor(size * 0.0125))
+  const sourceTarget = clamp(Math.round(size / 80_000), 1, 6)
+  const candidateLimit = sourceTarget * 24
+  const candidates: Array<{ id: number; height: number; score: number }> = []
+  const margin = Math.max(5, Math.min(14, Math.floor(Math.min(width, height) * 0.08)))
+  const sourceSampleModulo = clamp(Math.floor(size / 50_000), 4, 32)
+
+  for (let y = margin; y < height - margin; y++) {
+    for (let x = margin; x < width - margin; x++) {
+      const id = y * width + x
+      if (base.kind[id] === TERRAIN_KIND.lake) continue
+      // Bound top-candidate maintenance on million-tile worlds while still
+      // sampling tens of thousands of deterministic highland cells.
+      if (coordinateHash(x, y, descriptor.seed ^ 0x519f) % sourceSampleModulo !== 0) continue
+      const rawHeight = tileElevationSum(elevation, width, x, y) * 0.25
+      let nearWater = false
+      for (let oy = -4; oy <= 4 && !nearWater; oy++) {
+        for (let ox = -4; ox <= 4; ox++) {
+          if (Math.abs(ox) + Math.abs(oy) > 5) continue
+          if (base.kind[(y + oy) * width + x + ox] === TERRAIN_KIND.lake) { nearWater = true; break }
+        }
+      }
+      if (nearWater) continue
+      const score = rawHeight * 32 + (coordinateHash(x, y, descriptor.seed ^ 0x71a7) & 0x3ff)
+      const candidate = { id, height: rawHeight, score }
+      let insert = candidates.findIndex((other) => score > other.score)
+      if (insert < 0) insert = candidates.length
+      candidates.splice(insert, 0, candidate)
+      if (candidates.length > candidateLimit) candidates.pop()
+    }
+  }
+
+  const sources: typeof candidates = []
+  const minimumSeparation = Math.max(12, Math.floor(Math.min(width, height) / (sourceTarget + 1) * 0.45))
+  for (const candidate of candidates) {
+    const x = candidate.id % width
+    const y = Math.floor(candidate.id / width)
+    if (sources.some((source) => Math.hypot(x - source.id % width, y - Math.floor(source.id / width)) < minimumSeparation)) continue
+    sources.push(candidate)
+    if (sources.length >= sourceTarget * 3) break
+  }
+
+  let riverTiles = 0
+  let completed = 0
+  const cardinal = [[0, -1], [1, 0], [0, 1], [-1, 0]] as const
+  for (const source of sources) {
+    if (completed >= sourceTarget || riverTiles >= riverBudget) break
+    const sourceX = source.id % width
+    const sourceY = Math.floor(source.id / width)
+    let targetX = sourceX < width / 2 ? 0 : width - 1
+    let targetY = sourceY
+    let targetDistance = Math.min(sourceX, width - 1 - sourceX)
+    if (Math.min(sourceY, height - 1 - sourceY) < targetDistance) {
+      targetX = sourceX
+      targetY = sourceY < height / 2 ? 0 : height - 1
+      targetDistance = Math.min(sourceY, height - 1 - sourceY)
+    }
+    for (const lake of base.lakes) {
+      const distance = Math.hypot(lake.cx - sourceX, lake.cy - sourceY)
+      if (distance < targetDistance * 1.3) {
+        targetX = lake.cx
+        targetY = lake.cy
+        targetDistance = distance
+      }
+    }
+    const path: number[] = []
+    const seen = new Set<number>()
+    let current = source.id
+    let reachedOutlet = false
+    const maxSteps = Math.ceil(Math.hypot(width, height) * 2.5)
+    for (let step = 0; step < maxSteps; step++) {
+      const x = current % width
+      const y = Math.floor(current / width)
+      if (step > 0 && (originalWater[current] === TERRAIN_KIND.lake || riverMask[current] !== 0 ||
+          x === 0 || y === 0 || x === width - 1 || y === height - 1)) {
+        reachedOutlet = true
+        break
+      }
+      path.push(current)
+      seen.add(current)
+      const currentHeight = tileElevationSum(elevation, width, x, y) * 0.25
+      const currentOutletDistance = Math.hypot(targetX - x, targetY - y)
+      let best = -1
+      let bestScore = Infinity
+      for (const [dx, dy] of cardinal) {
+        const nx = x + dx
+        const ny = y + dy
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
+        const next = ny * width + nx
+        if (seen.has(next)) continue
+        const outletDistance = Math.hypot(targetX - nx, targetY - ny)
+        // Keep the drainage advancing toward its basin. A periodic lateral
+        // allowance creates meanders without permitting unbounded random walks.
+        if (outletDistance > currentOutletDistance + (step % 5 === 4 ? 0.8 : 0.05)) continue
+        const nextHeight = tileElevationSum(elevation, width, nx, ny) * 0.25
+        const uphill = Math.max(0, nextHeight - currentHeight)
+        const outlet = originalWater[next] === TERRAIN_KIND.lake || riverMask[next] !== 0
+        const edgeDistance = Math.min(nx, ny, width - 1 - nx, height - 1 - ny)
+        let parallelPenalty = 0
+        if (!outlet) {
+          for (const [ax, ay] of cardinal) {
+            const px = nx + ax
+            const py = ny + ay
+            if (px >= 0 && py >= 0 && px < width && py < height && riverMask[py * width + px]) parallelPenalty += 18
+          }
+        }
+        const meander = (coordinateHash(nx, ny, descriptor.seed ^ source.id) & 0xff) / 64
+        const score = (outlet ? -100_000 : 0) + nextHeight + uphill * 18 +
+          outletDistance * 1.15 + edgeDistance * 0.02 + parallelPenalty + meander
+        if (score < bestScore || (score === bestScore && next < best)) { bestScore = score; best = next }
+      }
+      if (best < 0) break
+      current = best
+    }
+    const newTileCount = path.reduce((count, id) => count + (base.kind[id] === TERRAIN_KIND.lake ? 0 : 1), 0)
+    if (!reachedOutlet || path.length < Math.max(8, Math.floor(Math.min(width, height) * 0.08)) ||
+        newTileCount === 0 || riverTiles + newTileCount > riverBudget) continue
+
+    const outletX = current % width
+    const outletY = Math.floor(current / width)
+    const outletHeight = originalWater[current] === TERRAIN_KIND.lake
+      ? Math.round(descriptor.seaLevel / descriptor.elevationScale)
+      : tileElevationSum(elevation, width, outletX, outletY) * 0.25
+    const endHeight = Math.min(source.height - path.length * 0.18, outletHeight + 1)
+    for (let index = 0; index < path.length; index++) {
+      const id = path[index]!
+      const x = id % width
+      const y = Math.floor(id / width)
+      const progress = path.length <= 1 ? 1 : index / (path.length - 1)
+      const channelHeight = source.height + (endHeight - source.height) * progress
+      if (base.kind[id] !== TERRAIN_KIND.lake) riverTiles++
+      base.kind[id] = TERRAIN_KIND.lake
+      riverMask[id] = 1
+      lowerRiverTile(elevation, width, x, y, channelHeight)
+
+      // Lower-course widening remains one extra bank tile, keeping the channel
+      // at no more than two cells while avoiding a solid two-wide ribbon.
+      if (progress < 0.75 || riverTiles >= riverBudget || index === 0 || index + 1 >= path.length) continue
+      const previous = path[index - 1]!
+      const next = path[index + 1]!
+      const dx = (next % width) - (previous % width)
+      const dy = Math.floor(next / width) - Math.floor(previous / width)
+      const side = (coordinateHash(x, y, descriptor.seed ^ 0x51de) & 1) === 0 ? -1 : 1
+      const wx = x + Math.sign(dy) * side
+      const wy = y - Math.sign(dx) * side
+      if (wx <= 0 || wy <= 0 || wx >= width - 1 || wy >= height - 1) continue
+      const widened = wy * width + wx
+      if (base.kind[widened] === TERRAIN_KIND.lake) continue
+      base.kind[widened] = TERRAIN_KIND.lake
+      riverMask[widened] = 1
+      riverTiles++
+      lowerRiverTile(elevation, width, wx, wy, channelHeight)
+    }
+    completed++
+  }
+
+  const relabeled = relabelV7Water(descriptor, base.kind)
+  return { kind: base.kind, feature: relabeled.feature, lakes: relabeled.lakes, riverMask }
+}
+
 function generateBiomes(
   descriptor: ReliefWorldDescriptor,
   base: Pick<StaticWorld, 'kind'>,
   elevation: Int16Array,
 ): Uint8Array {
   if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
-      descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6) {
+      descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6 ||
+      descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7) {
     return generateV5Biomes(descriptor, base, elevation)
   }
   const biome = new Uint8Array(descriptor.width * descriptor.height)
@@ -3293,7 +3563,8 @@ function clearV5RoadEnvironment(
     }
     if (!serviced) {
       district[id] = 0
-      if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6) {
+      if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6 ||
+          descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7) {
         if (kind[id] === TERRAIN_KIND.house) kind[id] = TERRAIN_KIND.empty
         if (feature) feature[id] = 0
       }
@@ -3412,7 +3683,7 @@ export function staticWorldV5Hash(
 
 /** Canonical V6 fingerprint, including zoning and authoritative campus layouts. */
 export function staticWorldV6Hash(
-  descriptor: WorldDescriptorV6,
+  descriptor: WorldDescriptorV6 | WorldDescriptorV7,
   layers: readonly ArrayLike<number>[],
   cities: readonly StaticCity[],
   regions: readonly StaticRegion[],
@@ -3421,11 +3692,13 @@ export function staticWorldV6Hash(
   municipalPowerPlants: readonly MunicipalPowerPlant[] = [],
 ): string {
   let hash = 0x811c9dc5
-  hash = hashNumber(hash, 0x0601)
+  const v7 = descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7
+  hash = hashNumber(hash, v7 ? 0x0701 : 0x0601)
   for (const value of [descriptor.formatVersion, descriptor.generatorVersion, descriptor.seed,
     descriptor.width, descriptor.height, descriptor.chunkSize, descriptor.cityCount,
     descriptor.transportAlgorithmVersion, descriptor.settlementAlgorithmVersion,
-    descriptor.municipalCampusAlgorithmVersion, descriptor.cityStatsModelVersion]) hash = hashUint32(hash, value)
+    descriptor.municipalCampusAlgorithmVersion, descriptor.cityStatsModelVersion,
+    ...(v7 ? [descriptor.riverAlgorithmVersion] : [])]) hash = hashUint32(hash, value)
   for (const value of [descriptor.landValueBase, descriptor.landValueCityPeak,
     descriptor.energyPricePerMWh, descriptor.waterCoverage, descriptor.elevationScale,
     descriptor.seaLevel, descriptor.terrainAlgorithmVersion, descriptor.biomeVersion]) hash = hashFloat64(hash, value)
@@ -3470,6 +3743,18 @@ export function staticWorldV6Hash(
     for (const id of plant.layout?.panelTileIds ?? []) hash = hashUint32(hash, id)
   }
   return hash.toString(16).padStart(8, '0')
+}
+
+export function staticWorldV7Hash(
+  descriptor: WorldDescriptorV7,
+  layers: readonly ArrayLike<number>[],
+  cities: readonly StaticCity[],
+  regions: readonly StaticRegion[],
+  lakes: readonly StaticLake[],
+  starterPads: readonly TileId[],
+  municipalPowerPlants: readonly MunicipalPowerPlant[] = [],
+): string {
+  return staticWorldV6Hash(descriptor, layers, cities, regions, lakes, starterPads, municipalPowerPlants)
 }
 
 function generateStaticWorldV4FromDescriptor(descriptor: WorldDescriptorV4): StaticWorld {
@@ -3577,9 +3862,11 @@ export function generateStaticWorldV5(options: WorldGenerationOptions): StaticWo
   return generateStaticWorldV5FromDescriptor(createWorldDescriptorV5(options))
 }
 
-function generateStaticWorldV6FromDescriptor(descriptor: WorldDescriptorV6): StaticWorld {
+function generateStaticWorldV6FromDescriptor(descriptor: WorldDescriptorV6 | WorldDescriptorV7): StaticWorld {
   const elevation = generateV4Elevation(descriptor)
-  const hydrology = deriveV4Hydrology(descriptor, elevation)
+  const hydrology = descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7
+    ? deriveV7Hydrology(descriptor, elevation)
+    : deriveV4Hydrology(descriptor, elevation)
   const kind = hydrology.kind
   const feature = hydrology.feature
   const size = descriptor.width * descriptor.height
@@ -3632,6 +3919,14 @@ function generateStaticWorldV6FromDescriptor(descriptor: WorldDescriptorV6): Sta
   clearV5RoadEnvironment(descriptor, kind, transport, district, feature)
   const regions = assignRegions(descriptor, cities.slice(0, descriptor.cityCount), region)
   buildVariantMasks(descriptor, kind, variantMask)
+  const riverMask = descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7
+    ? (hydrology as V7Hydrology).riverMask
+    : undefined
+  if (riverMask) {
+    for (let id = 0; id < size; id++) {
+      if (riverMask[id]) variantMask[id] |= TERRAIN_VARIANT_RIVER
+    }
+  }
   let water = 0
   let urban = 0
   let forest = 0
@@ -3646,13 +3941,19 @@ function generateStaticWorldV6FromDescriptor(descriptor: WorldDescriptorV6): Sta
     cities: Object.freeze(cities), regions: Object.freeze(regions), lakes: hydrology.lakes,
     municipalPowerPlants: Object.freeze(municipalPowerPlants),
     starterPads: Object.freeze(starterPads),
-    staticHash: staticWorldV6Hash(descriptor, layers, cities, regions, hydrology.lakes, starterPads, municipalPowerPlants),
+    staticHash: descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7
+      ? staticWorldV7Hash(descriptor, layers, cities, regions, hydrology.lakes, starterPads, municipalPowerPlants)
+      : staticWorldV6Hash(descriptor, layers, cities, regions, hydrology.lakes, starterPads, municipalPowerPlants),
     coverage: Object.freeze({ water: water / size, urban: urban / size, forest: forest / size }),
   }
 }
 
 export function generateStaticWorldV6(options: WorldGenerationOptions): StaticWorld {
   return generateStaticWorldV6FromDescriptor(createWorldDescriptorV6(options))
+}
+
+export function generateStaticWorldV7(options: WorldGenerationOptions): StaticWorld {
+  return generateStaticWorldV6FromDescriptor(createWorldDescriptorV7(options))
 }
 
 function descriptorElevationScale(world: StaticWorld): number {
@@ -3672,8 +3973,19 @@ export function getTileElevation(world: StaticWorld, x: number, y: number): numb
 
 export function getWaterElevation(world: StaticWorld, x: number, y: number): number {
   if (x < 0 || y < 0 || x >= world.descriptor.width || y >= world.descriptor.height) return 0
-  if (world.kind[y * world.descriptor.width + x] !== TERRAIN_KIND.lake) return getTileElevation(world, x, y)
+  const id = y * world.descriptor.width + x
+  if (world.kind[id] !== TERRAIN_KIND.lake) return getTileElevation(world, x, y)
+  if (world.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7 &&
+      (world.variantMask[id]! & TERRAIN_VARIANT_RIVER) !== 0) {
+    return getTileElevation(world, x, y) + descriptorElevationScale(world) * 0.35
+  }
   return isReliefDescriptor(world.descriptor) ? world.descriptor.seaLevel : 0
+}
+
+export function isRiverTile(world: StaticWorld, id: number): boolean {
+  return Number.isInteger(id) && id >= 0 && id < world.kind.length &&
+    world.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7 &&
+    world.kind[id] === TERRAIN_KIND.lake && (world.variantMask[id]! & TERRAIN_VARIANT_RIVER) !== 0
 }
 
 /** Maximum edge/diagonal grade as a rise/run ratio for one logical tile. */
@@ -3701,6 +4013,7 @@ export function regenerateStaticWorld(descriptor: WorldDescriptor): StaticWorld 
   if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V4) return generateStaticWorldV4FromDescriptor(descriptor)
   if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5) return generateStaticWorldV5FromDescriptor(descriptor)
   if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6) return generateStaticWorldV6FromDescriptor(descriptor)
+  if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7) return generateStaticWorldV6FromDescriptor(descriptor)
   throw new Error('unsupported compact world descriptor version')
 }
 

@@ -70,12 +70,26 @@ export const WORLD_GENERATOR_VERSION_V3 = 3 as const
 export const WORLD_GENERATOR_VERSION_V4 = 4 as const
 export const WORLD_GENERATOR_VERSION_V5 = 5 as const
 export const WORLD_GENERATOR_VERSION_V6 = 6 as const
+export const WORLD_GENERATOR_VERSION_V7 = 7 as const
+/** High variant bit reserved for V7 river water; low nibble remains NESW connectivity. */
+export const TERRAIN_VARIANT_RIVER = 0x80
+export const WATER_VARIANT_VISUAL_MASK = 0x70
+
+export function isRiverVariant(variantMask: number): boolean {
+  return (variantMask & TERRAIN_VARIANT_RIVER) !== 0
+}
+
+/** Decode the remaining three visual-variant bits from a V7 water tile. */
+export function waterVisualVariant(variantMask: number): number {
+  return (variantMask & WATER_VARIANT_VISUAL_MASK) >>> 4
+}
 export type WorldGeneratorVersion =
   | typeof WORLD_GENERATOR_VERSION
   | typeof WORLD_GENERATOR_VERSION_V3
   | typeof WORLD_GENERATOR_VERSION_V4
   | typeof WORLD_GENERATOR_VERSION_V5
   | typeof WORLD_GENERATOR_VERSION_V6
+  | typeof WORLD_GENERATOR_VERSION_V7
 
 interface WorldDescriptorBase {
   readonly formatVersion: typeof WORLD_FORMAT_VERSION
@@ -132,7 +146,21 @@ export interface WorldDescriptorV6 extends WorldDescriptorBase {
   readonly cityStatsModelVersion: 1
 }
 
-export type WorldDescriptor = WorldDescriptorV2 | WorldDescriptorV3 | WorldDescriptorV4 | WorldDescriptorV5 | WorldDescriptorV6
+/** V7 adds compact, deterministic drainage while retaining every V6 system version. */
+export interface WorldDescriptorV7 extends WorldDescriptorBase {
+  readonly generatorVersion: typeof WORLD_GENERATOR_VERSION_V7
+  readonly elevationScale: number
+  readonly seaLevel: number
+  readonly terrainAlgorithmVersion: 1
+  readonly biomeVersion: 1
+  readonly transportAlgorithmVersion: 2
+  readonly settlementAlgorithmVersion: 5
+  readonly municipalCampusAlgorithmVersion: 2
+  readonly cityStatsModelVersion: 1
+  readonly riverAlgorithmVersion: 1
+}
+
+export type WorldDescriptor = WorldDescriptorV2 | WorldDescriptorV3 | WorldDescriptorV4 | WorldDescriptorV5 | WorldDescriptorV6 | WorldDescriptorV7
 
 export const BIOME_KIND = {
   plains: 0,
@@ -255,6 +283,7 @@ export interface MunicipalPowerPlant {
  * Five bytes per logical tile. Coordinates are implicit: id = y * width + x.
  * feature uses 0 for none, 1..0x7fff for city index + 1, and bit 15 for lakes.
  * variantMask uses NESW in its low nibble and a deterministic variant in its high nibble.
+ * V7 water reserves bit 7 as a river marker, leaving bits 4..6 for water variation.
  */
 export interface StaticWorld {
   readonly descriptor: WorldDescriptor

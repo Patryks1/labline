@@ -96,14 +96,28 @@ describe('world navigator data', () => {
 
   it('keeps an equal world scale and cursor anchor across navigator zooms', () => {
     const fit = navigatorView(1_000, 500, 1, 500, 250, 1)
-    expect(fit).toEqual({ x: 0, y: -250, width: 1_000, height: 1_000, zoom: 1 })
+    expect(fit).toEqual({ x: 250, y: 0, width: 500, height: 500, zoom: 1 })
     const anchor = navigatorPointToWorld(fit, 75, 50, 100, 100)
     const zoomed = navigatorZoomAround(1_000, 500, fit, 2, anchor.x, anchor.y, 1)
     const after = navigatorPointToWorld(zoomed, 75, 50, 100, 100)
     expect(after.x).toBeCloseTo(anchor.x)
     expect(after.y).toBeCloseTo(anchor.y)
-    expect(zoomed.width).toBe(500)
-    expect(zoomed.height).toBe(500)
+    expect(zoomed.width).toBe(250)
+    expect(zoomed.height).toBe(250)
+  })
+
+  it('covers wide and tall navigator frames without exposing out-of-world bars', () => {
+    const cases = [
+      { worldWidth: 1_000, worldHeight: 500, view: navigatorView(1_000, 500, 1, 500, 250, 1) },
+      { worldWidth: 1_000, worldHeight: 500, view: navigatorView(1_000, 500, 1, 500, 250, 2.4) },
+      { worldWidth: 500, worldHeight: 1_000, view: navigatorView(500, 1_000, 1, 250, 500, 0.65) },
+    ]
+    for (const { view, worldWidth, worldHeight } of cases) {
+      expect(view.x).toBeGreaterThanOrEqual(0)
+      expect(view.y).toBeGreaterThanOrEqual(0)
+      expect(view.x + view.width).toBeLessThanOrEqual(worldWidth)
+      expect(view.y + view.height).toBeLessThanOrEqual(worldHeight)
+    }
   })
 
   it('extracts exact topology edges and reuses the revision projection', () => {

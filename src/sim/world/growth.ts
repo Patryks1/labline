@@ -4,6 +4,7 @@ import { encodeCityFeature } from './generator'
 import {
   BIOME_KIND,
   TERRAIN_KIND,
+  TERRAIN_VARIANT_RIVER,
   TRANSPORT_CLASS_MASK,
   TRANSPORT_CLASS_SHIFT,
   TRANSPORT_DIRECTION,
@@ -69,6 +70,10 @@ function isV5(world: DynamicWorld): boolean {
   return Number(world.descriptor.generatorVersion) >= 5
 }
 
+function isV7(world: DynamicWorld): boolean {
+  return Number(world.descriptor.generatorVersion) >= 7
+}
+
 const MAX_LOCAL_ROAD_GRADE = 0.18
 
 function v4TileGradeAllowed(world: DynamicWorld, id: TileId): boolean {
@@ -101,6 +106,19 @@ function settlementTier(world: DynamicWorld, cityIndex: number): SettlementTier 
 
 function hasTransport(world: DynamicWorld, id: TileId): boolean {
   return (world.getTransport(id) & TRANSPORT_CLASS_MASK) !== 0
+}
+
+function isGrowthRoadApproach(world: DynamicWorld, id: TileId): boolean {
+  if (world.getKind(id) === TERRAIN_KIND.lake) return false
+  const transport = world.getTransport(id)
+  if ((transport & TRANSPORT_FLAGS.settlement) === 0) return false
+  const roadClass = (transport & TRANSPORT_CLASS_MASK) >>> TRANSPORT_CLASS_SHIFT
+  return roadClass === TRANSPORT_ROAD_CLASS.local || roadClass === TRANSPORT_ROAD_CLASS.collector
+}
+
+function isRiverWater(world: DynamicWorld, id: TileId): boolean {
+  return world.getKind(id) === TERRAIN_KIND.lake &&
+    (world.getVariantMask(id) & TERRAIN_VARIANT_RIVER) !== 0
 }
 
 function isProtected(world: DynamicWorld, id: TileId): boolean {
@@ -151,10 +169,11 @@ function stageLocalTransport(
   world: DynamicWorld,
   batch: WorldMutationBatch,
   id: TileId,
+  flags = TRANSPORT_FLAGS.settlement,
 ): void {
   let transport =
     (TRANSPORT_ROAD_CLASS.local << TRANSPORT_CLASS_SHIFT) |
-    TRANSPORT_FLAGS.settlement
+    flags
   for (const neighbor of cardinalNeighborIds(id, world.descriptor)) {
     const neighborTransport = transportInBatch(world, batch, neighbor)
     if ((neighborTransport & TRANSPORT_CLASS_MASK) === 0) continue
@@ -164,6 +183,98 @@ function stageLocalTransport(
     patchTransport(batch, neighbor, neighborTransport | bits.reciprocal)
   }
   patchTransport(batch, id, transport)
+}
+
+interface GrowthBridgeCandidate {
+  readonly water: readonly TileId[]
+  readonly landing: TileId
+}
+
+const CARDINAL_STEPS = Object.freeze([
+  Object.freeze({ dx: 0, dy: -1 }),
+  Object.freeze({ dx: 1, dy: 0 }),
+  Object.freeze({ dx: 0, dy: 1 }),
+  Object.freeze({ dx: -1, dy: 0 }),
+])
+
+function steppedTile(
+  world: DynamicWorld,
+  id: TileId,
+  dx: number,
+  dy: number,
+): TileId | undefined {
+  const { x, y } = tileCoords(id, world.descriptor.width)
+  const nextX = x + dx
+  const nextY = y + dy
+  if (nextX < 0 || nextY < 0 || nextX >= world.descriptor.width || nextY >= world.descriptor.height) {
+    return undefined
+  }
+  return (nextY * world.descriptor.width + nextX) as TileId
+}
+
+function riverChannelApproximatelyPerpendicular(
+  world: DynamicWorld,
+  water: readonly TileId[],
+  crossingDx: number,
+): boolean {
+  let parallel = 0
+  let perpendicular = 0
+  for (const id of water) {
+    for (const step of CARDINAL_STEPS) {
+      const neighbor = steppedTile(world, id, step.dx, step.dy)
+      if (neighbor === undefined || !isRiverWater(world, neighbor)) continue
+      if ((step.dx === 0) === (crossingDx === 0)) parallel++
+      else perpendicular++
+    }
+  }
+  return perpendicular > parallel
+}
+
+function hasAdjacentExistingBridge(world: DynamicWorld, water: readonly TileId[]): boolean {
+  const span = new Set(water)
+  return water.some((id) => cardinalNeighborIds(id, world.descriptor).some((neighbor) =>
+    !span.has(neighbor) && (world.getTransport(neighbor) & TRANSPORT_FLAGS.bridge) !== 0,
+  ))
+}
+
+function collectGrowthBridgeCandidates(
+  world: DynamicWorld,
+  minX: number,
+  maxX: number,
+  minY: number,
+  maxY: number,
+  reserved: ReadonlySet<TileId>,
+): GrowthBridgeCandidate[] {
+  if (!isV7(world)) return []
+  const candidates = new Map<string, GrowthBridgeCandidate>()
+  for (let y = minY; y <= maxY; y++) {
+    for (let x = minX; x <= maxX; x++) {
+      const approach = (y * world.descriptor.width + x) as TileId
+      if (!isGrowthRoadApproach(world, approach)) continue
+      for (const { dx, dy } of CARDINAL_STEPS) {
+        const first = steppedTile(world, approach, dx, dy)
+        if (first === undefined || !isRiverWater(world, first)) continue
+        const water: TileId[] = [first]
+        let landing = steppedTile(world, first, dx, dy)
+        if (landing !== undefined && isRiverWater(world, landing)) {
+          water.push(landing)
+          landing = steppedTile(world, landing, dx, dy)
+        }
+        if (water.some((id) => reserved.has(id) || isProtected(world, id) || hasTransport(world, id))) continue
+        if (landing === undefined || isRiverWater(world, landing) ||
+            reserved.has(landing) || !canGrowInto(world, landing) || hasTransport(world, landing) ||
+            !v4TileGradeAllowed(world, landing)) continue
+        if (cardinalNeighborIds(landing, world.descriptor).some((neighbor) => hasTransport(world, neighbor))) continue
+        const path = [approach, ...water, landing]
+        if (path.some((id, index) => index > 0 && !v4TransportEdgeAllowed(world, path[index - 1]!, id))) continue
+        if (!riverChannelApproximatelyPerpendicular(world, water, dx)) continue
+        if (hasAdjacentExistingBridge(world, water)) continue
+        const key = `${water.join(',')}:${landing}`
+        candidates.set(key, Object.freeze({ water: Object.freeze(water), landing }))
+      }
+    }
+  }
+  return [...candidates.values()]
 }
 
 function annualGrowthRate(world: DynamicWorld, cityIndex: number): number {
@@ -242,11 +353,23 @@ function planV3CityGrowth(
 
   // Reserve roughly a third of a project for infill. A project with frontier
   // space still starts with transport, maintaining connectivity by construction.
+  const bridge = collectGrowthBridgeCandidates(world, minX, maxX, minY, maxY, reserved)
+    .filter((candidate) => candidate.water.length + 1 <= maxTiles)
+    .sort((a, b) =>
+      a.water.length - b.water.length ||
+      score(a.water[0]!) - score(b.water[0]!) ||
+      a.landing - b.landing,
+    )[0]
   const road = frontier.find((id) =>
     cardinalNeighborIds(id, world.descriptor).some((neighbor) =>
       hasTransport(world, neighbor) && v4TransportEdgeAllowed(world, id, neighbor)),
   )
-  if (road !== undefined) {
+  if (bridge !== undefined) {
+    for (const id of bridge.water) {
+      tiles.push(Object.freeze({ tileId: id, kind: TERRAIN_KIND.lake, mode: 'bridge' as const }))
+    }
+    tiles.push(Object.freeze({ tileId: bridge.landing, kind: world.getKind(bridge.landing), mode: 'transport' as const }))
+  } else if (road !== undefined) {
     tiles.push(Object.freeze({ tileId: road, kind: world.getKind(road), mode: 'transport' as const }))
   }
   for (const id of infill.slice(0, Math.min(8, maxTiles - tiles.length))) {
@@ -356,24 +479,39 @@ export function stageCityGrowth(
   if (!runtime) throw new RangeError(`unknown city index ${plan.cityIndex}`)
   if (plan.growthEvent !== runtime.growthEvents + 1) throw new Error('city growth plan is stale')
   if (plan.tiles.length > 24) throw new Error('city growth plan exceeds the 24-tile event limit')
+  const plannedBridgeTiles = plan.tiles.filter((tile) => tile.mode === 'bridge')
+  if (plannedBridgeTiles.length > 0) {
+    const { minX, maxX, minY, maxY } = v3ScanBounds(world, plan.cityIndex)
+    const matchesCandidate = collectGrowthBridgeCandidates(world, minX, maxX, minY, maxY, new Set())
+      .some((candidate) =>
+        candidate.water.length === plannedBridgeTiles.length &&
+        candidate.water.every((id, index) => plannedBridgeTiles[index]?.tileId === id) &&
+        plan.tiles.some((tile) => tile.mode === 'transport' && tile.tileId === candidate.landing),
+      )
+    if (!matchesCandidate) throw new Error('city growth plan contains an invalid river bridge')
+  }
   const feature = encodeCityFeature(plan.cityIndex)
   const seen = new Set<TileId>()
   for (const tile of plan.tiles) {
     if (seen.has(tile.tileId)) throw new Error('city growth plan contains duplicate tiles')
     seen.add(tile.tileId)
+    const validBridge = isV7(world) && tile.mode === 'bridge' &&
+      !isProtected(world, tile.tileId) && isRiverWater(world, tile.tileId)
     const validInfill = isV3(world) && tile.mode === 'infill' &&
       !isProtected(world, tile.tileId) && world.getFeature(tile.tileId) === feature &&
       isSettlementKind(world.getKind(tile.tileId))
-    if (!validInfill && !canGrowInto(world, tile.tileId)) {
+    if (!validBridge && !validInfill && !canGrowInto(world, tile.tileId)) {
       const { x, y } = tileCoords(tile.tileId, world.descriptor.width)
       throw new Error(`city growth cannot overwrite protected tile (${x}, ${y})`)
     }
-    if (isV4(world) && (!v4TileGradeAllowed(world, tile.tileId) ||
+    if (!validBridge && isV4(world) && (!v4TileGradeAllowed(world, tile.tileId) ||
         (isDenseGrowthKind(tile.kind) && !v4DenseGrowthAllowed(world, tile.tileId)))) {
       const { x, y } = tileCoords(tile.tileId, world.descriptor.width)
       throw new Error(`city growth cannot use unsuitable terrain (${x}, ${y})`)
     }
-    if (isV3(world) && tile.mode === 'transport') {
+    if (validBridge) {
+      stageLocalTransport(world, batch, tile.tileId, TRANSPORT_FLAGS.settlement | TRANSPORT_FLAGS.bridge)
+    } else if (isV3(world) && tile.mode === 'transport') {
       // Transport is an independent overlay in v3. Keeping the underlying
       // empty/forest terrain makes bridge/road rendering and future land-use
       // changes independent rather than reverting to the v2 road tile kind.

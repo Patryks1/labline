@@ -19,6 +19,7 @@ import { HudFeedback } from './view/hud/HudFeedback'
 import { FULL_BLEED_MAP_STYLE } from './view/hud/layout'
 import { MapNavigator } from './view/hud/MapNavigator'
 import { ReleaseCelebration } from './view/hud/ReleaseCelebration'
+import { DataHallEditorOverlay } from './view/hud/panels/hardware/DataHallEditorOverlay'
 
 function GameShell() {
   const paused = useGameStore((s) => s.state.paused)
@@ -69,6 +70,7 @@ function GameShell() {
       <HotkeyHelp />
       <HudFeedback />
       <ReleaseCelebration />
+      <DataHallEditorOverlay />
     </div>
   )
 }

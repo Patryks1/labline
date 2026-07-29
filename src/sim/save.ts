@@ -11,6 +11,7 @@ import type {
   MapTile,
   Model,
   RackDesign,
+  RackInstall,
   RivalTrainJob,
   SimState,
   SubPlan,
@@ -30,6 +31,7 @@ import {
 import { normalizeSiteEnergyState } from './systems/siteEnergy'
 import { clampSegmentUsageIntensity } from './systems/events'
 import { normalizedPlanRoutes, defaultSteadyPlanUsage } from './systems/plans'
+import { migrateDataHallLayouts, refreshAllDataHallAnalyses } from './systems/dataHallLayouts'
 import {
   WORLD_FORMAT_VERSION,
   createDynamicWorld,
@@ -39,7 +41,7 @@ import {
 } from './world'
 
 export const SAVE_FORMAT = 'labline-save' as const
-export const SAVE_VERSION = 9 as const
+export const SAVE_VERSION = 11 as const
 export const V1_INCOMPATIBILITY_REASON =
   'Save format v1 is incompatible with the compact-world renderer. This campaign cannot be migrated; start a new operation.'
 export const V2_INCOMPATIBILITY_REASON =
@@ -321,9 +323,14 @@ function jsonClone<T>(value: T): T {
 
 function compactPersistedState(state: SimState): PersistedSimState {
   const { map, ...simulation } = state
+  const compactLayouts = Object.fromEntries(Object.entries(simulation.dataHallLayouts ?? {}).map(([facilityId, layout]) => [facilityId, {
+    ...layout,
+    analysis: { ...layout.analysis, powerRoutes: [], networkRoutes: [] },
+  }]))
+  const compactSimulation = { ...simulation, dataHallLayouts: compactLayouts }
   if (map.storage === 'compact' && map.world) {
     return {
-      ...simulation,
+      ...compactSimulation,
       map: {
         width: map.width,
         height: map.height,
@@ -335,7 +342,7 @@ function compactPersistedState(state: SimState): PersistedSimState {
     }
   }
   return {
-    ...simulation,
+    ...compactSimulation,
     map: {
       width: map.width,
       height: map.height,
@@ -639,7 +646,14 @@ function restoreState(stateRaw: unknown, snapshot: DynamicWorldSnapshotV2 | null
       'incompatible-version',
     )
   }
-  restored.player.rackFleet = ensureArray(restored.player.rackFleet)
+  restored.player.rackFleet = ensureArray<RackInstall>(restored.player.rackFleet).map((rack) => ({
+    ...rack,
+    facilityId: typeof rack.facilityId === 'string' && rack.facilityId.trim() ? rack.facilityId : undefined,
+    bayStarts: ensureArray<number>(rack.bayStarts)
+      .slice(0, Math.max(0, Math.floor(rack.count)))
+      .map((value) => Number.isSafeInteger(value) && value >= 0 ? value : -1),
+    unitIds: ensureArray<string>(rack.unitIds).slice(0, Math.max(0, Math.floor(rack.count))),
+  }))
   restored.player.loans = ensureArray(restored.player.loans)
   restored.player.models = ensureArray(restored.player.models).map((model) =>
     normalizeModelComputeV2(model as Model),
@@ -671,6 +685,15 @@ function restoreState(stateRaw: unknown, snapshot: DynamicWorldSnapshotV2 | null
     }
     return {
       ...rival,
+      rackFleet: ensureArray<RackInstall>(rival.rackFleet).map((rack) => ({
+        ...rack,
+        facilityId: typeof rack.facilityId === 'string' && rack.facilityId.trim() ? rack.facilityId : undefined,
+        bayStarts: ensureArray<number>(rack.bayStarts)
+          .slice(0, Math.max(0, Math.floor(rack.count)))
+          .map((value) => Number.isSafeInteger(value) && value >= 0 ? value : -1),
+        unitIds: ensureArray<string>(rack.unitIds).slice(0, Math.max(0, Math.floor(rack.count))),
+      })),
+      rackDesigns: ensureArray(rival.rackDesigns),
       models: (ensureArray(rival.models) as Model[]).map(normalizeModelComputeV2),
       trainingJobs: canonicalJobs,
       researchQueue: ensureArray(rival.researchQueue),
@@ -700,6 +723,9 @@ function restoreState(stateRaw: unknown, snapshot: DynamicWorldSnapshotV2 | null
   restored.powerExportContracts = ensureArray(restored.powerExportContracts)
   restored.siteProjects = ensureArray(restored.siteProjects)
   restored.siteCapacities = ensureArray(restored.siteCapacities)
+  restored.facilityMarket = {
+    offers: ensureArray(restored.facilityMarket?.offers),
+  }
   restored.energyContracts = ensureArray(restored.energyContracts)
   restored.regionInterconnections = ensureArray(restored.regionInterconnections)
   restored.segments = ensureArray(restored.segments)
@@ -857,7 +883,7 @@ function restoreState(stateRaw: unknown, snapshot: DynamicWorldSnapshotV2 | null
   }
   if (typeof restored.tick !== 'number') restored.tick = restored.day
   restored.calendar = calendarForDay(restored.day, restored.config.campaignRules)
-  return syncLabIndex(normalizeSiteEnergyState(restored))
+  return syncLabIndex(refreshAllDataHallAnalyses(migrateDataHallLayouts(normalizeSiteEnergyState(restored))))
 }
 
 export function buildSaveMeta(
@@ -925,6 +951,8 @@ function validateSaveEnvelope(data: unknown): SaveFile {
   }
   if (
     candidate.version !== SAVE_VERSION &&
+    candidate.version !== 10 &&
+    candidate.version !== 9 &&
     candidate.version !== 8 &&
     candidate.version !== 7 &&
     candidate.version !== 6 &&

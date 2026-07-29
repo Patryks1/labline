@@ -5,6 +5,8 @@ import {
   WORLD_GENERATOR_VERSION_V4,
   WORLD_GENERATOR_VERSION_V5,
   WORLD_GENERATOR_VERSION_V6,
+  WORLD_GENERATOR_VERSION_V7,
+  TERRAIN_VARIANT_RIVER,
   WORLD_CHANGE_FLAGS,
   compileRoadNetwork,
   type DynamicWorld,
@@ -143,7 +145,8 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     this.useHeightfieldRoadMeshes =
       this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V4 ||
       this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
-      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6
+      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6 ||
+      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7
     this.chunkSize = this.compactWorld?.descriptor.chunkSize ?? RENDER_CHUNK_SIZE
     this.chunksWide = Math.ceil(this.width / this.chunkSize)
     this.chunksHigh = Math.ceil(this.height / this.chunkSize)
@@ -327,6 +330,10 @@ export class SimViewportRenderSource implements ViewportRenderSource {
         ownerId,
         facility,
       )
+      if (world.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7 &&
+          (world.getVariantMask(tileId as never) & TERRAIN_VARIANT_RIVER) !== 0) {
+        out.flags |= SurfaceFlag.river
+      }
       const transport = transportWorld.getTransport?.(tileId as never)
         ?? transportWorld.staticWorld.transport?.[tileId]
         ?? tileView.transport
@@ -517,7 +524,8 @@ export class SimViewportRenderSource implements ViewportRenderSource {
   getBiome(x: number, y: number) {
     if (this.compactWorld?.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V4 &&
       this.compactWorld?.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V5 &&
-      this.compactWorld?.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V6) {
+      this.compactWorld?.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V6 &&
+      this.compactWorld?.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V7) {
       return RenderBiome.plains
     }
     return this.compactWorld.getBiome(x, y)
@@ -586,7 +594,8 @@ export class SimViewportRenderSource implements ViewportRenderSource {
 
   private usesUrbanParcels(): boolean {
     return this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
-      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6
+      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6 ||
+      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7
   }
 
   private invalidateUrbanParcelPlan(): void {

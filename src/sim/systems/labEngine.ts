@@ -31,6 +31,7 @@ import {
   labInferCapacityWorkPf,
 } from './labCompute'
 import { HISTORY_LIMITS } from './history'
+import { ensureRackUnitIds } from './dataHallLayouts'
 
 const EMPTY_STAFF: StaffHeadcount = {
   researcher: 0,
@@ -807,12 +808,20 @@ export function computeLabSnapshot(state: SimState, labId: LabId): LabComputeSna
       // Invalid imported blueprints contribute no capacity until validation.
       continue
     }
-    installedLocalPf += sku.flopsPf * install.count
-    installedChipCount += install.count
-    installedVramGb += sku.vramGb * install.count
-    installedTokPerSec += sku.tokPerSec * install.count
-    installedPowerMw += sku.mw * install.count * pue
-    rackUnitsUsed += (install.rackUnits || sku.rackUnits) * install.count
+    const normalized = ensureRackUnitIds(install)
+    const facilityId = install.facilityId ?? hall?.campusId
+    const layout = facilityId ? state.dataHallLayouts?.[facilityId] : undefined
+    const operational = layout ? new Set(layout.analysis.operationalRackUnitIds) : null
+    const placed = layout ? new Set(layout.objects.flatMap((object) => object.rackUnitId ? [object.rackUnitId] : [])) : null
+    const activeCount = operational ? (normalized.unitIds ?? []).filter((unitId) => operational.has(unitId)).length : install.count
+    const placedCount = placed ? (normalized.unitIds ?? []).filter((unitId) => placed.has(unitId)).length : install.count
+    const throughput = layout?.analysis.throughputMultiplier ?? 1
+    installedLocalPf += sku.flopsPf * activeCount * throughput
+    installedChipCount += activeCount
+    installedVramGb += sku.vramGb * activeCount
+    installedTokPerSec += sku.tokPerSec * activeCount * throughput
+    installedPowerMw += sku.mw * activeCount * pue * (layout?.analysis.pueMultiplier ?? 1)
+    rackUnitsUsed += (install.rackUnits || sku.rackUnits) * placedCount
   }
   const providerContracts = labContractCapacityPf(state, labId)
   const legacyLeases = legacyLeaseCapacityForLab(state, labId)

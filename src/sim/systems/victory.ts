@@ -1,9 +1,10 @@
 import { ECONOMY } from '../balance/economy'
 import { STAFF_HIRE_COST, STAFF_ROLES, STAFF_WAGE_PER_DAY } from '../balance/staff'
 import type { Model, SimState, TileKind } from '../types'
-import { isBuildableKind, isHqAnchor } from './map'
+import { isBuildableKind, isDcKind, isHqAnchor } from './map'
 import { playerStaff } from './staff'
 import { facilityAnchorTiles, usesCompactWorld } from './worldAccess'
+import { dataCenterFacilityIds, facilityNav } from './facilityMarket'
 
 /**
  * How close the lab's best public model is to industry frontier (0–1).
@@ -63,11 +64,12 @@ export function modelIpValue(state: SimState): number {
 }
 
 /** Real estate + plant: halls, HQs, labs, power, fabs (completed + WIP). */
-export function buildingAssetValue(state: SimState): number {
+export function buildingAssetValue(state: SimState, includeDataCenters = true): number {
   let value = 0
   if (usesCompactWorld(state)) {
     state.map.world!.forEachFacility({ ownerId: 'player' }, (facility) => {
       if (!isBuildableKind(facility.kind as TileKind)) return
+      if (!includeDataCenters && isDcKind(facility.kind)) return
 
       const complete =
         facility.constructionTarget > 0
@@ -95,6 +97,7 @@ export function buildingAssetValue(state: SimState): number {
 
   for (const t of facilityAnchorTiles(state, { ownerId: 'player' })) {
     if (!isBuildableKind(t.kind)) continue
+    if (!includeDataCenters && isDcKind(t.kind)) continue
     // Multi-tile pads carry capex on anchor only
     if (t.campusRole === 'pad') continue
 
@@ -148,10 +151,10 @@ export function staffAssetValue(state: SimState): number {
 }
 
 /** Live silicon + ordered (at cost) fleet. */
-export function fleetAssetValue(state: SimState): number {
+export function fleetAssetValue(state: SimState, includeInstalledDataCenterRacks = true): number {
   let value = 0
   for (const r of state.player.rackFleet ?? []) {
-    if (r.status === 'live') value += r.paidEach * r.count * 0.58
+    if (r.status === 'live' && includeInstalledDataCenterRacks) value += r.paidEach * r.count * 0.58
     else if (r.status === 'ordered') value += r.paidEach * r.count * 0.85 // prepaid inventory
   }
   for (const inv of state.player.chips ?? []) {
@@ -189,7 +192,14 @@ export function valuationDrivers(state: SimState): ValuationDrivers {
   const annualizedNet = daily * 365
   const share = f.totalShare
   const brand = state.player.brandTrust / 50
-  const plantAndFleet = buildingAssetValue(state) + fleetAssetValue(state)
+  // Data centres use the same neutral NAV shown in acquisitions. Their live
+  // racks are already inside that NAV, so exclude the older fleet mark here.
+  const infrastructureNav = dataCenterFacilityIds(state, state.playerLabId)
+    .reduce((sum, facilityId) => sum + facilityNav(state, facilityId).total, 0)
+  const plantAndFleet =
+    buildingAssetValue(state, false) +
+    fleetAssetValue(state, false) +
+    infrastructureNav
   const talentAndResearch = staffAssetValue(state) + researchAssetValue(state)
   const debt =
     (state.player.loans ?? []).reduce((sum, loan) => sum + loan.remaining, 0) +

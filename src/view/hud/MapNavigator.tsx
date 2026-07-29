@@ -348,9 +348,7 @@ export function MapNavigator() {
     size.width,
     size.height,
     [
-      { x: size.width - 112, y: 0, width: 112, height: 36 },
-      { x: 0, y: 0, width: 42, height: 36 },
-      { x: 0, y: size.height - 28, width: 145, height: 28 },
+      { x: size.width / 2 - 92, y: size.height - 38, width: 184, height: 38 },
     ],
   ), [data.cities, size.height, size.width, view, zoom])
   const cityById = useMemo(() => new Map(data.cities.map((city) => [city.id, city])), [data.cities])
@@ -516,7 +514,7 @@ export function MapNavigator() {
         <X size="0.95rem" />
       </button>
       <div className="relative z-10">
-        <div className="flex items-center gap-1.5 border-b border-line/70 px-2 py-1.5">
+        <div className="map-navigator-sitebar flex items-center gap-1.5 border-b border-line/70 px-2 py-1.5">
           <button type="button" aria-label="Previous building" disabled={sites.length === 0} onClick={() => {
             if (sites.length === 0) return
             const next = (buildingIndex - 1 + sites.length) % sites.length
@@ -525,10 +523,10 @@ export function MapNavigator() {
           }} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-line/70 text-muted hover:bg-panel-2 hover:text-bone disabled:opacity-40">
             <CaretLeft size="0.9rem" />
           </button>
-          <button type="button" disabled={!activeSite} onClick={() => activeSite && focus(activeSite.x, activeSite.y)} className="flex h-8 min-w-0 flex-1 items-center gap-1.5 rounded-md border border-line/70 bg-panel-2/50 px-2 text-left hover:border-mint/40 disabled:opacity-50">
+          <button type="button" disabled={!activeSite} onClick={() => activeSite && focus(activeSite.x, activeSite.y)} className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md border border-line/70 bg-panel-2/50 px-2 text-left hover:border-mint/40 disabled:opacity-50">
             {activeSite ? <>
               <Factory size="0.8rem" className="shrink-0" style={{ color: activeSite.color }} />
-              <span className="min-w-0 flex-1 truncate text-[0.6875rem] font-medium text-bone">{activeSite.label}</span>
+              <span className="min-w-0 flex-1 truncate text-[0.6875rem] font-semibold uppercase tracking-[0.06em] text-bone">{activeSite.label}</span>
               <span className="shrink-0 truncate font-mono text-[0.625rem] text-muted">{activeSite.ownerName} · {buildingIndex % sites.length + 1}/{sites.length}</span>
             </> : <span className="flex items-center gap-1.5 text-[0.6875rem] text-muted"><Buildings size="0.85rem" /> No facilities</span>}
           </button>
@@ -542,30 +540,31 @@ export function MapNavigator() {
           </button>
         </div>
 
-        <div className="flex items-center gap-1 border-b border-line/70 px-2 py-1.5">
-          {([['all', 'All'], ['player', 'Yours'], ['rival', 'Rivals']] as const).map(([id, label]) => (
-            <button key={id} type="button" aria-pressed={buildingFilter === id} onClick={() => {
-              setBuildingFilter(id)
-              setBuildingIndex(0)
-            }} className={`h-8 rounded-md px-2 text-[0.625rem] font-medium ${buildingFilter === id ? 'bg-mint/15 text-mint' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}>{label}</button>
-          ))}
+        <div className="map-navigator-commandbar flex items-center gap-1 border-b border-line/70 bg-void/35 px-2 py-1.5">
+          <div className="flex shrink-0 items-center rounded-md border border-line/70 bg-void/45 p-0.5">
+            {([['all', 'All'], ['player', 'Yours'], ['rival', 'Rivals']] as const).map(([id, label]) => (
+              <button key={id} type="button" aria-pressed={buildingFilter === id} onClick={() => {
+                setBuildingFilter(id)
+                setBuildingIndex(0)
+              }} className={`h-7 rounded px-2 text-[0.625rem] font-medium uppercase tracking-[0.04em] ${buildingFilter === id ? 'bg-mint/15 text-mint shadow-[inset_0_0_0_1px_rgba(72,215,209,.28)]' : id === 'rival' ? 'text-danger/80 hover:bg-panel-2' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}>{label}</button>
+            ))}
+          </div>
+          <span aria-hidden="true" className="mx-0.5 h-5 w-px shrink-0 bg-line/70" />
+          <div className="flex min-w-0 flex-1 items-center justify-between gap-0.5">
+            {OVERLAYS.map(({ id, label, title, icon: Icon }) => (
+              <button key={id} type="button" title={title} aria-label={label} aria-pressed={overlay === id} onClick={() => setOverlay(id)} className={`flex h-7 w-7 items-center justify-center rounded-md ${overlay === id ? 'bg-mint/15 text-mint' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}>
+                <Icon size="0.92rem" weight={overlay === id ? 'fill' : 'duotone'} />
+              </button>
+            ))}
+            <CloudVisibilityToggle />
+            <button type="button" aria-label="Rotate map left" title="Rotate left (Q)" onClick={() => rotateMapCamera(-1)} className="h-7 w-7 rounded-md text-xs text-muted hover:bg-panel-2 hover:text-bone">↶</button>
+            <button type="button" aria-label={`Cycle map tilt, current ${mapCameraTilt}`} title="Cycle tilt (T)" onClick={cycleMapCameraTilt} className="h-7 min-w-7 rounded-md px-0.5 font-mono text-[0.5rem] uppercase text-muted hover:bg-panel-2 hover:text-bone">{mapCameraTilt.slice(0, 3)}</button>
+            <button type="button" aria-label="Rotate map right" title="Rotate right (E)" onClick={() => rotateMapCamera(1)} className="h-7 w-7 rounded-md text-xs text-muted hover:bg-panel-2 hover:text-bone">↷</button>
+            <button type="button" aria-label="Reset map perspective" title="Reset perspective (R)" onClick={resetMapCamera} className="h-7 w-7 rounded-md font-mono text-[0.5625rem] text-muted hover:bg-panel-2 hover:text-bone">R</button>
+          </div>
         </div>
 
-        <div className="flex items-center justify-between gap-1 border-b border-line/70 bg-void/35 px-2 py-1.5">
-          {OVERLAYS.map(({ id, label, title, icon: Icon }) => (
-            <button key={id} type="button" title={title} aria-label={label} aria-pressed={overlay === id} onClick={() => setOverlay(id)} className={`flex h-7 w-7 items-center justify-center rounded-md ${overlay === id ? 'bg-mint/15 text-mint' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}>
-              <Icon size="0.95rem" weight={overlay === id ? 'fill' : 'duotone'} />
-            </button>
-          ))}
-          <span aria-hidden="true" className="mx-0.5 h-5 w-px bg-line/70" />
-          <CloudVisibilityToggle />
-          <button type="button" aria-label="Rotate map left" title="Rotate left (Q)" onClick={() => rotateMapCamera(-1)} className="h-7 w-7 rounded-md text-xs text-muted hover:bg-panel-2 hover:text-bone">↶</button>
-          <button type="button" aria-label={`Cycle map tilt, current ${mapCameraTilt}`} title="Cycle tilt (T)" onClick={cycleMapCameraTilt} className="h-7 min-w-7 rounded-md px-0.5 font-mono text-[0.5rem] uppercase text-muted hover:bg-panel-2 hover:text-bone">{mapCameraTilt.slice(0, 3)}</button>
-          <button type="button" aria-label="Rotate map right" title="Rotate right (E)" onClick={() => rotateMapCamera(1)} className="h-7 w-7 rounded-md text-xs text-muted hover:bg-panel-2 hover:text-bone">↷</button>
-          <button type="button" aria-label="Reset map perspective" title="Reset perspective (R)" onClick={resetMapCamera} className="h-7 w-7 rounded-md font-mono text-[0.5625rem] text-muted hover:bg-panel-2 hover:text-bone">R</button>
-        </div>
-
-        <div className="relative border-b border-line/70 bg-[#071319] p-1.5">
+        <div className="relative bg-[#071319] p-1.5 pb-1">
           <div ref={frameRef} className="map-navigator-frame relative w-full overflow-hidden rounded-md border border-line/80 bg-void shadow-inner">
             <TerrainCanvas data={data} view={view} />
             <svg
@@ -602,26 +601,26 @@ export function MapNavigator() {
                 const city = cityById.get(label.id)
                 return <text key={label.id} data-map-marker="city-label" role="button" tabIndex={0} aria-label={city ? `Pan to ${navigatorCitySummary(city)}` : `Pan to ${label.text}`} x={label.x} y={label.y} textAnchor={label.anchor} fontSize={worldPerPixel * 10} fontFamily="IBM Plex Mono, monospace" fontWeight={city?.tier === 'metro' ? 700 : 500} fill={city?.tier === 'metro' ? '#dceffc' : '#d8dfdc'} stroke="#071319" strokeWidth={worldPerPixel * 2.4} paintOrder="stroke" className="cursor-pointer select-none" onClick={() => city && pan(city.cx, city.cy)}>{city ? <title>{navigatorCitySummary(city)}</title> : null}{label.text}</text>
               })}
-              {sites.map((site) => <SiteMarker key={`${site.ownerId}-${site.id}`} site={site} markerScale={markerScale} strokeScale={worldPerPixel} onFocus={focus} />)}
+              {sites.map((site) => <SiteMarker key={`${site.ownerId}-${site.id}`} site={site} active={activeSite?.id === site.id && activeSite.ownerId === site.ownerId} markerScale={markerScale} strokeScale={worldPerPixel} onFocus={focus} />)}
+              {activeSite ? <text x={activeSite.x + 0.5 + markerScale * 0.9} y={activeSite.y + 0.5 - markerScale * 0.45} fontSize={worldPerPixel * 9} fontFamily="IBM Plex Mono, monospace" fontWeight={700} fill={activeSite.color} stroke="#071319" strokeWidth={worldPerPixel * 2.4} paintOrder="stroke" pointerEvents="none">{activeSite.label}</text> : null}
               {mapViewport ? <MapViewportOverlay viewport={mapViewport} worldPerPixel={worldPerPixel} /> : null}
               {selectedTile ? <g pointerEvents="none">
                 <circle cx={selectedTile.x + 0.5} cy={selectedTile.y + 0.5} r={markerScale * 0.72} fill="none" stroke="#f3c969" strokeWidth={worldPerPixel * 1.25} />
                 <line x1={selectedTile.x + 0.5 - markerScale} y1={selectedTile.y + 0.5} x2={selectedTile.x + 0.5 + markerScale} y2={selectedTile.y + 0.5} stroke="#f3c969" strokeWidth={worldPerPixel * 0.55} />
               </g> : null}
             </svg>
-            <NavigatorCompass />
-            <div className="absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md border border-line/70 bg-void/90 p-0.5 shadow backdrop-blur-sm">
+            <div className="absolute bottom-1.5 left-1/2 flex -translate-x-1/2 items-center gap-0.5 rounded-md border border-line/70 bg-void/90 p-0.5 shadow backdrop-blur-sm">
               <button type="button" aria-label="Zoom minimap out" disabled={zoom === 1} onClick={() => applyZoom(zoomStep(zoom, -1))} className="h-7 w-7 rounded text-sm text-bone hover:bg-panel-2 disabled:opacity-35">−</button>
               <span className="min-w-7 text-center font-mono text-[0.5625rem] text-muted" aria-hidden="true">{zoom}×</span>
               <button type="button" aria-label="Zoom minimap in" disabled={zoom === 4} onClick={() => applyZoom(zoomStep(zoom, 1))} className="h-7 w-7 rounded text-sm text-bone hover:bg-panel-2 disabled:opacity-35">+</button>
               <button type="button" aria-label="Fit minimap to world" onClick={fit} className="h-7 rounded px-1.5 font-mono text-[0.5rem] uppercase text-muted hover:bg-panel-2 hover:text-bone">Fit</button>
               <button type="button" aria-label="Follow main map camera" aria-pressed={followViewport} onClick={follow} className={`h-7 rounded px-1.5 font-mono text-[0.5rem] uppercase ${followViewport ? 'bg-mint/15 text-mint' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}>Follow</button>
             </div>
-            <div className="pointer-events-none absolute bottom-1.5 left-1.5 flex items-center gap-1.5 rounded-md border border-line/70 bg-void/85 px-1.5 py-0.5 font-mono text-[0.5rem] uppercase tracking-[0.06em] text-muted backdrop-blur-sm">
-              <span className="h-1.5 w-1.5 rounded-sm bg-mint" /> Yours
-              <span className="h-1.5 w-1.5 rounded-full bg-danger" /> Rival
-              <span className="hidden sm:inline">Road</span><span className="h-[2px] w-2 bg-[#d8d1bd]" />
-            </div>
+          </div>
+          <div className="map-navigator-legend pointer-events-none flex h-6 items-center gap-2 px-1.5 font-mono text-[0.5rem] uppercase tracking-[0.06em] text-muted">
+            <span className="h-1.5 w-1.5 rounded-full border border-mint bg-mint/20" /> Yours
+            <span className="h-1.5 w-1.5 rotate-45 border border-danger bg-danger/25" /> Rival
+            <span className="ml-auto h-[2px] w-3 bg-[#d8d1bd]" /><span>Road</span>
           </div>
           <span id="map-navigator-help" className="sr-only">The map is north up. Terrain color shows biome and elevation. Roads use distinct widths and colors for local roads, collectors, arterials, and highways. City names appear as the navigator zooms. The outlined camera footprint reflects the exact main map perspective and its mint edge points forward. Use plus and minus to zoom, Follow to track the camera, drag the footprint to pan the main map, drag the background to explore this navigator, or press Home to fit the world.</span>
           <span className="sr-only" aria-live="polite">{zoomAnnouncement}</span>
@@ -632,8 +631,11 @@ export function MapNavigator() {
   )
 }
 
-function SiteMarker({ site, markerScale, strokeScale, onFocus }: { site: MapNavigatorSite; markerScale: number; strokeScale: number; onFocus: (x: number, y: number) => void }) {
+function SiteMarker({ site, active, markerScale, strokeScale, onFocus }: { site: MapNavigatorSite; active?: boolean; markerScale: number; strokeScale: number; onFocus: (x: number, y: number) => void }) {
   const size = markerScale * (site.ownerType === 'player' ? 0.72 : 0.62)
+  const cx = site.x + 0.5
+  const cy = site.y + 0.5
+  const half = size / 2
   return (
     <g data-map-marker="facility" role="button" aria-label={`Focus ${site.label}, ${site.ownerName}`} tabIndex={0} onClick={(event) => {
       event.stopPropagation()
@@ -643,9 +645,10 @@ function SiteMarker({ site, markerScale, strokeScale, onFocus }: { site: MapNavi
       event.preventDefault()
       onFocus(site.x, site.y)
     }} className="cursor-pointer outline-none">
-      <circle cx={site.x + 0.5} cy={site.y + 0.5} r={size + strokeScale * 1.1} fill="rgba(7,17,23,0.76)" />
-      {site.ownerType === 'player' ? <rect x={site.x + 0.5 - size / 2} y={site.y + 0.5 - size / 2} width={size} height={size} rx={strokeScale * 0.35} fill={site.color} stroke="#e8f2f2" strokeWidth={strokeScale * 0.55} /> : <circle cx={site.x + 0.5} cy={site.y + 0.5} r={size / 2} fill={site.color} stroke="#e8f2f2" strokeWidth={strokeScale * 0.55} />}
-      {site.constructing ? <circle cx={site.x + 0.5} cy={site.y + 0.5} r={size + strokeScale * 0.55} fill="none" stroke="#e8ad56" strokeWidth={strokeScale * 0.65} strokeDasharray={`${strokeScale * 1.4} ${strokeScale}`} /> : null}
+      <circle cx={cx} cy={cy} r={size + strokeScale * 1.2} fill="rgba(7,17,23,0.82)" />
+      {active ? <circle cx={cx} cy={cy} r={size + strokeScale * 0.8} fill="rgba(72,215,209,0.12)" stroke="#e8f2f2" strokeWidth={strokeScale * 0.75} /> : null}
+      <polygon points={`${cx},${cy - half} ${cx + half},${cy} ${cx},${cy + half} ${cx - half},${cy}`} fill={site.color} stroke="#e8f2f2" strokeWidth={strokeScale * 0.55} />
+      {site.constructing ? <circle cx={cx} cy={cy} r={size + strokeScale * 0.55} fill="none" stroke="#e8ad56" strokeWidth={strokeScale * 0.65} strokeDasharray={`${strokeScale * 1.4} ${strokeScale}`} /> : null}
       <title>{site.label} · {site.ownerName}</title>
     </g>
   )

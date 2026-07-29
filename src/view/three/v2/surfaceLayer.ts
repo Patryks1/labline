@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { smoothRoadCenterline, type RoadJunction, type RoadNetworkPoint } from '../../../sim/world'
 import { SurfaceBiomeTexture, SurfaceDataTexture } from './surfaceData'
-import { RenderBiome, SurfaceKind, TransportVisual, type ChunkId, type SurfaceTexel, type TileBounds, type ViewportRenderSource } from './types'
+import { RenderBiome, SurfaceFlag, SurfaceKind, TransportVisual, type ChunkId, type SurfaceTexel, type TileBounds, type ViewportRenderSource } from './types'
 
 const VERTEX_SHADER = /* glsl */ `
 precision highp float;
@@ -388,6 +388,7 @@ export class MapSurfaceLayer {
   readonly mesh = new THREE.Group()
   readonly terrainRoot = new THREE.Group()
   readonly waterRoot = new THREE.Group()
+  readonly riverRoot = new THREE.Group()
   readonly foamRoot = new THREE.Group()
   readonly bridgeRoot = new THREE.Group()
   readonly roadRoot = new THREE.Group()
@@ -401,8 +402,9 @@ export class MapSurfaceLayer {
   private readonly chunkSize: number
   private readonly chunks = new Map<ChunkId, SurfaceChunkRecord>()
   private readonly waterMaterial: THREE.MeshPhysicalMaterial
+  private readonly riverMaterial: THREE.MeshPhysicalMaterial
   private readonly foamMaterial: THREE.MeshStandardMaterial
-  private readonly bridgeMaterial: THREE.MeshStandardMaterial
+  private readonly bridgeMaterials: THREE.MeshStandardMaterial[]
   private readonly roadMaterials: THREE.MeshStandardMaterial[]
   private readonly edgeMaterial: THREE.MeshStandardMaterial
   private readonly useRoadMeshes: boolean
@@ -447,15 +449,14 @@ export class MapSurfaceLayer {
       side: THREE.FrontSide,
     })
     this.waterMaterial = createWaterMaterial()
+    this.riverMaterial = createRiverWaterMaterial()
     this.foamMaterial = createShoreFoamMaterial()
-    this.bridgeMaterial = new THREE.MeshStandardMaterial({
-      name: 'terrain-bridge-decks',
-      color: 0x26323b,
-      roughness: 0.76,
-      metalness: 0.12,
-      flatShading: false,
-      fog: true,
-    })
+    this.bridgeMaterials = [
+      bridgeMaterial('local-steel', 0x34434b, 0.72, 0.18),
+      bridgeMaterial('collector-concrete', 0x465058, 0.82, 0.08),
+      bridgeMaterial('arterial-concrete', 0x596064, 0.86, 0.04),
+      bridgeMaterial('highway-concrete', 0x686d6e, 0.88, 0.03),
+    ]
     const roadMarkingMaterial = roadMaterial('road-marking', 0xf4f2e9, 0.72, -4)
     roadMarkingMaterial.transparent = true
     roadMarkingMaterial.depthWrite = false
@@ -476,11 +477,12 @@ export class MapSurfaceLayer {
     this.mesh.name = 'map-heightfield-surface'
     this.terrainRoot.name = 'map-terrain-heightfield-chunks'
     this.waterRoot.name = 'map-independent-water-chunks'
+    this.riverRoot.name = 'map-flowing-river-chunks'
     this.foamRoot.name = 'map-shoreline-foam-chunks'
     this.bridgeRoot.name = 'map-bridge-deck-chunks'
     this.roadRoot.name = 'map-heightfield-road-chunks'
     this.edgeRoot.name = 'map-world-edge-fascia-chunks'
-    this.mesh.add(this.edgeRoot, this.terrainRoot, this.waterRoot, this.foamRoot, this.roadRoot, this.bridgeRoot)
+    this.mesh.add(this.edgeRoot, this.terrainRoot, this.waterRoot, this.riverRoot, this.foamRoot, this.roadRoot, this.bridgeRoot)
 
     // Keep a small geometry handle for diagnostics/tests; large maps do not
     // allocate a million-cell pick plane during construction.
@@ -530,7 +532,7 @@ export class MapSurfaceLayer {
         root.userData.edgeMesh = edgeMesh
       } else edge.dispose()
 
-      const water = this.buildWaterGeometry(bounds)
+      const water = this.buildWaterGeometry(bounds, false)
       if (water.getAttribute('position').count > 0) {
         const waterMesh = new THREE.Mesh(water, this.waterMaterial)
         waterMesh.name = `water-surface-${chunkId}`
@@ -540,6 +542,18 @@ export class MapSurfaceLayer {
         this.waterRoot.add(waterMesh)
         root.userData.waterMesh = waterMesh
       } else water.dispose()
+
+      const river = this.buildWaterGeometry(bounds, true)
+      if (river.getAttribute('position').count > 0) {
+        const riverMesh = new THREE.Mesh(river, this.riverMaterial)
+        riverMesh.name = `river-surface-${chunkId}`
+        riverMesh.renderOrder = 2
+        riverMesh.receiveShadow = true
+        riverMesh.userData.waterSurface = true
+        riverMesh.userData.riverSurface = true
+        this.riverRoot.add(riverMesh)
+        root.userData.riverMesh = riverMesh
+      } else river.dispose()
 
       const foam = this.buildShoreFoamGeometry(bounds)
       if (foam.getAttribute('position').count > 0) {
@@ -567,7 +581,7 @@ export class MapSurfaceLayer {
 
       const bridge = this.buildBridgeGeometry(bounds)
       if (bridge.getAttribute('position').count > 0) {
-        const bridgeMesh = new THREE.Mesh(bridge, this.bridgeMaterial)
+        const bridgeMesh = new THREE.Mesh(bridge, this.bridgeMaterials)
         bridgeMesh.name = `bridge-decks-${chunkId}`
         bridgeMesh.castShadow = true
         bridgeMesh.receiveShadow = true
@@ -617,11 +631,21 @@ export class MapSurfaceLayer {
     this.lastFrameTime = safeTime
     const time = this.waterMaterial.userData.waterTime as { value: number }
     time.value = this.waterAnimationTime
+    const riverTime = this.riverMaterial.userData.waterTime as { value: number }
+    riverTime.value = this.waterAnimationTime
     const normalMap = this.waterMaterial.normalMap
     if (normalMap) {
       normalMap.offset.set(
         (this.waterAnimationTime * 0.006) % 1,
         (this.waterAnimationTime * 0.0035) % 1,
+      )
+    }
+    const riverNormalMap = this.riverMaterial.normalMap
+    if (riverNormalMap) {
+      // A slow biased translation reads as downstream flow rather than lake chop.
+      riverNormalMap.offset.set(
+        (this.waterAnimationTime * 0.0025) % 1,
+        (this.waterAnimationTime * -0.009) % 1,
       )
     }
   }
@@ -632,8 +656,10 @@ export class MapSurfaceLayer {
     this.material.dispose()
     this.waterMaterial.normalMap?.dispose()
     this.waterMaterial.dispose()
+    this.riverMaterial.normalMap?.dispose()
+    this.riverMaterial.dispose()
     this.foamMaterial.dispose()
-    this.bridgeMaterial.dispose()
+    for (const material of this.bridgeMaterials) material.dispose()
     this.edgeMaterial.dispose()
     for (const material of this.roadMaterials) material.dispose()
     this.data.dispose()
@@ -799,7 +825,7 @@ export class MapSurfaceLayer {
     return geometry
   }
 
-  private buildWaterGeometry(bounds: TileBounds): THREE.BufferGeometry {
+  private buildWaterGeometry(bounds: TileBounds, river: boolean): THREE.BufferGeometry {
     const positions: number[] = []
     const uvs: number[] = []
     const indices: number[] = []
@@ -807,7 +833,7 @@ export class MapSurfaceLayer {
     for (let y = bounds.minY; y < bounds.maxY; y++) {
       for (let x = bounds.minX; x < bounds.maxX; x++) {
         this.source?.readSurface(y * this.width + x, texel)
-        if (!this.source || texel.kind !== SurfaceKind.lake) continue
+        if (!this.source || texel.kind !== SurfaceKind.lake || ((texel.flags & SurfaceFlag.river) !== 0) !== river) continue
         const h = (this.source.getWaterElevation?.(x, y) ?? this.tileHeight(x, y)) + WATER_LIFT
         const mask = texel.neighborMask & 0x0f
         const north = (mask & 1) !== 0
@@ -825,7 +851,11 @@ export class MapSurfaceLayer {
         const z0 = (y - 0.5) * this.tileSize
         const z1 = (y + 0.5) * this.tileSize
         positions.push(x0, h00, z0, x1, h10, z0, x0, h01, z1, x1, h11, z1)
-        uvs.push(x, y, x + 1, y, x, y + 1, x + 1, y + 1)
+        // Put the dominant channel axis in V: the river material scrolls that
+        // coordinate, so both east-west and north-south reaches read as flow.
+        const horizontalRiver = river && (east || west) && !(north || south)
+        if (horizontalRiver) uvs.push(y, x, y, x + 1, y + 1, x, y + 1, x + 1)
+        else uvs.push(x, y, x + 1, y, x, y + 1, x + 1, y + 1)
         indices.push(base, base + 2, base + 1, base + 1, base + 2, base + 3)
       }
     }
@@ -842,12 +872,14 @@ export class MapSurfaceLayer {
       for (let x = bounds.minX; x < bounds.maxX; x++) {
         this.source?.readSurface(y * this.width + x, texel)
         if (!this.source || texel.kind !== SurfaceKind.lake || (texel.neighborMask & 0x0f) === 0x0f) continue
+        const river = (texel.flags & SurfaceFlag.river) !== 0
         const h = (this.source.getWaterElevation?.(x, y) ?? this.tileHeight(x, y)) + SHORE_FOAM_LIFT
         const x0 = (x - 0.5) * this.tileSize
         const x1 = (x + 0.5) * this.tileSize
         const z0 = (y - 0.5) * this.tileSize
         const z1 = (y + 0.5) * this.tileSize
-        const width = this.tileSize * SHORE_FOAM_WIDTH
+        // Rivers keep only a thin suggestion of turbulence along their banks.
+        const width = this.tileSize * SHORE_FOAM_WIDTH * (river ? 0.38 : 1)
         if ((texel.neighborMask & 1) === 0) appendFoamStrip(positions, uvs, indices, x0, z0, x1, z0, 0, width, h, x, y)
         if ((texel.neighborMask & 2) === 0) appendFoamStrip(positions, uvs, indices, x1, z0, x1, z1, -width, 0, h, x, y)
         if ((texel.neighborMask & 4) === 0) appendFoamStrip(positions, uvs, indices, x1, z1, x0, z1, 0, -width, h, x, y)
@@ -861,7 +893,9 @@ export class MapSurfaceLayer {
     const positions: number[] = []
     const uvs: number[] = []
     const indices: number[] = []
+    const groups: Array<{ start: number; count: number; materialIndex: number }> = []
     const texel: SurfaceTexel = { kind: 0, neighborMask: 0, region: 0, flags: 0 }
+    const neighbor: SurfaceTexel = { kind: 0, neighborMask: 0, region: 0, flags: 0 }
     for (let y = bounds.minY; y < bounds.maxY; y++) {
       for (let x = bounds.minX; x < bounds.maxX; x++) {
         texel.transport = undefined
@@ -870,11 +904,23 @@ export class MapSurfaceLayer {
         if (!this.source || (transport & (TransportVisual.bridge << 8)) === 0) continue
         const topology = transport & 0xff
         const roadClass = (transport >>> 8) & TransportVisual.classMask
-        const halfWidth = this.tileSize * (0.15 + Math.max(0, roadClass - 1) * 0.035)
+        const classIndex = Math.max(0, Math.min(3, roadClass - 1))
+        const groupStart = indices.length
+        const halfWidth = this.tileSize * (0.15 + classIndex * 0.035)
         const deckY = (this.source.getWaterElevation?.(x, y) ?? this.tileHeight(x, y)) + 0.13
+        const deckThickness = this.tileSize * (0.055 + classIndex * 0.009)
         const endpoints = bridgeEndpoints(topology)
         if (endpoints.length === 0) endpoints.push([0, -0.5], [0, 0.5])
+        let connectedBridgeTiles = 0
+        for (const [neighborX, neighborY] of [[x, y - 1], [x + 1, y], [x, y + 1], [x - 1, y]] as const) {
+          if (neighborX < 0 || neighborY < 0 || neighborX >= this.width || neighborY >= this.height) continue
+          neighbor.transport = undefined
+          this.source.readSurface(neighborY * this.width + neighborX, neighbor)
+          if (((neighbor.transport ?? 0) & (TransportVisual.bridge << 8)) !== 0) connectedBridgeTiles++
+        }
         for (const [dx, dz] of endpoints) {
+          const endX = x * this.tileSize + dx * this.tileSize
+          const endZ = y * this.tileSize + dz * this.tileSize
           appendDeckSegment(
             positions,
             uvs,
@@ -882,15 +928,46 @@ export class MapSurfaceLayer {
             x * this.tileSize,
             deckY,
             y * this.tileSize,
-            x * this.tileSize + dx * this.tileSize,
-            y * this.tileSize + dz * this.tileSize,
+            endX,
+            endZ,
             halfWidth,
-            0.07,
+            deckThickness,
           )
+          appendBridgeEdges(
+            positions, uvs, indices,
+            x * this.tileSize, deckY, y * this.tileSize,
+            endX, endZ, halfWidth, roadClass, this.tileSize,
+          )
+
+          const neighborX = x + Math.sign(dx)
+          const neighborY = y + Math.sign(dz)
+          let neighborBridge = false
+          if (neighborX >= 0 && neighborX < this.width && neighborY >= 0 && neighborY < this.height) {
+            neighbor.transport = undefined
+            this.source.readSurface(neighborY * this.width + neighborX, neighbor)
+            neighborBridge = ((neighbor.transport ?? 0) & (TransportVisual.bridge << 8)) !== 0
+          }
+          if (!neighborBridge) {
+            appendBridgeAbutment(
+              positions, uvs, indices, endX, deckY, endZ,
+              dx, dz, halfWidth, deckThickness, this.tileSize,
+            )
+          }
         }
+        // A pier is useful only inside a span of at least three bridge cells;
+        // short one/two-cell crossings read better as a clean supported deck.
+        if (connectedBridgeTiles >= 2) appendBridgePier(
+          positions, uvs, indices,
+          x * this.tileSize, deckY - deckThickness, y * this.tileSize,
+          roadClass, this.tileSize,
+        )
+        groups.push({ start: groupStart, count: indices.length - groupStart, materialIndex: classIndex })
       }
     }
-    return arrayGeometry(positions, uvs, indices)
+    const consolidated = consolidateRoadGroups(indices, groups, this.bridgeMaterials.length)
+    const geometry = arrayGeometry(positions, uvs, consolidated.indices)
+    for (const group of consolidated.groups) geometry.addGroup(group.start, group.count, group.materialIndex)
+    return geometry
   }
 
   /** Build V4 roadbeds from transport topology; bridge cells own separate decks. */
@@ -1133,6 +1210,11 @@ export class MapSurfaceLayer {
       this.waterRoot.remove(water)
       water.geometry.dispose()
     }
+    const river = record.root.userData.riverMesh as THREE.Mesh | undefined
+    if (river) {
+      this.riverRoot.remove(river)
+      river.geometry.dispose()
+    }
     const foam = record.root.userData.foamMesh as THREE.Mesh | undefined
     if (foam) {
       this.foamRoot.remove(foam)
@@ -1162,12 +1244,14 @@ export class MapSurfaceLayer {
     record.root.visible = visible
     const terrain = record.root.children[0] as THREE.Mesh | undefined
     const water = record.root.userData.waterMesh as THREE.Mesh | undefined
+    const river = record.root.userData.riverMesh as THREE.Mesh | undefined
     const foam = record.root.userData.foamMesh as THREE.Mesh | undefined
     const bridge = record.root.userData.bridgeMesh as THREE.Mesh | undefined
     const road = record.root.userData.roadMesh as THREE.Mesh | undefined
     const edge = record.root.userData.edgeMesh as THREE.Mesh | undefined
     if (terrain) terrain.visible = visible
     if (water) water.visible = visible
+    if (river) river.visible = visible
     if (foam) foam.visible = visible
     if (bridge) bridge.visible = visible
     if (road) road.visible = visible
@@ -1558,6 +1642,22 @@ function roadMaterial(
   })
 }
 
+function bridgeMaterial(
+  suffix: string,
+  color: number,
+  roughness: number,
+  metalness: number,
+): THREE.MeshStandardMaterial {
+  return new THREE.MeshStandardMaterial({
+    name: `terrain-bridge-${suffix}`,
+    color,
+    roughness,
+    metalness,
+    flatShading: false,
+    fog: true,
+  })
+}
+
 function createWaterMaterial(): THREE.MeshPhysicalMaterial {
   const time = { value: 0 }
   const normalMap = createWaterNormalTexture()
@@ -1606,6 +1706,58 @@ diffuseColor.rgb *= mix(vec3(0.965, 0.985, 1.0), vec3(1.025, 1.045, 1.055), wate
       )
   }
   material.customProgramCacheKey = () => 'labline-independent-water-v3'
+  return material
+}
+
+/** Cooler, anisotropic water whose broad phase advances mostly downstream. */
+function createRiverWaterMaterial(): THREE.MeshPhysicalMaterial {
+  const time = { value: 0 }
+  const normalMap = createWaterNormalTexture()
+  normalMap.name = 'procedural-river-flow-normals'
+  normalMap.repeat.set(0.22, 0.58)
+  const material = new THREE.MeshPhysicalMaterial({
+    name: 'flowing-river-water',
+    color: 0x19758a,
+    roughness: 0.22,
+    metalness: 0,
+    clearcoat: 0.62,
+    clearcoatRoughness: 0.31,
+    reflectivity: 0.56,
+    ior: 1.333,
+    transmission: 0.09,
+    transparent: true,
+    opacity: 0.79,
+    normalMap,
+    normalScale: new THREE.Vector2(0.12, 0.27),
+    depthWrite: true,
+    side: THREE.DoubleSide,
+    fog: true,
+  })
+  material.userData.waterTime = time
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uWaterTime = time
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nuniform float uWaterTime;\nvarying vec2 vRiverFlowUv;')
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+vRiverFlowUv = uv;
+transformed.y += (
+  sin(vRiverFlowUv.y * 1.34 + vRiverFlowUv.x * 0.21 - uWaterTime * 0.16) * 0.0024 +
+  sin(vRiverFlowUv.y * 2.46 - vRiverFlowUv.x * 0.18 - uWaterTime * 0.09) * 0.0012
+);`,
+      )
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform float uWaterTime;\nvarying vec2 vRiverFlowUv;')
+      .replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+float riverBand = sin(vRiverFlowUv.y * 3.2 + vRiverFlowUv.x * 0.42 - uWaterTime * 0.14) * 0.5 + 0.5;
+float riverThread = smoothstep(0.72, 0.96, riverBand);
+diffuseColor.rgb *= mix(vec3(0.97, 1.0, 1.015), vec3(1.035, 1.055, 1.06), riverThread * 0.22);`,
+      )
+  }
+  material.customProgramCacheKey = () => 'labline-flowing-river-v1'
   return material
 }
 
@@ -1709,5 +1861,83 @@ function appendDeckSegment(
     base + 1, base + 3, base + 5, base + 5, base + 3, base + 7,
     base, base + 1, base + 4, base + 1, base + 5, base + 4,
     base + 2, base + 6, base + 3, base + 3, base + 6, base + 7,
+  )
+}
+
+/** Railings on minor spans become progressively heavier parapets on trunk roads. */
+function appendBridgeEdges(
+  positions: number[], uvs: number[], indices: number[],
+  x0: number, y: number, z0: number, x1: number, z1: number,
+  deckHalfWidth: number, roadClass: number, tileSize: number,
+): void {
+  const dx = x1 - x0
+  const dz = z1 - z0
+  const length = Math.hypot(dx, dz)
+  if (length < 1e-6) return
+  const nx = -dz / length
+  const nz = dx / length
+  const major = roadClass >= TransportVisual.arterial
+  const edgeThickness = tileSize * (major ? 0.034 : 0.018)
+  const edgeHeight = tileSize * (major ? 0.115 : 0.066)
+  const offset = deckHalfWidth - edgeThickness * 0.55
+  for (const side of [-1, 1]) {
+    appendDeckSegment(
+      positions, uvs, indices,
+      x0 + nx * offset * side, y + edgeHeight, z0 + nz * offset * side,
+      x1 + nx * offset * side, z1 + nz * offset * side,
+      edgeThickness, edgeHeight,
+    )
+  }
+}
+
+/** Transverse concrete seat at a bridge-to-land transition. */
+function appendBridgeAbutment(
+  positions: number[], uvs: number[], indices: number[],
+  x: number, y: number, z: number, dx: number, dz: number,
+  deckHalfWidth: number, deckThickness: number, tileSize: number,
+): void {
+  const length = Math.hypot(dx, dz) || 1
+  const nx = -dz / length
+  const nz = dx / length
+  const halfLength = deckHalfWidth * 1.12
+  appendDeckSegment(
+    positions, uvs, indices,
+    x - nx * halfLength, y - deckThickness * 0.35, z - nz * halfLength,
+    x + nx * halfLength, z + nz * halfLength,
+    tileSize * 0.07, tileSize * 0.20,
+  )
+}
+
+/** Chunk-batched interior pier; the caller suppresses it on short spans. */
+function appendBridgePier(
+  positions: number[], uvs: number[], indices: number[],
+  x: number, top: number, z: number, roadClass: number, tileSize: number,
+): void {
+  const classIndex = Math.max(0, Math.min(3, roadClass - 1))
+  const halfWidth = tileSize * (0.045 + classIndex * 0.012)
+  const halfDepth = tileSize * (0.07 + classIndex * 0.016)
+  const height = tileSize * (0.20 + classIndex * 0.025)
+  appendBoxVolume(positions, uvs, indices, x, top - height * 0.5, z, halfWidth, height * 0.5, halfDepth)
+}
+
+function appendBoxVolume(
+  positions: number[], uvs: number[], indices: number[],
+  x: number, y: number, z: number, hx: number, hy: number, hz: number,
+): void {
+  const base = positions.length / 3
+  positions.push(
+    x - hx, y + hy, z - hz, x + hx, y + hy, z - hz,
+    x - hx, y + hy, z + hz, x + hx, y + hy, z + hz,
+    x - hx, y - hy, z - hz, x + hx, y - hy, z - hz,
+    x - hx, y - hy, z + hz, x + hx, y - hy, z + hz,
+  )
+  for (let index = 0; index < 8; index++) uvs.push(index & 1, (index >> 1) & 1)
+  indices.push(
+    base, base + 2, base + 1, base + 1, base + 2, base + 3,
+    base + 4, base + 5, base + 6, base + 5, base + 7, base + 6,
+    base, base + 1, base + 4, base + 1, base + 5, base + 4,
+    base + 2, base + 6, base + 3, base + 3, base + 6, base + 7,
+    base, base + 4, base + 2, base + 4, base + 6, base + 2,
+    base + 1, base + 3, base + 5, base + 5, base + 3, base + 7,
   )
 }

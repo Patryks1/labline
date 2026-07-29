@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_CAMPAIGN_RULES } from '../../../sim/campaign'
 import { LablineMenuShell } from './LablineMenuShell'
+import { parseCheatMoneyAmount } from './cheatMoney'
 import { SettingsPanel } from './SettingsPanel'
 
 describe('LablineMenuShell', () => {
@@ -39,6 +40,7 @@ describe('SettingsPanel', () => {
     expect(markup).toContain('>Video</button>')
     expect(markup).toContain('>Audio</button>')
     expect(markup).not.toContain('>Gameplay</button>')
+    expect(markup).not.toContain('>Cheats</button>')
   })
 
   it('adds Gameplay only when campaign actions are available', () => {
@@ -51,5 +53,22 @@ describe('SettingsPanel', () => {
       },
     }))
     expect(markup).toContain('>Gameplay</button>')
+    expect(markup).not.toContain('>Cheats</button>')
+  })
+
+  it('exposes Cheats only when active-campaign cheat actions are available', () => {
+    const markup = renderToStaticMarkup(createElement(SettingsPanel, {
+      cheats: { cash: 1_000_000, adjustMoney: () => true, runInstantAction: () => 0 },
+    }))
+    expect(markup).toContain('>Cheats</button>')
+  })
+
+  it('accepts only positive, finite cheat money amounts', () => {
+    expect(parseCheatMoneyAmount('2500000.50')).toBe(2_500_000.5)
+    expect(parseCheatMoneyAmount('')).toBeNull()
+    expect(parseCheatMoneyAmount('0')).toBeNull()
+    expect(parseCheatMoneyAmount('-10')).toBeNull()
+    expect(parseCheatMoneyAmount('Infinity')).toBeNull()
+    expect(parseCheatMoneyAmount('not money')).toBeNull()
   })
 })

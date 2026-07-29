@@ -11,6 +11,7 @@ import {
 } from './balance/gameConfig'
 import { createRivals } from './systems/rivals'
 import { createWorldMarkets, refreshPublicEstimates, syncLabIndex } from './systems/labEngine'
+import { migrateDataHallLayouts } from './systems/dataHallLayouts'
 import { createInitialMap } from './systems/map'
 import { defaultPlans } from './systems/plans'
 import {
@@ -33,7 +34,7 @@ import {
 import {
   TERRAIN_KIND,
   createDynamicWorld,
-  generateStaticWorldV6,
+  generateStaticWorldV7,
   tileId,
   type DynamicWorld,
   type Facility,
@@ -52,7 +53,7 @@ export interface CreateGameOpts {
   advanced?: AdvancedOverrides
   /** Full config wins over difficulty/advanced when provided */
   config?: GameConfig
-  /** Compatibility-fixture escape hatch. Normal campaigns always use V6. */
+  /** Compatibility-fixture escape hatch. Normal campaigns always use V7. */
   legacyMapFixture?: boolean
 }
 
@@ -210,7 +211,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
   // are still supported when loading old saves, but are no longer created.
   const compact = opts.legacyMapFixture !== true
   const staticWorld = compact
-    ? generateStaticWorldV6({
+    ? generateStaticWorldV7({
         seed,
         width: cfg.mapWidth,
         height: cfg.mapHeight,
@@ -591,5 +592,5 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
     evaluations: [],
     reviews: [],
   }
-  return refreshPublicEstimates(syncLabIndex(normalizeSiteEnergyState(state)))
+  return refreshPublicEstimates(syncLabIndex(migrateDataHallLayouts(normalizeSiteEnergyState(state))))
 }

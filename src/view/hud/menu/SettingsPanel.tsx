@@ -2,6 +2,7 @@ import { useId, useState, type ReactNode } from 'react'
 import {
   ArrowsOut,
   Cloud,
+  CurrencyDollar,
   Eye,
   GameController,
   Monitor,
@@ -9,6 +10,7 @@ import {
   SpeakerSlash,
 } from '@phosphor-icons/react'
 import type { CampaignRules } from '../../../sim/types'
+import type { InstantCheatAction } from '../../../sim/systems/cheats'
 import {
   RENDER_PRESETS,
   type InterfaceScale,
@@ -16,8 +18,10 @@ import {
   useResolvedUiScale,
   useUiStore,
 } from '../../../store/uiStore'
+import { money } from '../format'
+import { parseCheatMoneyAmount } from './cheatMoney'
 
-export type SettingsCategory = 'interface' | 'video' | 'audio' | 'gameplay'
+export type SettingsCategory = 'interface' | 'video' | 'audio' | 'gameplay' | 'cheats'
 
 const INTERFACE_SCALE_OPTIONS: ReadonlyArray<{
   value: InterfaceScale
@@ -39,13 +43,20 @@ export interface GameplaySettingsContext {
   setOnboardingDismissed: (dismissed: boolean) => void
 }
 
-export function SettingsPanel({ gameplay }: { gameplay?: GameplaySettingsContext }) {
+export interface CheatSettingsContext {
+  cash: number
+  adjustMoney: (delta: number) => boolean
+  runInstantAction: (action: InstantCheatAction) => number
+}
+
+export function SettingsPanel({ gameplay, cheats }: { gameplay?: GameplaySettingsContext; cheats?: CheatSettingsContext }) {
   const [category, setCategory] = useState<SettingsCategory>('interface')
   const categories: Array<{ id: SettingsCategory; label: string }> = [
     { id: 'interface', label: 'Interface' },
     { id: 'video', label: 'Video' },
     { id: 'audio', label: 'Audio' },
     ...(gameplay ? [{ id: 'gameplay' as const, label: 'Gameplay' }] : []),
+    ...(cheats ? [{ id: 'cheats' as const, label: 'Cheats' }] : []),
   ]
 
   return (
@@ -85,6 +96,7 @@ export function SettingsPanel({ gameplay }: { gameplay?: GameplaySettingsContext
         {category === 'video' && <VideoSettings />}
         {category === 'audio' && <AudioSettings />}
         {category === 'gameplay' && gameplay ? <GameplaySettings gameplay={gameplay} /> : null}
+        {category === 'cheats' && cheats ? <CheatSettings cheats={cheats} /> : null}
       </div>
     </div>
   )
@@ -305,6 +317,106 @@ function GameplaySettings({ gameplay }: { gameplay: GameplaySettingsContext }) {
           {gameplay.onboardingDismissed ? 'Hidden' : 'Visible'}
         </span>
       </button>
+    </div>
+  )
+}
+
+function CheatSettings({ cheats }: { cheats: CheatSettingsContext }) {
+  const inputId = useId()
+  const feedbackId = `${inputId}-feedback`
+  const [value, setValue] = useState('')
+  const [feedback, setFeedback] = useState<{ text: string; error: boolean } | null>(null)
+
+  const apply = (direction: 1 | -1) => {
+    const amount = parseCheatMoneyAmount(value)
+    if (amount == null) {
+      setFeedback({ text: 'Enter a positive, finite money amount.', error: true })
+      return
+    }
+    if (!cheats.adjustMoney(direction * amount)) {
+      setFeedback({ text: 'That amount cannot be applied.', error: true })
+      return
+    }
+    setFeedback({
+      text: `${direction > 0 ? 'Added' : 'Removed'} ${money(amount)}.`,
+      error: false,
+    })
+    setValue('')
+  }
+
+  const runInstant = (action: InstantCheatAction, label: string) => {
+    const affected = cheats.runInstantAction(action)
+    setFeedback({
+      text: affected > 0 ? `${label}: ${affected} completed.` : `${label}: nothing is currently in progress.`,
+      error: false,
+    })
+  }
+
+  return (
+    <div className="space-y-3">
+      <SettingCard
+        icon={<CurrencyDollar size="1.15rem" />}
+        title="Money"
+        description="Add money to this campaign or remove it. Removing more than the balance sets cash to zero."
+      >
+        <div className="mt-3">
+          <div className="mb-2 flex items-center justify-between gap-3 text-[0.75rem]">
+            <label htmlFor={inputId} className="font-medium text-bone">Amount</label>
+            <span className="font-mono tabular-nums text-muted">Balance {money(cheats.cash)}</span>
+          </div>
+          <input
+            id={inputId}
+            type="text"
+            inputMode="decimal"
+            value={value}
+            aria-invalid={feedback?.error ?? false}
+            aria-describedby={feedback ? feedbackId : undefined}
+            onChange={(event) => {
+              setValue(event.currentTarget.value)
+              setFeedback(null)
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') apply(1)
+            }}
+            placeholder="e.g. 1000000"
+            className={`w-full border bg-void/50 px-2.5 py-2 font-mono text-[0.8125rem] text-bone outline-none ${
+              feedback?.error ? 'border-danger' : 'border-line focus:border-mint/50'
+            }`}
+          />
+          {feedback ? (
+            <p id={feedbackId} role={feedback.error ? 'alert' : 'status'} className={`mt-1.5 text-[0.6875rem] ${feedback.error ? 'text-danger' : 'text-mint'}`}>
+              {feedback.text}
+            </p>
+          ) : null}
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <button type="button" className="hud-button hud-button--secondary" onClick={() => apply(-1)}>Remove money</button>
+            <button type="button" className="hud-button hud-button--primary" onClick={() => apply(1)}>Add money</button>
+          </div>
+        </div>
+      </SettingCard>
+      <SettingCard
+        icon={<ArrowsOut size="1.15rem" />}
+        title="Instant actions"
+        description="Complete current work immediately while preserving its normal finished state and follow-up decisions."
+      >
+        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {([
+            ['construction', 'Finish construction'],
+            ['research', 'Complete research'],
+            ['training', 'Complete training'],
+            ['rackDelivery', 'Deliver rack orders'],
+          ] as const).map(([action, label]) => (
+            <button
+              key={action}
+              type="button"
+              className="hud-button hud-button--secondary min-h-11"
+              onClick={() => runInstant(action, label)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </SettingCard>
     </div>
   )
 }

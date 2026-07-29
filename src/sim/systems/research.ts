@@ -708,31 +708,41 @@ export function tickResearch(state: SimState): SimState {
   }
 
   const complete = next.progressPfDays >= costTarget && next.daysSpent >= daysTarget
-  if (!complete) {
-    return s
-  }
+  if (!complete) return s
+  return completeResearchNode(s, node)
+}
 
-  s = {
-    ...s,
+function completeResearchNode(state: SimState, node: ResearchNodeDef): SimState {
+  let s: SimState = {
+    ...state,
     player: {
-      ...s.player,
+      ...state.player,
       activeResearch: null,
-      researchUnlocked: [...s.player.researchUnlocked, node.id],
+      researchUnlocked: state.player.researchUnlocked.includes(node.id)
+        ? state.player.researchUnlocked
+        : [...state.player.researchUnlocked, node.id],
     },
-    news: [`Day ${s.day}: Unlocked ${node.name}`, ...s.news].slice(0, 20),
+    news: [`Day ${state.day}: Unlocked ${node.name}`, ...state.news].slice(0, 20),
     alerts: [
       {
-        id: `res-done-${s.day}-${node.id}`,
-        day: s.day,
+        id: `res-done-${state.day}-${node.id}`,
+        day: state.day,
         severity: 'info' as const,
         message: `Research complete: ${node.name}`,
       },
-      ...s.alerts,
+      ...state.alerts,
     ].slice(0, 40),
   }
   s = applyEffects(s, node.effects)
-  s = tryStartFromQueue(s)
-  return s
+  return tryStartFromQueue(s)
+}
+
+/** Cheat surface: finish the active project through the normal unlock/effects path. */
+export function completeActiveResearchNow(state: SimState): SimState {
+  const started = state.player.activeResearch ? state : tryStartFromQueue(state)
+  const active = started.player.activeResearch
+  if (!active) return state
+  return completeResearchNode(started, getResearchNode(active.nodeId))
 }
 
 export function availableResearch(state: SimState) {
