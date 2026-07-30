@@ -57,6 +57,8 @@ export function RacksPanel() {
   const orderRacks = useGameStore((s) => s.orderRacks)
   const sellRacks = useGameStore((s) => s.sellRacks)
   const cancelRackOrder = useGameStore((s) => s.cancelRackOrder)
+  const tab = useGameStore((s) => s.rackWorkspaceTab)
+  const setTab = useGameStore((s) => s.setRackWorkspaceTab)
   const submitFacilityOffer = useGameStore((s) => s.submitFacilityOffer)
   const withdrawFacilityOffer = useGameStore((s) => s.withdrawFacilityOffer)
   const acceptFacilityOffer = useGameStore((s) => s.acceptFacilityOffer)
@@ -86,7 +88,6 @@ export function RacksPanel() {
   const orderedCount = installs.filter((r) => r.status === 'ordered').reduce((s, r) => s + r.count, 0)
   const liveCount = installs.filter((r) => r.status === 'live').reduce((s, r) => s + r.count, 0)
 
-  const [tab, setTab] = useState<'fleet' | 'hall' | 'blueprints'>('fleet')
   const [autoDesignGoal, setAutoDesignGoal] = useState<RackDesignGoal>('balanced')
   const [design, setDesign] = useState<RackDesign>(() => emptyDesign('case_8u', 'My Node'))
   const [selectedModule, setSelectedModule] = useState('gpu_h100')
@@ -585,10 +586,15 @@ export function RacksPanel() {
                     title={!stats.valid ? 'Fix design errors first' : undefined}
                     onClick={() => {
                       setState(saveRackDesign(state, design))
-                      setMsg('Blueprint saved — order it from the Order tab')
+                      if (isLiveDc) {
+                        setTab('hall')
+                        setMsg('Blueprint saved — choose it in the order list for this hall')
+                      } else {
+                        setMsg('Blueprint saved — select an owned hall under Facility to order it')
+                      }
                     }}
                   >
-                    Save blueprint
+                    {isLiveDc ? 'Save & order for this hall' : 'Save blueprint'}
                   </HudButton>
                   <HudButton
                     type="button"

@@ -1,8 +1,11 @@
-import { createElement } from 'react'
+import { createElement, type ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
+import { createGame } from '../../sim/createGame'
+import { buildMapNavigatorData, navigatorCitySummary, type NavigatorCityLabel } from './mapNavigatorData'
 import {
   CloudVisibilityButton,
+  NavigatorCityLabelLayer,
   NavigatorCompass,
   MapViewportOverlay,
 } from './MapNavigator'
@@ -36,6 +39,45 @@ describe('NavigatorCompass', () => {
     expect(markup).toContain('role="img"')
     expect(markup).toContain('aria-label="North up"')
     expect(markup).toContain('>N</div>')
+  })
+})
+
+describe('NavigatorCityLabelLayer', () => {
+  const data = buildMapNavigatorData(createGame({ seed: 82, difficulty: 'normal' }))
+  const metro = { ...data.cities[0]!, id: 'metro-label', tier: 'metro' as const }
+  const settlement = { ...data.cities[1]!, id: 'town-label', tier: 'town' as const }
+  const labels: NavigatorCityLabel[] = [
+    { id: metro.id, text: metro.name, left: 10, top: 12, width: 70, height: 13 },
+    { id: settlement.id, text: settlement.name, left: 90, top: 30, width: 80, height: 13 },
+  ]
+
+  it('renders native screen-space buttons with loaded metro and settlement weights', () => {
+    const markup = renderToStaticMarkup(createElement(NavigatorCityLabelLayer, {
+      labels,
+      cities: [metro, settlement],
+      onPan: () => undefined,
+    }))
+
+    expect(markup.match(/<button/g)).toHaveLength(2)
+    expect(markup).not.toContain('<text')
+    expect(markup).toContain('font-weight:600')
+    expect(markup).toContain('font-weight:500')
+    expect(markup).toContain('font-size:11px')
+  })
+
+  it('retains detailed accessible names and pans to the activated city', () => {
+    const calls: Array<[number, number]> = []
+    const layer = NavigatorCityLabelLayer({
+      labels,
+      cities: [metro, settlement],
+      onPan: (x, y) => calls.push([x, y]),
+    }) as ReactElement<{ children: ReactElement<{ onClick: (event: { stopPropagation: () => void }) => void }>[] }>
+    const markup = renderToStaticMarkup(layer)
+
+    expect(markup).toContain(`aria-label="Pan to ${navigatorCitySummary(metro)}`)
+    expect(markup).toContain(`title="${navigatorCitySummary(metro)}"`)
+    layer.props.children[0]!.props.onClick({ stopPropagation: () => undefined })
+    expect(calls).toEqual([[metro.cx, metro.cy]])
   })
 })
 

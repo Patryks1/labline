@@ -1,7 +1,42 @@
-import type { RackInstall, RackSku, Speed } from '../../../../sim/types'
+import type { DataHallObjectPlacement, RackInstall, RackSku, Speed } from '../../../../sim/types'
 import { rackInstallPlacementId } from '../../../../sim/systems/rackLayouts'
 
 export type RackVisualKind = 'gpu' | 'cpu' | 'memory' | 'cooling' | 'empty' | 'unknown'
+
+export interface HallRackCapacityTotals {
+  cabinets: number
+  flopsPf: number
+  vramGb: number
+  mw: number
+  tokPerSec: number
+}
+
+export interface HallRackCapacityImpact {
+  installed: HallRackCapacityTotals
+  planned: HallRackCapacityTotals
+}
+
+const emptyCapacityTotals = (): HallRackCapacityTotals => ({ cabinets: 0, flopsPf: 0, vramGb: 0, mw: 0, tokPerSec: 0 })
+
+/** Installed hardware versus the potential hardware represented by empty planned cabinets. */
+export function summarizeHallRackCapacity(
+  objects: readonly DataHallObjectPlacement[],
+  resolveSku: (skuId: string) => Pick<RackSku, 'flopsPf' | 'vramGb' | 'mw' | 'tokPerSec'> | undefined,
+): HallRackCapacityImpact {
+  const impact = { installed: emptyCapacityTotals(), planned: emptyCapacityTotals() }
+  for (const object of objects) {
+    if (object.kind !== 'rack') continue
+    const sku = resolveSku(object.catalogId)
+    if (!sku) continue
+    const totals = object.reserved ? impact.planned : impact.installed
+    totals.cabinets += 1
+    totals.flopsPf += sku.flopsPf
+    totals.vramGb += sku.vramGb
+    totals.mw += sku.mw
+    totals.tokPerSec += sku.tokPerSec
+  }
+  return impact
+}
 
 export interface HallRackSlot {
   index: number

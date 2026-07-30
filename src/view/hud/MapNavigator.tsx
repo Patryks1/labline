@@ -34,7 +34,9 @@ import {
   navigatorZoomAround,
   regionOverlayFill,
   type MapNavigatorData,
+  type MapNavigatorCity,
   type MapNavigatorSite,
+  type NavigatorCityLabel,
   type NavigatorView,
   type NavigatorZoom,
 } from './mapNavigatorData'
@@ -139,6 +141,54 @@ export function NavigatorCompass() {
       title="North up"
     >
       N
+    </div>
+  )
+}
+
+export function NavigatorCityLabelLayer({
+  labels,
+  cities,
+  onPan,
+}: {
+  labels: readonly NavigatorCityLabel[]
+  cities: readonly MapNavigatorCity[]
+  onPan: (x: number, y: number) => void
+}) {
+  const cityById = new Map(cities.map((city) => [city.id, city]))
+  return (
+    <div className="pointer-events-none absolute inset-0 z-[1]" data-map-city-label-layer="true">
+      {labels.map((label) => {
+        const city = cityById.get(label.id)
+        const summary = city ? navigatorCitySummary(city) : label.text
+        return (
+          <button
+            key={label.id}
+            type="button"
+            data-map-marker="city-label"
+            aria-label={`Pan to ${summary}`}
+            title={summary}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation()
+              if (city) onPan(city.cx, city.cy)
+            }}
+            className="pointer-events-auto absolute m-0 select-none overflow-visible whitespace-nowrap border-0 bg-transparent p-0 font-mono outline-none focus-visible:rounded-sm focus-visible:ring-1 focus-visible:ring-mint focus-visible:ring-offset-1 focus-visible:ring-offset-void"
+            style={{
+              left: label.left,
+              top: label.top,
+              width: label.width,
+              height: label.height,
+              fontSize: 11,
+              lineHeight: '13px',
+              color: city?.tier === 'metro' ? '#dceffc' : '#d8dfdc',
+              fontWeight: city?.tier === 'metro' ? 600 : 500,
+              textShadow: '0 1px 2px #071319, 0 0 2px rgba(7, 19, 25, 0.9)',
+            }}
+          >
+            {label.text}
+          </button>
+        )
+      })}
     </div>
   )
 }
@@ -351,8 +401,6 @@ export function MapNavigator() {
       { x: size.width / 2 - 92, y: size.height - 38, width: 184, height: 38 },
     ],
   ), [data.cities, size.height, size.width, view, zoom])
-  const cityById = useMemo(() => new Map(data.cities.map((city) => [city.id, city])), [data.cities])
-
   const clampPoint = useCallback((x: number, y: number) => ({
     x: Math.max(0, Math.min(data.width - 1, x)),
     y: Math.max(0, Math.min(data.height - 1, y)),
@@ -597,10 +645,6 @@ export function MapNavigator() {
                   <title>{navigatorCitySummary(city)}</title>
                 </g>
               ))}
-              {labels.map((label) => {
-                const city = cityById.get(label.id)
-                return <text key={label.id} data-map-marker="city-label" role="button" tabIndex={0} aria-label={city ? `Pan to ${navigatorCitySummary(city)}` : `Pan to ${label.text}`} x={label.x} y={label.y} textAnchor={label.anchor} fontSize={worldPerPixel * 10} fontFamily="IBM Plex Mono, monospace" fontWeight={city?.tier === 'metro' ? 700 : 500} fill={city?.tier === 'metro' ? '#dceffc' : '#d8dfdc'} stroke="#071319" strokeWidth={worldPerPixel * 2.4} paintOrder="stroke" className="cursor-pointer select-none" onClick={() => city && pan(city.cx, city.cy)}>{city ? <title>{navigatorCitySummary(city)}</title> : null}{label.text}</text>
-              })}
               {sites.map((site) => <SiteMarker key={`${site.ownerId}-${site.id}`} site={site} active={activeSite?.id === site.id && activeSite.ownerId === site.ownerId} markerScale={markerScale} strokeScale={worldPerPixel} onFocus={focus} />)}
               {activeSite ? <text x={activeSite.x + 0.5 + markerScale * 0.9} y={activeSite.y + 0.5 - markerScale * 0.45} fontSize={worldPerPixel * 9} fontFamily="IBM Plex Mono, monospace" fontWeight={700} fill={activeSite.color} stroke="#071319" strokeWidth={worldPerPixel * 2.4} paintOrder="stroke" pointerEvents="none">{activeSite.label}</text> : null}
               {mapViewport ? <MapViewportOverlay viewport={mapViewport} worldPerPixel={worldPerPixel} /> : null}
@@ -609,6 +653,7 @@ export function MapNavigator() {
                 <line x1={selectedTile.x + 0.5 - markerScale} y1={selectedTile.y + 0.5} x2={selectedTile.x + 0.5 + markerScale} y2={selectedTile.y + 0.5} stroke="#f3c969" strokeWidth={worldPerPixel * 0.55} />
               </g> : null}
             </svg>
+            <NavigatorCityLabelLayer labels={labels} cities={data.cities} onPan={pan} />
             <div className="absolute bottom-1.5 left-1/2 flex -translate-x-1/2 items-center gap-0.5 rounded-md border border-line/70 bg-void/90 p-0.5 shadow backdrop-blur-sm">
               <button type="button" aria-label="Zoom minimap out" disabled={zoom === 1} onClick={() => applyZoom(zoomStep(zoom, -1))} className="h-7 w-7 rounded text-sm text-bone hover:bg-panel-2 disabled:opacity-35">−</button>
               <span className="min-w-7 text-center font-mono text-[0.5625rem] text-muted" aria-hidden="true">{zoom}×</span>

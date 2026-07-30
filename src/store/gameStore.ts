@@ -58,6 +58,7 @@ import {
   type InstantCheatAction,
 } from "../sim/systems/cheats";
 import { applyHallPlan, migrateDataHallLayouts } from "../sim/systems/dataHallLayouts";
+import { facilityAnchorTiles } from "../sim/systems/worldAccess";
 import type { DataHallEditPlan } from "../sim/types";
 import {
   setChipDesignFocus,
@@ -171,6 +172,7 @@ interface GameStore {
   saveStatus: "idle" | "saving" | "saved" | "error";
   state: SimState;
   activePanel: PanelId;
+  rackWorkspaceTab: "fleet" | "hall" | "blueprints";
   hallEditorFacilityId: string | null;
   selectedTile: { x: number; y: number } | null;
   selectedRivalId: string | null;
@@ -207,6 +209,8 @@ interface GameStore {
   openResearchNode: (nodeId: string) => void;
   /** Open Fleet → Racks and expand the left rail (never switches to Sites). */
   openFleet: () => void;
+  openRackDesigner: (facilityId: string) => void;
+  setRackWorkspaceTab: (tab: "fleet" | "hall" | "blueprints") => void;
   openFleetForOwner: (ownerId: string) => void;
   setSelectedRivalId: (id: string | null) => void;
   setMapTool: (tool: MapToolMode) => void;
@@ -502,6 +506,7 @@ function applyLoadedState(state: SimState) {
     lifecycleError: null,
     state: { ...state, paused: true },
     activePanel: "stats" as PanelId,
+    rackWorkspaceTab: "fleet" as const,
     hallEditorFacilityId: null,
     selectedTile: null,
     selectedRivalId: null,
@@ -529,6 +534,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
   saveStatus: "idle",
   state: placeholderState(),
   activePanel: "stats",
+  rackWorkspaceTab: "fleet",
   hallEditorFacilityId: null,
   selectedTile: null,
   selectedRivalId: null,
@@ -593,14 +599,31 @@ export const useGameStore = create<GameStore>((set, get) => ({
   openFleet: () =>
     set({
       activePanel: "racks",
+      rackWorkspaceTab: "fleet",
       leftRailOpen: true,
       buildMode: null,
     }),
+  openRackDesigner: (facilityId) =>
+    set((store) => {
+      const hall = facilityAnchorTiles(store.state).find(
+        (candidate) => (candidate.campusId ?? `facility:${candidate.x},${candidate.y}`) === facilityId,
+      );
+      return {
+        activePanel: "racks",
+        rackWorkspaceTab: "blueprints",
+        hallEditorFacilityId: null,
+        selectedTile: hall ? { x: hall.x, y: hall.y } : store.selectedTile,
+        leftRailOpen: true,
+        buildMode: null,
+      };
+    }),
+  setRackWorkspaceTab: (rackWorkspaceTab) => set({ rackWorkspaceTab }),
   openFleetForOwner: (ownerId) =>
     set({
       fleetOwnerFilter: ownerId,
       selectedRivalId: ownerId === "player" ? null : ownerId,
       activePanel: "racks",
+      rackWorkspaceTab: "fleet",
       leftRailOpen: true,
     }),
   setSelectedRivalId: (id) => set({ selectedRivalId: id }),
@@ -1148,6 +1171,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
         saveStatus: "idle",
         state: { ...state, paused: true },
         activePanel: "stats",
+        rackWorkspaceTab: "fleet",
         selectedTile: null,
         mapFocusRequest: null,
         researchFocusRequest: null,

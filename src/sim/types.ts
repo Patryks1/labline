@@ -659,6 +659,8 @@ export interface DataHallObjectPlacement {
   z: number;
   rotation: HallRotation;
   rackUnitId?: string;
+  /** Persisted physical rack cabinet reserved for future delivered inventory. */
+  reserved?: boolean;
   purchasePrice: number;
 }
 

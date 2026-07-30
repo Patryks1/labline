@@ -156,8 +156,9 @@ button:not(:disabled):active {
 
 .labline-menu-stage--with-utility {
   display: grid;
-  grid-template-columns: minmax(15rem, 18rem) minmax(0, 64rem);
-  align-items: center;
+  grid-template-columns: minmax(15rem, 18rem) minmax(0, 48rem);
+  align-content: center;
+  align-items: stretch;
   justify-content: center;
   gap: clamp(1rem, 2vw, 1.75rem);
 }
@@ -201,6 +202,7 @@ button:not(:disabled):active {
 }
 
 .labline-menu-utility {
+  display: flex;
   width: 100%;
   min-height: 0;
   max-height: calc(100dvh - 16rem);
@@ -209,14 +211,22 @@ button:not(:disabled):active {
 }
 
 .main-menu-news-feed {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
   max-height: inherit;
 }
 
 .main-menu-news-posts {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
   overflow: hidden;
 }
 
 .main-menu-news-post {
+  flex: 1;
   border-left: 0;
   border-right: 0;
   border-top: 0;
@@ -474,6 +484,7 @@ button:not(:disabled):active {
   }
 
   .labline-menu-utility {
+    display: block;
     order: 2;
     max-height: none;
     padding: 0;
@@ -481,6 +492,7 @@ button:not(:disabled):active {
 
   .main-menu-news-feed {
     display: grid;
+    flex: initial;
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: stretch;
   }
@@ -491,6 +503,8 @@ button:not(:disabled):active {
   }
 
   .main-menu-news-posts {
+    display: block;
+    flex: initial;
     min-width: 0;
   }
 

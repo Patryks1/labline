@@ -205,13 +205,19 @@ export function analyzeHallLayout(
   const occupancy = new Int32Array(shell.width * shell.depth)
   const inventoryById = new Map(inventory.map((unit) => [unit.unitId, unit]))
   const racks = layout.objects.filter((object) => object.kind === 'rack').sort((a, b) => a.id.localeCompare(b.id))
-  const objectIds = new Set<string>()
+  const placementIds = new Set<string>()
+  for (const entry of [...layout.objects, ...layout.walls, ...layout.doors]) {
+    if (placementIds.has(entry.id)) analysis.hardErrors.push(`Placement ID ${entry.id} is used more than once.`)
+    else placementIds.add(entry.id)
+  }
   if (racks.length > rackCapacity) analysis.hardErrors.push(`Layout has ${racks.length} racks but this shell is rated for ${rackCapacity}.`)
   const seenRackUnits = new Set<string>()
   for (let objectIndex = 0; objectIndex < layout.objects.length; objectIndex += 1) {
     const object = layout.objects[objectIndex]!
-    if (objectIds.has(object.id)) analysis.hardErrors.push(`Object ID ${object.id} is used more than once.`)
-    else objectIds.add(object.id)
+    if (object.kind !== 'rack') {
+      const equipment = HALL_EQUIPMENT_CATALOG.find((entry) => entry.id === object.catalogId)
+      if (!equipment || equipment.kind !== object.kind) analysis.hardErrors.push(`${object.id} references unknown ${object.kind} equipment ${object.catalogId}.`)
+    }
     const { width, depth } = dims(object)
     if (!Number.isInteger(object.x) || !Number.isInteger(object.z) || object.x < 0 || object.z < 0 || object.x + width > shell.width || object.z + depth > shell.depth) {
       analysis.hardErrors.push(`${object.id} is outside the hall shell.`)
@@ -227,6 +233,10 @@ export function analyzeHallLayout(
       else occupancy[cell] = objectIndex + 1
     }
     if (object.kind === 'rack') {
+      if (object.reserved) {
+        if (object.rackUnitId) analysis.hardErrors.push(`${object.id} cannot be both reserved and assigned to rack unit ${object.rackUnitId}.`)
+        continue
+      }
       if (!object.rackUnitId || !inventoryById.has(object.rackUnitId)) analysis.hardErrors.push(`${object.id} does not reference an owned rack unit.`)
       else if (seenRackUnits.has(object.rackUnitId)) analysis.hardErrors.push(`${object.rackUnitId} is placed more than once.`)
       else seenRackUnits.add(object.rackUnitId)
@@ -257,7 +267,7 @@ export function analyzeHallLayout(
   const power = layout.objects.filter((object) => object.kind === 'power').map((object) => ({ object, remaining: HALL_EQUIPMENT_CATALOG.find((entry) => entry.id === object.catalogId)?.powerMw ?? 0 }))
   const network = layout.objects.filter((object) => object.kind === 'network').map((object) => ({ object, remaining: HALL_EQUIPMENT_CATALOG.find((entry) => entry.id === object.catalogId)?.networkGbps ?? 0 }))
   const coolingCapacity = layout.objects.filter((object) => object.kind === 'cooling').reduce((sum, object) => sum + (HALL_EQUIPMENT_CATALOG.find((entry) => entry.id === object.catalogId)?.coolingMw ?? 0), 0)
-  const deliveredRacks = racks.filter((rack) => rack.rackUnitId && inventoryById.get(rack.rackUnitId)?.delivered)
+  const deliveredRacks = racks.filter((rack) => !rack.reserved && rack.rackUnitId && inventoryById.get(rack.rackUnitId)?.delivered)
   let totalHeat = 0
   let airflowTotal = 0
   let aisleTotal = 0
@@ -350,6 +360,9 @@ export function autoPlanHall(
   options: { provisionUtilities?: boolean } = {},
 ): DataHallLayout {
   const shell = DATA_HALL_SHELLS[layout.shellId]
+  const savedReservations = strategy === layout.preferredStrategy
+    ? layout.objects.filter((object) => object.kind === 'rack' && object.reserved)
+    : []
   const utilities = layout.objects.filter((object) => object.kind !== 'rack' && !object.id.includes(':auto-plan:'))
   if (options.provisionUtilities) {
     const delivered = inventory.filter((unit) => unit.delivered).slice(0, rackCapacity)
@@ -397,14 +410,47 @@ export function autoPlanHall(
   for (const object of utilities) for (const cell of rectCells(shell, object)) if (cell >= 0 && cell < occupied.length) occupied[cell] = 1
   const spacing = strategy === 'density' ? 1 : strategy === 'efficiency' ? 2 : 3
   const rowGap = strategy === 'density' ? 2 : strategy === 'efficiency' ? 5 : 7
-  const racks: DataHallObjectPlacement[] = []
   const units = inventory.filter((unit) => unit.delivered).slice(0, rackCapacity).sort((a, b) => a.unitId.localeCompare(b.unitId))
+  const selectedUnitIds = new Set(units.map((unit) => unit.unitId))
+  const preserveInstalled = !options.provisionUtilities && strategy === layout.preferredStrategy
+  const racks: DataHallObjectPlacement[] = preserveInstalled
+    ? layout.objects.filter((object) => object.kind === 'rack' && !object.reserved && object.rackUnitId && selectedUnitIds.has(object.rackUnitId))
+    : []
+  for (const rack of racks) {
+    for (const cell of rectCells(shell, rack)) if (cell >= 0 && cell < occupied.length) occupied[cell] = 1
+  }
+  const assignedUnitIds = new Set(racks.flatMap((rack) => rack.rackUnitId ? [rack.rackUnitId] : []))
+  const pendingUnits = units.filter((unit) => !assignedUnitIds.has(unit.unitId))
+  const consumedReservations = new Set<string>()
+
+  if (preserveInstalled) {
+    for (const unit of pendingUnits.slice()) {
+      if (racks.length >= rackCapacity) break
+      const saved = savedReservations.find((reservation) => !consumedReservations.has(reservation.id))
+      if (!saved) break
+      consumedReservations.add(saved.id)
+      const rack: DataHallObjectPlacement = {
+        ...saved,
+        id: `rack:${unit.unitId}`,
+        catalogId: unit.skuId,
+        rackUnitId: unit.unitId,
+        reserved: undefined,
+        purchasePrice: 0,
+      }
+      if (previewHallObjectPlacement({ ...layout, objects: [...utilities, ...racks] }, rack, rackCapacity) === 'invalid') continue
+      for (const cell of rectCells(shell, rack)) occupied[cell] = 1
+      racks.push(rack)
+      assignedUnitIds.add(unit.unitId)
+    }
+  }
+  const overflowUnits = pendingUnits.filter((unit) => !assignedUnitIds.has(unit.unitId))
   let cursor = 0
-  for (let z = 10; z + 5 < shell.depth && cursor < units.length; z += 5 + rowGap) {
-    for (let x = 8; x + 3 < shell.width && cursor < units.length; x += 3 + spacing) {
-      const rack: DataHallObjectPlacement = { id: `rack:${units[cursor]!.unitId}`, kind: 'rack', catalogId: units[cursor]!.skuId, rackUnitId: units[cursor]!.unitId, x, z, rotation: z % 2 === 0 ? 0 : 180, purchasePrice: 0 }
+  for (let z = 10; z + 5 < shell.depth && cursor < overflowUnits.length; z += 5 + rowGap) {
+    for (let x = 8; x + 3 < shell.width && cursor < overflowUnits.length; x += 3 + spacing) {
+      const rack: DataHallObjectPlacement = { id: `rack:${overflowUnits[cursor]!.unitId}`, kind: 'rack', catalogId: overflowUnits[cursor]!.skuId, rackUnitId: overflowUnits[cursor]!.unitId, x, z, rotation: z % 2 === 0 ? 0 : 180, purchasePrice: 0 }
       const cells = rectCells(shell, rack)
       if (cells.some((cell) => occupied[cell])) continue
+      if (previewHallObjectPlacement({ ...layout, objects: [...utilities, ...racks] }, rack, rackCapacity) === 'invalid') continue
       cells.forEach((cell) => { occupied[cell] = 1 })
       racks.push(rack)
       cursor += 1
@@ -413,15 +459,27 @@ export function autoPlanHall(
   // Utilities or wide-aisle patterns can consume some preferred row slots.
   // Finish the rated plan with deterministic first-fit spaces rather than
   // silently leaving a partially planned hall.
-  for (let z = 7; z + 5 < shell.depth && cursor < units.length; z += 1) {
-    for (let x = 4; x + 3 < shell.width && cursor < units.length; x += 1) {
-      const rack: DataHallObjectPlacement = { id: `rack:${units[cursor]!.unitId}`, kind: 'rack', catalogId: units[cursor]!.skuId, rackUnitId: units[cursor]!.unitId, x, z, rotation: 0, purchasePrice: 0 }
+  for (let z = 7; z + 5 < shell.depth && cursor < overflowUnits.length; z += 1) {
+    for (let x = 4; x + 3 < shell.width && cursor < overflowUnits.length; x += 1) {
+      const rack: DataHallObjectPlacement = { id: `rack:${overflowUnits[cursor]!.unitId}`, kind: 'rack', catalogId: overflowUnits[cursor]!.skuId, rackUnitId: overflowUnits[cursor]!.unitId, x, z, rotation: 0, purchasePrice: 0 }
       const cells = rectCells(shell, rack)
       if (cells.some((cell) => occupied[cell])) continue
+      if (previewHallObjectPlacement({ ...layout, objects: [...utilities, ...racks] }, rack, rackCapacity) === 'invalid') continue
       cells.forEach((cell) => { occupied[cell] = 1 })
       racks.push(rack)
       cursor += 1
     }
+  }
+  // A saved capacity plan remains useful as inventory arrives. Actual racks
+  // are placed first so they replace matching planned cabinets; only
+  // collision-valid unused reservations are restored around them.
+  const usedIds = new Set([...utilities, ...racks].map((object) => object.id))
+  for (const saved of savedReservations) {
+    if (racks.length >= rackCapacity || consumedReservations.has(saved.id) || usedIds.has(saved.id)) continue
+    const reservation: DataHallObjectPlacement = { ...saved, rackUnitId: undefined, reserved: true }
+    if (previewHallObjectPlacement({ ...layout, objects: [...utilities, ...racks] }, reservation, rackCapacity) === 'invalid') continue
+    racks.push(reservation)
+    usedIds.add(reservation.id)
   }
   return { ...layout, preferredStrategy: strategy, objects: [...utilities, ...racks], analysis: emptyAnalysis(layout.revision) }
 }
@@ -473,11 +531,11 @@ export function tickDataHallLayouts(state: SimState): SimState {
     if (!layout) continue
     const inventory = rackUnitsForFacility(next, facilityId, hall.owner)
     const delivered = inventory.filter((unit) => unit.delivered)
-    const placed = new Set(layout.objects.flatMap((object) => object.rackUnitId ? [object.rackUnitId] : []))
+    const placed = new Set(layout.objects.flatMap((object) => !object.reserved && object.rackUnitId ? [object.rackUnitId] : []))
     const missing = delivered.some((unit) => !placed.has(unit.unitId))
     if (layout.autoPlaceDeliveries && missing) {
       const planned = autoPlanHall(layout, inventory, layout.preferredStrategy, hall.rackCapacity)
-      const gainsPlacement = planned.objects.some((object) => object.rackUnitId && !placed.has(object.rackUnitId))
+      const gainsPlacement = planned.objects.some((object) => !object.reserved && object.rackUnitId && !placed.has(object.rackUnitId))
       // If the selected strategy cannot fit any more racks, leave the excess
       // in staging without churning the layout revision on every tick.
       if (!gainsPlacement) {
@@ -498,6 +556,33 @@ export function tickDataHallLayouts(state: SimState): SimState {
   return next
 }
 
+/** Infrastructure cash delta for a draft. Racks are already paid inventory. */
+export function quoteHallPlanNetCost(
+  current: Pick<DataHallLayout, 'objects' | 'walls' | 'doors'>,
+  candidate: Pick<DataHallLayout, 'objects' | 'walls' | 'doors'>,
+): number {
+  const objectKey = (object: DataHallObjectPlacement) => `object:${object.kind}:${object.catalogId}:${object.id}`
+  const wallKey = (wall: DataHallWallSegment) => `wall:${wall.id}:${wall.x1},${wall.z1}:${wall.x2},${wall.z2}`
+  const doorKey = (door: DataHallDoorPlacement) => `door:${door.id}:${door.wallId}:${door.width}`
+  const keys = (layout: Pick<DataHallLayout, 'objects' | 'walls' | 'doors'>) => new Set([
+    ...layout.objects.map(objectKey),
+    ...layout.walls.map(wallKey),
+    ...layout.doors.map(doorKey),
+  ])
+  const infrastructureValue = (layout: Pick<DataHallLayout, 'objects' | 'walls' | 'doors'>, excluded: Set<string>) =>
+    layout.objects.reduce((sum, object) => {
+      if (object.kind === 'rack' || excluded.has(objectKey(object))) return sum
+      return sum + (HALL_EQUIPMENT_CATALOG.find((entry) => entry.id === object.catalogId && entry.kind === object.kind)?.price ?? 0)
+    }, 0) +
+    layout.walls.reduce((sum, wall) => excluded.has(wallKey(wall)) ? sum : sum + (Math.abs(wall.x2 - wall.x1) + Math.abs(wall.z2 - wall.z1)) * HALL_WALL_PRICE_PER_CELL, 0) +
+    layout.doors.reduce((sum, door) => excluded.has(doorKey(door)) ? sum : sum + HALL_DOOR_PRICE, 0)
+  const currentKeys = keys(current)
+  const candidateKeys = keys(candidate)
+  const added = infrastructureValue(candidate, currentKeys)
+  const removed = infrastructureValue(current, candidateKeys)
+  return added - Math.floor(removed * 0.5)
+}
+
 export function applyHallPlan(
   state: SimState,
   plan: DataHallEditPlan,
@@ -512,17 +597,9 @@ export function applyHallPlan(
   const candidate: DataHallLayout = { ...current, preferredStrategy: plan.preferredStrategy ?? current.preferredStrategy, revision: current.revision + 1, objects: plan.objects, walls: plan.walls, doors: plan.doors, analysis: emptyAnalysis(current.revision + 1) }
   candidate.analysis = analyzeHallLayout(candidate, inventory, hall.rackCapacity)
   if (!candidate.analysis.valid) return { state, ok: false, error: candidate.analysis.hardErrors[0], netCost: 0 }
-  const infrastructureValue = (layout: Pick<DataHallLayout, 'objects' | 'walls' | 'doors'>) =>
-    layout.objects.filter((object) => object.kind !== 'rack').reduce((sum, object) => sum + Math.max(0, object.purchasePrice), 0) +
-    layout.walls.reduce((sum, wall) => sum + Math.max(0, wall.purchasePrice), 0) +
-    layout.doors.reduce((sum, door) => sum + Math.max(0, door.purchasePrice), 0)
-  const oldIds = new Set([...current.objects, ...current.walls, ...current.doors].map((entry) => entry.id))
-  const newIds = new Set([...candidate.objects, ...candidate.walls, ...candidate.doors].map((entry) => entry.id))
-  const added = infrastructureValue({ objects: candidate.objects.filter((entry) => !oldIds.has(entry.id)), walls: candidate.walls.filter((entry) => !oldIds.has(entry.id)), doors: candidate.doors.filter((entry) => !oldIds.has(entry.id)) })
-  const removed = infrastructureValue({ objects: current.objects.filter((entry) => !newIds.has(entry.id)), walls: current.walls.filter((entry) => !newIds.has(entry.id)), doors: current.doors.filter((entry) => !newIds.has(entry.id)) })
   // A negative net cost is a refund: removed infrastructure recovers half of
   // its recorded purchase price after any new construction is paid for.
-  const netCost = added - Math.floor(removed * 0.5)
+  const netCost = quoteHallPlanNetCost(current, candidate)
   if (state.player.cash < netCost) return { state, ok: false, error: `Need $${(netCost / 1e6).toFixed(2)}M to apply this plan.`, netCost }
   const cash = state.player.cash - netCost
   return {
@@ -532,7 +609,7 @@ export function applyHallPlan(
       ...state,
       dataHallLayouts: { ...(state.dataHallLayouts ?? {}), [plan.facilityId]: candidate },
       player: { ...state.player, cash, finance: { ...state.player.finance, cash } },
-      labs: state.labs[state.playerLabId] ? { ...state.labs, [state.playerLabId]: { ...state.labs[state.playerLabId]!, cash } } : state.labs,
+      labs: state.labs[state.playerLabId] ? { ...state.labs, [state.playerLabId]: { ...state.labs[state.playerLabId]!, cash, finance: { ...state.labs[state.playerLabId]!.finance, cash } } } : state.labs,
     },
   }
 }

@@ -113,12 +113,14 @@ export interface NavigatorView {
   zoom: NavigatorZoom
 }
 
+/** Screen-space box used as both the collision boundary and rendered city-label button boundary. */
 export interface NavigatorCityLabel {
   id: string
   text: string
-  x: number
-  y: number
-  anchor: 'start' | 'middle' | 'end'
+  left: number
+  top: number
+  width: number
+  height: number
 }
 
 
@@ -517,25 +519,34 @@ export function layoutNavigatorCityLabels(
     [8, -7, 'start'], [8, 4, 'start'], [-8, -7, 'end'], [-8, 4, 'end'],
     [0, -13, 'middle'], [0, 12, 'middle'], [12, -13, 'start'], [-12, 12, 'end'],
   ] as const
+  const characterWidth = 6.6
+  const lineHeight = 13
+  const horizontalPadding = 2
   const intersects = (a: { x: number; y: number; width: number; height: number }, b: typeof a) =>
     a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
   for (const city of sorted) {
     const px = ((city.cx - view.x) / view.width) * pixelWidth
     const py = ((city.cy - view.y) / view.height) * pixelHeight
     if (px < -20 || py < -20 || px > pixelWidth + 20 || py > pixelHeight + 20) continue
-    const labelWidth = Math.max(24, city.name.length * 6.15)
+    const textWidth = Math.max(24, city.name.length * characterWidth)
     for (const [dx, dy, anchor] of offsets) {
-      const x = px + dx - (anchor === 'middle' ? labelWidth / 2 : anchor === 'end' ? labelWidth : 0)
-      const box = { x: x - 2, y: py + dy - 9, width: labelWidth + 4, height: 12 }
-      if (x < 2 || box.y < 2 || x + labelWidth > pixelWidth - 2 || box.y + box.height > pixelHeight - 2) continue
+      const textLeft = px + dx - (anchor === 'middle' ? textWidth / 2 : anchor === 'end' ? textWidth : 0)
+      const box = {
+        x: textLeft - horizontalPadding,
+        y: py + dy - 10,
+        width: textWidth + horizontalPadding * 2,
+        height: lineHeight,
+      }
+      if (box.x < 2 || box.y < 2 || box.x + box.width > pixelWidth - 2 || box.y + box.height > pixelHeight - 2) continue
       if (boxes.some((other) => intersects(box, other))) continue
       boxes.push(box)
       labels.push({
         id: city.id,
         text: city.name,
-        x: view.x + ((px + dx) / pixelWidth) * view.width,
-        y: view.y + ((py + dy) / pixelHeight) * view.height,
-        anchor,
+        left: box.x,
+        top: box.y,
+        width: box.width,
+        height: box.height,
       })
       break
     }

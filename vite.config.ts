@@ -4,6 +4,13 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  server: {
+    // Tailscale Serve terminates private HTTPS and forwards to this loopback dev server.
+    allowedHosts: ['home-server.tail083b17.ts.net'],
+    host: '127.0.0.1',
+    port: 5173,
+    strictPort: true,
+  },
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts'],

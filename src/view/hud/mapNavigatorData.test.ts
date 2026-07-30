@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../../sim/createGame'
+import type { MapCity } from '../../sim/types'
 import {
   buildMinimapTerrain,
   buildMinimapRoads,
@@ -128,15 +129,75 @@ describe('world navigator data', () => {
     expect(buildMinimapRoads(state)).toBe(roads)
   })
 
-  it('reveals settlement tiers by zoom and resolves labels deterministically', () => {
+  it('reveals settlement tiers by zoom and resolves screen-space boxes deterministically', () => {
     const state = createGame({ seed: 79, difficulty: 'normal' })
+    const source = state.map.cities![0]!
+    const city = (id: string, name: string, tier: MapCity['tier'], cx: number): MapCity => ({
+      ...source,
+      id,
+      name,
+      tier,
+      cx,
+      cy: 40,
+      population: 1_000,
+    })
+    const cities = [
+      city('metro', 'Metro', 'metro', 20),
+      city('satellite', 'Orbit', 'satellite', 40),
+      city('town', 'Town', 'town', 60),
+      city('village', 'Village', 'village', 80),
+    ]
+    const view = { x: 0, y: 0, width: 100, height: 100, zoom: 1 as const }
+    const labelsAt = (zoom: 1 | 2 | 4) => layoutNavigatorCityLabels(cities, zoom, { ...view, zoom }, 400, 200)
+
+    expect(labelsAt(1).map((label) => label.id)).toEqual(['metro'])
+    expect(labelsAt(2).map((label) => label.id)).toEqual(['metro', 'satellite', 'town'])
+    expect(labelsAt(4).map((label) => label.id)).toEqual(['metro', 'satellite', 'town', 'village'])
+    expect(labelsAt(4)).toEqual(labelsAt(4))
+  })
+
+  it('keeps label boxes in bounds and clear of labels and reserved controls', () => {
+    const state = createGame({ seed: 80, difficulty: 'normal' })
     const cities = state.map.cities ?? []
-    const view = navigatorView(state.map.width, state.map.height, 1, state.map.width / 2, state.map.height / 2, 2)
-    const fitLabels = layoutNavigatorCityLabels(cities, 1, view, 280, 140)
-    expect(fitLabels.every((label) => cities.find((city) => city.id === label.id)?.tier === 'metro')).toBe(true)
-    expect(layoutNavigatorCityLabels(cities, 1, view, 280, 140)).toEqual(fitLabels)
-    const detailView = { ...view, zoom: 4 as const }
-    const detailLabels = layoutNavigatorCityLabels(cities, 4, detailView, 280, 140)
-    expect(detailLabels.length).toBeGreaterThanOrEqual(fitLabels.length)
+    const view = navigatorView(state.map.width, state.map.height, 4, state.map.width / 2, state.map.height / 2, 2)
+    const reserved = { x: 48, y: 100, width: 184, height: 38 }
+    const labels = layoutNavigatorCityLabels(cities, 4, view, 280, 140, [reserved])
+    const intersects = (
+      a: { left: number; top: number; width: number; height: number },
+      b: { left: number; top: number; width: number; height: number },
+    ) => a.left < b.left + b.width && a.left + a.width > b.left &&
+      a.top < b.top + b.height && a.top + a.height > b.top
+    const reservedBox = { left: reserved.x, top: reserved.y, width: reserved.width, height: reserved.height }
+
+    for (const [index, label] of labels.entries()) {
+      expect(label.left).toBeGreaterThanOrEqual(2)
+      expect(label.top).toBeGreaterThanOrEqual(2)
+      expect(label.left + label.width).toBeLessThanOrEqual(278)
+      expect(label.top + label.height).toBeLessThanOrEqual(138)
+      expect(intersects(label, reservedBox)).toBe(false)
+      for (const other of labels.slice(index + 1)) expect(intersects(label, other)).toBe(false)
+    }
+  })
+
+  it('allocates wider screen-space boxes to longer city names', () => {
+    const state = createGame({ seed: 81, difficulty: 'normal' })
+    const source = state.map.cities![0]!
+    const cities: MapCity[] = [
+      { ...source, id: 'short', name: 'Ion', tier: 'metro', cx: 25, cy: 50 },
+      { ...source, id: 'long', name: 'Long Junction', tier: 'metro', cx: 75, cy: 50 },
+    ]
+    const labels = layoutNavigatorCityLabels(
+      cities,
+      1,
+      { x: 0, y: 0, width: 100, height: 100, zoom: 1 },
+      400,
+      200,
+    )
+    const short = labels.find((label) => label.id === 'short')!
+    const long = labels.find((label) => label.id === 'long')!
+
+    expect(short.height).toBe(13)
+    expect(long.width).toBeCloseTo('Long Junction'.length * 6.6 + 4)
+    expect(long.width).toBeGreaterThan(short.width)
   })
 })

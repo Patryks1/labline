@@ -7,6 +7,7 @@ import {
   rackVisualKind,
   restoreHallClock,
   semanticGridWindow,
+  summarizeHallRackCapacity,
 } from './hallLayoutModel'
 
 const sku = (id: string, name: string) => ({ id, name, rackUnits: 1 } as RackSku)
@@ -23,6 +24,17 @@ describe('hall layout projection', () => {
     expect(rackVisualKind(sku('a', 'CPU dense node'))).toBe('cpu')
     expect(rackVisualKind(sku('b', 'Liquid cooling CDU'))).toBe('cooling')
     expect(rackVisualKind(sku('c', 'RAM memory shelf'))).toBe('memory')
+  })
+
+  it('separates installed rack resources from planned cabinet potential', () => {
+    const objects = [
+      { id: 'installed', kind: 'rack', catalogId: 'gpu', rackUnitId: 'unit-1', x: 0, z: 0, rotation: 0, purchasePrice: 0 },
+      { id: 'planned', kind: 'rack', catalogId: 'gpu', reserved: true, x: 4, z: 0, rotation: 0, purchasePrice: 0 },
+      { id: 'utility', kind: 'power', catalogId: 'pdu-2mw', x: 8, z: 0, rotation: 0, purchasePrice: 1 },
+    ] as const
+    const impact = summarizeHallRackCapacity(objects, () => ({ flopsPf: 8, vramGb: 640, mw: 0.008, tokPerSec: 96_000 }))
+    expect(impact.installed).toEqual({ cabinets: 1, flopsPf: 8, vramGb: 640, mw: 0.008, tokPerSec: 96_000 })
+    expect(impact.planned).toEqual({ cabinets: 1, flopsPf: 8, vramGb: 640, mw: 0.008, tokPerSec: 96_000 })
   })
 
   it('moves within grid bounds for keyboard navigation', () => {
