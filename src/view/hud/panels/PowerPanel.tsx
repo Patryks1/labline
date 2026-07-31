@@ -6,6 +6,7 @@ import {
   cancelCityPowerContract,
   cancelPowerExportContract,
   cityDashboard,
+  citiesInGridConnectorRange,
   evaluatePowerExportOffer,
   evaluatePowerImportOffer,
   powerBalance,
@@ -75,7 +76,13 @@ export function PowerPanel() {
   const bill = powerImportBill(state, resolved.mwGridImport);
   const importContracts = activeCityPowerContracts(state);
   const exportContracts = activePowerExportContracts(state);
-  const cities = cityDashboard(state);
+  const citiesInRange = new Set(
+    citiesInGridConnectorRange(state).map((city) => city.id),
+  );
+  const cities = cityDashboard(state).filter(({ city }) =>
+    citiesInRange.has(city.id),
+  );
+  const citySelectionKey = cities.map(({ city }) => city.id).join("|");
   const [contractMw, setContractMw] = useState(8);
   const [contractTerm, setContractTerm] = useState(60);
   const [tab, setTab] = useState<PowerTab>("status");
@@ -84,16 +91,22 @@ export function PowerPanel() {
     cityId: cities[0]?.city.id ?? "",
   }));
 
+  useEffect(() => {
+    const availableCityIds = citySelectionKey ? citySelectionKey.split("|") : [];
+    setNegotiation((current) =>
+      availableCityIds.includes(current.cityId)
+        ? current
+        : {
+            ...current,
+            cityId: availableCityIds[0] ?? "",
+            offerPrice: undefined,
+          },
+    );
+  }, [citySelectionKey]);
+
   const short = Math.max(
     0,
-    balance.demandMw -
-      Math.min(
-        balance.demandMw,
-        Math.min(balance.demandMw, balance.genMw) +
-          bill.contractMw +
-          bill.energyContractMw +
-          bill.spotMw,
-      ),
+    balance.demandMw - resolved.mwAvailable,
   );
   const supplyRatio =
     balance.demandMw > 0.001
@@ -109,7 +122,7 @@ export function PowerPanel() {
       <div className="space-y-3">
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <MetricTile
-            label="Need"
+            label="Demand"
             value={mw(balance.demandMw)}
             tone="warning"
           />
@@ -124,17 +137,30 @@ export function PowerPanel() {
             tone={short > 0.05 ? "danger" : "positive"}
             detail={short > 0.05 ? "Tight" : "Covered"}
           />
-          <MetricTile label="Spot" value={`${money(wholesale)}/MWh`} />
+          <MetricTile
+            label="Available"
+            value={mw(resolved.mwAvailable)}
+            tone={short > 0.05 ? "danger" : "positive"}
+            detail={`${money(wholesale)}/MWh spot`}
+          />
         </div>
 
         <GameCard
           eyebrow="Supply vs demand"
-          title={short > 0.05 ? "Power pressure" : "Fully powered"}
+          title={
+            balance.demandMw <= 0.001
+              ? "No active load"
+              : short > 0.05
+                ? "Power pressure"
+                : "Demand covered"
+          }
           live={short > 0.05}
           tone={short > 0.05 ? "danger" : "mint"}
           actions={
             short > 0.05 ? (
               <LiveDot className="text-danger" />
+            ) : balance.demandMw <= 0.001 ? (
+              <StatusChip tone="neutral">Idle</StatusChip>
             ) : (
               <StatusChip tone="positive">OK</StatusChip>
             )
@@ -154,14 +180,25 @@ export function PowerPanel() {
             live={short > 0.05}
           />
           <div className="mt-2 space-y-0.5">
+            <StatRow label="Physical demand" value={mw(balance.demandMw)} />
+            <StatRow label="On-site generation" value={mw(resolved.mwGeneration)} />
             <StatRow
-              label="Contract import"
-              value={mw(bill.contractMw + bill.energyContractMw)}
+              label="Firm contract draw"
+              value={mw(resolved.mwContractImport)}
             />
             <StatRow
               label="Spot draw"
               value={mw(bill.spotMw)}
               tone={bill.spotMw > 0 ? "warning" : "neutral"}
+            />
+            <StatRow
+              label="Interconnect limit"
+              value={mw(resolved.mwInterconnect)}
+            />
+            <StatRow
+              label="Brownout shortfall"
+              value={mw(short)}
+              tone={short > 0.05 ? "danger" : "positive"}
             />
             <StatRow
               label="Export"
@@ -274,19 +311,26 @@ export function PowerPanel() {
           ) : null}
 
           {tab === "desk" ? (
-            <ContractDesk
-              state={state}
-              setState={setState}
-              cities={cities}
-              contractMw={contractMw}
-              setContractMw={setContractMw}
-              contractTerm={contractTerm}
-              setContractTerm={setContractTerm}
-              negotiation={negotiation}
-              setNegotiation={setNegotiation}
-              gridStatus={`${scarcity.industryDcCount}/${scarcity.softCap}`}
-              gridConstrained={scarcity.gridDemandMw > scarcity.gridCapMw}
-            />
+            cities.length === 0 ? (
+              <EmptyState
+                title="No city utilities in range"
+                description="Commission a grid connector within 50 tiles of a city utility to open negotiations."
+              />
+            ) : (
+              <ContractDesk
+                state={state}
+                setState={setState}
+                cities={cities}
+                contractMw={contractMw}
+                setContractMw={setContractMw}
+                contractTerm={contractTerm}
+                setContractTerm={setContractTerm}
+                negotiation={negotiation}
+                setNegotiation={setNegotiation}
+                gridStatus={`${scarcity.industryDcCount}/${scarcity.softCap}`}
+                gridConstrained={scarcity.gridDemandMw > scarcity.gridCapMw}
+              />
+            )
           ) : null}
         </div>
       </div>

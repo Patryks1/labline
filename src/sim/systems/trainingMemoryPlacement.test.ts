@@ -119,7 +119,7 @@ describe('concurrent training memory placement', () => {
     const nextBackground = next.player.trainingJobs!.find((job) => job.id === background.id)!
     expect(nextPriority.progressPfDays).toBeGreaterThan(priority.progressPfDays)
     expect(nextBackground.progressPfDays).toBe(background.progressPfDays)
-    expect(nextBackground.stallReason).toContain('Training RAM blocked')
+    expect(nextBackground.stallReason).toContain('Training HBM blocked')
   })
 
   it('shares limited compute across RAM-ready jobs instead of blocking them', () => {

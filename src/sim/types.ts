@@ -188,6 +188,8 @@ export interface CloudProvider {
   name: string;
   regionId: string;
   baselinePf: number;
+  /** Long-run expansion ceiling, initialized from the first simulated baseline when absent. */
+  maxBaselinePf?: number;
   availablePf: number;
   basePricePerPfDay: number;
   reliability: number;
@@ -1046,7 +1048,7 @@ export interface TrainingDataPlan {
   domainModels?: Partial<Record<DataDomain, string>>;
   /** Optional synthetic teacher override per domain. Missing entries use the best eligible model. */
   syntheticTeacherIds?: Partial<Record<DataDomain, string>>;
-  /** Requested generated-token expansion relative to attributed real data (0–3×). */
+  /** Requested generated-token expansion relative to attributed real data (0–7×; 8× total). */
   syntheticMultiplier?: number;
   /** V3: unique/repeated exposure used for saturation and memorization risk. */
   uniqueMTok?: number;
@@ -1077,6 +1079,12 @@ export interface Model {
   revision?: number;
   safetyTraining?: SafetyTrainingRecord;
   postTrain: PostTrainStage;
+  /** One-shot post-training stages completed anywhere in this model lineage. */
+  completedPostTrainStages?: Exclude<PostTrainStage, "none">[];
+  /** Effectiveness earned by each completed stage (0-1), preserved across continuation. */
+  postTrainStageEffectiveness?: Partial<
+    Record<Exclude<PostTrainStage, "none">, number>
+  >;
   trainComputeSpent: number;
   /** Lifetime revenue/cost attribution for this model. */
   economics?: ModelEconomics;
@@ -1300,6 +1308,12 @@ export interface TrainingJob {
   activeParamsB?: number;
   targetPfDays: number;
   progressPfDays: number;
+  /** Cumulative accelerator energy proxy: allocated PF × MW/PF × active days. */
+  energyMwDays?: number;
+  /** Cumulative accelerator energy in MWh (`energyMwDays × 24`). */
+  energyMWh?: number;
+  /** Live ETA: max(remaining PF/current effective PF, remaining calendar gate). */
+  daysRemaining?: number;
   /** Integration/validation time gate, independent of allocated PF. */
   minCalendarDays?: number;
   /** Funded, unpaused active days accumulated toward the calendar gate. */
@@ -1307,6 +1321,14 @@ export interface TrainingJob {
   postTrain: PostTrainStage;
   postTrainProgress: number;
   postTrainTarget: number;
+  /** One-shot stages inherited from, or completed within, this lineage. */
+  completedPostTrainStages?: Exclude<PostTrainStage, "none">[];
+  /** Frozen result for completed stages so later research cannot rewrite history. */
+  postTrainStageEffectiveness?: Partial<
+    Record<Exclude<PostTrainStage, "none">, number>
+  >;
+  /** Funded active days spent in the current post-training stage. */
+  postTrainDaysElapsed?: number;
   mode: TrainMode;
   teacherId?: string;
   /**
@@ -1394,13 +1416,22 @@ export interface TrainingEconomics {
   trainingCostAccrued: number;
 }
 
-/** Deterministic progress-scaled mid-training evaluation. */
+/** Deterministic but deliberately uncertain progress-scaled mid-training evaluation. */
 export interface TrainingBenchmarkSnapshot {
   day: number;
   progress: number;
+  /** Noisy point estimates; checkpoint benchmarking cannot reveal terminal quality exactly. */
   capability: number;
   safety: number;
   suite?: number;
+  /** Nominal confidence in the interval (0-1). */
+  confidence?: number;
+  /** Minimum proportional uncertainty applied around each point estimate. */
+  inaccuracy?: number;
+  capabilityLow?: number;
+  capabilityHigh?: number;
+  safetyLow?: number;
+  safetyHigh?: number;
 }
 
 export interface ModelEconomics {
@@ -2406,6 +2437,7 @@ export interface TrainingSpec {
   teacherId?: string;
   distillTeacherShare?: number;
   modelStack?: string[];
+  trainingNumerics?: TrainingNumerics;
 }
 
 export interface TrainingForecast {
@@ -2424,6 +2456,17 @@ export interface TrainingForecast {
   interactiveTokPerSec: number;
   risk: "low" | "medium" | "high";
   warnings: string[];
+  /** Composed precision assumptions for quote presentation. */
+  precision?: {
+    label: string;
+    trainingWorkMultiplier: number;
+    upfrontCashMultiplier: number;
+    dailyCashMultiplier: number;
+    qualityCeilingMultiplier: number;
+    lossVolatilityMultiplier: number;
+    inferenceCostMultiplier: number;
+    stabilityRisk: number;
+  };
 }
 
 export interface RivalPublicEstimate {

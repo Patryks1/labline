@@ -9,6 +9,7 @@ import {
   startTraining,
   trainingStageFailurePlan,
 } from './training'
+import { postTrainTargetPfDays } from '../balance/postTraining'
 
 function started(seed = 930) {
   const state = startTraining(createGame(seed), {
@@ -115,7 +116,71 @@ describe('training lifecycle controls', () => {
     }
 
     const next = selectPostTrain(completed, job.id, 'rlhf')
-    expect(next.player.trainingJob).toMatchObject({ postTrain: 'rlhf', postTrainProgress: 0, postTrainTarget: 8 })
+    expect(next.player.trainingJob).toMatchObject({
+      postTrain: 'rlhf',
+      postTrainProgress: 0,
+      postTrainTarget: postTrainTargetPfDays(job, 'rlhf'),
+    })
+  })
+
+  it('prevents replaying a completed post-training stage in the same lineage', () => {
+    const state = started(931)
+    const job = state.player.trainingJob!
+    const completed = {
+      ...state,
+      player: {
+        ...state.player,
+        trainingJobs: [{
+          ...job,
+          progressPfDays: job.targetPfDays,
+          daysElapsed: job.minCalendarDays,
+          completedPostTrainStages: ['sft' as const],
+        }],
+        trainingJob: {
+          ...job,
+          progressPfDays: job.targetPfDays,
+          daysElapsed: job.minCalendarDays,
+          completedPostTrainStages: ['sft' as const],
+        },
+      },
+    }
+
+    const next = selectPostTrain(completed, job.id, 'sft')
+    expect(next.player.trainingJob?.postTrain).toBe('none')
+    expect(next.alerts[0]?.message).toContain('one-shot')
+  })
+
+  it('materializes tools I/O and lineage history on a tools-trained model', () => {
+    const state = startTraining(createGame(933), {
+      name: 'Lifecycle',
+      family: 'dense',
+      paramsB: 1,
+      io: { inputs: { text: 50 }, outputs: { text: 50 }, tools: 0 },
+    })
+    const job = state.player.trainingJob!
+    const baseComplete = {
+      ...state,
+      player: {
+        ...state.player,
+        trainingJobs: [{ ...job, progressPfDays: job.targetPfDays, daysElapsed: job.minCalendarDays }],
+        trainingJob: { ...job, progressPfDays: job.targetPfDays, daysElapsed: job.minCalendarDays },
+      },
+    }
+    const baseline = keepInternal(baseComplete, job.id).player.models.find(
+      (candidate) => candidate.name === 'Lifecycle',
+    )!
+    const selected = selectPostTrain(baseComplete, job.id, 'tools')
+    const stageComplete = completeTrainingJobsNow(selected)
+    expect(stageComplete.player.trainingJob?.completedPostTrainStages).toContain('tools')
+    expect(stageComplete.player.trainingJob?.postTrainStageEffectiveness?.tools).toBeGreaterThan(0)
+
+    const finalized = keepInternal(stageComplete, job.id)
+    const model = finalized.player.models.find((candidate) => candidate.name === 'Lifecycle')!
+    expect(model.completedPostTrainStages).toContain('tools')
+    expect(model.io?.tools).toBeGreaterThan(0)
+    expect(model.modalities).toContain('tools')
+    expect(model.benchmarks.agents).toBeGreaterThan(baseline.benchmarks.agents)
+    expect(model.evaluationProfile?.agents?.penalty).not.toBe('Tools I/O is not enabled')
   })
 
   it('benchmarks a completed run as a private model without releasing it', () => {
@@ -138,5 +203,29 @@ describe('training lifecycle controls', () => {
     expect(updated!.benchmarkSnapshots?.length ?? 0).toBeGreaterThan(0)
     expect(updated!.lastBenchmarkDay).toBe(next.day)
     expect(next.player.models.length).toBe(completed.player.models.length)
+  })
+
+  it('makes checkpoint estimates deterministically noisy with a 20%+ confidence band', () => {
+    const state = started(933)
+    const job = state.player.trainingJob!
+    const benchmarkable = {
+      ...state,
+      player: {
+        ...state.player,
+        trainingJobs: [{ ...job, progressPfDays: job.targetPfDays * 0.5 }],
+        trainingJob: { ...job, progressPfDays: job.targetPfDays * 0.5 },
+      },
+    }
+
+    const first = benchmarkTrainingJob(benchmarkable, job.id).player.trainingJob!
+      .benchmarkSnapshots![0]!
+    const repeated = benchmarkTrainingJob(benchmarkable, job.id).player.trainingJob!
+      .benchmarkSnapshots![0]!
+
+    expect(repeated).toEqual(first)
+    expect(first.inaccuracy).toBeGreaterThanOrEqual(0.2)
+    expect(first.confidence).toBeLessThan(1)
+    expect(first.capabilityLow).toBeLessThanOrEqual(first.capability * 0.8)
+    expect(first.capabilityHigh).toBeGreaterThanOrEqual(first.capability * 1.2)
   })
 })

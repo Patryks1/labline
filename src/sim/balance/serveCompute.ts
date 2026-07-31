@@ -98,12 +98,39 @@ export function serveAgainstInferencePool(
 export function planUsageUtilization(
   plan: SubPlan,
   allPlans: SubPlan[],
-  opts?: { modelCapability?: number; frontierCapability?: number },
+  opts?: {
+    modelCapability?: number
+    frontierCapability?: number
+    demandShockMultiplier?: number
+  },
 ): number {
+  return planHeavyUserProfile(plan, allPlans, opts).blendedUtilization
+}
+
+export interface PlanHeavyUserProfile {
+  /** Share of seats that are attracted by the allowance and use nearly all of it. */
+  heavyUserShare: number
+  regularUtilization: number
+  heavyUtilization: number
+  blendedUtilization: number
+}
+
+/**
+ * Shared player/rival allowance-abuse profile. Generous tiers attract a small
+ * cohort of power users; frontier launches temporarily make that cohort larger.
+ */
+export function planHeavyUserProfile(
+  plan: SubPlan,
+  allPlans: SubPlan[],
+  opts?: {
+    modelCapability?: number
+    frontierCapability?: number
+    demandShockMultiplier?: number
+  },
+): PlanHeavyUserProfile {
   const cap = opts?.modelCapability ?? 50
   const frontier = Math.max(opts?.frontierCapability ?? cap, cap)
   const sota = Math.max(0, Math.min(1, (cap - 25) / Math.max(25, frontier - 25 + 1e-6)))
-  void allPlans
   // Steady-state allowance use is a tier promise, not a hidden multiplier over
   // entitlement. SOTA quality moves a plan within its band but never beyond it.
   const [low, high] =
@@ -116,9 +143,50 @@ export function planUsageUtilization(
           : [0.5, 0.8]
   const endogenous = low + (high - low) * sota
   const configured = plan.steadyUsageTarget
-  return configured == null
+  const regularUtilization = configured == null
     ? endogenous
     : Math.max(low, Math.min(high, configured * (0.9 + sota * 0.2)))
+  const allowance =
+    Number.isFinite(plan.includedMTokPerMonth) && (plan.includedMTokPerMonth ?? 0) > 0
+      ? plan.includedMTokPerMonth!
+      : ECONOMY.basePlanUsageMTokPerDay * plan.usageMultiplier * ECONOMY.daysPerMonth
+  const peerAllowances = allPlans
+    .filter((candidate) => candidate.id !== plan.id)
+    .map((candidate) =>
+      Number.isFinite(candidate.includedMTokPerMonth) &&
+      (candidate.includedMTokPerMonth ?? 0) > 0
+        ? candidate.includedMTokPerMonth!
+        : ECONOMY.basePlanUsageMTokPerDay *
+          candidate.usageMultiplier *
+          ECONOMY.daysPerMonth,
+    )
+    .filter((value) => value > 0)
+    .sort((a, b) => a - b)
+  const peerMedian =
+    peerAllowances.length > 0
+      ? peerAllowances[Math.floor(peerAllowances.length / 2)]!
+      : ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth
+  const baseAllowance = Math.max(
+    ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth,
+    peerMedian,
+  )
+  const generositySteps = Math.max(0, Math.log2(Math.max(1, allowance / baseAllowance)))
+  const launchLift = Math.max(0, (opts?.demandShockMultiplier ?? 1) - 1)
+  const heavyUserShare = Math.max(
+    0.008,
+    Math.min(0.16, 0.008 + generositySteps * 0.014 + sota * 0.012 + launchLift * 0.05),
+  )
+  const heavyUtilization = Math.min(0.99, 0.9 + sota * 0.05 + Math.min(0.04, launchLift * 0.05))
+  const blendedUtilization = Math.min(
+    1,
+    regularUtilization * (1 - heavyUserShare) + heavyUtilization * heavyUserShare,
+  )
+  return {
+    heavyUserShare,
+    regularUtilization,
+    heavyUtilization,
+    blendedUtilization,
+  }
 }
 
 /** Allowance MTok/user/day × utilization = actual use. */

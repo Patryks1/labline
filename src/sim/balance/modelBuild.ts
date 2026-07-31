@@ -12,6 +12,7 @@ import type {
   Modality,
   PostTrainStage,
   QualityAxes,
+  TrainingNumerics,
 } from "../types";
 import {
   capabilityCeiling,
@@ -30,6 +31,7 @@ import {
   rollTrainingOutcome,
   serviceProfileForModel,
 } from "./trainingV3";
+import { trainingNumericsEconomicsProfile } from "./trainingPrecision";
 
 export interface BuildScaledModelOpts {
   id: string;
@@ -65,6 +67,7 @@ export interface BuildScaledModelOpts {
   effectiveDataRatio?: number;
   repeatedDataEpochs?: number;
   openWeights?: boolean;
+  trainingNumerics?: TrainingNumerics;
 }
 
 function clamp(n: number, lo = 0, hi = 100) {
@@ -92,6 +95,7 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
   const researchMult = opts.researchMult ?? 1 + unlocked.length * 0.004;
   const lqShare = Math.max(0, Math.min(1, opts.synthLqShare ?? 0));
   const lqMult = lqSynthCapabilityMult(lqShare);
+  const precision = trainingNumericsEconomicsProfile(opts.trainingNumerics);
 
   const scaleIn: ScaleInputs = {
     paramsB: opts.paramsB,
@@ -170,10 +174,20 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
       benchmarks[key] = clamp(benchmarks[key] + outcome.capabilityDelta * 0.45);
     }
   }
-  capability = Math.min(capability, capabilityCeiling(scaleIn).capability);
+  capability = Math.min(
+    capability,
+    capabilityCeiling(scaleIn).capability * precision.qualityCeilingMultiplier,
+  );
+  for (const key of Object.keys(benchmarks) as (keyof BenchmarkScores)[]) {
+    benchmarks[key] = Math.min(
+      benchmarks[key],
+      scale.benchCeilings[key] * precision.qualityCeilingMultiplier,
+    );
+  }
 
   const moe = backbone === "moe";
-  const inferCostMult = opts.inferCostMult ?? (moe ? 0.75 : 1);
+  const inferCostMult =
+    (opts.inferCostMult ?? (moe ? 0.75 : 1)) * precision.inferenceCostMultiplier;
   // Each model gets its own in/out list from size/family/capability costs
   const apiSug = suggestApiInOut({
     costPerMTokBase: 0.28,
@@ -233,5 +247,6 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
     repeatedDataEpochs: opts.repeatedDataEpochs ?? 1,
     outcome,
     openWeights: opts.openWeights ?? false,
+    trainingNumerics: opts.trainingNumerics,
   });
 }

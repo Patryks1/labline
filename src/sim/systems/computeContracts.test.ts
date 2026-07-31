@@ -26,6 +26,12 @@ function providerAvailable(state: SimState, providerId: string): number {
   )!.availablePf;
 }
 
+function providerCapacity(state: SimState, providerId: string) {
+  return state.worldMarkets.cloudProviders.find(
+    (provider) => provider.id === providerId,
+  )!;
+}
+
 describe("provider compute contracts", () => {
   it("snapshots provider accelerator and numerical-format capabilities", () => {
     const state = endStarterContract(createGame(799));
@@ -190,6 +196,26 @@ describe("provider compute contracts", () => {
       )?.status,
     ).toBe("interrupted");
     expect(labContractCapacityPf(first, first.playerLabId).inboundPf).toBe(0);
+    const beforeProvider = providerCapacity(state, quote.contract.providerId);
+    const afterProvider = providerCapacity(first, quote.contract.providerId);
+    expect(
+      afterProvider.baselinePf - afterProvider.availablePf,
+    ).toBeCloseTo(beforeProvider.baselinePf - beforeProvider.availablePf, 8);
+
+    const terminated = terminateComputeContract(first, quote.contract.id);
+    const terminatedAgain = terminateComputeContract(
+      terminated,
+      quote.contract.id,
+    );
+    expect(
+      providerCapacity(terminated, quote.contract.providerId).availablePf,
+    ).toBeCloseTo(
+      providerCapacity(terminated, quote.contract.providerId).baselinePf,
+      8,
+    );
+    expect(providerCapacity(terminatedAgain, quote.contract.providerId)).toEqual(
+      providerCapacity(terminated, quote.contract.providerId),
+    );
   });
 
   it("applies promotional credits before cash cost without creating revenue", () => {
@@ -223,7 +249,7 @@ describe("provider compute contracts", () => {
     const starter = state.computeContracts.find(
       (contract) => contract.status === "active",
     )!;
-    const before = providerAvailable(state, starter.providerId);
+    const before = providerCapacity(state, starter.providerId);
     state = {
       ...state,
       computeContracts: state.computeContracts.map((contract) =>
@@ -236,10 +262,81 @@ describe("provider compute contracts", () => {
       next.computeContracts.find((contract) => contract.id === starter.id)
         ?.status,
     ).toBe("expired");
-    expect(providerAvailable(next, starter.providerId)).toBeCloseTo(
-      before + starter.pf,
-      8,
-    );
+    const after = providerCapacity(next, starter.providerId);
+    expect(after.baselinePf).toBeGreaterThan(before.baselinePf);
+    expect(after.availablePf).toBeCloseTo(after.baselinePf, 8);
+  });
+
+  it("grows baseline and free inventory by the same amount up to a fixed cap", () => {
+    let state = endStarterContract(createGame(8051));
+    const providerId = "cloud-northstar";
+    state = {
+      ...state,
+      worldMarkets: {
+        ...state.worldMarkets,
+        cloudProviders: state.worldMarkets.cloudProviders.map((provider) =>
+          provider.id === providerId
+            ? {
+                ...provider,
+                baselinePf: 100,
+                availablePf: 60,
+                maxBaselinePf: 100.05,
+              }
+            : provider,
+        ),
+      },
+    };
+
+    const first = tickComputeContracts(state);
+    const repeated = tickComputeContracts(state);
+    const grown = providerCapacity(first, providerId);
+    expect(grown).toEqual(providerCapacity(repeated, providerId));
+    expect(grown.baselinePf).toBeCloseTo(100.05, 8);
+    expect(grown.availablePf).toBeCloseTo(60.05, 8);
+
+    const capped = providerCapacity(tickComputeContracts(first), providerId);
+    expect(capped.baselinePf).toBeCloseTo(100.05, 8);
+    expect(capped.availablePf).toBeCloseTo(60.05, 8);
+  });
+
+  it("does not return an expired contract twice while provider capacity grows", () => {
+    let state = endStarterContract(createGame(8052));
+    const providerId = "cloud-northstar";
+    const first = quoteComputeContract(state, {
+      providerId,
+      buyerLabId: state.playerLabId,
+      kind: "on_demand",
+      pf: 40,
+      termDays: 30,
+    });
+    state = signComputeContract(state, first);
+    const second = quoteComputeContract(state, {
+      providerId,
+      buyerLabId: state.playerLabId,
+      kind: "on_demand",
+      pf: 30,
+      termDays: 30,
+    });
+    state = signComputeContract(state, second);
+    state = {
+      ...state,
+      computeContracts: state.computeContracts.map((contract) =>
+        contract.id === first.contract.id
+          ? { ...contract, daysLeft: 1 }
+          : contract,
+      ),
+    };
+
+    const afterExpiry = tickComputeContracts(state);
+    const afterAnotherDay = tickComputeContracts(afterExpiry);
+    const committedAfterExpiry =
+      providerCapacity(afterExpiry, providerId).baselinePf -
+      providerCapacity(afterExpiry, providerId).availablePf;
+    const committedAfterAnotherDay =
+      providerCapacity(afterAnotherDay, providerId).baselinePf -
+      providerCapacity(afterAnotherDay, providerId).availablePf;
+    expect(committedAfterExpiry).toBeCloseTo(second.contract.pf, 8);
+    expect(committedAfterAnotherDay).toBeCloseTo(second.contract.pf, 8);
   });
 
   it("tracks inbound and outbound PF separately instead of netting them away", () => {

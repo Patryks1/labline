@@ -387,7 +387,8 @@ export function ComputeMarketPanel() {
                         className="bg-void"
                       >
                         {provider.name} · {computeMw(pfToMw(provider.availablePf))}
-                        open
+                        {" open / "}
+                        {computeMw(pfToMw(provider.baselinePf))} total
                       </option>
                     ))}
                   </select>

@@ -4,10 +4,13 @@ import {
   analyzeApiPricing,
   analyzePlanPricing,
   blendApiPrice,
+  commercialModelKind,
   fullyLoadedApiCostFloor,
   modelCostMult,
   serveInfraCost,
   splitInOutMTok,
+  suggestCompetitiveApiInOut,
+  suggestPlanPriceAndUsage,
 } from "../../../sim/balance/pricing";
 import { energyPriceForState } from "../../../sim/systems/map";
 import {
@@ -139,6 +142,7 @@ export function PlansPanel() {
   const updatePlan = useGameStore((s) => s.updatePlan);
   const deletePlan = useGameStore((s) => s.deletePlan);
   const setModelApiInOut = useGameStore((s) => s.setModelApiInOut);
+  const applyModelApiMarkup = useGameStore((s) => s.applyModelApiMarkup);
   const setPricing = useGameStore((s) => s.setPricing);
   const stats = state.lastMarket.planStats;
   const models = state.player.models.filter(
@@ -166,6 +170,25 @@ export function PlansPanel() {
           model.apiPriceInPerMTok != null && model.apiPriceOutPerMTok != null
             ? blendApiPrice(model.apiPriceInPerMTok, model.apiPriceOutPerMTok)
             : rival.pricing.apiPricePerMTok,
+        capability: model.capability,
+        featureScore: model.modalities.length * 18,
+        tokPerSec:
+          model.serviceProfile?.interactiveTokPerSec ??
+          52 * model.tokPerSecMult,
+      })),
+  );
+  const rivalApiInOutPeers = state.rivals.flatMap((rival) =>
+    rival.models
+      .filter((model) => model.release === "released" || model.shipped)
+      .map((model) => ({
+        priceIn:
+          model.apiPriceInPerMTok ??
+          rival.pricing.apiPriceInPerMTok ??
+          rival.pricing.apiPricePerMTok * 0.35,
+        priceOut:
+          model.apiPriceOutPerMTok ??
+          rival.pricing.apiPriceOutPerMTok ??
+          rival.pricing.apiPricePerMTok * 1.25,
         capability: model.capability,
         featureScore: model.modalities.length * 18,
         tokPerSec:
@@ -523,6 +546,18 @@ export function PlansPanel() {
                       52 * apiServedModel.tokPerSecMult,
                     peers: rivalApiPeers,
                   });
+                  const suggestedApi = suggestCompetitiveApiInOut({
+                    costIn: liveCost.costIn,
+                    costOut: liveCost.costOut,
+                    capability: apiServedModel.capability,
+                    featureScore: m.modalities.length * 18,
+                    tokPerSec:
+                      apiServedModel.serviceProfile?.interactiveTokPerSec ??
+                      52 * apiServedModel.tokPerSecMult,
+                    peers: rivalApiInOutPeers,
+                    fallbackPriceIn: m.suggestedApiPriceIn,
+                    fallbackPriceOut: m.suggestedApiPriceOut,
+                  });
                   const dayNet =
                     (fin?.dayApiRevenue ?? 0) - (fin?.dayApiCogs ?? 0);
                   const belowFloor = blend < liveCost.blended;
@@ -731,7 +766,12 @@ export function PlansPanel() {
 
                         <div className="mt-2 grid grid-cols-2 gap-2">
                           <label className="text-[0.8125rem] text-muted">
-                            Input $/1M tok
+                            <span className="flex items-center justify-between gap-2">
+                              <span>Input $/1M tok</span>
+                              <span className="font-mono text-[0.6875rem] text-mint">
+                                Suggested ${suggestedApi.priceIn.toFixed(2)}
+                              </span>
+                            </span>
                             <DraftNumberInput
                               ariaLabel={`${m.name} input price per million tokens`}
                               min={0}
@@ -746,7 +786,12 @@ export function PlansPanel() {
                             />
                           </label>
                           <label className="text-[0.8125rem] text-muted">
-                            Output $/1M tok
+                            <span className="flex items-center justify-between gap-2">
+                              <span>Output $/1M tok</span>
+                              <span className="font-mono text-[0.6875rem] text-mint">
+                                Suggested ${suggestedApi.priceOut.toFixed(2)}
+                              </span>
+                            </span>
                             <DraftNumberInput
                               ariaLabel={`${m.name} output price per million tokens`}
                               min={0}
@@ -776,27 +821,33 @@ export function PlansPanel() {
                                 Price margin
                               </div>
                               <p className="mt-0.5 text-[0.75rem] text-muted">
-                                Allocated compute floor{" "}
-                                {money(liveCost.blended)}/M ·{" "}
+                                Model cost basis{" "}
+                                {money(
+                                  blendApiPrice(
+                                    m.costApiPriceIn,
+                                    m.costApiPriceOut,
+                                  ),
+                                )}
+                                /M · current floor {money(liveCost.blended)}/M ·{" "}
                                 {pricingStatus.explanation}
                               </p>
                             </div>
                             <label className="flex shrink-0 items-center gap-1.5 text-[0.75rem] text-muted">
                               <DraftNumberInput
                                 ariaLabel={`${m.name} API margin percent`}
-                                min={-50}
+                                min={0}
                                 max={500}
                                 step={1}
                                 value={Math.max(
-                                  -50,
+                                  0,
                                   Math.min(
                                     500,
                                     (blend /
                                       Math.max(
                                         0.001,
                                         blendApiPrice(
-                                          liveCost.costIn,
-                                          liveCost.costOut,
+                                          m.costApiPriceIn,
+                                          m.costApiPriceOut,
                                         ),
                                       ) -
                                       1) *
@@ -805,18 +856,7 @@ export function PlansPanel() {
                                 )}
                                 decimals={1}
                                 onCommit={(marginPct) => {
-                                  const priceMultiplier = Math.max(
-                                    0.5,
-                                    1 + marginPct / 100,
-                                  );
-                                  const costIn = liveCost.costIn;
-                                  const costOut = liveCost.costOut;
-                                  const nextIn = costIn * priceMultiplier;
-                                  const nextOut = Math.max(
-                                    nextIn,
-                                    costOut * priceMultiplier,
-                                  );
-                                  setModelApiInOut(m.id, nextIn, nextOut);
+                                  applyModelApiMarkup(m.id, marginPct);
                                 }}
                                 className="w-20 rounded-md border border-mint/35 bg-void px-2 py-1 font-mono text-[0.8125rem] text-bone outline-none focus:border-mint"
                               />
@@ -1739,6 +1779,20 @@ function PlanCard({
   const allowanceExpectation = planAllowanceExpectation(plan);
   const dissatisfaction =
     stats?.dissatisfaction ?? allowanceExpectation.dissatisfaction;
+  const recommendationModel = [...models]
+    .filter((model) => plan.modelIds.includes(model.id))
+    .sort((a, b) => b.capability - a.capability)[0];
+  const planSuggestion = suggestPlanPriceAndUsage({
+    currentPrice: plan.pricePerMonth,
+    currentIncludedMTokPerMonth: allowanceMo,
+    marginalCostPerMTok: unitCogs,
+    capability: modelCap,
+    frontierCapability: frontierCap,
+    kind: recommendationModel
+      ? commercialModelKind(recommendationModel)
+      : "language",
+    peers: peerPlans,
+  });
 
   return (
     <div
@@ -1887,6 +1941,35 @@ function PlanCard({
               className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 font-mono text-sm text-bone outline-none"
             />
           </label>
+        </div>
+
+        <div className="rounded-lg border border-mint/25 bg-mint/5 px-2.5 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <div className="text-[0.75rem] font-medium text-bone">
+                Suggested {money(planSuggestion.pricePerMonth)}/mo ·{" "}
+                {num(planSuggestion.includedMTokPerMonth, 2)} MTok/mo
+              </div>
+              <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">
+                Based on {planSuggestion.explanation}. Recommendations are
+                bounded to $0–$5,000 and 0.06–300 MTok/month.
+              </p>
+            </div>
+            <HudButton
+              type="button"
+              variant="secondary"
+              className="!px-2.5 !py-1 text-[0.6875rem]"
+              onClick={() =>
+                onChange({
+                  pricePerMonth: planSuggestion.pricePerMonth,
+                  includedMTokPerMonth:
+                    planSuggestion.includedMTokPerMonth,
+                })
+              }
+            >
+              Apply both
+            </HudButton>
+          </div>
         </div>
 
         <label className="block text-[0.75rem] text-muted">

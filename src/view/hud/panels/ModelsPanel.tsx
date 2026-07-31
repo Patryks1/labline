@@ -21,7 +21,9 @@ import {
 } from "../../../sim/balance/training";
 import {
   estimateTrainingMemoryGb,
+  supportsTrainingFormat,
   TRAINING_PRECISION_PROFILES,
+  trainingNumericsEconomicsProfile,
 } from "../../../sim/balance/trainingPrecision";
 import {
   familyFromSpec,
@@ -57,6 +59,7 @@ import { money, mw, num } from "../format";
 import { SizeSlider } from "../ui/SizeSlider";
 import { ResearchUnlockLink } from "../ui/ResearchUnlockLink";
 import { modelTrainVramGb, modelVramGb } from "../../../sim/balance/racks";
+import { resolveRackSku } from "../../../sim/systems/racks";
 import {
   generateUniqueModelName,
   isModelNameTaken,
@@ -395,6 +398,11 @@ export function ModelsPanel() {
           teacherId: mode === "distill" ? teacherId || undefined : undefined,
           distillTeacherShare: mode === "distill" ? teacherShare : undefined,
           modelStack: selectedStack,
+          trainingNumerics: {
+            computeFormat: trainingFormat,
+            nativeWeightFormat,
+            recipeVersion: 1,
+          },
         },
         labData,
         dataQuality: state.player.dataQuality,
@@ -415,6 +423,8 @@ export function ModelsPanel() {
       teacherId,
       teacherShare,
       selectedStack,
+      trainingFormat,
+      nativeWeightFormat,
       labData,
       state.player.dataQuality,
       state.player.trainEfficiency,
@@ -511,6 +521,12 @@ export function ModelsPanel() {
   const dailyCost = trainingForecast.cashBurnPerDay;
   const upfront = trainingForecast.upfrontCash;
   const daysEst = trainingForecast.etaDays;
+  const calendarMinDays = trainingForecast.minCalendarDays ?? 0;
+  const computeDaysEst =
+    daysEst === Infinity
+      ? Infinity
+      : Math.max(0, Math.ceil(trainingForecast.targetPfDays / Math.max(0.001, snap.pools.training)));
+  const calendarBoundEta = calendarMinDays > 0 && daysEst !== Infinity && daysEst <= calendarMinDays + 1e-9;
   const hostWeightFormat = trainingFormat.includes("fp32")
     ? "fp32"
     : trainingFormat.includes("fp8") || trainingFormat.includes("nvfp4")
@@ -546,6 +562,23 @@ export function ModelsPanel() {
       unlocked,
     ],
   );
+  const numericsEconomics = useMemo(
+    () =>
+      trainingNumericsEconomicsProfile({
+        computeFormat: trainingFormat,
+        nativeWeightFormat,
+        recipeVersion: 1,
+      }),
+    [trainingFormat, nativeWeightFormat],
+  );
+  const precisionRisk =
+    numericsEconomics.stabilityRisk >= 0.1 ||
+    numericsEconomics.lossVolatilityMultiplier >= 1.5
+      ? "high"
+      : numericsEconomics.stabilityRisk > 0.02 ||
+          numericsEconomics.lossVolatilityMultiplier > 1.1
+        ? "medium"
+        : "low";
   const needVramGb = Math.max(
     modelTrainVramGb(
       trainParamsB,
@@ -561,6 +594,47 @@ export function ModelsPanel() {
     snap,
     trainingMemory.requiredSystemRamGb,
   );
+  const liveRackHardware = (state.player.rackFleet ?? [])
+    .filter((rack) => rack.status === "live" && rack.count > 0)
+    .map((rack) => resolveRackSku(rack.skuId, state.player.rackDesigns ?? []))
+    .map((sku) => ({
+      generation: sku.accelerator?.generation ?? 1,
+      formats: sku.accelerator?.supportedTrainingFormats,
+    }));
+  const liveContractHardware = state.computeContracts
+    .filter(
+      (contract) =>
+        contract.buyerLabId === state.playerLabId &&
+        contract.status === "active" &&
+        contract.pf > 0 &&
+        (contract.availableDay == null || state.day >= contract.availableDay),
+    )
+    .map((contract) => ({
+      generation: contract.acceleratorGeneration ?? 1,
+      formats: contract.supportedTrainingFormats,
+    }));
+  const enumeratedHardware = [...liveRackHardware, ...liveContractHardware];
+  const hasInboundBilateralCompute = state.computeLeases.some((lease) => {
+    if (lease.status !== "active" || lease.pf <= 0) return false;
+    const buyerLabId =
+      lease.buyerLabId ??
+      (lease.playerSells ? lease.rivalId : state.playerLabId);
+    return buyerLabId === state.playerLabId;
+  });
+  const legacyHardware =
+    enumeratedHardware.length === 0 &&
+    (snap.chipCount > 0 || hasInboundBilateralCompute);
+  const maxHardwareGeneration = Math.max(
+    legacyHardware ? 1 : 0,
+    ...enumeratedHardware.map((hardware) => hardware.generation),
+  );
+  const formatHardwareAvailable =
+    (legacyHardware && supportsTrainingFormat(1, trainingFormat)) ||
+    enumeratedHardware.some(
+      (hardware) =>
+        supportsTrainingFormat(hardware.generation, trainingFormat) &&
+        (!hardware.formats || hardware.formats.includes(trainingFormat)),
+    );
   const underProvisioned =
     snap.chipCount > 0 && snap.chipCount < recChips * 0.35;
   const publicFrontier = Math.max(
@@ -608,6 +682,20 @@ export function ModelsPanel() {
         .map((model) => model.capability),
     ),
   );
+  const syntheticTeacherReliability = DATA_DOMAINS.reduce((sum, domain) => {
+    const selected = teachers.find(
+      (model) => model.id === syntheticTeacherIds[domain],
+    );
+    return (
+      sum +
+      ((selected ?? strongestTeacher)?.quality.reliability ?? 0) *
+        (weights[domain] ?? 0)
+    );
+  }, 0);
+  const syntheticDataQuality = DATA_DOMAINS.reduce((sum, domain) => {
+    const stock = labData.stocks[domain];
+    return sum + Math.max(0, stock?.quality ?? state.player.dataQuality) * (weights[domain] ?? 0);
+  }, 0);
   const syntheticProfile = syntheticTrainingProfile({
     realMTok: Math.min(realDataMTok, processedAvail),
     syntheticMTok:
@@ -616,6 +704,15 @@ export function ModelsPanel() {
       ? syntheticTeacherCapability
       : 0,
     frontierCapability: syntheticFrontierCapability,
+    teacherReliability: Number.isFinite(syntheticTeacherReliability)
+      ? syntheticTeacherReliability
+      : 0,
+    dataQuality: Number.isFinite(syntheticDataQuality)
+      ? syntheticDataQuality
+      : state.player.dataQuality,
+    // Forecast-only; actual beyond-2x gains still require generation compute at consumption/finalize time.
+    computePfDays: Math.max(0, trainingForecast.targetPfDays),
+    seed: `${state.seed}:${family}:${Math.round(realDataMTok)}:${effectiveSyntheticMultiplier.toFixed(1)}`,
   });
   const evaluatedActive = useMemo(
     () => (active ? normalizeModelEvaluations(active) : null),
@@ -718,15 +815,48 @@ export function ModelsPanel() {
     }
     if (snap.pools.training < 0.05) {
       items.push({
-        text: "Training pool near zero — build compute and raise Training allocation.",
-        tone: "warning",
+        text: `No training PF allocated (${num(snap.pools.training, 2)} PF). Raise the Training allocation or add active compute.`,
+        tone: "danger",
+      });
+    }
+    if (!formatHardwareAvailable) {
+      const requiredGeneration =
+        TRAINING_PRECISION_PROFILES[trainingFormat]
+          .minimumHardwareGeneration;
+      items.push({
+        text:
+          maxHardwareGeneration >= requiredGeneration
+            ? `${TRAINING_PRECISION_PROFILES[trainingFormat].label} needs generation ${requiredGeneration}+ format support; active generation ${maxHardwareGeneration} hardware exists, but none advertises compatible training kernels.`
+            : maxHardwareGeneration > 0
+            ? `${TRAINING_PRECISION_PROFILES[trainingFormat].label} needs generation ${requiredGeneration}+ support; the active fleet tops out at generation ${maxHardwareGeneration}. Switch format or allocate compatible hardware.`
+            : `${TRAINING_PRECISION_PROFILES[trainingFormat].label} needs generation ${requiredGeneration}+ hardware; no active accelerator fleet or contract is available.`,
+        tone: "danger",
       });
     }
     if (!prospectiveRamFit.ready) {
-      items.push({
-        text: `Training RAM is a hard limit: ${prospectiveRamFit.blockerName ?? "New run"} needs ${num(prospectiveRamFit.blockerRequiredGb ?? needVramGb, 0)} GB but would receive ${num(prospectiveRamFit.blockerAllocatedGb ?? prospectiveRamFit.candidateAllocatedGb, 0)} GB after the priority split. Raise Training allocation, add memory, pause a run, or change priorities.`,
-        tone: "danger",
-      });
+      const hbmShort =
+        prospectiveRamFit.candidateAllocatedGb + 1e-9 < needVramGb;
+      const systemRamShort =
+        prospectiveRamFit.candidateSystemRamAllocatedGb + 1e-9 <
+        trainingMemory.requiredSystemRamGb;
+      if (hbmShort) {
+        items.push({
+          text: `HBM short by ${num(needVramGb - prospectiveRamFit.candidateAllocatedGb, 0)} GB: ${num(prospectiveRamFit.candidateAllocatedGb, 0)} GB allocated / ${num(needVramGb, 0)} GB required after the priority split.`,
+          tone: "danger",
+        });
+      }
+      if (systemRamShort) {
+        items.push({
+          text: `Host RAM short by ${num(trainingMemory.requiredSystemRamGb - prospectiveRamFit.candidateSystemRamAllocatedGb, 0)} GB: ${num(prospectiveRamFit.candidateSystemRamAllocatedGb, 0)} GB allocated / ${num(trainingMemory.requiredSystemRamGb, 0)} GB required.`,
+          tone: "danger",
+        });
+      }
+      if (!hbmShort && !systemRamShort) {
+        items.push({
+          text: `${prospectiveRamFit.blockerResource ?? "Memory"} placement blocks ${prospectiveRamFit.blockerName ?? "the new run"}: no single execution domain can fit ${num(prospectiveRamFit.blockerRequiredGb ?? needVramGb, 0)} GB.`,
+          tone: "danger",
+        });
+      }
     }
     if (underProvisioned) {
       items.push({
@@ -734,7 +864,12 @@ export function ModelsPanel() {
         tone: "warning",
       });
     }
-    for (const warning of trainingForecast.warnings.slice(0, 2)) {
+    for (const warning of trainingForecast.warnings
+      .filter(
+        (warning) =>
+          !warning.toLowerCase().includes("compatible training hardware"),
+      )
+      .slice(0, 2)) {
       items.push({ text: warning, tone: "warning" });
     }
     return items;
@@ -751,12 +886,17 @@ export function ModelsPanel() {
     teacherId,
     teachers.length,
     snap.pools.training,
+    formatHardwareAvailable,
+    trainingFormat,
+    maxHardwareGeneration,
     prospectiveRamFit.ready,
     prospectiveRamFit.blockerName,
     prospectiveRamFit.blockerRequiredGb,
-    prospectiveRamFit.blockerAllocatedGb,
     prospectiveRamFit.candidateAllocatedGb,
+    prospectiveRamFit.candidateSystemRamAllocatedGb,
+    prospectiveRamFit.blockerResource,
     needVramGb,
+    trainingMemory.requiredSystemRamGb,
     underProvisioned,
     snap.chipCount,
     recChips,
@@ -1294,7 +1434,7 @@ export function ModelsPanel() {
                     <input
                       type="range"
                       min={0}
-                      max={3}
+                      max={7}
                       step={0.1}
                       value={effectiveSyntheticMultiplier}
                       disabled={!synthUnlocked || !strongestTeacher}
@@ -1344,6 +1484,7 @@ export function ModelsPanel() {
                   data={labData}
                   autoBalanceDisabled={!mixUnlocked}
                   syntheticUnlocked={synthUnlocked}
+                  syntheticMultiplier={effectiveSyntheticMultiplier}
                   teachers={teachers}
                   syntheticTeacherIds={syntheticTeacherIds}
                   includeSynthHQ={includeSynthHQ && synthUnlocked}
@@ -1353,7 +1494,13 @@ export function ModelsPanel() {
                   onTogglePreviousOverlay={() =>
                     setShowPreviousCorpus((v) => !v)
                   }
-                  onChange={setWeights}
+                  onChange={(nextWeights, nextTotalMTok) => {
+                    setWeights(nextWeights);
+                    setRealDataMTok(
+                      nextTotalMTok /
+                        Math.max(1, 1 + effectiveSyntheticMultiplier),
+                    );
+                  }}
                   onAutoBalance={() =>
                     setWeights(bestRecipeWeights(family, dataMTok, labData))
                   }
@@ -1400,13 +1547,35 @@ export function ModelsPanel() {
                           option.research &&
                           !unlocked.includes(option.research),
                         );
+                        const optionNumerics = {
+                          computeFormat: option.value,
+                          nativeWeightFormat:
+                            nativeWeightFormat === "ternary_1_58" &&
+                            option.value === "bf16_mixed"
+                              ? nativeWeightFormat
+                              : ("float" as const),
+                          recipeVersion: 1,
+                        };
+                        const optionEconomics =
+                          trainingNumericsEconomicsProfile(optionNumerics);
+                        const optionMemory = estimateTrainingMemoryGb({
+                          paramsB: trainParamsB,
+                          activeParamsB,
+                          family: backbone === "moe" ? "moe" : family,
+                          numerics: optionNumerics,
+                          activationCheckpointing:
+                            unlocked.includes("opt_checkpoint"),
+                        });
+                        const optionTradeoff = `quality ${Math.round(optionEconomics.qualityCeilingMultiplier * 100)}% · risk ${optionEconomics.stabilityRisk >= 0.1 || optionEconomics.lossVolatilityMultiplier >= 1.5 ? "high" : optionEconomics.stabilityRisk > 0.02 || optionEconomics.lossVolatilityMultiplier > 1.1 ? "medium" : "low"} · compute ${optionEconomics.trainingWorkMultiplier.toFixed(2)}× · HBM ${num(optionMemory.requiredHbmGb, 0)} GB · cost ${optionEconomics.upfrontCashMultiplier.toFixed(2)}×/${optionEconomics.dailyCashMultiplier.toFixed(2)}×`;
                         return (
                           <option
                             key={option.value}
                             value={option.value}
                             disabled={locked}
+                            title={optionTradeoff}
                           >
                             {TRAINING_PRECISION_PROFILES[option.value].label}
+                            {` · ${optionTradeoff}`}
                             {locked ? " · research required" : ""}
                           </option>
                         );
@@ -1441,6 +1610,19 @@ export function ModelsPanel() {
                       </option>
                     </select>
                   </label>
+                </div>
+                <div
+                  className="rounded-md border border-line/60 bg-void/45 p-2 font-mono text-[0.6875rem] leading-relaxed text-muted"
+                  title={`Inference cost ${numericsEconomics.inferenceCostMultiplier.toFixed(2)}× · loss volatility ${numericsEconomics.lossVolatilityMultiplier.toFixed(2)}× · packed checkpoint ${num(trainingMemory.packedCheckpointGb, 1)} GB`}
+                >
+                  <span className="text-bone">{numericsEconomics.label}</span>
+                  {` · quality ${Math.round(numericsEconomics.qualityCeilingMultiplier * 100)}% · ${precisionRisk} stability risk · compute ${numericsEconomics.trainingWorkMultiplier.toFixed(2)}× · HBM ${num(trainingMemory.requiredHbmGb, 0)} GB · host ${num(trainingMemory.requiredSystemRamGb, 0)} GB`}
+                  <span className="block text-[0.625rem] text-muted/90">
+                    Setup {numericsEconomics.upfrontCashMultiplier.toFixed(2)}×
+                    {" · "}daily {numericsEconomics.dailyCashMultiplier.toFixed(2)}×
+                    {" · "}serve {numericsEconomics.inferenceCostMultiplier.toFixed(2)}×
+                    {" · "}volatility {numericsEconomics.lossVolatilityMultiplier.toFixed(2)}×
+                  </span>
                 </div>
 
                 <div>
@@ -1537,110 +1719,128 @@ export function ModelsPanel() {
                   />
                 </label>
 
-                <div className="rounded-md border border-line/60 bg-void/35 p-3">
+                <div
+                  className="rounded-md border border-line/60 bg-void/35 p-3"
+                  title={`Work ${num(trainingForecast.targetPfDays, 1)} PF·d · power ${mw(trainingForecast.powerMw)} · setup ${money(setupCost)} · data ${money(dataCost)} · daily ${money(dailyCost)}/d · capability ceiling ${capabilityLimit.capability.toFixed(1)} (${capabilityLimit.limitingFactor}) · serving host RAM ${num(hostRamGb, 0)} GB ${hostWeightFormat}`}
+                >
                   <p className="text-[0.8125rem] text-bone">
                     {forecastVerdict}
                   </p>
-                  <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-10">
+                  <div className="mt-2 grid grid-cols-2 gap-2 xl:grid-cols-4">
                     <MetricTile
-                      label="Work"
-                      value={`${num(trainingForecast.targetPfDays, 1)} PF·d`}
-                      detail={`${num(snap.pools.training, 2)} PF available`}
-                      tone="train"
-                    />
-                    <MetricTile
-                      label="Power"
-                      value={mw(trainingForecast.powerMw)}
-                      detail="physical fleet draw"
-                      tone="warning"
-                    />
-                    <MetricTile
-                      label="Calendar"
+                      label="ETA"
                       value={
                         daysEst === Infinity
                           ? "No pool"
                           : `${daysEst.toFixed(0)}d`
                       }
-                      tone={daysEst > 120 ? "warning" : "positive"}
-                    />
-                    <MetricTile
-                      label="Setup"
-                      value={money(setupCost)}
-                      detail={`cash ${money(state.player.cash)}`}
+                      detail={
+                        daysEst === Infinity
+                          ? "need training pool"
+                          : calendarBoundEta
+                            ? `${num(trainingForecast.targetPfDays, 1)} PF·d · calendar floor ${calendarMinDays}d`
+                            : `${num(trainingForecast.targetPfDays, 1)} PF·d · compute ~${computeDaysEst === Infinity ? "∞" : computeDaysEst}d`
+                      }
                       tone={
-                        state.player.cash < setupCost + dataCost
-                          ? "danger"
-                          : "neutral"
+                        daysEst === Infinity || daysEst > 120
+                          ? "warning"
+                          : calendarBoundEta
+                            ? "warning"
+                            : "positive"
                       }
                     />
                     <MetricTile
-                      label="Data cost"
-                      value={money(dataCost)}
-                      tone="neutral"
-                    />
-                    <MetricTile
-                      label="Daily"
-                      value={`${money(dailyCost)}/d`}
-                      tone="warning"
+                      label="Budget"
+                      value={money(upfront)}
+                      detail={
+                        <>
+                          setup {money(setupCost)} · data {money(dataCost)}
+                          <span className="block">burn {money(dailyCost)}/d</span>
+                        </>
+                      }
+                      tone={state.player.cash < upfront ? "danger" : "neutral"}
                     />
                     <MetricTile
                       label="Capability"
                       value={trainingForecast.expectedCapability.toFixed(1)}
-                      detail={`${trainingForecast.interactiveTokPerSec.toFixed(0)} tok/s`}
+                      detail={`ceiling ${capabilityLimit.capability.toFixed(1)} · ${trainingForecast.interactiveTokPerSec.toFixed(0)} tok/s`}
                       tone="positive"
                     />
                     <MetricTile
-                      label="Ceiling"
-                      value={capabilityLimit.capability.toFixed(1)}
-                      detail={`limited by ${capabilityLimit.limitingFactor}`}
-                      tone={
-                        capabilityLimit.capability -
-                          trainingForecast.expectedCapability <
-                        3
-                          ? "warning"
-                          : "neutral"
-                      }
-                    />
-                    <MetricTile
-                      label="Host RAM"
-                      value={`${num(hostRamGb, 0)} GB`}
-                      detail={`${hostWeightFormat} · ${backbone === "moe" ? "MoE half-offload" : "dense"}`}
-                      tone="neutral"
-                    />
-                    <MetricTile
-                      label="Training HBM"
+                      label="Memory"
                       value={`${num(prospectiveRamFit.candidateAllocatedGb, 0)} / ${num(needVramGb, 0)} GB`}
                       detail={
-                        prospectiveRamFit.ready
-                          ? `assigned / required · ${Math.round(trainingResources.trainingAllocationShare * 100)}% allocation`
-                          : `hard limit · blocks ${prospectiveRamFit.blockerName ?? "new run"}`
+                        <>
+                          HBM assigned / required
+                          <span className="block">
+                            host {num(prospectiveRamFit.candidateSystemRamAllocatedGb, 0)} / {num(trainingMemory.requiredSystemRamGb, 0)} GB
+                          </span>
+                        </>
                       }
-                      tone={prospectiveRamFit.ready ? "positive" : "danger"}
-                    />
-                    <MetricTile
-                      label="Training host RAM"
-                      value={`${num(prospectiveRamFit.candidateSystemRamAllocatedGb, 0)} / ${num(trainingMemory.requiredSystemRamGb, 0)} GB`}
-                      detail={`bottleneck · ${prospectiveRamFit.blockerResource ?? "none"}`}
                       tone={prospectiveRamFit.ready ? "positive" : "danger"}
                     />
                   </div>
-                  <div className="mt-2 grid grid-cols-2 gap-2">
-                    <MetricTile
-                      label="Data coverage"
-                      value={`${trainingForecast.effectiveDataRatio.toFixed(2)}×`}
-                      detail={`modality ${trainingForecast.modalityComputeMult.toFixed(2)}×`}
-                      tone={
-                        trainingForecast.effectiveDataRatio < 0.85
-                          ? "warning"
-                          : "neutral"
-                      }
-                    />
-                    <MetricTile
-                      label="Upfront total"
-                      value={money(upfront)}
-                      detail="setup + data"
-                      tone={state.player.cash < upfront ? "danger" : "neutral"}
-                    />
+                  <div className="mt-2 grid gap-x-4 gap-y-1 rounded-md border border-line/40 bg-panel-2/35 px-2.5 py-2 sm:grid-cols-2">
+                    {[
+                      {
+                        label: "Compute",
+                        value:
+                          snap.pools.training >= 0.05 && formatHardwareAvailable
+                            ? 1
+                            : 0,
+                        text: `${num(snap.pools.training, 2)} PF · gen ${maxHardwareGeneration || "—"}`,
+                        ready:
+                          snap.pools.training >= 0.05 && formatHardwareAvailable,
+                      },
+                      {
+                        label: "HBM",
+                        value:
+                          prospectiveRamFit.candidateAllocatedGb /
+                          Math.max(1, needVramGb),
+                        text: `${num(prospectiveRamFit.candidateAllocatedGb, 0)} / ${num(needVramGb, 0)} GB`,
+                        ready:
+                          prospectiveRamFit.candidateAllocatedGb + 1e-9 >=
+                          needVramGb,
+                      },
+                      {
+                        label: "Host RAM",
+                        value:
+                          prospectiveRamFit.candidateSystemRamAllocatedGb /
+                          Math.max(1, trainingMemory.requiredSystemRamGb),
+                        text: `${num(prospectiveRamFit.candidateSystemRamAllocatedGb, 0)} / ${num(trainingMemory.requiredSystemRamGb, 0)} GB`,
+                        ready:
+                          prospectiveRamFit.candidateSystemRamAllocatedGb +
+                            1e-9 >=
+                          trainingMemory.requiredSystemRamGb,
+                      },
+                      {
+                        label: "Data",
+                        value: trainingForecast.effectiveDataRatio,
+                        text: `${trainingForecast.effectiveDataRatio.toFixed(2)}× · modality ${trainingForecast.modalityComputeMult.toFixed(2)}×`,
+                        ready: trainingForecast.effectiveDataRatio >= 0.85,
+                      },
+                    ].map((readiness) => (
+                      <div
+                        key={readiness.label}
+                        className="grid grid-cols-[4.5rem_1fr_auto] items-center gap-2 font-mono text-[0.625rem]"
+                        title={`${readiness.label}: ${readiness.text}`}
+                      >
+                        <span className="text-muted">{readiness.label}</span>
+                        <span className="h-1.5 overflow-hidden rounded-full bg-void">
+                          <span
+                            className={`block h-full rounded-full ${readiness.ready ? "bg-mint" : "bg-amber"}`}
+                            style={{
+                              width: `${Math.max(0, Math.min(1, readiness.value)) * 100}%`,
+                            }}
+                          />
+                        </span>
+                        <span
+                          className={readiness.ready ? "text-mint" : "text-amber"}
+                        >
+                          {readiness.text}
+                        </span>
+                      </div>
+                    ))}
                   </div>
                 </div>
 

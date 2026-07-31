@@ -6,7 +6,10 @@ import {
   formatTokens,
   normalizeWeights,
 } from "../../../sim/balance/data";
-import { rebalanceTrainingDataDomain } from "./trainingDataRadarMath";
+import {
+  rebalanceTrainingDataDomain,
+  trainingDataDomainCapMTok,
+} from "./trainingDataRadarMath";
 
 const SIZE = 380;
 const CENTER = SIZE / 2;
@@ -35,6 +38,7 @@ export function TrainingDataRadar({
   data,
   autoBalanceDisabled,
   syntheticUnlocked = false,
+  syntheticMultiplier = 0,
   teachers,
   syntheticTeacherIds,
   includeSynthHQ,
@@ -53,6 +57,7 @@ export function TrainingDataRadar({
   data: LabData;
   autoBalanceDisabled?: boolean;
   syntheticUnlocked?: boolean;
+  syntheticMultiplier?: number;
   teachers: Model[];
   syntheticTeacherIds: Partial<Record<DataDomain, string>>;
   includeSynthHQ: boolean;
@@ -60,7 +65,7 @@ export function TrainingDataRadar({
   previousWeights?: Record<DataDomain, number> | null;
   showPreviousOverlay?: boolean;
   onTogglePreviousOverlay?: () => void;
-  onChange: (weights: Record<DataDomain, number>) => void;
+  onChange: (weights: Record<DataDomain, number>, totalMTok: number) => void;
   onAutoBalance: () => void;
   onTeacherChange: (domain: DataDomain, teacherId: string | undefined) => void;
   onIncludeSynthHQChange: (value: boolean) => void;
@@ -71,19 +76,26 @@ export function TrainingDataRadar({
   const [selected, setSelected] = useState<DataDomain>("code");
   const [dragging, setDragging] = useState<DataDomain | null>(null);
   const normalized = useMemo(() => normalizeWeights(weights), [weights]);
-  const maxWeight = Math.max(
-    0.2,
-    ...DATA_DOMAINS.map((domain) => normalized[domain]),
+  const allocations = useMemo(
+    () => Object.fromEntries(
+      DATA_DOMAINS.map((domain) => [domain, totalMTok * normalized[domain]]),
+    ) as Record<DataDomain, number>,
+    [normalized, totalMTok],
   );
-  const target = DATA_DOMAINS.map((domain) => normalized[domain] / maxWeight);
+  const axisMaxMTok = Math.max(
+    1,
+    totalMTok / 3,
+    ...DATA_DOMAINS.map((domain) => allocations[domain] * 1.25),
+  );
+  const target = DATA_DOMAINS.map((domain) => allocations[domain] / axisMaxMTok);
   const layers = useMemo(() => {
     const real: number[] = [];
     const hq: number[] = [];
     const lq: number[] = [];
     for (const domain of DATA_DOMAINS) {
       const stock = data.stocks[domain];
-      const need = Math.max(0.01, totalMTok * normalized[domain]);
-      const targetRadius = normalized[domain] / maxWeight;
+      const need = Math.max(0.01, allocations[domain]);
+      const targetRadius = allocations[domain] / axisMaxMTok;
       const realAvailable = Math.max(
         0,
         stock.processed - stock.fromSynthHQ - stock.fromSynthLQ,
@@ -100,7 +112,7 @@ export function TrainingDataRadar({
       lq.push((targetRadius * (realTake + hqTake + lqTake)) / need);
     }
     return { real, hq, lq };
-  }, [data, includeSynthHQ, includeSynthLQ, maxWeight, normalized, totalMTok]);
+  }, [allocations, axisMaxMTok, data, includeSynthHQ, includeSynthLQ]);
 
   const updateFromPointer = (
     domain: DataDomain,
@@ -114,17 +126,28 @@ export function TrainingDataRadar({
     const index = DATA_DOMAINS.indexOf(domain);
     const angle = -Math.PI / 2 + (index / DATA_DOMAINS.length) * Math.PI * 2;
     const projected = (x * Math.cos(angle) + y * Math.sin(angle)) / RADIUS;
-    onChange(
-      rebalanceTrainingDataDomain(
-        normalized,
-        domain,
-        Math.max(0.01, projected * maxWeight),
-      ),
+    const stock = data.stocks[domain];
+    const realAvailable = Math.max(0, stock.processed - stock.fromSynthHQ - stock.fromSynthLQ);
+    const includedSynthetic =
+      (includeSynthHQ ? stock.fromSynthHQ : 0) +
+      (includeSynthLQ ? stock.fromSynthLQ : 0);
+    const capMTok = trainingDataDomainCapMTok(
+      realAvailable,
+      includedSynthetic,
+      syntheticUnlocked ? syntheticMultiplier : 0,
     );
+    const next = rebalanceTrainingDataDomain(
+      allocations,
+      domain,
+      Math.max(0, projected * axisMaxMTok),
+      capMTok,
+    );
+    const nextTotal = DATA_DOMAINS.reduce((sum, candidate) => sum + next[candidate], 0);
+    if (nextTotal > 0) onChange(normalizeWeights(next), nextTotal);
   };
 
   const selectedStock = data.stocks[selected];
-  const selectedNeed = totalMTok * normalized[selected];
+  const selectedNeed = allocations[selected];
   const selectedReal = Math.max(
     0,
     selectedStock.processed -
@@ -137,6 +160,28 @@ export function TrainingDataRadar({
       selectedReal -
       (includeSynthHQ ? selectedStock.fromSynthHQ : 0) -
       (includeSynthLQ ? selectedStock.fromSynthLQ : 0),
+  );
+  const selectedHq = includeSynthHQ
+    ? Math.min(Math.max(0, selectedNeed - selectedReal), selectedStock.fromSynthHQ)
+    : 0;
+  const selectedLq = includeSynthLQ
+    ? Math.min(Math.max(0, selectedNeed - selectedReal - selectedHq), selectedStock.fromSynthLQ)
+    : 0;
+  const sourceTotals = DATA_DOMAINS.reduce(
+    (totals, domain) => {
+      const stock = data.stocks[domain];
+      const need = allocations[domain];
+      const realAvailable = Math.max(0, stock.processed - stock.fromSynthHQ - stock.fromSynthLQ);
+      const real = Math.min(need, realAvailable);
+      const hq = includeSynthHQ ? Math.min(Math.max(0, need - real), stock.fromSynthHQ) : 0;
+      const lq = includeSynthLQ ? Math.min(Math.max(0, need - real - hq), stock.fromSynthLQ) : 0;
+      totals.real += real;
+      totals.hq += hq;
+      totals.lq += lq;
+      totals.shortfall += Math.max(0, need - real - hq - lq);
+      return totals;
+    },
+    { real: 0, hq: 0, lq: 0, shortfall: 0 },
   );
   const selectedTeacher = teachers.find(
     (teacher) => teacher.id === syntheticTeacherIds[selected],
@@ -164,6 +209,9 @@ export function TrainingDataRadar({
             {syntheticUnlocked
               ? "Drag a point to change the recipe. Source rings show where real data ends and synthetic data begins."
               : "Drag a point to change the recipe. Available real data determines coverage."}
+          </p>
+          <p className="mt-0.5 font-mono text-[0.625rem] text-muted">
+            {formatTokens(totalMTok)} total · {formatTokens(sourceTotals.real)} real · {formatTokens(sourceTotals.hq + sourceTotals.lq)} synthetic · {formatTokens(sourceTotals.shortfall)} short
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -247,8 +295,9 @@ export function TrainingDataRadar({
                     fill={selected === domain ? "#56e1dc" : "#9bb1ba"}
                     fontSize="11"
                   >
+                    <title>{`${DATA_DOMAIN_META[domain].label}: ${Math.round(normalized[domain] * 100)}% of ${formatTokens(totalMTok)}`}</title>
                     {DATA_DOMAIN_META[domain].label}{" "}
-                    {Math.round(normalized[domain] * 100)}%
+                    {formatTokens(allocations[domain])}
                   </text>
                 </g>
               );
@@ -325,10 +374,10 @@ export function TrainingDataRadar({
                     className="cursor-grab outline-none active:cursor-grabbing"
                     tabIndex={0}
                     role="slider"
-                    aria-label={`${DATA_DOMAIN_META[domain].label} share`}
-                    aria-valuemin={1}
-                    aria-valuemax={72}
-                    aria-valuenow={Math.round(normalized[domain] * 100)}
+                    aria-label={`${DATA_DOMAIN_META[domain].label} token volume`}
+                    aria-valuemin={0}
+                    aria-valuemax={Math.round(axisMaxMTok)}
+                    aria-valuenow={Math.round(allocations[domain])}
                     onFocus={() => setSelected(domain)}
                     onPointerDown={(event) => {
                       event.preventDefault();
@@ -351,15 +400,24 @@ export function TrainingDataRadar({
                       event.preventDefault();
                       const delta =
                         event.key === "ArrowUp" || event.key === "ArrowRight"
-                          ? 0.01
-                          : -0.01;
-                      onChange(
-                        rebalanceTrainingDataDomain(
-                          normalized,
-                          domain,
-                          normalized[domain] + delta,
-                        ),
+                          ? Math.max(1, axisMaxMTok * 0.01)
+                          : -Math.max(1, axisMaxMTok * 0.01);
+                      const next = rebalanceTrainingDataDomain(
+                        allocations,
+                        domain,
+                        allocations[domain] + delta,
+                        (() => {
+                          const stock = data.stocks[domain];
+                          const real = Math.max(0, stock.processed - stock.fromSynthHQ - stock.fromSynthLQ);
+                          return trainingDataDomainCapMTok(
+                            real,
+                            stock.fromSynthHQ + stock.fromSynthLQ,
+                            syntheticUnlocked ? syntheticMultiplier : 0,
+                          );
+                        })(),
                       );
+                      const nextTotal = DATA_DOMAINS.reduce((sum, candidate) => sum + next[candidate], 0);
+                      if (nextTotal > 0) onChange(normalizeWeights(next), nextTotal);
                     }}
                   />
                   <circle
@@ -407,7 +465,7 @@ export function TrainingDataRadar({
               <h4 className="text-base font-medium text-bone">
                 {DATA_DOMAIN_META[selected].label}{" "}
                 <span className="font-mono text-sm text-mint">
-                  {Math.round(normalized[selected] * 100)}%
+                  {formatTokens(selectedNeed)}
                 </span>
               </h4>
             </div>
@@ -427,9 +485,13 @@ export function TrainingDataRadar({
             <SourceRow label="Needed" value={formatTokens(selectedNeed)} />
             <SourceRow
               label="Real data"
-              value={formatTokens(selectedReal)}
+              value={formatTokens(Math.min(selectedNeed, selectedReal))}
               tone="text-mint"
             />
+            <SourceRow label="HQ synthetic" value={formatTokens(selectedHq)} tone="text-sky" />
+            <SourceRow label="LQ synthetic" value={formatTokens(selectedLq)} tone="text-research" />
+            <SourceRow label="Shortfall" value={formatTokens(selectedShortfall)} tone={selectedShortfall > 0.05 ? "text-amber" : "text-muted"} />
+            <SourceRow label="Mix share" value={`${Math.round(normalized[selected] * 100)}%`} />
           </div>
           {syntheticUnlocked ? (
             <label className="mt-3 block text-[0.6875rem] text-muted">

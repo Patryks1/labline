@@ -51,6 +51,7 @@ import {
   retargetMapCameraRotation,
   rotateMapWorldOffset,
   sampleMapCameraRotation,
+  sanitizeMapTargetComponent,
   type MapCameraHeading,
   type MapCameraTilt,
 } from './mapControls'
@@ -264,6 +265,8 @@ export function GameMap() {
     let animationFrame = 0
     let resizeFrame = 0
     let disposed = false
+    let renderFaultCount = 0
+    let contextLost = false
 
     function createProjection(
       state: SimState,
@@ -322,6 +325,9 @@ export function GameMap() {
     }
 
     function updateProjectionMatrix(): void {
+      if (!Number.isFinite(frustum) || frustum <= 0) frustum = DEFAULT_FRUSTUM
+      if (!Number.isFinite(renderedWidth) || renderedWidth < 1) renderedWidth = 1
+      if (!Number.isFinite(renderedHeight) || renderedHeight < 1) renderedHeight = 1
       aspect = renderedWidth / Math.max(1, renderedHeight)
       camera.left = -frustum * aspect
       camera.right = frustum * aspect
@@ -347,6 +353,12 @@ export function GameMap() {
     }
 
     function clampTarget(): void {
+      // A non-finite component poisons the camera matrix and every projected
+      // ray, leaving a permanently white scene until reload. Recover to the
+      // last finite origin instead of propagating it.
+      target.x = sanitizeMapTargetComponent(target.x)
+      target.y = sanitizeMapTargetComponent(target.y)
+      target.z = sanitizeMapTargetComponent(target.z)
       target.x = THREE.MathUtils.clamp(
         target.x,
         0,
@@ -739,6 +751,8 @@ export function GameMap() {
       const interval = interactive ? ACTIVE_FRAME_MS : IDLE_FRAME_MS
       if (lastRenderAt > 0 && now - lastRenderAt < interval - 0.75) return
 
+      if (contextLost) return
+
       const frameStarted = performance.now()
       frameChunkWorkMs = 0
       const frameMs = Math.min(250, now - lastFrameAt)
@@ -754,7 +768,17 @@ export function GameMap() {
       }
       if (moveFromKeys(dt)) markInteraction()
       if (viewportDirty) reconcileViewport(now)
-      projection.viewport.render(camera, now * 0.001)
+      try {
+        projection.viewport.render(camera, now * 0.001)
+      } catch (error) {
+        // A renderer fault must not freeze the loop: the next frame re-renders
+        // from the same immutable state instead of leaving a stale white canvas.
+        renderFaultCount += 1
+        if (renderFaultCount <= 3) {
+          console.error('[GameMap] render frame failed; recovering next frame', error)
+        }
+        viewportDirty = true
+      }
       if (warmupPending) {
         // Three r185's async compiler expects each collected material to have a
         // current program. One real render establishes that invariant first.
@@ -956,6 +980,26 @@ export function GameMap() {
       resizeFrame = requestAnimationFrame(applyResize)
     }
 
+    function onWebglContextLost(event: Event): void {
+      // Without preventDefault the canvas is never restored and the map stays
+      // white until a full page reload.
+      event.preventDefault()
+      contextLost = true
+    }
+
+    function onWebglContextRestored(): void {
+      contextLost = false
+      renderFaultCount = 0
+      // GPU chunk/texture buffers were dropped with the context. Force a full
+      // projection rebuild from the immutable sim state instead of trusting
+      // resident GPU resources that no longer exist.
+      const store = useGameStore.getState()
+      replaceProjection(store.state, store.selectedTile, store.buildMode)
+      viewportDirty = true
+      markInteraction()
+      scheduleAnimation()
+    }
+
     function onVisibilityChange(): void {
       if (document.hidden) {
         if (animationFrame) cancelAnimationFrame(animationFrame)
@@ -1088,6 +1132,8 @@ export function GameMap() {
     renderer.domElement.addEventListener('pointermove', onPointerMove)
     renderer.domElement.addEventListener('pointerleave', onPointerLeave)
     renderer.domElement.addEventListener('wheel', onWheel, { passive: false })
+    renderer.domElement.addEventListener('webglcontextlost', onWebglContextLost)
+    renderer.domElement.addEventListener('webglcontextrestored', onWebglContextRestored)
     renderer.domElement.addEventListener('dragover', onBlueprintDragOver)
     renderer.domElement.addEventListener('dragleave', onBlueprintDragLeave)
     renderer.domElement.addEventListener('drop', onBlueprintDrop)
@@ -1154,6 +1200,8 @@ export function GameMap() {
       renderer.domElement.removeEventListener('pointermove', onPointerMove)
       renderer.domElement.removeEventListener('pointerleave', onPointerLeave)
       renderer.domElement.removeEventListener('wheel', onWheel)
+      renderer.domElement.removeEventListener('webglcontextlost', onWebglContextLost)
+      renderer.domElement.removeEventListener('webglcontextrestored', onWebglContextRestored)
       renderer.domElement.removeEventListener('dragover', onBlueprintDragOver)
       renderer.domElement.removeEventListener('dragleave', onBlueprintDragLeave)
       renderer.domElement.removeEventListener('drop', onBlueprintDrop)

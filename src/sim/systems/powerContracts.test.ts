@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
+import type { MapTile } from '../types'
 import { tileId } from '../world/ids'
 import {
+  citiesInGridConnectorRange,
   cityGridConnectorCapacity,
   evaluatePowerExportOffer,
   evaluatePowerImportOffer,
@@ -14,6 +16,49 @@ import {
 } from './facilities'
 
 describe('power contracts', () => {
+  it('lists only cities within 50 tiles of a commissioned player connector', () => {
+    const created = createGame(91_203)
+    const templateCity = created.map.cities?.[0]
+    if (!templateCity) throw new Error('Expected a generated city')
+    const connector = {
+      x: 0,
+      y: 0,
+      kind: 'substation',
+      owner: 'player',
+      buildingProgress: 1,
+      buildingTarget: 1,
+      mwCapacity: 12,
+    } as MapTile
+    const state = {
+      ...created,
+      map: {
+        ...created.map,
+        storage: 'legacy' as const,
+        world: undefined,
+        tiles: [connector],
+        cities: [
+          { ...templateCity, id: 'at-limit', cx: 50, cy: 50 },
+          { ...templateCity, id: 'outside-limit', cx: 51, cy: 0 },
+        ],
+      },
+    }
+
+    expect(citiesInGridConnectorRange(state).map((city) => city.id)).toEqual(['at-limit'])
+
+    for (const unusable of [
+      { ...connector, buildingProgress: 0 },
+      { ...connector, mwCapacity: 0 },
+      { ...connector, owner: 'rival-0' },
+    ] as MapTile[]) {
+      expect(
+        citiesInGridConnectorRange({
+          ...state,
+          map: { ...state.map, tiles: [unusable] },
+        }),
+      ).toEqual([])
+    }
+  })
+
   it('signs import and export commitments and settles delivered surplus', () => {
     const created = createGame(91_204)
     const city = created.map.cities?.[0]

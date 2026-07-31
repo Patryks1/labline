@@ -11,6 +11,8 @@ import { formatComputeMw } from './computeMarket'
 
 const MIN_PF = 1
 const MAX_PF = 10_000
+const PROVIDER_DAILY_GROWTH_RATE = 0.0005
+const PROVIDER_DEFAULT_GROWTH_CAP_MULTIPLIER = 1.5
 
 export interface ComputeContractRequest {
   providerId: string
@@ -333,6 +335,31 @@ function releaseProviderCapacity(
   )
 }
 
+/** Expand free inventory without changing the capacity already leased to customers. */
+function growProviderCapacity(provider: CloudProvider): CloudProvider {
+  const maxBaselinePf = Math.max(
+    provider.baselinePf,
+    provider.maxBaselinePf ??
+      provider.baselinePf * PROVIDER_DEFAULT_GROWTH_CAP_MULTIPLIER,
+  )
+  const growthPf = Math.min(
+    provider.baselinePf * PROVIDER_DAILY_GROWTH_RATE,
+    maxBaselinePf - provider.baselinePf,
+  )
+  if (growthPf <= 0) {
+    return provider.maxBaselinePf !== maxBaselinePf
+      ? { ...provider, maxBaselinePf }
+      : provider
+  }
+  const baselinePf = provider.baselinePf + growthPf
+  return {
+    ...provider,
+    baselinePf,
+    maxBaselinePf,
+    availablePf: Math.min(baselinePf, provider.availablePf + growthPf),
+  }
+}
+
 function chargeLabCash(state: SimState, labId: LabId, amount: number): SimState {
   if (amount <= 0) return state
   return updateLab(state, labId, (lab) => ({
@@ -529,6 +556,8 @@ export function tickComputeContracts(state: SimState): SimState {
     }
     contracts.push(contract)
   }
+
+  providers = providers.map(growProviderCapacity)
 
   return {
     ...next,

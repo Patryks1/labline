@@ -1,5 +1,9 @@
-import type { DataMix, ModelBackbone, ModelFamily, TrainMode } from '../types'
+import type { DataMix, ModelBackbone, ModelFamily, TrainMode, TrainingNumerics } from '../types'
 import { ECONOMY } from './economy'
+import {
+  trainingNumericsEconomicsProfile,
+  type TrainingNumericsEconomicsProfile,
+} from './trainingPrecision'
 
 /** One petaflop-day is 10^15 FLOP/s for 86,400 seconds. */
 export const FLOPS_PER_PF_DAY = 8.64e19
@@ -32,6 +36,7 @@ export interface TrainingEconomicsEstimate extends TrainingRunEstimate {
   dataCost: number
   upfrontCash: number
   cashBurnPerDay: number
+  precision: TrainingNumericsEconomicsProfile
 }
 
 export function minimumTrainingCalendarDays(opts: {
@@ -53,7 +58,7 @@ export function minimumTrainingCalendarDays(opts: {
             ? 1.05
             : 1
   const modeMult = opts.mode === 'continue' ? 0.45 : opts.mode === 'distill' ? 0.65 : 1
-  return Math.ceil(Math.max(5, Math.min(45, scaleDays * familyMult * modeMult)))
+  return Math.ceil(Math.max(10, Math.min(45, scaleDays * familyMult * modeMult)))
 }
 
 export const PARAM_PRESETS = [
@@ -316,7 +321,9 @@ export function estimateTrainingEconomics(opts: {
   modalityComputeMult?: number
   trainCostMult?: number
   dataCost?: number
+  numerics?: TrainingNumerics
 }): TrainingEconomicsEstimate {
+  const precision = trainingNumericsEconomicsProfile(opts.numerics)
   const run = estimateTrainingRun({
     paramsB: opts.paramsB,
     family: opts.family,
@@ -335,20 +342,28 @@ export function estimateTrainingEconomics(opts: {
       : opts.mode === 'distill'
         ? 0.82 + (1 - Math.max(0.05, Math.min(0.95, opts.distillTeacherShare ?? 0.72))) * 0.45
         : 1
-  const costMult = modeMult * Math.max(0.05, opts.trainCostMult ?? 1)
+  const costMult =
+    modeMult * Math.max(0.05, opts.trainCostMult ?? 1) * precision.trainingWorkMultiplier
   const scale = (value: number) => value * costMult
   const targetPfDays = scale(run.gamePfDays)
   const minCalendarDays = minimumTrainingCalendarDays(opts)
+  // Cluster reservation is intentionally 25× the legacy 0.08 baseline.
   const setupCost = Math.max(
     1_000,
-    Math.floor(targetPfDays * ECONOMY.trainUpfrontPerPfDay * 0.08),
+    Math.floor(
+      targetPfDays *
+        ECONOMY.trainUpfrontPerPfDay *
+        2 *
+        precision.upfrontCashMultiplier,
+    ),
   )
   const dataCost = Math.max(0, Math.floor(opts.dataCost ?? 0))
   const totalTokens = Math.max(0, opts.trainingTokensMTok + opts.verificationTokensMTok)
   const cashBurnPerDay = Math.floor(
     ECONOMY.trainCashBurnPerPfDay *
       Math.sqrt(Math.max(1, opts.paramsB)) *
-      (1 + Math.log10(Math.max(10, totalTokens)) * 0.08),
+      (1 + Math.log10(Math.max(10, totalTokens)) * 0.08) *
+      precision.dailyCashMultiplier,
   )
   return {
     ...run,
@@ -362,6 +377,7 @@ export function estimateTrainingEconomics(opts: {
     dataCost,
     upfrontCash: setupCost + dataCost,
     cashBurnPerDay,
+    precision,
   }
 }
 

@@ -2045,31 +2045,53 @@ export function resolveLabPowerMw(
   if (scarcity.gridDemandMw > scarcity.gridCapMw && scarcity.gridDemandMw > 1e-6) {
     gridFrac = Math.max(0.15, scarcity.gridCapMw / scarcity.gridDemandMw)
   }
-  const needAfterGen = Math.max(0, mwDemand - mwGeneration)
-  const mwCityContractImport = Math.min(mwCityContractCap, needAfterGen, mwInterconnect)
-  const needAfterCityContract = Math.max(0, needAfterGen - mwCityContractImport)
-  const interconnectAfterCity = Math.max(0, mwInterconnect - mwCityContractImport)
-  const mwEnergyContractImport = Math.min(
+
+  // Resolve physical supply capacity independently from today's draw. Firm
+  // contracts reserve the interconnect first; only the unreserved remainder is
+  // exposed to congestion. Keeping this separate from the delivered import is
+  // important: a lightly loaded campus still has real headroom, while billing
+  // must only see MW that was actually consumed.
+  const mwCityContractCapacity = Math.min(mwCityContractCap, mwInterconnect)
+  const interconnectAfterCityCapacity = Math.max(
+    0,
+    mwInterconnect - mwCityContractCapacity,
+  )
+  const mwEnergyContractCapacity = Math.min(
     mwEnergyContractCap,
+    interconnectAfterCityCapacity,
+  )
+  const mwSpotCapacity = Math.max(
+    0,
+    interconnectAfterCityCapacity - mwEnergyContractCapacity,
+  ) * gridFrac
+  const mwAvailable =
+    mwGeneration +
+    mwCityContractCapacity +
+    mwEnergyContractCapacity +
+    mwSpotCapacity
+
+  // Dispatch owned generation before imports. The component import fields are
+  // delivered MW (not reservation capacity) and therefore remain suitable for
+  // settlement and the power panel's live supply breakdown.
+  const needAfterGen = Math.max(0, mwDemand - mwGeneration)
+  const mwCityContractImport = Math.min(
+    mwCityContractCapacity,
+    needAfterGen,
+  )
+  const needAfterCityContract = Math.max(0, needAfterGen - mwCityContractImport)
+  const mwEnergyContractImport = Math.min(
+    mwEnergyContractCapacity,
     needAfterCityContract,
-    interconnectAfterCity,
   )
   const needAfterContract = Math.max(
     0,
     needAfterCityContract - mwEnergyContractImport,
   )
-  const spotInterconnectMw = Math.max(
-    0,
-    interconnectAfterCity - mwEnergyContractImport,
-  )
-  // Only the uncontracted remainder is exposed to grid curtailment.
-  const mwSpotImport = Math.min(spotInterconnectMw, needAfterContract) * gridFrac
+  const mwSpotImport = Math.min(mwSpotCapacity, needAfterContract)
   const mwContractImport = mwCityContractImport + mwEnergyContractImport
   const mwGridImport = mwContractImport + mwSpotImport
-  const mwAvailable = mwGeneration + mwGridImport
   return {
-    // Floor so a powered campus never fully dies — brownouts throttle, don't blackout
-    mwAvailable: Math.max(0.05, mwAvailable),
+    mwAvailable,
     mwGeneration,
     mwGridImport,
     mwInterconnect,
@@ -2079,7 +2101,7 @@ export function resolveLabPowerMw(
     gridPriceMult: scarcity.priceMult,
     industryDcCount: scarcity.industryDcCount,
     gridCapped:
-      gridFrac < 0.999 || needAfterContract > spotInterconnectMw + 1e-6,
+      gridFrac < 0.999 || mwDemand > mwAvailable + 1e-6,
   }
 }
 

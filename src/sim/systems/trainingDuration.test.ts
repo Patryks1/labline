@@ -3,11 +3,13 @@ import { createGame } from '../createGame'
 import { minimumTrainingCalendarDays } from './trainingDuration'
 import {
   appendLossPoint,
+  playerTrainingResourcePlan,
   startTraining,
   tickTraining,
   trainingLoss,
 } from './training'
 import type { TrainingJob } from '../types'
+import { mwPerPf } from './computeMarket'
 
 function richState(seed: number) {
   const state = createGame(seed)
@@ -30,6 +32,12 @@ describe('minimum training duration', () => {
     expect(frontier).toBeGreaterThan(small)
     expect(video).toBeGreaterThan(frontier)
     expect(distill).toBeLessThan(frontier)
+  })
+
+  it('never compresses any training mode below ten calendar days', () => {
+    for (const mode of ['pretrain', 'continue', 'distill'] as const) {
+      expect(minimumTrainingCalendarDays({ paramsB: 0.001, family: 'dense', mode })).toBeGreaterThanOrEqual(10)
+    }
   })
 
   it('keeps PF work and upfront cash independent of launch-time pool size', () => {
@@ -74,10 +82,57 @@ describe('minimum training duration', () => {
     expect(state.player.trainingJob!.daysElapsed).toBe(minDays)
     expect(state.player.trainingJob!.awaitingDecision).toBe(true)
   })
+
+  it('accumulates allocated-PF energy and recomputes live days remaining', () => {
+    let state = startTraining(richState(1202), {
+      name: 'MeteredTrain',
+      family: 'dense',
+      paramsB: 1,
+      computePriority: 100,
+    })
+    const started = state.player.trainingJob!
+    const firstAllocatedPf =
+      playerTrainingResourcePlan(state).jobs[started.id]!.effectivePf
+    expect(firstAllocatedPf).toBeGreaterThan(0)
+
+    const targetPfDays = firstAllocatedPf * 8
+    const meteredJob = {
+      ...started,
+      targetPfDays,
+      recommendedPfDays: targetPfDays,
+      minCalendarDays: 20,
+      daysRemaining: 20,
+    }
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        trainingJob: meteredJob,
+        trainingJobs: [meteredJob],
+      },
+    }
+
+    state = tickTraining(state)
+    const afterOne = state.player.trainingJob!
+    expect(afterOne.energyMwDays).toBeCloseTo(firstAllocatedPf * mwPerPf(), 10)
+    expect(afterOne.energyMWh).toBeCloseTo(firstAllocatedPf * mwPerPf() * 24, 10)
+    expect(afterOne.daysRemaining).toBeCloseTo(19, 10)
+
+    const secondAllocatedPf =
+      playerTrainingResourcePlan(state).jobs[started.id]!.effectivePf
+    state = tickTraining({ ...state, day: state.day + 1 })
+    const afterTwo = state.player.trainingJob!
+    expect(afterTwo.energyMwDays).toBeCloseTo(
+      (firstAllocatedPf + secondAllocatedPf) * mwPerPf(),
+      10,
+    )
+    expect(afterTwo.daysRemaining).toBeCloseTo(18, 10)
+    expect(afterTwo.daysRemaining!).toBeLessThan(afterOne.daysRemaining!)
+  })
 })
 
 describe('training loss curve', () => {
-  const job: Pick<TrainingJob, 'id' | 'outcomeSeed' | 'targetParamsB'> = {
+  const job: Parameters<typeof trainingLoss>[0] = {
     id: 'loss-job',
     outcomeSeed: 4242,
     targetParamsB: 8,

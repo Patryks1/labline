@@ -28,10 +28,20 @@ import {
   updatePlan,
 } from './systems/plans'
 import { playerBuildingOpex } from './systems/map'
-import { tickMarket } from './systems/market'
+import { rivalPlanDemandPerUser, tickMarket } from './systems/market'
 import { startTraining, releaseFromJob, tickTraining } from './systems/training'
 import { buildScaledModel } from './balance/modelBuild'
+import {
+  apiDemandPricePenalty,
+  suggestPlanPriceAndUsage,
+} from './balance/pricing'
+import {
+  planActualMTokPerUser,
+  planHeavyUserProfile,
+} from './balance/serveCompute'
 import type { Model, SimState, SubPlan } from './types'
+import { tickDay } from './tick'
+import { useGameStore } from '../store/gameStore'
 
 function withHall(s: SimState, racks: number): SimState {
   const tiles = s.map.tiles.map((t) => {
@@ -179,18 +189,17 @@ function shipModel(s: SimState, cap = 55): SimState {
     },
     rivals: s.rivals.map((r) => ({
       ...r,
-      models: r.models.map((x) => ({ ...x, capability: Math.min(x.capability, 48) })),
+      models: r.models.map((x) => ({
+        ...x,
+        capability: Math.min(x.capability, 48),
+      })),
       pricing: { ...r.pricing, subPlusPrice: 22 },
     })),
   }
 }
 
 /** Override lab + active model API list prices together. */
-function withApiPrices(
-  s: SimState,
-  pin: number,
-  pout: number,
-): SimState {
+function withApiPrices(s: SimState, pin: number, pout: number): SimState {
   const blend = Math.round((pin * 0.3 + pout * 0.7) * 1000) / 1000
   const activeId = s.player.pricing.activeModelId
   return {
@@ -228,6 +237,169 @@ const basePlan = (over: Partial<SubPlan> = {}): SubPlan => ({
   ...over,
 })
 
+describe('gradual commercial elasticity and allowance abuse', () => {
+  it('keeps near-market pricing unpenalized and preserves modality niches at high prices', () => {
+    expect(apiDemandPricePenalty({ ratioToPeer: 1.12, kind: 'language' })).toBeLessThan(0.6)
+    const language = apiDemandPricePenalty({ ratioToPeer: 4, kind: 'language' })
+    const video = apiDemandPricePenalty({ ratioToPeer: 4, kind: 'video' })
+    expect(language).toBeGreaterThan(0)
+    expect(video).toBeGreaterThan(0)
+    expect(video).toBeLessThan(language)
+    expect(language).toBeLessThanOrEqual(9)
+  })
+
+  it('large allowances attract a measurable near-cap heavy-user cohort', () => {
+    const ordinary = basePlan({
+      id: 'ordinary-abuse',
+      includedMTokPerMonth: 1,
+      usageMultiplier: 1,
+      steadyUsageTarget: 0.35,
+    })
+    const generous = basePlan({
+      id: 'generous-abuse',
+      includedMTokPerMonth: 128,
+      usageMultiplier: 128,
+      steadyUsageTarget: 0.35,
+    })
+    const plans = [ordinary, generous]
+    const ordinaryProfile = planHeavyUserProfile(ordinary, plans, {
+      modelCapability: 65,
+      frontierCapability: 70,
+    })
+    const generousProfile = planHeavyUserProfile(generous, plans, {
+      modelCapability: 65,
+      frontierCapability: 70,
+    })
+    const launchProfile = planHeavyUserProfile(generous, plans, {
+      modelCapability: 70,
+      frontierCapability: 70,
+      demandShockMultiplier: 1.8,
+    })
+    expect(generousProfile.heavyUserShare).toBeGreaterThan(
+      ordinaryProfile.heavyUserShare,
+    )
+    expect(generousProfile.heavyUtilization).toBeGreaterThanOrEqual(0.9)
+    expect(launchProfile.heavyUserShare).toBeGreaterThan(
+      generousProfile.heavyUserShare,
+    )
+    expect(
+      planActualMTokPerUser(
+        generous,
+        ECONOMY.basePlanUsageMTokPerDay,
+        generousProfile.blendedUtilization,
+      ),
+    ).toBeGreaterThan(
+      planActualMTokPerUser(
+        ordinary,
+        ECONOMY.basePlanUsageMTokPerDay,
+        ordinaryProfile.blendedUtilization,
+      ),
+    )
+  })
+
+  it('uses the shared abuse utilization for rival subscription demand', () => {
+    const state = shipModel(createGame(31_073), 70)
+    const rivalModel = {
+      ...state.player.models[0]!,
+      id: 'rival-abuse-model',
+      name: 'Rival Abuse Model',
+    }
+    const rival = { ...state.rivals[0]!, models: [rivalModel] }
+    const lowPlan = basePlan({
+      id: 'rival-low',
+      modelIds: [rivalModel.id],
+      includedMTokPerMonth: 1,
+      usageMultiplier: 1,
+    })
+    const highPlan = basePlan({
+      id: 'rival-high',
+      modelIds: [rivalModel.id],
+      includedMTokPerMonth: 100,
+      usageMultiplier: 100,
+    })
+    const low = rivalPlanDemandPerUser(
+      { ...rival, pricing: { ...rival.pricing, plans: [lowPlan] } },
+      rivalModel,
+      rivalModel.capability,
+      state.day,
+    )
+    const high = rivalPlanDemandPerUser(
+      { ...rival, pricing: { ...rival.pricing, plans: [highPlan] } },
+      rivalModel,
+      rivalModel.capability,
+      state.day,
+    )
+    expect(high).toBeGreaterThan(low * 20)
+  })
+
+  it('recommends higher bounded usage for reasoning and video plans', () => {
+    const base = {
+      currentPrice: 80,
+      currentIncludedMTokPerMonth: 10,
+      marginalCostPerMTok: 0.2,
+      capability: 72,
+      frontierCapability: 75,
+      peers: [
+        {
+          price: 70,
+          includedMTokPerMonth: 8,
+          capability: 68,
+          featureScore: 18,
+        },
+      ],
+    }
+    const language = suggestPlanPriceAndUsage({ ...base, kind: 'language' })
+    const reasoning = suggestPlanPriceAndUsage({ ...base, kind: 'reasoning' })
+    const video = suggestPlanPriceAndUsage({ ...base, kind: 'video' })
+    expect(reasoning.includedMTokPerMonth).toBeGreaterThan(
+      language.includedMTokPerMonth,
+    )
+    expect(video.includedMTokPerMonth).toBeGreaterThan(
+      reasoning.includedMTokPerMonth,
+    )
+    expect(video.includedMTokPerMonth).toBeLessThanOrEqual(300)
+    expect(video.pricePerMonth).toBeLessThanOrEqual(5_000)
+  })
+})
+
+describe('API margin state transition', () => {
+  it('updates model and lab pricing together and survives a day tick', () => {
+    const initial = createGame(31_072)
+    const model = buildScaledModel({
+      id: 'margin-regression',
+      name: 'Margin Regression',
+      paramsB: 7,
+      family: 'dense',
+      day: initial.day,
+      dataCoverage: 1,
+      dataQuality: 70,
+    })
+    useGameStore.setState({
+      state: {
+        ...initial,
+        player: {
+          ...initial.player,
+          models: [model],
+          pricing: { ...initial.player.pricing, activeModelId: model.id },
+        },
+      },
+    })
+
+    useGameStore.getState().applyModelApiMarkup(model.id, 75)
+    const priced = useGameStore.getState().state
+    const expectedIn = Math.round(model.costApiPriceIn * 1.75 * 1000) / 1000
+    const expectedOut = Math.round(model.costApiPriceOut * 1.75 * 1000) / 1000
+    expect(priced.player.models[0]?.apiPriceInPerMTok).toBe(expectedIn)
+    expect(priced.player.models[0]?.apiPriceOutPerMTok).toBe(expectedOut)
+    expect(priced.player.pricing.apiPriceInPerMTok).toBe(expectedIn)
+    expect(priced.player.pricing.apiPriceOutPerMTok).toBe(expectedOut)
+
+    const nextDay = tickDay(priced)
+    expect(nextDay.player.models[0]?.apiPriceInPerMTok).toBe(expectedIn)
+    expect(nextDay.player.models[0]?.apiPriceOutPerMTok).toBe(expectedOut)
+  })
+})
+
 describe('plan mult / high ARPU UI path', () => {
   it('updatePlan accepts enterprise mults above 100 (matches clampMultiplier 500)', () => {
     let s = createGame(199)
@@ -235,12 +407,14 @@ describe('plan mult / high ARPU UI path', () => {
     s = updatePlan(s, id, { usageMultiplier: 150, pricePerMonth: 5000 })
     const p = s.player.pricing.plans.find((x) => x.id === id)!
     expect(p.usageMultiplier).toBe(150)
-    expect(planAllowanceMTokPerMonth(p)).toBeGreaterThan(planAllowanceMTokPerMonth({
-      ...p,
-      usageMultiplier: 100,
-      includedMTokPerMonth:
-        ECONOMY.basePlanUsageMTokPerDay * 100 * ECONOMY.daysPerMonth,
-    }))
+    expect(planAllowanceMTokPerMonth(p)).toBeGreaterThan(
+      planAllowanceMTokPerMonth({
+        ...p,
+        usageMultiplier: 100,
+        includedMTokPerMonth:
+          ECONOMY.basePlanUsageMTokPerDay * 100 * ECONOMY.daysPerMonth,
+      }),
+    )
   })
 })
 
@@ -253,17 +427,25 @@ describe('plan token value vs rivals', () => {
           (messagesPerDay * 2_000 * ECONOMY.daysPerMonth) / 1_000_000,
       })
 
-    expect(freeTierDemandProfile(freeAtMessages(4.99)).band).toBe('cost_constrained')
+    expect(freeTierDemandProfile(freeAtMessages(4.99)).band).toBe(
+      'cost_constrained',
+    )
     expect(freeTierDemandProfile(freeAtMessages(5)).band).toBe('semi_popular')
     expect(freeTierDemandProfile(freeAtMessages(10)).band).toBe('semi_popular')
     expect(freeTierDemandProfile(freeAtMessages(10.01)).band).toBe('popular')
-    expect(freeTierDemandProfile(freeAtMessages(10.01)).audienceMultiplier).toBeGreaterThan(
+    expect(
+      freeTierDemandProfile(freeAtMessages(10.01)).audienceMultiplier,
+    ).toBeGreaterThan(
       freeTierDemandProfile(freeAtMessages(5)).audienceMultiplier,
     )
-    expect(freeTierDemandProfile(freeAtMessages(5)).minimumAudienceShare).toBeGreaterThan(
+    expect(
+      freeTierDemandProfile(freeAtMessages(5)).minimumAudienceShare,
+    ).toBeGreaterThan(
       freeTierDemandProfile(freeAtMessages(4.99)).minimumAudienceShare,
     )
-    expect(freeTierDemandProfile(freeAtMessages(10.01)).minimumAudienceShare).toBeGreaterThan(
+    expect(
+      freeTierDemandProfile(freeAtMessages(10.01)).minimumAudienceShare,
+    ).toBeGreaterThan(
       freeTierDemandProfile(freeAtMessages(5)).minimumAudienceShare,
     )
   })
@@ -278,22 +460,46 @@ describe('plan token value vs rivals', () => {
           ...s.player.pricing,
           plans: [
             basePlan({ id: 'stingy', usageMultiplier: 1, pricePerMonth: 40 }),
-            basePlan({ id: 'generous', usageMultiplier: 12, pricePerMonth: 40 }),
+            basePlan({
+              id: 'generous',
+              usageMultiplier: 12,
+              pricePerMonth: 40,
+            }),
           ],
         },
       },
     }
-    const stingy = { ...s.player.pricing.plans[0]!, modelIds: [s.player.models[0]!.id] }
-    const generous = { ...s.player.pricing.plans[1]!, modelIds: [s.player.models[0]!.id] }
+    const stingy = {
+      ...s.player.pricing.plans[0]!,
+      modelIds: [s.player.models[0]!.id],
+    }
+    const generous = {
+      ...s.player.pricing.plans[1]!,
+      modelIds: [s.player.models[0]!.id],
+    }
     const aStingy = planAttractiveness(
-      { ...s, player: { ...s.player, pricing: { ...s.player.pricing, plans: [stingy] } } },
+      {
+        ...s,
+        player: {
+          ...s.player,
+          pricing: { ...s.player.pricing, plans: [stingy] },
+        },
+      },
       stingy,
     )
     const aGen = planAttractiveness(
-      { ...s, player: { ...s.player, pricing: { ...s.player.pricing, plans: [generous] } } },
+      {
+        ...s,
+        player: {
+          ...s.player,
+          pricing: { ...s.player.pricing, plans: [generous] },
+        },
+      },
       generous,
     )
-    expect(planAllowanceMTokPerMonth(generous)).toBeGreaterThan(planAllowanceMTokPerMonth(stingy))
+    expect(planAllowanceMTokPerMonth(generous)).toBeGreaterThan(
+      planAllowanceMTokPerMonth(stingy),
+    )
     expect(aGen).toBeGreaterThan(aStingy)
   })
 
@@ -315,8 +521,18 @@ describe('plan token value vs rivals', () => {
         pricing: {
           ...s.player.pricing,
           plans: [
-            basePlan({ id: 'w', pricePerMonth: 30, usageMultiplier: 2, modelIds: [weak.id] }),
-            basePlan({ id: 's', pricePerMonth: 30, usageMultiplier: 2, modelIds: [strong.id] }),
+            basePlan({
+              id: 'w',
+              pricePerMonth: 30,
+              usageMultiplier: 2,
+              modelIds: [weak.id],
+            }),
+            basePlan({
+              id: 's',
+              pricePerMonth: 30,
+              usageMultiplier: 2,
+              modelIds: [strong.id],
+            }),
           ],
         },
       },
@@ -329,8 +545,18 @@ describe('plan token value vs rivals', () => {
   it('same tokens + much higher price → lower attractiveness / price-too-high', () => {
     let s = shipModel(createGame(203), 50)
     const mid = s.player.models[0]!.id
-    const cheap = basePlan({ id: 'c', pricePerMonth: 25, usageMultiplier: 3, modelIds: [mid] })
-    const dear = basePlan({ id: 'd', pricePerMonth: 1200, usageMultiplier: 3, modelIds: [mid] })
+    const cheap = basePlan({
+      id: 'c',
+      pricePerMonth: 25,
+      usageMultiplier: 3,
+      modelIds: [mid],
+    })
+    const dear = basePlan({
+      id: 'd',
+      pricePerMonth: 1200,
+      usageMultiplier: 3,
+      modelIds: [mid],
+    })
     s = {
       ...s,
       player: {
@@ -338,7 +564,9 @@ describe('plan token value vs rivals', () => {
         pricing: { ...s.player.pricing, plans: [cheap, dear] },
       },
     }
-    expect(planAttractiveness(s, cheap)).toBeGreaterThan(planAttractiveness(s, dear))
+    expect(planAttractiveness(s, cheap)).toBeGreaterThan(
+      planAttractiveness(s, dear),
+    )
     const tooHigh = planPriceTooHighScore(dear, {
       apiPricePerMTok: 2,
       modelCapability: 50,
@@ -360,9 +588,27 @@ describe('plan token value vs rivals', () => {
         pricing: {
           ...s.player.pricing,
           plans: [
-            basePlan({ id: 'free', name: 'Free', pricePerMonth: 0, usageMultiplier: 1, modelIds: [modelId] }),
-            basePlan({ id: 'plus', name: 'Plus', pricePerMonth: 20, usageMultiplier: 4, modelIds: [modelId] }),
-            basePlan({ id: 'pro', name: 'Pro', pricePerMonth: 80, usageMultiplier: 12, modelIds: [modelId] }),
+            basePlan({
+              id: 'free',
+              name: 'Free',
+              pricePerMonth: 0,
+              usageMultiplier: 1,
+              modelIds: [modelId],
+            }),
+            basePlan({
+              id: 'plus',
+              name: 'Plus',
+              pricePerMonth: 20,
+              usageMultiplier: 4,
+              modelIds: [modelId],
+            }),
+            basePlan({
+              id: 'pro',
+              name: 'Pro',
+              pricePerMonth: 80,
+              usageMultiplier: 12,
+              modelIds: [modelId],
+            }),
           ],
         },
       },
@@ -371,7 +617,9 @@ describe('plan token value vs rivals', () => {
     s = tickMarket(s)
     const free = s.lastMarket.planStats.find((p) => p.planId === 'free')!
     const largestPaid = Math.max(
-      ...s.lastMarket.planStats.filter((p) => !p.isFree).map((p) => p.subscribers),
+      ...s.lastMarket.planStats
+        .filter((p) => !p.isFree)
+        .map((p) => p.subscribers),
     )
     expect(free.subscribers).toBeGreaterThan(largestPaid)
   })
@@ -410,12 +658,14 @@ describe('plan token value vs rivals', () => {
     const mix = planModelTrafficMix(s, plan)
     expect(mix).toHaveLength(2)
     expect(mix.reduce((sum, lane) => sum + lane.share, 0)).toBeCloseTo(1)
-    expect(mix.find((lane) => lane.model.id === large.id)!.share).toBeGreaterThan(
-      mix.find((lane) => lane.model.id === small.id)!.share,
-    )
+    expect(
+      mix.find((lane) => lane.model.id === large.id)!.share,
+    ).toBeGreaterThan(mix.find((lane) => lane.model.id === small.id)!.share)
 
     s = tickMarket(s)
-    const usage = s.lastMarket.planStats.find((p) => p.planId === plan.id)!.modelUsage!
+    const usage = s.lastMarket.planStats.find(
+      (p) => p.planId === plan.id,
+    )!.modelUsage!
     expect(usage).toHaveLength(2)
     expect(usage.reduce((sum, lane) => sum + lane.dayMTok, 0)).toBeCloseTo(
       s.lastMarket.planStats[0]!.dayMTok,
@@ -445,7 +695,11 @@ describe('plan token value vs rivals', () => {
 
   it('protects a higher-priority paid plan under a constrained subscription PF pool', () => {
     const low = basePlan({ id: 'free', pricePerMonth: 0, computePriority: 15 })
-    const high = basePlan({ id: 'pro', pricePerMonth: 80, computePriority: 90 })
+    const high = basePlan({
+      id: 'pro',
+      pricePerMonth: 80,
+      computePriority: 90,
+    })
     const fractions = allocatePlanCompute(
       [
         { plan: low, demandPf: 100 },
@@ -478,13 +732,18 @@ describe('plan token value vs rivals', () => {
         pricing: {
           ...s.player.pricing,
           apiModelIds: [first.id, second.id],
-          plans: s.player.pricing.plans.map((plan) => ({ ...plan, modelIds: [first.id] })),
+          plans: s.player.pricing.plans.map((plan) => ({
+            ...plan,
+            modelIds: [first.id],
+          })),
         },
       },
     }
     s = tickMarket(s)
     const usage = s.lastMarket.apiModelUsage ?? []
-    expect(usage.map((item) => item.modelId).sort()).toEqual([first.id, second.id].sort())
+    expect(usage.map((item) => item.modelId).sort()).toEqual(
+      [first.id, second.id].sort(),
+    )
     expect(usage.every((item) => item.dayMTok > 0)).toBe(true)
     const finance = s.lastMarket.modelFinance.filter((row) =>
       [first.id, second.id].includes(row.modelId),
@@ -523,7 +782,11 @@ describe('precision and premium scrutiny', () => {
       player: {
         ...state.player,
         models: [small, large],
-        researchUnlocked: [...state.player.researchUnlocked, 'sys_quant', 'sys_fp8'],
+        researchUnlocked: [
+          ...state.player.researchUnlocked,
+          'sys_quant',
+          'sys_fp8',
+        ],
         pricing: { ...state.player.pricing, plans: [plan] },
       },
     }
@@ -537,20 +800,38 @@ describe('precision and premium scrutiny', () => {
       [small.id]: 'int8',
       [large.id]: 'int4',
     })
-    expect(Object.values(updated.modalityRoutes ?? {}).every((route) => route?.fallbackModelId == null)).toBe(true)
+    expect(
+      Object.values(updated.modalityRoutes ?? {}).every(
+        (route) => route?.fallbackModelId == null,
+      ),
+    ).toBe(true)
     const mix = planModelTrafficMix(state, updated)
-    expect(mix.map((lane) => lane.model.id).sort()).toEqual([small.id, large.id].sort())
-    expect(planModelServePrecision(updated, small, state.player.researchUnlocked)).toBe('int8')
-    expect(planModelServePrecision(updated, large, state.player.researchUnlocked)).toBe('int4')
-    expect(mix.find((lane) => lane.model.id === large.id)!.model.capability).toBe(
-      large.capability + planServeModifiers('int4', state.player.researchUnlocked).capabilityDelta,
+    expect(mix.map((lane) => lane.model.id).sort()).toEqual(
+      [small.id, large.id].sort(),
+    )
+    expect(
+      planModelServePrecision(updated, small, state.player.researchUnlocked),
+    ).toBe('int8')
+    expect(
+      planModelServePrecision(updated, large, state.player.researchUnlocked),
+    ).toBe('int4')
+    expect(
+      mix.find((lane) => lane.model.id === large.id)!.model.capability,
+    ).toBe(
+      large.capability +
+        planServeModifiers('int4', state.player.researchUnlocked)
+          .capabilityDelta,
     )
 
     state = updatePlan(state, plan.id, {
       modelIds: [small.id],
       servePrecisionByModel: { [small.id]: 'int8' },
     })
-    expect(planModelTrafficMix(state, state.player.pricing.plans[0]!).map((lane) => lane.model.id)).toEqual([small.id])
+    expect(
+      planModelTrafficMix(state, state.player.pricing.plans[0]!).map(
+        (lane) => lane.model.id,
+      ),
+    ).toEqual([small.id])
   })
 
   it('clamps locked and checkpoint-incompatible plan-model formats', () => {
@@ -568,7 +849,13 @@ describe('precision and premium scrutiny', () => {
     state = updatePlan(state, plan.id, {
       servePrecisionByModel: { [model.id]: 'int4' },
     })
-    expect(planModelServePrecision(state.player.pricing.plans[0]!, model, state.player.researchUnlocked)).toBe('fp16')
+    expect(
+      planModelServePrecision(
+        state.player.pricing.plans[0]!,
+        model,
+        state.player.researchUnlocked,
+      ),
+    ).toBe('fp16')
 
     state = {
       ...state,
@@ -582,11 +869,15 @@ describe('precision and premium scrutiny', () => {
         ],
       },
     }
-    expect(availablePlanPrecisionsForModel(model, state.player.researchUnlocked)).not.toContain('ternary_1_58')
+    expect(
+      availablePlanPrecisionsForModel(model, state.player.researchUnlocked),
+    ).not.toContain('ternary_1_58')
     state = updatePlan(state, plan.id, {
       servePrecisionByModel: { [model.id]: 'ternary_1_58' },
     })
-    expect(state.player.pricing.plans[0]!.servePrecisionByModel?.[model.id]).not.toBe('ternary_1_58')
+    expect(
+      state.player.pricing.plans[0]!.servePrecisionByModel?.[model.id],
+    ).not.toBe('ternary_1_58')
   })
 
   it('INT4 saves the most compute with bounded eval and brand risk', () => {
@@ -596,7 +887,9 @@ describe('precision and premium scrutiny', () => {
     const int4 = planServeModifiers('int4', unlocks)
     expect(int4.computeMult).toBeLessThan(int8.computeMult)
     expect(int8.computeMult).toBeLessThan(full.computeMult)
-    expect(int4.benchmarkDeltas.coding).toBeLessThan(int8.benchmarkDeltas.coding!)
+    expect(int4.benchmarkDeltas.coding).toBeLessThan(
+      int8.benchmarkDeltas.coding!,
+    )
     expect(int4.benchmarkDeltas.math).toBeLessThan(int8.benchmarkDeltas.math!)
     expect(int4.benchmarkDeltas.math).toBeGreaterThan(-10)
     expect(int4.brandRisk).toBeGreaterThan(int8.brandRisk)
@@ -624,13 +917,22 @@ describe('precision and premium scrutiny', () => {
         player: {
           ...state.player,
           brandTrust: 75,
-          researchUnlocked: [...state.player.researchUnlocked, 'sys_quant', 'sys_fp8'],
-          rackFleet: state.player.rackFleet.map((rack) => ({ ...rack, count: 160 })),
+          researchUnlocked: [
+            ...state.player.researchUnlocked,
+            'sys_quant',
+            'sys_fp8',
+          ],
+          rackFleet: state.player.rackFleet.map((rack) => ({
+            ...rack,
+            count: 160,
+          })),
           allocation: { training: 0.05, inference: 0.9, research: 0.05 },
           pricing: {
             ...state.player.pricing,
             apiModelIds: [state.player.models[0]!.id],
-            apiServePrecisionByModel: { [state.player.models[0]!.id]: precision },
+            apiServePrecisionByModel: {
+              [state.player.models[0]!.id]: precision,
+            },
             plans: [],
           },
         },
@@ -645,12 +947,15 @@ describe('precision and premium scrutiny', () => {
 
     expect(fullUsage?.dayMTok).toBeGreaterThan(0)
     expect(int4Usage?.dayMTok).toBeGreaterThan(0)
-    expect((int4Usage?.dayInferPf ?? 0) / (int4Usage?.dayMTok ?? 1)).toBeLessThan(
-      (fullUsage?.dayInferPf ?? 0) / (fullUsage?.dayMTok ?? 1),
+    expect(
+      (int4Usage?.dayInferPf ?? 0) / (int4Usage?.dayMTok ?? 1),
+    ).toBeLessThan((fullUsage?.dayInferPf ?? 0) / (fullUsage?.dayMTok ?? 1))
+    expect(int4.player.models[0]!.capability).toBe(
+      full.player.models[0]!.capability,
     )
-    expect(int4.player.models[0]!.capability).toBe(full.player.models[0]!.capability)
     expect(int4.lastMarket.computeLedger?.requestedPfDays).toBeLessThan(
-      full.lastMarket.computeLedger?.requestedPfDays ?? Number.POSITIVE_INFINITY,
+      full.lastMarket.computeLedger?.requestedPfDays ??
+        Number.POSITIVE_INFINITY,
     )
   })
 
@@ -664,7 +969,11 @@ describe('precision and premium scrutiny', () => {
         player: {
           ...state.player,
           brandTrust: 70,
-          researchUnlocked: [...state.player.researchUnlocked, 'sys_quant', 'sys_fp8'],
+          researchUnlocked: [
+            ...state.player.researchUnlocked,
+            'sys_quant',
+            'sys_fp8',
+          ],
           pricing: {
             ...state.player.pricing,
             apiModelIds: [],
@@ -690,8 +999,18 @@ describe('precision and premium scrutiny', () => {
   })
 
   it('plans above $180 are judged against a 20x allowance expectation', () => {
-    const entry = basePlan({ id: 'entry', name: 'Entry', pricePerMonth: 20, includedMTokPerMonth: 1 })
-    const stingy = basePlan({ id: 'premium', name: 'Premium', pricePerMonth: 200, includedMTokPerMonth: 7.5 })
+    const entry = basePlan({
+      id: 'entry',
+      name: 'Entry',
+      pricePerMonth: 20,
+      includedMTokPerMonth: 1,
+    })
+    const stingy = basePlan({
+      id: 'premium',
+      name: 'Premium',
+      pricePerMonth: 200,
+      includedMTokPerMonth: 7.5,
+    })
     const generous = { ...stingy, id: 'generous', includedMTokPerMonth: 20 }
     const audit = premiumPlanScrutiny(stingy, [entry, stingy])
     expect(audit.applies).toBe(true)
@@ -829,9 +1148,15 @@ describe('compute seats + capacity', () => {
     expect(low.lastMarket.playerDemandMTok).toBeGreaterThan(1)
     expect(low.lastMarket.demandPf).toBeGreaterThan(low.lastMarket.capacityPf)
     expect(low.lastMarket.unservedRatio).toBeGreaterThan(0.1)
-    expect(high.lastMarket.capacityPf).toBeGreaterThan(low.lastMarket.capacityPf)
-    expect(high.lastMarket.servedMTok).toBeGreaterThan(low.lastMarket.servedMTok)
-    expect(high.lastMarket.unservedRatio).toBeLessThan(low.lastMarket.unservedRatio)
+    expect(high.lastMarket.capacityPf).toBeGreaterThan(
+      low.lastMarket.capacityPf,
+    )
+    expect(high.lastMarket.servedMTok).toBeGreaterThan(
+      low.lastMarket.servedMTok,
+    )
+    expect(high.lastMarket.unservedRatio).toBeLessThan(
+      low.lastMarket.unservedRatio,
+    )
   })
 })
 
@@ -893,9 +1218,7 @@ describe('facility opex scales with GPUs', () => {
     // GPU term alone should be material
     expect(ECONOMY.facilityOpexMultiplier).toBe(1)
     expect(oFull - oEmpty).toBeGreaterThan(
-      48 *
-        (ECONOMY.rackOpexPerGpuDay ?? 400) *
-        0.9,
+      48 * (ECONOMY.rackOpexPerGpuDay ?? 400) * 0.9,
     )
   })
 })
@@ -905,7 +1228,7 @@ describe('API vs sub balance iterations', () => {
     let s = shipModel(createGame(230), 68)
     // Healthy competitive paid Plus (not a killed sub) + competitive API list.
     // No rivals → player owns market; capacity high; API base demand should dominate.
-    s = withApiPrices(s, 1.5, 4.5)
+    s = withApiPrices(s, 3, 9)
     s = {
       ...s,
       player: {
@@ -926,15 +1249,6 @@ describe('API vs sub balance iterations', () => {
               modelIds: [s.player.models[0]!.id],
               enabled: true,
             },
-            {
-              id: 'plan-pro',
-              name: 'Pro',
-              pricePerMonth: 60,
-              usageMultiplier: 5,
-              usageRate: 0.7,
-              modelIds: [s.player.models[0]!.id],
-              enabled: true,
-            },
           ],
         },
       },
@@ -945,7 +1259,9 @@ describe('API vs sub balance iterations', () => {
     const sub = s.player.finance.subRevenue
     // Subs must still earn real revenue (not a killed overpriced tier)
     expect(sub).toBeGreaterThan(100)
-    expect(s.lastMarket.planStats.some((p) => p.subscribers > 100 && !p.isFree)).toBe(true)
+    expect(
+      s.lastMarket.planStats.some((p) => p.subscribers > 100 && !p.isFree),
+    ).toBe(true)
     expect(api).toBeGreaterThan(0)
     // Competitive API remains a real revenue pillar vs seats
     expect(api).toBeGreaterThanOrEqual(sub * 0.24)
@@ -1007,7 +1323,9 @@ describe('API vs sub balance iterations', () => {
     b = tickMarket(b)
 
     // Pre-serve demand must fall when list prices explode
-    expect(a.lastMarket.apiDemandMTok ?? 0).toBeGreaterThan(b.lastMarket.apiDemandMTok ?? 0)
+    expect(a.lastMarket.apiDemandMTok ?? 0).toBeGreaterThan(
+      b.lastMarket.apiDemandMTok ?? 0,
+    )
   })
 
   it('only rewards safe, capable generation models in plan breadth', () => {
@@ -1020,9 +1338,19 @@ describe('API vs sub balance iterations', () => {
       family: 'diffusion',
       productPreset: 'image_generation',
       modalities: ['image'],
-      io: { inputs: { text: 70, image: 50 }, outputs: { image: 78 }, tools: 20 },
+      io: {
+        inputs: { text: 70, image: 50 },
+        outputs: { image: 78 },
+        tools: 20,
+      },
       capability: 70,
-      quality: { ...base.quality, image: 82, reasoning: 55, safety: 70, reliability: 72 },
+      quality: {
+        ...base.quality,
+        image: 82,
+        reasoning: 55,
+        safety: 70,
+        reliability: 72,
+      },
       capabilities: base.capabilities
         ? {
             ...base.capabilities,
@@ -1033,7 +1361,10 @@ describe('API vs sub balance iterations', () => {
         : base.capabilities,
       benchmarkSuites: undefined,
     }
-    const plan = { ...state.player.pricing.plans[0]!, modelIds: [base.id, imageModel.id] }
+    const plan = {
+      ...state.player.pricing.plans[0]!,
+      modelIds: [base.id, imageModel.id],
+    }
     const capable = planOfferingBreadth(
       { ...state, player: { ...state.player, models: [base, imageModel] } },
       plan,

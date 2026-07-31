@@ -12,9 +12,9 @@ import type {
 } from "../types";
 import { computeSnapshot } from "./compute";
 import type { ComputeSnapshot } from "./compute";
+import { mwPerPf } from "./computeMarket";
 import {
   normalizeDataQuality,
-  postTrainStrength,
   scaleIntelligence,
   scoresFromScale,
 } from "../balance/modelScaling";
@@ -39,6 +39,7 @@ import {
   DEFAULT_TRAINING_NUMERICS,
   estimateTrainingMemoryGb,
   LEGACY_TRAINING_NUMERICS,
+  trainingNumericsEconomicsProfile,
   validateTrainingNumerics,
 } from "../balance/trainingPrecision";
 import type { TrainingHardwarePool } from "../balance/trainingPrecision";
@@ -52,7 +53,6 @@ import {
 } from "../balance/trainingV3";
 import { createRng, hashSeed, seededId } from "../rng";
 
-export const RELEASE_LOSS_GATE = 2;
 export const TRAINING_EXTENSION_DAYS = 10;
 export const TRAINING_BENCHMARK_MIN_PROGRESS = 0.1;
 export const TRAINING_BENCHMARK_COOLDOWN_DAYS = 7;
@@ -78,6 +78,14 @@ import { createDataManifest } from "./dataAssets";
 import { modelStackModifiers, sanitizeModelStack } from "../balance/modelStack";
 import { normalizeModelEvaluations } from "../balance/evaluationSuites";
 import { syntheticTrainingProfile } from "../balance/syntheticTraining";
+import {
+  completedPostTrainStages,
+  postTrainEffectProfile,
+  postTrainMinimumDays,
+  resolvedPostTrainStageEffectiveness,
+  postTrainStageEffectiveness,
+  postTrainTargetPfDays,
+} from "../balance/postTraining";
 
 const POST_TRAIN_ORDER: PostTrainStage[] = [
   "none",
@@ -248,6 +256,56 @@ export interface PlayerTrainingResourcePlan {
   trainingAllocationShare: number;
   jobs: Record<string, TrainingResourceAllocation>;
   safetyCampaign?: TrainingResourceAllocation;
+}
+
+function liveTrainingDaysRemaining(
+  job: TrainingJob,
+  effectivePf: number,
+  progressPfDays = job.progressPfDays,
+  daysElapsed = job.daysElapsed ?? 0,
+): number {
+  const remainingPfDays = Math.max(0, job.targetPfDays - progressPfDays);
+  const computeDays =
+    remainingPfDays <= 1e-9
+      ? 0
+      : effectivePf > 1e-9
+        ? remainingPfDays / effectivePf
+        : Number.POSITIVE_INFINITY;
+  const calendarDays = Math.max(
+    0,
+    (job.minCalendarDays ?? 0) - daysElapsed,
+  );
+  return Math.max(computeDays, calendarDays);
+}
+
+function trainingStallReason(
+  state: SimState,
+  snap: ComputeSnapshot,
+  resources: PlayerTrainingResourcePlan,
+  resource: TrainingResourceAllocation | undefined,
+): string {
+  if (resource && resource.bottleneck !== "none") {
+    if (resource.bottleneck === "system_ram") {
+      return `Training system RAM blocked: ${resource.systemRamRequiredGb.toFixed(0)} GB needed, ${resource.systemRamAllocatedGb.toFixed(0)} GB assigned from the ${Math.round(resources.trainingAllocationShare * 100)}% Training allocation.`;
+    }
+    if (resource.bottleneck === "both") {
+      return `Training memory blocked: ${resource.ramRequiredGb.toFixed(0)} GB HBM and ${resource.systemRamRequiredGb.toFixed(0)} GB system RAM needed; ${resource.ramAllocatedGb.toFixed(0)} GB HBM and ${resource.systemRamAllocatedGb.toFixed(0)} GB system RAM assigned.`;
+    }
+    return `Training HBM blocked: ${resource.ramRequiredGb.toFixed(0)} GB needed, ${resource.ramAllocatedGb.toFixed(0)} GB assigned from the ${Math.round(resources.trainingAllocationShare * 100)}% Training allocation.`;
+  }
+  if (state.player.allocation.training <= 1e-9) {
+    return "Training compute blocked: zero PF is allocated to Training.";
+  }
+  if (snap.mwAvailable <= 1e-9 || snap.powerDerate <= 1e-9) {
+    return "Training compute power-blocked: no powered PF is available.";
+  }
+  if (snap.pools.training <= 1e-9) {
+    return "Training compute blocked: the Training pool has zero effective PF.";
+  }
+  if (resource && resource.rawPf <= 1e-9) {
+    return "Training format blocked: no allocated accelerator supports this training format.";
+  }
+  return "Training compute blocked: zero effective PF was allocated to this run.";
 }
 
 /** The configured Training slice owns the same share of accelerator RAM as PF. */
@@ -575,21 +633,6 @@ export function playerTrainingResourcePlan(
   };
 }
 
-function postTrainTarget(stage: PostTrainStage): number {
-  switch (stage) {
-    case "sft":
-      return 4;
-    case "rlhf":
-      return 8;
-    case "process":
-      return 10;
-    case "tools":
-      return 6;
-    default:
-      return 0;
-  }
-}
-
 type TrainableStage = "base" | Exclude<PostTrainStage, "none">;
 
 /**
@@ -644,42 +687,161 @@ function estimateJobDailyThroughput(
 }
 
 /**
- * Observed training loss: exponential decay toward a floor (fast early, slow
- * late) plus mean-reverting noise with occasional 2–6% upward spikes.
+ * Observed training loss. The signal is intentionally less tidy than the
+ * underlying learning curve: seeded jitter, two-sided spikes and short
+ * divergence/recovery episodes sit on top of a long-run improving trend.
  * Deterministic per (job, stage, day) via seeded RNG — never Math.random.
  */
 export function trainingLoss(
-  job: Pick<TrainingJob, "id" | "outcomeSeed" | "targetParamsB">,
+  job: Pick<TrainingJob, "id" | "outcomeSeed" | "targetParamsB"> &
+    Partial<
+      Pick<
+        TrainingJob,
+        | "trainingNumerics"
+        | "numerics"
+        | "dataPlan"
+        | "dataQualityUsed"
+        | "integratedMethods"
+        | "outcomeRisk"
+        | "effectiveDataRatio"
+        | "repeatedDataEpochs"
+      >
+    >,
   stage: TrainableStage,
   progress: number,
   day: number,
   previousObservedLoss?: number,
 ): number {
+  const precision = trainingNumericsEconomicsProfile(
+    job.trainingNumerics ?? job.numerics ?? DEFAULT_TRAINING_NUMERICS,
+  );
   const p = Math.max(0, Math.min(1, progress));
-  const stageFloor = stage === "base" ? 1.15 : 0.72;
-  const stageStart =
-    stage === "base"
-      ? 8.4 + Math.log10(Math.max(1, job.targetParamsB)) * 0.4
-      : 2.1;
-  // Steeper early drop, then hard diminishing returns into the floor.
+
+  const weights = Object.values(job.dataPlan?.weights ?? {}).filter(
+    (weight): weight is number => Number.isFinite(weight) && weight > 0,
+  );
+  const weightTotal = weights.reduce((sum, weight) => sum + weight, 0);
+  const diversity =
+    weights.length <= 1 || weightTotal <= 0
+      ? weights.length === 1
+        ? 0
+        : 0.65
+      : -weights.reduce((entropy, weight) => {
+          const share = weight / weightTotal;
+          return entropy + share * Math.log(share);
+        }, 0) / Math.log(weights.length);
+  const quality = Math.max(
+    0,
+    Math.min(1, (job.dataQualityUsed ?? 70) / 100),
+  );
+  const repeatPressure = Math.max(0, (job.repeatedDataEpochs ?? 1) - 1);
+  const dataRatio = job.effectiveDataRatio;
+  const dataRatioRisk =
+    dataRatio == null
+      ? 0
+      : Math.min(0.22, Math.max(0, 1 - dataRatio) * 0.18) +
+        Math.min(0.18, Math.max(0, dataRatio - 8) * 0.018);
+  const qualityGap = 0.7 - quality;
+  const diversityGap = 0.65 - diversity;
+
+  // This terminal band is derived from scale and the data recipe. Typical
+  // jobs settle visibly in the high-threes/low-fours without a magic target.
+  const baseBand =
+    3.45 +
+    Math.log10(Math.max(1, job.targetParamsB)) * 0.18 +
+    qualityGap * 1.2 +
+    diversityGap * 0.55 +
+    Math.min(0.45, repeatPressure * 0.09);
+  const baseStart =
+    baseBand +
+    5.15 +
+    Math.log10(Math.max(1, job.targetParamsB)) * 0.28;
+  const postStageAdjustment =
+    stage === "rlhf" || stage === "process"
+      ? -0.18
+      : stage === "tools"
+        ? 0.08
+        : -0.08;
   const trend =
-    stageFloor + (stageStart - stageFloor) * Math.exp(-3.1 * p - 1.4 * p * p);
+    stage === "base"
+      ? baseBand +
+        (baseStart - baseBand) * Math.exp(-3.7 * p - 0.8 * p * p) -
+        0.12 * p
+      : baseBand +
+        postStageAdjustment -
+        0.1 * p +
+        (0.72 + baseBand * 0.08) * Math.exp(-7.5 * p);
+
+  const stableOptimizationMethods = new Set([
+    "opt_mixed",
+    "opt_te_fp8",
+    "opt_overlap_comm",
+    "opt_grad_accum",
+    "data_eval",
+  ]);
+  const stabilityResearch = (job.integratedMethods ?? []).filter((method) =>
+    stableOptimizationMethods.has(method),
+  ).length;
+  const outcomeRisk =
+    job.outcomeRisk === "high" ? 0.28 : job.outcomeRisk === "medium" ? 0.12 : 0;
+  const volatility = Math.max(
+    0.45,
+    precision.lossVolatilityMultiplier *
+      (1 +
+        Math.max(0, qualityGap) * 0.55 +
+        Math.max(0, 0.65 - diversity) * 0.45 +
+        Math.max(0, diversity - 0.65) * 0.55 * Math.pow(1 - p, 1.5) +
+        Math.min(0.35, repeatPressure * 0.07) +
+        dataRatioRisk +
+        Math.max(0, precision.stabilityRisk) +
+        outcomeRisk) *
+      Math.max(0.72, 1 - stabilityResearch * 0.055),
+  );
 
   const rng = createRng(
-    hashSeed(job.outcomeSeed ?? 0, job.id, stage, day, "loss-v2"),
+    hashSeed(job.outcomeSeed ?? 0, job.id, stage, day, "loss-v3"),
   );
   const prev =
     previousObservedLoss == null || !Number.isFinite(previousObservedLoss)
       ? trend
       : previousObservedLoss;
   // Mean-revert toward today's trend; residual carries day-to-day wobble.
-  const residual = (prev - trend) * 0.62 + rng.range(-0.045, 0.045);
+  const residual =
+    (prev - trend) * 0.56 + rng.range(-0.032, 0.032) * volatility;
   let observed = trend + residual;
-  // Occasional upward spike (~12% of days) of roughly 2–6%.
-  if (rng.next() < 0.12) {
-    observed *= 1 + rng.range(0.02, 0.06);
+
+  // A block seed makes instability persist for several samples: the curve
+  // first diverges, then recovers and can briefly undershoot its trend.
+  const episodeLength = 9;
+  const episodeIndex = Math.floor(day / episodeLength);
+  const episodePhase = ((day % episodeLength) + episodeLength) % episodeLength;
+  const episodeRng = createRng(
+    hashSeed(
+      job.outcomeSeed ?? 0,
+      job.id,
+      stage,
+      episodeIndex,
+      "loss-divergence-v1",
+    ),
+  );
+  if (episodeRng.next() < Math.min(0.34, 0.1 * volatility)) {
+    const amplitude = episodeRng.range(0.055, 0.14) * volatility;
+    const episodeShape =
+      episodePhase <= 3
+        ? episodePhase / 3
+        : episodePhase <= 6
+          ? (6 - episodePhase) / 3
+          : -(episodePhase - 6) / 6;
+    observed *= 1 + amplitude * episodeShape;
   }
-  const floor = stageFloor * 0.92;
+
+  // Optimizer shocks go both ways; negative spikes model lucky batches or a
+  // recovered learning-rate step rather than forcing every wobble upward.
+  if (rng.next() < Math.min(0.32, 0.16 * volatility)) {
+    const direction = rng.next() < 0.58 ? 1 : -1;
+    observed *= 1 + direction * rng.range(0.015, 0.055) * volatility;
+  }
+  const floor = baseBand * 0.82;
   return Math.max(floor, Math.round(observed * 1000) / 1000);
 }
 
@@ -689,43 +851,124 @@ export function observedLoss(job: TrainingJob): number | null {
   return history[history.length - 1]!.loss;
 }
 
+export const LOSS_PLATEAU_WINDOW = 6;
+export const LOSS_PLATEAU_TOLERANCE = 0.04;
+
+/**
+ * Detect a flat recent loss curve without relying on wall-clock randomness.
+ * A plateau needs a full same-stage window, little end-to-end improvement,
+ * and no large excursion hidden inside that window.
+ */
+export function detectLossPlateau(
+  job: Pick<TrainingJob, "lossHistory">,
+  tolerance: number = LOSS_PLATEAU_TOLERANCE,
+): boolean {
+  const history = job.lossHistory ?? [];
+  const stage = history.at(-1)?.stage;
+  if (!stage) return false;
+  const recent = history
+    .filter((point) => point.stage === stage && Number.isFinite(point.loss))
+    .slice(-LOSS_PLATEAU_WINDOW);
+  if (recent.length < LOSS_PLATEAU_WINDOW) return false;
+  const losses = recent.map((point) => point.loss);
+  const improvement = losses[0]! - losses.at(-1)!;
+  const excursion = Math.max(...losses) - Math.min(...losses);
+  const allowed = Math.max(0, tolerance);
+  return Math.abs(improvement) <= allowed && excursion <= allowed * 2.5;
+}
+
 export function trainingMinimumStatus(job: TrainingJob): {
   ok: boolean;
   reason?: string;
+  computeReady: boolean;
+  calendarReady: boolean;
+  completeReady: boolean;
+  plateaued: boolean;
+  earlyReleaseReady: boolean;
 } {
   if (job.failed)
-    return { ok: false, reason: "This run failed and cannot be released." };
-  if (job.progressPfDays + 1e-9 < job.targetPfDays) {
-    return { ok: false, reason: "Complete the training compute target first." };
-  }
+    return {
+      ok: false,
+      reason: "This run failed and cannot be released.",
+      computeReady: false,
+      calendarReady: false,
+      completeReady: false,
+      plateaued: false,
+      earlyReleaseReady: false,
+    };
+  const computeReady = job.progressPfDays + 1e-9 >= job.targetPfDays;
   const calendarRemaining = Math.max(
     0,
     (job.minCalendarDays ?? 0) - (job.daysElapsed ?? 0),
   );
+  const calendarReady = calendarRemaining <= 0;
+  const plateaued = detectLossPlateau(job);
+  const completeReady = computeReady && calendarReady;
+  const earlyReleaseReady = !computeReady && calendarReady && plateaued;
   if (calendarRemaining > 0) {
     return {
       ok: false,
       reason: `${calendarRemaining} funded active calendar day${calendarRemaining === 1 ? "" : "s"} remain for integration and validation.`,
+      computeReady,
+      calendarReady,
+      completeReady,
+      plateaued,
+      earlyReleaseReady,
     };
   }
-  return { ok: true };
+  if (!computeReady) {
+    return {
+      ok: false,
+      reason: plateaued
+        ? "Loss has plateaued; this checkpoint is eligible for a degraded early release."
+        : "Complete the training compute target or wait for a sustained loss plateau.",
+      computeReady,
+      calendarReady,
+      completeReady,
+      plateaued,
+      earlyReleaseReady,
+    };
+  }
+  return {
+    ok: true,
+    computeReady,
+    calendarReady,
+    completeReady,
+    plateaued,
+    earlyReleaseReady,
+  };
 }
 
 export function canReleaseTrainingJob(job: TrainingJob): {
   ok: boolean;
   reason?: string;
+  releaseKind?: "complete" | "early";
 } {
-  const minimum = trainingMinimumStatus(job);
-  if (!minimum.ok) return minimum;
-  const loss = observedLoss(job);
-  if (loss == null) return { ok: false, reason: "No observed loss yet." };
-  if (loss > RELEASE_LOSS_GATE) {
-    return {
-      ok: false,
-      reason: `Release needs observed loss ≤ ${RELEASE_LOSS_GATE} (currently ${loss.toFixed(3)}).`,
-    };
-  }
-  return { ok: true };
+  const status = trainingMinimumStatus(job);
+  if (status.completeReady) return { ok: true, releaseKind: "complete" };
+  if (status.earlyReleaseReady) return { ok: true, releaseKind: "early" };
+  return { ok: false, reason: status.reason };
+}
+
+export function earlyReleasePenalty(
+  job: Pick<TrainingJob, "progressPfDays" | "targetPfDays">,
+): {
+  progress: number;
+  capabilityMultiplier: number;
+  benchmarkMultiplier: number;
+  reliabilityMultiplier: number;
+} {
+  const progress = Math.max(
+    0,
+    Math.min(1, job.progressPfDays / Math.max(job.targetPfDays, 1e-9)),
+  );
+  const maturity = Math.sqrt(progress);
+  return {
+    progress,
+    capabilityMultiplier: 0.45 + maturity * 0.55,
+    benchmarkMultiplier: 0.35 + maturity * 0.65,
+    reliabilityMultiplier: 0.3 + maturity * 0.7,
+  };
 }
 
 export function extendTraining(
@@ -1054,6 +1297,10 @@ export function startTraining(
     includeSynthHQ: opts.dataPlan?.includeSynthHQ ?? true,
     includeSynthLQ: opts.dataPlan?.includeSynthLQ ?? false,
     domainModels: specialistsUnlocked ? opts.dataPlan?.domainModels : undefined,
+    syntheticTeacherIds: opts.dataPlan?.syntheticTeacherIds
+      ? { ...opts.dataPlan.syntheticTeacherIds }
+      : undefined,
+    syntheticMultiplier: opts.dataPlan?.syntheticMultiplier,
   };
   const consume = consumeForTraining(
     state,
@@ -1153,6 +1400,7 @@ export function startTraining(
     modalityComputeMult: dataAnalysis.modalityComputeMult,
     trainCostMult: stackModifiers.trainCostMult,
     dataCost: consume.cashCost,
+    numerics,
   });
   target = trainingEconomics.targetPfDays;
 
@@ -1193,6 +1441,14 @@ export function startTraining(
   }
 
   const reservedPf = Math.max(0, opts.reservedPf ?? 0);
+  const initialEffectivePf = estimateJobDailyThroughput(state, {
+    numerics,
+    computePriority,
+    reservedPf,
+    concurrentJobs:
+      existingJobs.filter((candidate) => !candidate.paused && !candidate.failed)
+        .length + 1,
+  });
 
   // Even tiny runs incur cluster setup, checkpointing, orchestration and eval
   // overhead. Preserve physical PF scaling while preventing zero-cost jobs.
@@ -1234,11 +1490,32 @@ export function startTraining(
     activeParamsB,
     targetPfDays: target,
     progressPfDays: 0,
+    energyMwDays: 0,
+    energyMWh: 0,
+    daysRemaining: Math.max(
+      initialEffectivePf > 1e-9
+        ? target / initialEffectivePf
+        : Number.POSITIVE_INFINITY,
+      trainingEconomics.minCalendarDays,
+    ),
     minCalendarDays: trainingEconomics.minCalendarDays,
     daysElapsed: 0,
     postTrain: "none",
     postTrainProgress: 0,
     postTrainTarget: 0,
+    completedPostTrainStages: continueFromId
+      ? [
+          ...(state.player.models.find((model) => model.id === continueFromId)
+            ?.completedPostTrainStages ?? []),
+        ]
+      : [],
+    postTrainStageEffectiveness: continueFromId
+      ? {
+          ...(state.player.models.find((model) => model.id === continueFromId)
+            ?.postTrainStageEffectiveness ?? {}),
+        }
+      : {},
+    postTrainDaysElapsed: 0,
     mode,
     teacherId,
     distillTeacherShare: mode === "distill" ? distillTeacherShare : undefined,
@@ -1313,6 +1590,7 @@ export function startTraining(
               "train-outcome",
             ),
             targetParamsB: paramsB,
+            trainingNumerics: numerics,
           },
           "base",
           0,
@@ -1439,6 +1717,13 @@ export function selectPostTrain(
   const jobs = playerTrainingJobs(state);
   const job = jobs.find((candidate) => candidate.id === jobId);
   if (!job || !trainingMinimumStatus(job).ok) return state;
+  if (completedPostTrainStages(job).includes(nextStage)) {
+    return withAlert(
+      state,
+      "warn",
+      `${nextStage.toUpperCase()} has already been applied to this model lineage. Post-training stages are one-shot.`,
+    );
+  }
   if (job.postTrain !== "none" && job.postTrainProgress < job.postTrainTarget) {
     return withAlert(
       state,
@@ -1466,7 +1751,8 @@ export function selectPostTrain(
     ...job,
     postTrain: nextStage,
     postTrainProgress: 0,
-    postTrainTarget: postTrainTarget(nextStage),
+    postTrainTarget: postTrainTargetPfDays(job, nextStage),
+    postTrainDaysElapsed: 0,
     paused: false,
     stallReason: null,
   };
@@ -1500,7 +1786,12 @@ export function keepInternal(state: SimState, jobId?: string): SimState {
 
 /** Finish job and release publicly (plans/API eligible). */
 export function releaseFromJob(state: SimState, jobId?: string): SimState {
-  return finalizeJob(state, "released", jobId);
+  return finalizeJob(state, "released", jobId, true);
+}
+
+/** Stop a plateaued run after its calendar gate and release its current checkpoint. */
+export function releaseTrainingEarly(state: SimState, jobId: string): SimState {
+  return finalizeJob(state, "released", jobId, true);
 }
 
 /** Cheat surface: finish compute and post-training while preserving the release decision. */
@@ -1508,19 +1799,35 @@ export function completeTrainingJobsNow(state: SimState): SimState {
   const jobs = playerTrainingJobs(state);
   const active = jobs.filter((job) => !job.failed);
   if (active.length === 0) return state;
-  const completed = jobs.map((job) =>
-    job.failed
-      ? job
-      : {
+  const completed = jobs.map((job) => {
+    if (job.failed) return job;
+    const completedJob: TrainingJob = {
           ...job,
           progressPfDays: Math.max(job.progressPfDays, job.targetPfDays, job.recommendedPfDays ?? 0),
           daysElapsed: Math.max(job.daysElapsed ?? 0, job.minCalendarDays ?? 0),
           postTrainProgress: Math.max(job.postTrainProgress, job.postTrainTarget),
+          postTrainDaysElapsed:
+            job.postTrain === "none"
+              ? job.postTrainDaysElapsed
+              : Math.max(
+                  job.postTrainDaysElapsed ?? 0,
+                  postTrainMinimumDays(job.postTrain),
+                ),
           awaitingDecision: true,
           paused: false,
           stallReason: null,
-        },
-  );
+        };
+    const completedStages = completedPostTrainStages(completedJob);
+    return {
+      ...completedJob,
+      completedPostTrainStages: completedStages,
+      postTrainStageEffectiveness: resolvedPostTrainStageEffectiveness(
+        completedJob,
+        state.player.researchUnlocked,
+        state.player.models,
+      ),
+    };
+  });
   return withAlert(
     withTrainingJobs(state, completed),
     "info",
@@ -1551,20 +1858,64 @@ export function benchmarkTrainingJob(state: SimState, jobId: string): SimState {
     );
   }
   const loss = observedLoss(job) ?? 8.4;
-  const capability = Math.max(
-    1,
-    Math.min(100, (100 - loss * 8) * Math.min(1, 0.35 + progressFrac * 0.75)),
+  const precision = trainingNumericsEconomicsProfile(
+    job.trainingNumerics ?? job.numerics ?? DEFAULT_TRAINING_NUMERICS,
   );
-  const safety = Math.max(
+  const latentCapability = Math.max(
     1,
-    Math.min(100, capability * 0.85 + progressFrac * 8),
+    Math.min(
+      100,
+      (100 - loss * 8) *
+        Math.min(1, 0.35 + progressFrac * 0.75) *
+      precision.qualityCeilingMultiplier,
+    ),
   );
+  const latentSafety = Math.max(
+    1,
+    Math.min(100, latentCapability * 0.85 + progressFrac * 8),
+  );
+  // Checkpoint evaluations are directional, not an oracle for final quality.
+  // The hidden roll is stable for a given job/day and deliberately misses the
+  // latent point by 20-35%; the displayed interval is at least as wide.
+  const benchmarkRng = createRng(
+    hashSeed(job.outcomeSeed ?? 0, job.id, state.day, "benchmark-v2"),
+  );
+  const inaccuracy = 0.2 + benchmarkRng.next() * 0.15;
+  const noisyScore = (latent: number, preferredSign: -1 | 1): number => {
+    const positiveFits = latent * (1 + inaccuracy) <= 100;
+    const negativeFits = latent * (1 - inaccuracy) >= 1;
+    const sign =
+      preferredSign > 0
+        ? positiveFits
+          ? 1
+          : -1
+        : negativeFits
+          ? -1
+          : 1;
+    return latent * (1 + sign * inaccuracy);
+  };
+  const capability = noisyScore(
+    latentCapability,
+    benchmarkRng.next() < 0.5 ? -1 : 1,
+  );
+  const safety = noisyScore(
+    latentSafety,
+    benchmarkRng.next() < 0.5 ? -1 : 1,
+  );
+  const confidence = Math.round((0.72 - inaccuracy * 0.6) * 100) / 100;
+  const interval = Math.max(0.2, inaccuracy);
   const snapshot = {
     day: state.day,
     progress: progressFrac,
     capability,
     safety,
     suite: Math.round((capability * 0.7 + safety * 0.3) * 10) / 10,
+    confidence,
+    inaccuracy: interval,
+    capabilityLow: capability * (1 - interval),
+    capabilityHigh: capability * (1 + interval),
+    safetyLow: safety * (1 - interval),
+    safetyHigh: safety * (1 + interval),
   };
   const updated: TrainingJob = {
     ...job,
@@ -1592,43 +1943,24 @@ function finalizeJob(
   state: SimState,
   release: "internal" | "released",
   jobId?: string,
+  allowEarlyRelease: boolean = false,
 ): SimState {
   const jobs = playerTrainingJobs(state);
   const job = jobId
     ? jobs.find((candidate) => candidate.id === jobId)
     : jobs[0];
   if (!job || job.failed) return state;
-  const completionGate = trainingMinimumStatus(job);
-  if (!completionGate.ok) {
-    return withAlert(state, "warn", completionGate.reason ?? "Training is not complete.");
-  }
-  const recommended = job.recommendedPfDays ?? job.targetPfDays;
-  const atOrPastRecommended = job.progressPfDays + 1e-9 >= recommended;
-  // Keep-internal / recommended milestone always allowed once base target reached.
-  // Early public release requires loss ≤ RELEASE_LOSS_GATE.
-  if (release === "released" && !atOrPastRecommended) {
-    const gate = canReleaseTrainingJob(job);
-    if (!gate.ok)
-      return withAlert(state, "warn", gate.reason ?? "Cannot release yet.");
-  } else if (
-    job.progressPfDays + 1e-9 < Math.min(job.targetPfDays, recommended) &&
-    !atOrPastRecommended
-  ) {
-    // Still below recommended and not loss-gated early release: require progress.
-    if (
-      job.progressPfDays + 1e-9 < job.targetPfDays &&
-      release === "internal" &&
-      !job.awaitingDecision
-    ) {
-      return state;
-    }
-  }
-  if (
-    job.progressPfDays + 1e-9 < job.targetPfDays &&
-    release === "internal" &&
-    !(job.awaitingDecision || atOrPastRecommended)
-  ) {
-    return state;
+  const completion = trainingMinimumStatus(job);
+  const releaseGate = canReleaseTrainingJob(job);
+  const isEarlyRelease = release === "released" && releaseGate.releaseKind === "early";
+  if (!completion.ok && !(allowEarlyRelease && isEarlyRelease)) {
+    return withAlert(
+      state,
+      "warn",
+      release === "released"
+        ? (releaseGate.reason ?? "Cannot release yet.")
+        : (completion.reason ?? "Training is not complete."),
+    );
   }
   if (job.postTrain !== "none" && job.postTrainProgress < job.postTrainTarget) {
     // allow finish mid post-train with partial quality
@@ -1713,6 +2045,8 @@ function finalizeJob(
             ? `${model.name} continue-train complete (cap ${model.capability.toFixed(0)}).`
             : release === "internal"
               ? `${model.name} kept internal. Use as distillation teacher or release later.`
+              : isEarlyRelease
+                ? `Released ${model.name} early at ${Math.round((job.progressPfDays / Math.max(job.targetPfDays, 1e-9)) * 100)}% compute — capability and benchmarks are degraded.`
               : model.quality.reliability < 40
                 ? `Released ${model.name} — rough quality. Expect churn.`
                 : `Released ${model.name}. ${outcomeLine} Set API price and assign to Plans.`,
@@ -1942,6 +2276,9 @@ function buildModelFromJob(
   const family = job.family;
   const backbone = job.backbone ?? backboneFromFamily(family);
   const stackModifiers = modelStackModifiers(job.modelStack ?? [], family);
+  const precision = trainingNumericsEconomicsProfile(
+    job.trainingNumerics ?? job.numerics ?? DEFAULT_TRAINING_NUMERICS,
+  );
   const paramsB = job.targetParamsB;
   const activeParamsB =
     backbone === "moe" ? (job.activeParamsB ?? paramsB * 0.1) : undefined;
@@ -1951,6 +2288,23 @@ function buildModelFromJob(
   const continueBase = job.continueFromId
     ? state.player.models.find((m) => m.id === job.continueFromId)
     : undefined;
+  const postProfile = postTrainEffectProfile(
+    job,
+    state.player.researchUnlocked,
+    state.player.models,
+  );
+  const completedPostStages = completedPostTrainStages(job);
+  const resolvedStageEffectiveness = resolvedPostTrainStageEffectiveness(
+    job,
+    state.player.researchUnlocked,
+    state.player.models,
+  );
+  const reasoningTrained =
+    stackModifiers.reasoningEnabled ||
+    job.postTrain === "process" ||
+    job.postTrain === "tools" ||
+    completedPostStages.includes("process") ||
+    completedPostStages.includes("tools");
   const legacyMix = DATA_MIX_DEFS[job.dataMix ?? "web"];
   // Domain recipe effects
   const weights = job.dataPlan?.weights ?? {};
@@ -2021,8 +2375,8 @@ function buildModelFromJob(
         ? researchMult * 0.55
         : researchMult,
     trainComplete,
-    postTrainStrength: postTrainStrength(job.postTrain),
-    reasoningEnabled: stackModifiers.reasoningEnabled,
+    postTrainStrength: postProfile.scaleStrength,
+    reasoningEnabled: reasoningTrained,
     teacherCapability: job.mode === "distill" ? teacher?.capability : undefined,
   });
 
@@ -2044,7 +2398,7 @@ function buildModelFromJob(
     );
   }
 
-  const postIdx = POST_TRAIN_ORDER.indexOf(job.postTrain);
+  const postIdx = postProfile.alignmentEquivalent;
   const rlhfMult = 1 + (effects.rlhfQuality ?? 0);
   const safetyBase =
     14 +
@@ -2067,7 +2421,7 @@ function buildModelFromJob(
   let reasoning = Math.min(
     100,
     capability * 0.95 +
-      (postIdx >= 3 ? 4 : 0) +
+      (reasoningTrained ? 4 * Math.min(1, postProfile.alignmentEquivalent) : 0) +
       mix.math * 0.34 +
       mix.science * 0.18,
   );
@@ -2189,8 +2543,11 @@ function buildModelFromJob(
   inferCostMult *= stackModifiers.hostingMult;
   tokPerSecMult *= stackModifiers.speedMult;
 
-  const jobIo =
+  const baseJobIo =
     job.io ?? ioForPreset(job.productPreset ?? presetFromFamily(family));
+  const jobIo = postProfile.toolsEnabled
+    ? { ...baseJobIo, tools: Math.max(1, baseJobIo.tools) }
+    : baseJobIo;
   const modalities: Model["modalities"] = [];
   for (const modality of ["text", "image", "audio", "video"] as const) {
     if (
@@ -2273,8 +2630,8 @@ function buildModelFromJob(
         ? researchMult * 0.55
         : researchMult,
     trainComplete,
-    postTrainStrength: postTrainStrength(job.postTrain),
-    reasoningEnabled: stackModifiers.reasoningEnabled,
+    postTrainStrength: postProfile.scaleStrength,
+    reasoningEnabled: reasoningTrained,
     teacherCapability: job.mode === "distill" ? teacher?.capability : undefined,
   });
 
@@ -2285,8 +2642,8 @@ function buildModelFromJob(
     unlocked: state.player.researchUnlocked,
     postTrain: job.postTrain,
     extras,
-    reasoningEnabled: stackModifiers.reasoningEnabled,
-    toolsEnabled: jobIo.tools > 0,
+    reasoningEnabled: reasoningTrained,
+    toolsEnabled: postProfile.toolsEnabled || jobIo.tools > 0,
     imageDataQualityFactor:
       (job.dataQualityByDomain?.image ?? job.dataQualityUsed ?? 50) / 100,
     healthLowQualityShare:
@@ -2392,10 +2749,15 @@ function buildModelFromJob(
     researchCount: state.player.researchUnlocked.length,
     day: state.day,
     breakthroughBias: effects.trainingBreakthroughBias,
-    stumbleRisk: effects.trainingStumbleRisk,
+    stumbleRisk:
+      (effects.trainingStumbleRisk ?? 0) +
+      Math.max(0, precision.lossVolatilityMultiplier - 1) * 0.08,
   });
   capability = clamp(capability + outcome.capabilityDelta);
-  capability = Math.min(capability, scale.capabilityCeiling);
+  capability = Math.min(
+    capability,
+    scale.capabilityCeiling * precision.qualityCeilingMultiplier,
+  );
   quality.reliability = clamp(quality.reliability + outcome.reliabilityDelta);
   quality.safety = clamp(
     quality.safety +
@@ -2423,15 +2785,21 @@ function buildModelFromJob(
       return source
         ? {
             capability: acc.capability + source.capability * volume,
+            reliability:
+              acc.reliability + source.quality.reliability * volume,
             volume: acc.volume + volume,
           }
         : acc;
     },
-    { capability: 0, volume: 0 },
+    { capability: 0, reliability: 0, volume: 0 },
   );
   const syntheticTeacherCapability =
     weightedTeacher.volume > 0
       ? weightedTeacher.capability / weightedTeacher.volume
+      : 0;
+  const syntheticTeacherReliability =
+    weightedTeacher.volume > 0
+      ? weightedTeacher.reliability / weightedTeacher.volume
       : 0;
   const frontierCapability = Math.max(
     syntheticTeacherCapability,
@@ -2449,17 +2817,63 @@ function buildModelFromJob(
     syntheticMTok: job.syntheticUnits ?? 0,
     teacherCapability: syntheticTeacherCapability,
     frontierCapability,
+    teacherReliability: syntheticTeacherReliability,
+    dataQuality: job.dataQualityUsed ?? state.player.dataQuality,
+    computePfDays: job.progressPfDays,
+    seed: `${job.id}:${state.seed}`,
   });
+  const effectiveSyntheticVolume =
+    syntheticProfile.realMTok + syntheticProfile.effectiveSyntheticMTok;
+  if (
+    syntheticProfile.totalMTok > 0 &&
+    effectiveSyntheticVolume + 1e-9 < syntheticProfile.totalMTok
+  ) {
+    const effectiveCoverage =
+      coverage * (effectiveSyntheticVolume / syntheticProfile.totalMTok);
+    const effectiveScale = scaleIntelligence({
+      paramsB,
+      activeParamsB,
+      family,
+      backbone,
+      dataCoverage: effectiveCoverage,
+      dataQuality: dataQualityNorm,
+      mixWeights: weights,
+      researchMult:
+        (family === "moe" || job.backbone === "moe") &&
+        !state.player.researchUnlocked.includes("moe_routing")
+          ? researchMult * 0.55
+          : researchMult,
+      trainComplete,
+      postTrainStrength: postProfile.scaleStrength,
+      reasoningEnabled: reasoningTrained,
+      teacherCapability:
+        job.mode === "distill" ? teacher?.capability : undefined,
+    });
+    scale = effectiveScale;
+    capability = Math.min(capability, effectiveScale.capability);
+    for (const key of Object.keys(benchmarks) as (keyof BenchmarkScores)[]) {
+      benchmarks = {
+        ...benchmarks,
+        [key]: Math.min(benchmarks[key]!, effectiveScale.benchCeilings[key]),
+      };
+    }
+  }
   if (syntheticTeacherCapability > 0 && syntheticProfile.syntheticShare > 0) {
+    const effectiveSyntheticShare =
+      syntheticProfile.effectiveSyntheticMTok /
+      Math.max(
+        1e-9,
+        syntheticProfile.realMTok + syntheticProfile.effectiveSyntheticMTok,
+      );
     const imitationTarget =
       syntheticTeacherCapability * syntheticProfile.imitationRetention;
     capability = clamp(
       capability +
         Math.max(0, imitationTarget - capability) *
-          syntheticProfile.syntheticShare,
+          effectiveSyntheticShare,
     );
     const benchmarkLift =
-      syntheticProfile.syntheticShare * 3 +
+      effectiveSyntheticShare * 3 +
       syntheticProfile.benchmarkOverfit * 6;
     for (const key of Object.keys(benchmarks) as (keyof BenchmarkScores)[]) {
       benchmarks = {
@@ -2472,6 +2886,49 @@ function buildModelFromJob(
     );
     quality.chat = clamp(quality.chat - syntheticProfile.benchmarkOverfit * 10);
   }
+
+  // Precision cannot invent parameter/data/architecture headroom. Apply this
+  // after all stochastic and synthetic lifts so no later path bypasses it.
+  capability = Math.min(
+    capability,
+    scale.capabilityCeiling * precision.qualityCeilingMultiplier,
+  );
+  for (const key of Object.keys(benchmarks) as (keyof BenchmarkScores)[]) {
+    benchmarks = {
+      ...benchmarks,
+      [key]: Math.min(
+        benchmarks[key]!,
+        scale.benchCeilings[key] * precision.qualityCeilingMultiplier,
+      ),
+    };
+  }
+
+  // A plateau permits stopping; it does not manufacture the work that was
+  // skipped. This explicit maturity haircut compounds the scale formula's
+  // progress ceiling and is exactly neutral for a completed run.
+  const releasePenalty = earlyReleasePenalty(job);
+  if (releasePenalty.progress < 1) {
+    capability = clamp(
+      capability * releasePenalty.capabilityMultiplier,
+    );
+    for (const key of Object.keys(quality) as (keyof QualityAxes)[]) {
+      quality[key] = clamp(
+        quality[key] *
+          (key === "reliability"
+            ? releasePenalty.reliabilityMultiplier
+            : releasePenalty.capabilityMultiplier),
+      );
+    }
+    for (const key of Object.keys(benchmarks) as (keyof BenchmarkScores)[]) {
+      benchmarks = {
+        ...benchmarks,
+        [key]: clamp(
+          benchmarks[key]! * releasePenalty.benchmarkMultiplier,
+        ),
+      };
+    }
+  }
+  inferCostMult *= precision.inferenceCostMultiplier;
 
   const apiSug = suggestApiInOut({
     costPerMTokBase: 0.28,
@@ -2536,23 +2993,30 @@ function buildModelFromJob(
     activeParamsB,
     backbone,
     productPreset,
-    io: job.io
-      ? {
-          inputs: Object.fromEntries(
-            Object.keys(job.io.inputs).map((key) => [key, capability]),
-          ),
-          outputs: Object.fromEntries(
-            Object.keys(job.io.outputs).map((key) => [key, capability]),
-          ),
-          tools: job.io.tools > 0 ? capability * 0.7 : 0,
-        }
-      : ioForPreset(productPreset, capability),
+    io: {
+      inputs: Object.fromEntries(
+        Object.keys(jobIo.inputs).map((key) => [key, capability]),
+      ),
+      outputs: Object.fromEntries(
+        Object.keys(jobIo.outputs).map((key) => [key, capability]),
+      ),
+      tools: postProfile.toolsEnabled
+        ? capability * (0.45 + postProfile.scaleStrength * 0.4)
+        : jobIo.tools > 0
+          ? capability * 0.35
+          : 0,
+    },
     capability,
     capabilities,
     modalities,
     quality,
     benchmarks,
     postTrain: job.postTrain,
+    completedPostTrainStages: completedPostStages,
+    postTrainStageEffectiveness: {
+      ...(continueBase?.postTrainStageEffectiveness ?? {}),
+      ...resolvedStageEffectiveness,
+    },
     trainComputeSpent:
       (continueBase?.trainComputeSpent ?? 0) + job.progressPfDays,
     releaseDay: continueBase?.releaseDay ?? state.day,
@@ -2599,7 +3063,7 @@ function buildModelFromJob(
     integratedMethods:
       job.integratedMethods ?? continueBase?.integratedMethods ?? [],
     modelStack: job.modelStack ?? continueBase?.modelStack ?? [],
-    reasoningEnabled: stackModifiers.reasoningEnabled,
+    reasoningEnabled: reasoningTrained,
     revision: continueBase?.revision ?? 1,
     safetyTraining: continueBase?.safetyTraining,
     dataQualityByDomain:
@@ -2672,6 +3136,22 @@ export function tickTraining(state: SimState): SimState {
     const daysElapsed = (job.daysElapsed ?? 0) + (active ? 1 : 0);
     const resource = resources.jobs[job.id];
     const trainPool = resource?.effectivePf ?? 0;
+    const allocatedPf = active ? Math.max(0, trainPool) : 0;
+    const energyMwDays = (job.energyMwDays ?? 0) + allocatedPf * mwPerPf();
+    const energyMWh = energyMwDays * 24;
+    const telemetry = (
+      progressPfDays = job.progressPfDays,
+      elapsed = daysElapsed,
+    ) => ({
+      energyMwDays,
+      energyMWh,
+      daysRemaining: liveTrainingDaysRemaining(
+        job,
+        allocatedPf,
+        progressPfDays,
+        elapsed,
+      ),
+    });
     const recommended = job.recommendedPfDays ?? job.targetPfDays;
     const economics = {
       setupCost: job.economics?.setupCost ?? 0,
@@ -2691,6 +3171,7 @@ export function tickTraining(state: SimState): SimState {
       const nextProgress = Math.min(job.targetPfDays, recommended);
       return {
         ...job,
+        ...telemetry(nextProgress),
         economics,
         daysElapsed,
         progressPfDays: nextProgress,
@@ -2712,17 +3193,24 @@ export function tickTraining(state: SimState): SimState {
           ? "Recommended compute reached — release, keep internal, or extend 10 days."
           : "Paused"
         : trainPool <= 1e-9
-          ? "No compatible training hardware is available."
+          ? trainingStallReason(state, snap, resources, resource)
           : null;
     if (job.paused || job.awaitingDecision) {
-      return { ...job, economics, daysElapsed, stallReason };
-    }
-    if (resource && !resource.ramReady) {
       return {
         ...job,
+        ...telemetry(),
         economics,
         daysElapsed,
-        stallReason: `Training RAM blocked: ${resource.ramRequiredGb.toFixed(0)} GB needed, ${resource.ramAllocatedGb.toFixed(0)} GB assigned from the ${Math.round(resources.trainingAllocationShare * 100)}% Training allocation. Raise Training allocation, add memory, or pause another run.`,
+        stallReason,
+      };
+    }
+    if (resource && (!resource.ramReady || !resource.systemRamReady)) {
+      return {
+        ...job,
+        ...telemetry(),
+        economics,
+        daysElapsed,
+        stallReason,
       };
     }
     if (job.progressPfDays < job.targetPfDays) {
@@ -2742,6 +3230,7 @@ export function tickTraining(state: SimState): SimState {
         return failTrainingJob(
           {
             ...job,
+            ...telemetry(nextProgress),
             economics,
             daysElapsed,
             progressPfDays: nextProgress,
@@ -2758,6 +3247,7 @@ export function tickTraining(state: SimState): SimState {
       }
       return {
         ...job,
+        ...telemetry(nextProgress),
         economics,
         daysElapsed,
         stallReason,
@@ -2774,6 +3264,7 @@ export function tickTraining(state: SimState): SimState {
       job.postTrain !== "none" &&
       job.postTrainProgress < job.postTrainTarget
     ) {
+      const postTrainDaysElapsed = (job.postTrainDaysElapsed ?? 0) + 1;
       const postPool =
         (snap.pools.inference * 0.35) / jobs.length + trainPool * 0.25;
       const scale = 1 + Math.log10(Math.max(1, job.targetParamsB)) * 0.25;
@@ -2781,6 +3272,21 @@ export function tickTraining(state: SimState): SimState {
         job.postTrainTarget,
         job.postTrainProgress + (postPool * 0.15) / scale,
       );
+      const stageCompleted = nextProgress + 1e-9 >= job.postTrainTarget;
+      const effectiveness = stageCompleted
+        ? postTrainStageEffectiveness({
+            job: {
+              ...job,
+              postTrainProgress: nextProgress,
+              postTrainDaysElapsed,
+            },
+            stage: job.postTrain,
+            researchUnlocked: state.player.researchUnlocked,
+            models: state.player.models,
+            progress: nextProgress,
+            daysElapsed: postTrainDaysElapsed,
+          })
+        : undefined;
       if (
         failedAtCrossing(
           job,
@@ -2793,8 +3299,11 @@ export function tickTraining(state: SimState): SimState {
         return failTrainingJob(
           {
             ...job,
+            ...telemetry(),
+            economics,
             daysElapsed,
             postTrainProgress: nextProgress,
+            postTrainDaysElapsed,
             lossHistory: appendLossPoint(
               job,
               job.postTrain,
@@ -2808,8 +3317,24 @@ export function tickTraining(state: SimState): SimState {
       }
       return {
         ...job,
+        ...telemetry(),
+        economics,
         daysElapsed,
         postTrainProgress: nextProgress,
+        postTrainDaysElapsed,
+        completedPostTrainStages: stageCompleted
+          ? completedPostTrainStages({
+              ...job,
+              postTrainProgress: nextProgress,
+            })
+          : job.completedPostTrainStages,
+        postTrainStageEffectiveness:
+          stageCompleted && effectiveness != null
+            ? {
+                ...(job.postTrainStageEffectiveness ?? {}),
+                [job.postTrain]: effectiveness,
+              }
+            : job.postTrainStageEffectiveness,
         lossHistory: appendLossPoint(
           job,
           job.postTrain,
@@ -2818,7 +3343,13 @@ export function tickTraining(state: SimState): SimState {
         ),
       };
     }
-    return { ...job, economics, daysElapsed, stallReason };
+    return {
+      ...job,
+      ...telemetry(),
+      economics,
+      daysElapsed,
+      stallReason,
+    };
   });
   const next = withTrainingJobs(state, nextJobs);
   const newlyFailed = nextJobs.filter(

@@ -1,13 +1,20 @@
 import type { TrainingJob } from '../../../../sim/types'
+import { lossStageMarkers, trainingEnergyLabel } from './trainingPresentation'
 
 type LossPoint = NonNullable<TrainingJob['lossHistory']>[number]
 
 export function TrainingLossChart({
   history,
   failed,
+  energyMWh,
+  mwDays,
+  energyEstimated = false,
 }: {
   history: LossPoint[]
   failed: boolean
+  energyMWh?: number
+  mwDays?: number
+  energyEstimated?: boolean
 }) {
   const points =
     history.length > 1
@@ -35,23 +42,44 @@ export function TrainingLossChart({
   const height = 180
   const padL = 44
   const padR = 12
-  const padT = 14
+  const padT = 22
   const padB = 28
   const losses = points.map((point) => point.loss)
-  const min = Math.min(...losses)
-  const max = Math.max(...losses)
-  const range = Math.max(0.05, max - min)
+  const observedMin = Math.min(...losses)
+  const observedMax = Math.max(...losses)
+  const observedRange = observedMax - observedMin
+  const range = Math.max(0.2, observedRange * 1.2)
+  const midpoint = (observedMax + observedMin) / 2
+  const min = Math.max(0, midpoint - range / 2)
+  const max = min + range
+  const firstDay = points[0]!.day
+  const lastDay = points.at(-1)!.day
+  const daySpan = lastDay - firstDay
+  const firstProgress = points[0]!.progress
+  const lastProgress = points.at(-1)!.progress
+  const progressSpan = lastProgress - firstProgress
+  const xForPoint = (point: LossPoint, index: number) => {
+    const fraction = daySpan > 0
+      ? (point.day - firstDay) / daySpan
+      : progressSpan > 1e-9
+        ? (point.progress - firstProgress) / progressSpan
+        : points.length === 1
+          ? 0
+          : index / (points.length - 1)
+    return padL + Math.max(0, Math.min(1, fraction)) * (width - padL - padR)
+  }
   const path = points
     .map((point, index) => {
-      const x =
-        padL +
-        (points.length === 1 ? 0 : (index / (points.length - 1)) * (width - padL - padR))
+      const x = xForPoint(point, index)
       const y = padT + ((max - point.loss) / range) * (height - padT - padB)
       return `${index === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
     })
     .join(' ')
   const current = points.at(-1)!
   const yTicks = [max, (max + min) / 2, min]
+  const stageMarkers = lossStageMarkers(points)
+  const hasEnergy = energyMWh != null || mwDays != null
+  const energyLabel = trainingEnergyLabel({ energyMWh, mwDays, estimated: energyEstimated })
 
   return (
     <div className="mt-2 rounded-lg border border-line/60 bg-void/30 p-3">
@@ -63,8 +91,11 @@ export function TrainingLossChart({
           </p>
         </div>
         <div className="text-right font-mono text-[0.6875rem] tabular-nums text-muted">
-          <div>min {min.toFixed(3)}</div>
-          <div>max {max.toFixed(3)}</div>
+          <div>observed min {observedMin.toFixed(3)}</div>
+          <div>observed max {observedMax.toFixed(3)}</div>
+          <div title={!hasEnergy ? 'Awaiting simulator energy telemetry or a training power field.' : undefined}>
+            {energyLabel}
+          </div>
         </div>
       </div>
       <svg
@@ -99,6 +130,32 @@ export function TrainingLossChart({
             </g>
           )
         })}
+        {stageMarkers.map(({ point, index }) => {
+          const x = xForPoint(point, index)
+          return (
+            <g key={`${point.stage}-${point.day}-${index}`}>
+              <line
+                x1={x}
+                y1={padT}
+                x2={x}
+                y2={height - padB}
+                stroke="currentColor"
+                className="text-research/70"
+                strokeWidth="1"
+                strokeDasharray="4 3"
+              />
+              <text
+                x={x + 4}
+                y={padT - 6}
+                className="fill-research"
+                fontSize="9"
+                fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+              >
+                {point.stage.toUpperCase()}
+              </text>
+            </g>
+          )
+        })}
         <path
           d={path}
           fill="none"
@@ -114,7 +171,7 @@ export function TrainingLossChart({
           fontSize="10"
           fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
         >
-          D{points[0]!.day}
+          {daySpan > 0 ? `D${points[0]!.day}` : `${Math.round(points[0]!.progress * 100)}%`}
         </text>
         <text
           x={width - padR}
@@ -124,7 +181,7 @@ export function TrainingLossChart({
           fontSize="10"
           fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
         >
-          D{current.day}
+          {daySpan > 0 ? `D${current.day}` : `${Math.round(current.progress * 100)}%`}
         </text>
       </svg>
     </div>

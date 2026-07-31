@@ -293,6 +293,7 @@ export function forecastTrainingV3(opts: {
     modalityComputeMult: analysis.modalityComputeMult,
     trainCostMult: stack.trainCostMult,
     dataCost: actualMTok * 0.35,
+    numerics: opts.spec.trainingNumerics,
   })
   const targetPfDays = economics.targetPfDays
   const scale = scaleIntelligence({
@@ -326,11 +327,15 @@ export function forecastTrainingV3(opts: {
     effectiveDataRatio: analysis.effectiveDataRatio,
     repeatedDataEpochs: analysis.repeatedEpochs,
     modalityComputeMult: analysis.modalityComputeMult,
-    expectedCapability: scale.capability + stack.capabilityBonus,
+    expectedCapability: Math.min(
+      scale.capability + stack.capabilityBonus,
+      scale.capabilityCeiling * economics.precision.qualityCeilingMultiplier,
+    ),
     interactiveTokPerSec:
       serviceProfileForModel(modelLike).interactiveTokPerSec * stack.speedMult,
     risk: analysis.risk,
     warnings: analysis.warnings,
+    precision: economics.precision,
   }
 }
 

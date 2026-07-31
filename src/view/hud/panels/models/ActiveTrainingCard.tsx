@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { PostTrainStage, TrainingJob } from '../../../../sim/types'
 import {
   canReleaseTrainingJob,
+  earlyReleasePenalty,
   trainingMinimumStatus,
   type TrainingResourceAllocation,
 } from '../../../../sim/systems/training'
@@ -14,6 +15,49 @@ import { ResearchUnlockLink } from '../../ui/ResearchUnlockLink'
 import { TrainingLossChart } from './TrainingLossChart'
 import { SafetyCampaignSection } from './SafetyCampaignSection'
 import type { Model, SafetyCampaign, SafetyCampaignIntensity } from '../../../../sim/types'
+import {
+  classifyTrainingStatus,
+  trainingReleaseDisabledReason,
+  trainingRemainingTime,
+} from './trainingPresentation'
+
+type TrainStage = Exclude<PostTrainStage, 'none'>
+
+const POST_TRAIN_META: Record<
+  TrainStage,
+  { feature: string; research?: string; target: number; compute: string; data: string; spike: string }
+> = {
+  sft: {
+    feature: 'Instruction following',
+    target: 4,
+    compute: '~4 PF target units',
+    data: 'Curated instruction data',
+    spike: '+0.2–0.5, then recovery',
+  },
+  rlhf: {
+    feature: 'Preference alignment',
+    research: 'align_rlhf',
+    target: 8,
+    compute: '~8 PF target units',
+    data: 'Preference comparisons',
+    spike: '+0.3–0.7, then recovery',
+  },
+  process: {
+    feature: 'Process reward',
+    research: 'align_process',
+    target: 10,
+    compute: '~10 PF target units',
+    data: 'Step-level judgments',
+    spike: '+0.4–0.8, then recovery',
+  },
+  tools: {
+    feature: 'Tool use in benchmarks',
+    target: 6,
+    compute: '~6 PF target units',
+    data: 'Tool-call trajectories',
+    spike: '+0.2–0.6, then recovery',
+  },
+}
 
 export function ActiveTrainingCard({
   job,
@@ -72,47 +116,99 @@ export function ActiveTrainingCard({
       : job.failed || job.paused
       ? 0
       : trainingPoolPf * ((job.computePriority ?? 50) / prioritySum)
-  const remainingPf = Math.max(0, job.targetPfDays - job.progressPfDays)
-  const calendarRemaining = Math.max(0, (job.minCalendarDays ?? 0) - (job.daysElapsed ?? 0))
-  const computeEta = remainingPf <= 1e-9 ? 0 : allocatedPf > 0.05 ? remainingPf / allocatedPf : Infinity
-  const etaDays = Math.max(computeEta, calendarRemaining)
+  const { calendarRemaining, computeDone, etaDays } = trainingRemainingTime({
+    targetPfDays: job.targetPfDays,
+    progressPfDays: job.progressPfDays,
+    allocatedPf,
+    minCalendarDays: job.minCalendarDays,
+    daysElapsed: job.daysElapsed,
+  })
   const currentLoss = job.lossHistory?.at(-1)?.loss
   const recommended = job.recommendedPfDays ?? job.targetPfDays
   const atRecommended = job.progressPfDays + 1e-9 >= recommended
   const recommendedProgress = recommended > 0 ? job.progressPfDays / recommended : progress
   const releaseGate = canReleaseTrainingJob(job)
+  const releaseDisabledReason = trainingReleaseDisabledReason(releaseGate)
+  const minimum = trainingMinimumStatus(job)
+  const earlyPenalty = earlyReleasePenalty(job)
   const economics = job.economics
   const snapshots = job.benchmarkSnapshots ?? []
   const canBenchmarkMid = !job.failed && progress >= 0.1 && (job.lastBenchmarkDay == null || day - job.lastBenchmarkDay >= 7)
-  const done = trainingMinimumStatus(job).ok
-  const ramBlocked = Boolean(
-    resources && (!resources.ramReady || !resources.systemRamReady) && !job.failed && !job.paused && !done,
-  )
+  const done = minimum.ok
   const awaiting = Boolean(job.awaitingDecision)
+  const {
+    calendarWaiting,
+    diagnosticStall,
+    incompatible,
+    memoryBlocked,
+    powerBlocked,
+    ramBlocked,
+    statusLabel,
+    unstable,
+    visuallyBlocked,
+  } = classifyTrainingStatus({
+    failed: job.failed,
+    paused: job.paused,
+    stallReason: job.stallReason,
+    resources,
+    completeReady: minimum.completeReady,
+    plateaued: minimum.plateaued,
+    computeDone,
+    calendarRemaining,
+  })
+  const statusTone = job.failed || memoryBlocked || powerBlocked || incompatible || unstable
+    ? 'danger'
+    : job.paused || calendarWaiting
+      ? 'warning'
+      : minimum.completeReady
+        ? 'positive'
+        : 'warning'
+  const etaDetail =
+    etaDays === Infinity
+      ? 'stalled'
+      : calendarWaiting
+        ? `calendar hold · ${calendarRemaining}d left`
+        : computeDone
+          ? 'compute done'
+          : `~${etaDays.toFixed(0)}d left`
   const modeLabel =
     job.mode === 'distill'
       ? `Distill · teacher ${Math.round((job.distillTeacherShare ?? 0.72) * 100)}%`
       : job.mode === 'continue'
         ? 'Continuation'
         : 'Pretrain'
+  const jobWithEnergy = job as TrainingJob & {
+    energyMWh?: number
+    cumulativeMWh?: number
+    energyMwDays?: number
+    mwDays?: number
+    powerMw?: number
+    trainingPowerMw?: number
+  }
+  const directMWh = jobWithEnergy.energyMWh ?? jobWithEnergy.cumulativeMWh
+  const directMwDays = jobWithEnergy.energyMwDays ?? jobWithEnergy.mwDays
+  const powerMw = jobWithEnergy.trainingPowerMw ?? jobWithEnergy.powerMw
+  const estimatedMwDays = powerMw != null ? Math.max(0, powerMw) * Math.max(0, job.daysElapsed ?? 0) : undefined
+  const chartMwDays = directMwDays ?? (directMWh != null ? directMWh / 24 : estimatedMwDays)
+  const chartMWh = directMWh ?? (chartMwDays != null ? chartMwDays * 24 : undefined)
+  const energyEstimated = directMWh == null && directMwDays == null && chartMWh != null
+  const stageHistory = new Set((job.lossHistory ?? []).filter((point) => point.stage !== 'base').map((point) => point.stage as TrainStage))
 
   return (
     <GameCard
       eyebrow="Live training"
       title={
         <span className="flex items-center gap-2">
-          <LiveDot className={job.failed || ramBlocked ? 'text-danger' : job.paused ? 'text-amber' : 'text-train'} />
+          <LiveDot className={job.failed || visuallyBlocked ? 'text-danger' : job.paused || calendarWaiting ? 'text-amber' : 'text-train'} />
           <span className="truncate">{job.name}</span>
         </span>
       }
-      tone={job.failed || ramBlocked ? 'danger' : 'train'}
-      live={!job.failed && !job.paused && !done && !ramBlocked}
-      className={!job.failed && !done && !ramBlocked ? 'live-glow' : ''}
+      tone={job.failed || visuallyBlocked ? 'danger' : 'train'}
+      live={!job.failed && !job.paused && !done && !visuallyBlocked && !calendarWaiting}
+      className={!job.failed && !done && !visuallyBlocked && !calendarWaiting ? 'live-glow' : ''}
       actions={
         <div className="flex items-center gap-1.5">
-          <StatusChip tone={job.failed || ramBlocked ? 'danger' : job.paused ? 'warning' : done ? 'positive' : 'warning'}>
-            {job.failed ? 'Failed' : ramBlocked ? 'RAM blocked' : job.paused ? 'Paused' : done ? 'Ready' : 'Training'}
-          </StatusChip>
+          <StatusChip tone={statusTone}>{statusLabel}</StatusChip>
         </div>
       }
     >
@@ -144,9 +240,9 @@ export function ActiveTrainingCard({
         <MeterBar
           label="Progress"
           value={progress}
-          detail={`${pct}% · ${etaDays === Infinity ? 'stalled' : `~${etaDays.toFixed(0)}d left`} · calendar ${job.daysElapsed ?? 0}/${job.minCalendarDays ?? 0}d`}
+          detail={`${pct}% · ${etaDetail} · calendar ${job.daysElapsed ?? 0}/${job.minCalendarDays ?? 0}d`}
           tone="train"
-          live={!job.failed && !job.paused && !done && !ramBlocked}
+          live={!job.failed && !job.paused && !done && !ramBlocked && !calendarWaiting}
         />
 
         <div className="grid grid-cols-3 gap-2">
@@ -176,7 +272,13 @@ export function ActiveTrainingCard({
           </div>
         ) : null}
 
-        {job.stallReason ? <p className="text-[0.75rem] text-amber">{job.stallReason}</p> : null}
+        {diagnosticStall ? <p className="text-[0.75rem] text-amber">{diagnosticStall}</p> : null}
+        {calendarWaiting && !job.stallReason ? (
+          <p className="text-[0.75rem] text-amber">
+            {minimum.reason ??
+              `${calendarRemaining} funded active calendar day${calendarRemaining === 1 ? '' : 's'} remain for integration and validation.`}
+          </p>
+        ) : null}
         {ramBlocked && !job.stallReason ? (
           <p className="text-[0.75rem] text-danger">
             Training RAM is a hard limit. Raise Training allocation, add memory, or pause another run.
@@ -231,7 +333,13 @@ export function ActiveTrainingCard({
           </div>
         ) : null}
 
-        <TrainingLossChart history={job.lossHistory ?? []} failed={job.failed ?? false} />
+        <TrainingLossChart
+          history={job.lossHistory ?? []}
+          failed={job.failed ?? false}
+          energyMWh={chartMWh}
+          mwDays={chartMwDays}
+          energyEstimated={energyEstimated}
+        />
 
         {!job.failed ? (
           <label className="block text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
@@ -255,14 +363,25 @@ export function ActiveTrainingCard({
             </HudButton>
           ) : done || awaiting ? (
             <>
-              <HudButton
-                variant="primary"
-                disabled={!releaseGate.ok}
-                title={!releaseGate.ok ? releaseGate.reason : undefined}
-                onClick={() => onRelease(job.id)}
-              >
-                Release
-              </HudButton>
+              {minimum.completeReady ? (
+                <HudButton
+                  variant="primary"
+                  disabled={!releaseGate.ok}
+                  title={releaseDisabledReason}
+                  onClick={() => onRelease(job.id)}
+                >
+                  Release
+                </HudButton>
+              ) : (
+                <HudButton
+                  variant="primary"
+                  disabled={!releaseGate.ok || releaseGate.releaseKind !== 'early'}
+                  title={releaseDisabledReason ?? 'Release this plateaued checkpoint with degraded quality.'}
+                  onClick={() => onRelease(job.id)}
+                >
+                  Early release
+                </HudButton>
+              )}
               <HudButton onClick={() => onBenchmark(job.id)}>Run benchmarks</HudButton>
               <HudButton onClick={() => onKeepInternal(job.id)}>Keep internal</HudButton>
               {onExtend && (awaiting || atRecommended) ? (
@@ -279,8 +398,12 @@ export function ActiveTrainingCard({
               >
                 {cancelConfirm ? 'Confirm delete' : 'Delete run'}
               </HudButton>
-              {!releaseGate.ok ? (
-                <p className="basis-full text-[0.75rem] text-amber">{releaseGate.reason}</p>
+              {releaseDisabledReason ? (
+                <p className="basis-full text-[0.75rem] text-amber">{releaseDisabledReason}</p>
+              ) : releaseGate.releaseKind === 'early' || minimum.earlyReleaseReady ? (
+                <p className="basis-full text-[0.75rem] text-amber">
+                  Degraded checkpoint: capability ×{earlyPenalty.capabilityMultiplier.toFixed(2)}, benchmarks ×{earlyPenalty.benchmarkMultiplier.toFixed(2)}, reliability ×{earlyPenalty.reliabilityMultiplier.toFixed(2)}.
+                </p>
               ) : null}
             </>
           ) : (
@@ -294,6 +417,14 @@ export function ActiveTrainingCard({
                 onClick={() => onBenchmark(job.id)}
               >
                 Benchmark
+              </HudButton>
+              <HudButton
+                variant="primary"
+                disabled={!releaseGate.ok || releaseGate.releaseKind !== 'early'}
+                title={releaseDisabledReason ?? 'Release this plateaued checkpoint with degraded quality.'}
+                onClick={() => onRelease(job.id)}
+              >
+                Early release
               </HudButton>
               {onExtend && atRecommended ? (
                 <HudButton variant="secondary" onClick={() => onExtend(job.id)}>
@@ -309,6 +440,13 @@ export function ActiveTrainingCard({
               >
                 {cancelConfirm ? 'Confirm cancel' : 'Cancel'}
               </HudButton>
+              {releaseGate.releaseKind === 'early' || minimum.earlyReleaseReady ? (
+                <p className="basis-full text-[0.75rem] text-amber">
+                  Early release degrades quality: capability ×{earlyPenalty.capabilityMultiplier.toFixed(2)}, benchmarks ×{earlyPenalty.benchmarkMultiplier.toFixed(2)}, reliability ×{earlyPenalty.reliabilityMultiplier.toFixed(2)}.
+                </p>
+              ) : releaseDisabledReason ? (
+                <p className="basis-full text-[0.75rem] text-muted">Early release locked: {releaseDisabledReason}</p>
+              ) : null}
             </>
           )}
         </div>
@@ -319,26 +457,48 @@ export function ActiveTrainingCard({
               <span className="text-[0.8125rem] font-semibold text-bone">Optional post-training</span>
               <span className="font-mono text-[0.6875rem] text-muted">choose next stage</span>
             </div>
-            <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-              {(['sft', 'rlhf', 'process', 'tools'] as Exclude<PostTrainStage, 'none'>[]).map((stage) => {
-                const locked =
-                  (stage === 'rlhf' && !unlocked.includes('align_rlhf')) ||
-                  (stage === 'process' && !unlocked.includes('align_process'))
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {(Object.keys(POST_TRAIN_META) as TrainStage[]).map((stage) => {
+                const meta = POST_TRAIN_META[stage]
+                const locked = Boolean(meta.research && !unlocked.includes(meta.research))
                 const busy = job.postTrain !== 'none' && job.postTrainProgress < job.postTrainTarget
+                const applied =
+                  (stageHistory.has(stage) && job.postTrain !== stage) ||
+                  (job.postTrain === stage && job.postTrainProgress >= job.postTrainTarget)
+                const stageTime = allocatedPf > 0.05
+                  ? `~${Math.ceil(meta.target / allocatedPf)} active day${Math.ceil(meta.target / allocatedPf) === 1 ? '' : 's'}`
+                  : 'Time awaits PF allocation'
+                const lockReason = applied
+                  ? 'Already applied; post-training stages are one-shot.'
+                  : locked
+                    ? `Research ${meta.research} required.`
+                    : busy
+                      ? `${job.postTrain.toUpperCase()} is already in progress.`
+                      : undefined
+                const stateLabel = applied ? 'done' : locked ? 'locked' : busy ? 'busy' : 'available'
                 return (
                   <button
                     key={stage}
                     type="button"
-                    disabled={locked || busy}
-                    title={locked ? 'Research required' : busy ? 'Stage in progress' : undefined}
+                    disabled={applied || locked || busy}
+                    title={lockReason}
                     onClick={() => onSelectPostTrain(job.id, stage)}
-                    className={`rounded-md border px-2 py-1.5 text-[0.6875rem] uppercase tracking-[0.12em] disabled:cursor-not-allowed disabled:opacity-40 ${
+                    className={`rounded-md border p-2.5 text-left disabled:cursor-not-allowed disabled:opacity-55 ${
                       job.postTrain === stage
                         ? 'border-research bg-research/20 text-research'
                         : 'border-line text-muted'
                     }`}
                   >
-                    {stage}
+                    <span className="flex items-center justify-between gap-2">
+                      <strong className="text-[0.75rem] uppercase tracking-[0.12em] text-bone">{stage}</strong>
+                      <span className="font-mono text-[0.625rem] uppercase tracking-[0.1em]">{stateLabel}</span>
+                    </span>
+                    <span className="mt-1 block text-[0.75rem] text-bone">Gains: {meta.feature}</span>
+                    <span className="mt-1 block font-mono text-[0.6875rem] leading-5">
+                      {meta.data} · {meta.compute} · {stageTime}
+                    </span>
+                    <span className="block text-[0.6875rem]">Expected loss spike {meta.spike}</span>
+                    {lockReason ? <span className="mt-1 block text-[0.6875rem] text-amber">{lockReason}</span> : null}
                   </button>
                 )
               })}

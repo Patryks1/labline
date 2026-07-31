@@ -14,7 +14,13 @@ import type {
   ComputeLedger as SimComputeLedger,
   ComputeWorkItem as SimComputeWorkItem,
 } from '../types'
-import { analyzeApiPricing, apiRevenueFromMTok, blendApiPrice } from '../balance/pricing'
+import {
+  analyzeApiPricing,
+  apiDemandPricePenalty,
+  apiRevenueFromMTok,
+  blendApiPrice,
+  commercialModelKind,
+} from '../balance/pricing'
 import {
   inferenceCapacityMTok,
   inferencePfAvailable,
@@ -504,6 +510,45 @@ export interface RivalOfferSettlement {
   unservedRatio: number
 }
 
+export function rivalPlanDemandPerUser(
+  rival: RivalLab,
+  model: Model,
+  frontierCapability: number,
+  day: number,
+): number {
+  const enabled = (rival.pricing.plans ?? []).filter(
+    (plan) => plan.enabled && (plan.modelIds.length === 0 || plan.modelIds.includes(model.id)),
+  )
+  const plans = enabled.length > 0 ? enabled : (rival.pricing.plans ?? []).filter((plan) => plan.enabled)
+  if (plans.length === 0) return ECONOMY.basePlanUsageMTokPerDay
+  const rawWeights = plans.map((plan) => {
+    const allowance = planAllowanceMTokPerMonth(plan)
+    return Math.max(
+      0.05,
+      Math.log1p(allowance) * 1.1 - Math.log1p(Math.max(0, plan.pricePerMonth)) * 0.28,
+    )
+  })
+  const weightTotal = rawWeights.reduce((sum, weight) => sum + weight, 0)
+  const sota = sotaProximity(model.capability, frontierCapability)
+  return plans.reduce((sum, plan, index) => {
+    const shock = planDemandShockMultiplier(plan, day)
+    const utilization = planUsageUtilization(plan, plans, {
+      modelCapability: model.capability,
+      frontierCapability,
+      demandShockMultiplier: shock,
+    })
+    const qualityEngagement = 0.85 + Math.pow(sota, 1.35) * 0.15
+    const launchEngagement = 1 + Math.max(0, shock - 1) * 0.15
+    const perUser = Math.min(
+      planAllowanceMTokPerMonth(plan) / ECONOMY.daysPerMonth,
+      planActualMTokPerUser(plan, ECONOMY.basePlanUsageMTokPerDay, utilization) *
+        qualityEngagement *
+        launchEngagement,
+    )
+    return sum + perUser * (rawWeights[index]! / Math.max(1e-9, weightTotal))
+  }, 0)
+}
+
 /**
  * Settle the exact rival models that won demand. All model workloads share one
  * PF pool, so larger/less-efficient winners consume proportionally more of it.
@@ -686,6 +731,7 @@ export function tickMarket(state: SimState): SimState {
   let playerIndieUsers = 0
   let totalDemandMTok = 0
   let enterpriseWeight = 0
+  let playerPricingComplaintPressure = 0
 
   const segBoost = (id: SegmentId) =>
     state.activeEvents.reduce((m, e) => m * (e.effects.segmentBoost?.[id] ?? 1), 1)
@@ -776,15 +822,24 @@ export function tickMarket(state: SimState): SimState {
 
     // Frontier-relative utilities: SOTA leads; mid-pack still gets real share.
     // Paid acquisition is available to every lab on subscription segments.
+    const pricingByOffer = new Map<string, ReturnType<typeof analyzeApiPricing>>()
     const utils = segmentOffers.map((o) => {
       const scoredOffer = effectiveOffer(o)
       let u = offerUtility(scoredOffer, segState.id, { frontier: segmentFrontier })
+      const scoredModel =
+        o.labId === state.playerLabId
+          ? state.player.models.find((model) => model.id === o.modelId)
+          : state.rivals
+              .find((rival) => rival.id === o.labId)
+              ?.models.find((model) => model.id === o.modelId)
+      const kind = scoredModel ? commercialModelKind(scoredModel) : 'language'
       const pricingStatus = analyzeApiPricing({
         price: segDef.prefersSub ? o.subPrice : o.apiPrice,
         marginalCost: 0,
         capability: scoredOffer.capability,
         featureScore: scoredOffer.modalities.length * 18,
         tokPerSec: scoredOffer.tokPerSec,
+        kind,
         peers: segmentOffers
           .filter((peer) => peer.labId !== o.labId)
           .map((peer) => {
@@ -797,9 +852,13 @@ export function tickMarket(state: SimState): SimState {
             }
           }),
       })
-      if (pricingStatus.primary === 'demand_collapse') u -= 10
-      else if (pricingStatus.primary === 'expensive') u -= 3.5
-      else if (pricingStatus.primary === 'undercutting') u += 1
+      pricingByOffer.set(marketOfferKey(o.labId, o.modelId), pricingStatus)
+      const pricePenalty = apiDemandPricePenalty({
+        ratioToPeer: pricingStatus.ratioToPeer,
+        kind,
+      })
+      u -= pricePenalty
+      if (pricingStatus.primary === 'undercutting') u += 1
       const marketingSpend =
         o.labId === state.playerLabId
           ? marketingReach(state).demandEquivalentSpend
@@ -884,17 +943,46 @@ export function tickMarket(state: SimState): SimState {
         mtok *= Math.max(0.35, 1 - offerPain * 0.55)
       }
       if (!segDef.prefersSub) {
-        const pricePressure = Math.max(
-          0,
-          Math.min(1, (Math.log10(Math.max(0, offer.apiPrice) + 1) - 0.6) / 1.8),
-        )
+        const model =
+          offer.labId === state.playerLabId
+            ? state.player.models.find((candidate) => candidate.id === offer.modelId)
+            : state.rivals
+                .find((rival) => rival.id === offer.labId)
+                ?.models.find((candidate) => candidate.id === offer.modelId)
+        const kind = model ? commercialModelKind(model) : 'language'
+        const pricingStatus = pricingByOffer.get(marketOfferKey(offer.labId, offer.modelId))
+        const pricePressure = apiDemandPricePenalty({
+          ratioToPeer: pricingStatus?.ratioToPeer ?? null,
+          kind,
+        })
         const sensitivity =
           segState.id === 'hobby' || segState.id === 'indie_api'
             ? 1.15
             : segState.id === 'startup_api'
               ? 0.9
               : 0.45
-        mtok *= Math.max(0.12, 1 - pricePressure * sensitivity)
+        const nicheFloor =
+          kind === 'video'
+            ? 0.34
+            : kind === 'image' || kind === 'reasoning' || kind === 'coding'
+              ? 0.27
+              : 0.18
+        mtok *= Math.max(nicheFloor, 1 - pricePressure * sensitivity * 0.075)
+        if (offer.labId === state.playerLabId) {
+          playerPricingComplaintPressure = Math.max(
+            playerPricingComplaintPressure,
+            pricePressure / 9,
+          )
+        }
+      } else if (offer.labId !== state.playerLabId) {
+        const rival = state.rivals.find((candidate) => candidate.id === offer.labId)
+        const model = rival?.models.find((candidate) => candidate.id === offer.modelId)
+        if (rival && model) {
+          mtok =
+            users *
+            PLAN_SEAT_CONVERSION *
+            rivalPlanDemandPerUser(rival, model, segmentFrontier, state.day)
+        }
       }
 
       totalDemandMTok += mtok
@@ -1048,6 +1136,7 @@ export function tickMarket(state: SimState): SimState {
     const autoU = planUsageUtilization(plan, enabledPlans, {
       modelCapability: cap,
       frontierCapability: frontierCap,
+      demandShockMultiplier: planDemandShockMultiplier(plan, state.day),
     })
     const usageRate = autoU
     const sota = sotaProximity(cap, frontierCap)
@@ -1064,7 +1153,7 @@ export function tickMarket(state: SimState): SimState {
       utilization: usageRate,
     })
     // Softer price rejection — gouging still hurts, fair Plus/Pro still sell
-    subscribers *= Math.max(0.08, Math.pow(Math.max(0.05, 1 - priceTooHigh), 1.55))
+    subscribers *= Math.max(0.14, Math.pow(Math.max(0.08, 1 - priceTooHigh), 1.3))
     // Closing free: paid take-rate bonus (conversion funnel)
     if (!free && !freePlanOn) subscribers *= 1.35
     const dailyAllowance = planAllowanceMTokPerMonth(plan) / ECONOMY.daysPerMonth
@@ -1072,7 +1161,7 @@ export function tickMarket(state: SimState): SimState {
       dailyAllowance,
       planActualMTokPerUser(plan, ECONOMY.basePlanUsageMTokPerDay, usageRate) *
         qualityEngagement *
-        planDemandShockMultiplier(plan, state.day),
+        (1 + Math.max(0, planDemandShockMultiplier(plan, state.day) - 1) * 0.15),
     )
     if (free && priorPain > 0.08) perUser *= painDemandDamp
     const rawMTok = subscribers * perUser
@@ -1501,6 +1590,9 @@ export function tickMarket(state: SimState): SimState {
   const model = bestPlayerModel(state)
   if (model && model.quality.reliability < 35) brand = Math.max(8, brand - 0.15)
   if (model && model.capability < 22) brand = Math.max(8, brand - 0.1)
+  if (playerPricingComplaintPressure > 0.2) {
+    brand = Math.max(8, brand - (playerPricingComplaintPressure - 0.2) * 0.35)
+  }
   // Quantized traffic exposes the lower eval profile to real customers. INT8
   // is usually tolerable; sustained INT4 on a material product creates a
   // visible trust cost proportional to that plan's share of served traffic.

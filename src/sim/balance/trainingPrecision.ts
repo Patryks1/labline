@@ -14,6 +14,18 @@ export interface TrainingPrecisionProfile {
   throughputByGeneration: Readonly<Partial<Record<number, number>>>
   /** Activation/workspace footprint relative to BF16. */
   activationMemoryMultiplier: number
+  /** Useful optimizer work required relative to the default mixed-precision recipe. */
+  trainingWorkMultiplier: number
+  /** Cluster reservation / setup cash relative to the default recipe. */
+  upfrontCashMultiplier: number
+  /** Recurring training cash burn relative to the default recipe. */
+  dailyCashMultiplier: number
+  /** Maximum share of the parameter/data/architecture capability ceiling retained. */
+  qualityCeilingMultiplier: number
+  /** Day-to-day loss and terminal outcome spread relative to default mixed precision. */
+  lossVolatilityMultiplier: number
+  /** Ordinary inference cost inherited by the unquantized checkpoint. */
+  inferenceCostMultiplier: number
   /** Relative numerical-instability pressure; not a deterministic quality loss. */
   stabilityRisk: number
 }
@@ -32,6 +44,12 @@ export const TRAINING_PRECISION_PROFILES: Readonly<
     minimumHardwareGeneration: 1,
     throughputByGeneration: { 1: 0.065, 2: 0.07, 3: 0.08, 4: 0.09, 5: 0.1 },
     activationMemoryMultiplier: 2,
+    trainingWorkMultiplier: 1.16,
+    upfrontCashMultiplier: 1.22,
+    dailyCashMultiplier: 1.2,
+    qualityCeilingMultiplier: 1,
+    lossVolatilityMultiplier: 0.72,
+    inferenceCostMultiplier: 1.18,
     stabilityRisk: -0.08,
   },
   fp16_mixed: {
@@ -40,6 +58,12 @@ export const TRAINING_PRECISION_PROFILES: Readonly<
     minimumHardwareGeneration: 1,
     throughputByGeneration: { 1: 1, 2: 1, 3: 1, 4: 1, 5: 1 },
     activationMemoryMultiplier: 1,
+    trainingWorkMultiplier: 1,
+    upfrontCashMultiplier: 1,
+    dailyCashMultiplier: 1,
+    qualityCeilingMultiplier: 0.992,
+    lossVolatilityMultiplier: 1,
+    inferenceCostMultiplier: 1,
     stabilityRisk: 0.04,
   },
   bf16_mixed: {
@@ -48,6 +72,12 @@ export const TRAINING_PRECISION_PROFILES: Readonly<
     minimumHardwareGeneration: 1,
     throughputByGeneration: { 1: 1, 2: 1, 3: 1, 4: 1, 5: 1 },
     activationMemoryMultiplier: 1,
+    trainingWorkMultiplier: 1,
+    upfrontCashMultiplier: 1,
+    dailyCashMultiplier: 0.99,
+    qualityCeilingMultiplier: 0.995,
+    lossVolatilityMultiplier: 0.94,
+    inferenceCostMultiplier: 1,
     stabilityRisk: 0,
   },
   fp8_hybrid: {
@@ -58,6 +88,12 @@ export const TRAINING_PRECISION_PROFILES: Readonly<
     // FP8 often retains BF16/FP32 master and optimizer copies. Most savings are
     // in activations and communication, not the entire training state.
     activationMemoryMultiplier: 0.88,
+    trainingWorkMultiplier: 0.82,
+    upfrontCashMultiplier: 0.82,
+    dailyCashMultiplier: 0.84,
+    qualityCeilingMultiplier: 0.965,
+    lossVolatilityMultiplier: 1.35,
+    inferenceCostMultiplier: 0.82,
     stabilityRisk: 0.04,
   },
   nvfp4: {
@@ -66,8 +102,55 @@ export const TRAINING_PRECISION_PROFILES: Readonly<
     minimumHardwareGeneration: 3,
     throughputByGeneration: { 3: 2.6, 4: 2.7, 5: 2.8 },
     activationMemoryMultiplier: 0.72,
+    trainingWorkMultiplier: 0.64,
+    upfrontCashMultiplier: 0.66,
+    dailyCashMultiplier: 0.7,
+    qualityCeilingMultiplier: 0.9,
+    lossVolatilityMultiplier: 1.85,
+    inferenceCostMultiplier: 0.62,
     stabilityRisk: 0.12,
   },
+}
+
+/** UI-safe, composed economics metadata for compute precision + native topology. */
+export interface TrainingNumericsEconomicsProfile {
+  label: string
+  trainingWorkMultiplier: number
+  upfrontCashMultiplier: number
+  dailyCashMultiplier: number
+  qualityCeilingMultiplier: number
+  lossVolatilityMultiplier: number
+  inferenceCostMultiplier: number
+  stabilityRisk: number
+}
+
+export function trainingNumericsEconomicsProfile(
+  numerics: TrainingNumerics = DEFAULT_TRAINING_NUMERICS,
+): TrainingNumericsEconomicsProfile {
+  const base = TRAINING_PRECISION_PROFILES[numerics.computeFormat]
+  const ternary = numerics.nativeWeightFormat === 'ternary_1_58'
+  // Later recipe generations recover part of low-precision quality/stability,
+  // but never exceed the underlying parameter/data/architecture ceiling.
+  const recipeAdvances = Math.max(0, Math.floor(numerics.recipeVersion) - 1)
+  const recoveredCeiling = Math.min(
+    1,
+    base.qualityCeilingMultiplier +
+      (1 - base.qualityCeilingMultiplier) * Math.min(0.8, recipeAdvances * 0.25),
+  )
+  const stabilizedVolatility = Math.max(
+    0.7,
+    base.lossVolatilityMultiplier * Math.pow(0.9, recipeAdvances),
+  )
+  return {
+    label: ternary ? `${base.label} · ternary 1.58-bit weights` : base.label,
+    trainingWorkMultiplier: base.trainingWorkMultiplier * (ternary ? 0.9 : 1),
+    upfrontCashMultiplier: base.upfrontCashMultiplier * (ternary ? 0.88 : 1),
+    dailyCashMultiplier: base.dailyCashMultiplier * (ternary ? 0.86 : 1),
+    qualityCeilingMultiplier: Math.min(recoveredCeiling, ternary ? 0.92 : 1),
+    lossVolatilityMultiplier: stabilizedVolatility * (ternary ? 1.55 : 1),
+    inferenceCostMultiplier: base.inferenceCostMultiplier * (ternary ? 0.22 : 1),
+    stabilityRisk: base.stabilityRisk + (ternary ? 0.1 : 0),
+  }
 }
 
 export const DEFAULT_TRAINING_NUMERICS: TrainingNumerics = {

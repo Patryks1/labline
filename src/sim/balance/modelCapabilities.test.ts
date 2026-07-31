@@ -5,6 +5,7 @@ import {
   deriveModelCapabilities,
   estimateSyntheticQuality,
 } from './modelCapabilities'
+import { scaleIntelligence } from './modelScaling'
 
 const base: ModelCapabilityInputs = {
   finalCapability: 60,
@@ -37,6 +38,26 @@ describe('domain-first model capabilities', () => {
     expect(math.domains.math).toBeGreaterThan(science.domains.math)
     expect(science.domains.science).toBeGreaterThan(math.domains.science)
     expect(math.domains.math).toBeGreaterThan(healthCode.domains.math)
+  })
+
+  it('boosts the dominant skill while narrowing unrelated capability', () => {
+    const multimodal = { ...base, io: { ...base.io, inputs: { ...base.io.inputs, image: 60 } } }
+    const scaleBase = { paramsB: 20, dataCoverage: 6, dataQuality: 1 }
+    const broadWeights = multimodal.domainWeights
+    const narrowWeights = { math: 0.92, code: 0.08 }
+    const broad = deriveModelCapabilities({
+      ...multimodal,
+      finalCapability: scaleIntelligence({ ...scaleBase, mixWeights: broadWeights }).capability,
+    })
+    const narrow = deriveModelCapabilities({
+      ...multimodal,
+      finalCapability: scaleIntelligence({ ...scaleBase, mixWeights: narrowWeights }).capability,
+      domainWeights: narrowWeights,
+    })
+
+    expect(narrow.domains.math).toBeGreaterThan(broad.domains.math)
+    expect(narrow.domains.language).toBeLessThan(broad.domains.language)
+    expect(narrow.domains.vision).toBeLessThan(broad.domains.vision)
   })
 
   it('improves with compute and data but saturates', () => {

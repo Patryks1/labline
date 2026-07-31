@@ -314,6 +314,16 @@ export function grabbedWorldPanDelta(
   }
 }
 
+/**
+ * Sanitize a camera target component after pointer pans, keyboard movement, or
+ * replay frames. A single non-finite value (for example from a bad elevation
+ * sample or a coalesced wheel packet) otherwise poisons the camera matrix and
+ * every projected ray, leaving the map permanently white until reload.
+ */
+export function sanitizeMapTargetComponent(value: number, fallback = 0): number {
+  return Number.isFinite(value) ? value : fallback
+}
+
 export function hasPointerDragged(
   startX: number,
   startY: number,

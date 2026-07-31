@@ -19,11 +19,10 @@ import {
   shipModel,
   keepInternal,
   releaseFromJob,
+  releaseTrainingEarly,
   releaseModel,
   deleteModel,
   setModelApiPrice,
-  setModelApiInOut,
-  applyModelApiMarkup,
 } from "../sim/systems/training";
 import { applyLabAction } from "../sim/systems/labActionKernel";
 import {
@@ -272,6 +271,7 @@ interface GameStore {
   shipModel: () => void;
   keepInternal: (jobId?: string) => void;
   releaseFromJob: (jobId?: string) => void;
+  releaseTrainingEarly: (jobId: string) => void;
   releaseModel: (id: string) => void;
   deleteModel: (id: string) => void;
   setModelApiPrice: (id: string, price: number | null) => void;
@@ -585,10 +585,10 @@ export const useGameStore = create<GameStore>((set, get) => ({
       },
     })),
   openHallEditor: (hallEditorFacilityId) => set((store) => ({
-    state: migrateDataHallLayouts(store.state),
-    hallEditorFacilityId,
-    leftRailOpen: false,
-    commandDockOpen: false,
+      state: migrateDataHallLayouts(store.state),
+      hallEditorFacilityId,
+      leftRailOpen: false,
+      commandDockOpen: false,
   })),
   closeHallEditor: () => set({ hallEditorFacilityId: null }),
   applyHallEditorPlan: (plan) => {
@@ -908,14 +908,54 @@ export const useGameStore = create<GameStore>((set, get) => ({
     set((st) => ({ state: keepInternal(st.state, jobId) })),
   releaseFromJob: (jobId) =>
     set((st) => ({ state: releaseFromJob(st.state, jobId) })),
+  releaseTrainingEarly: (jobId) =>
+    set((st) => ({ state: releaseTrainingEarly(st.state, jobId) })),
   releaseModel: (id) => set((st) => ({ state: releaseModel(st.state, id) })),
   deleteModel: (id) => set((st) => ({ state: deleteModel(st.state, id) })),
   setModelApiPrice: (id, price) =>
     set((st) => ({ state: setModelApiPrice(st.state, id, price) })),
   setModelApiInOut: (id, priceIn, priceOut) =>
-    set((st) => ({ state: setModelApiInOut(st.state, id, priceIn, priceOut) })),
+    set((st) => {
+      const model = st.state.player.models.find(
+        (candidate) => candidate.id === id,
+      );
+      if (!model) return st;
+      const input = Math.max(
+        0,
+        priceIn ?? model.apiPriceInPerMTok ?? model.costApiPriceIn,
+      );
+      const output = Math.max(
+        0,
+        priceOut ?? model.apiPriceOutPerMTok ?? model.costApiPriceOut,
+      );
+      return {
+        state: applyLabAction(st.state, st.state.playerLabId, {
+          kind: "set_api_price",
+          modelId: id,
+          input,
+          output,
+        }),
+      };
+    }),
   applyModelApiMarkup: (id, markupPct) =>
-    set((st) => ({ state: applyModelApiMarkup(st.state, id, markupPct) })),
+    set((st) => {
+      const model = st.state.player.models.find(
+        (candidate) => candidate.id === id,
+      );
+      if (!model) return st;
+      const multiplier = 1 + Math.max(0, markupPct) / 100;
+      const input = Math.round(model.costApiPriceIn * multiplier * 1000) / 1000;
+      const output =
+        Math.round(model.costApiPriceOut * multiplier * 1000) / 1000;
+      return {
+        state: applyLabAction(st.state, st.state.playerLabId, {
+          kind: "set_api_price",
+          modelId: id,
+          input,
+          output,
+        }),
+      };
+    }),
   startSafetyCampaign: (modelId, intensity, researchers) =>
     set((st) => ({
       state: startSafetyCampaign(st.state, { modelId, intensity, researchers }),

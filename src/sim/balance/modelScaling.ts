@@ -239,6 +239,11 @@ export function dataFitScore(coverage: number, dataQuality: number): number {
 export function mixFit(weights?: Partial<Record<string, number>>): {
   general: number;
   domainBoost: Record<string, number>;
+  /** 0–1 strength of a corpus dominated by its largest one or two domains. */
+  specialization: number;
+  /** Fractional loss applied to general capability (hard-capped at 50%). */
+  generalPenalty: number;
+  dominantDomains: string[];
 } {
   const keys = [
     "code",
@@ -271,6 +276,9 @@ export function mixFit(weights?: Partial<Record<string, number>>): {
         health: 0.1,
         image: 0.08,
       },
+      specialization: 0,
+      generalPenalty: 0,
+      dominantDomains: [],
     };
   }
   for (const k of keys) w[k] = (w[k] ?? 0) / sum;
@@ -283,14 +291,33 @@ export function mixFit(weights?: Partial<Record<string, number>>): {
   }
   const entMax = Math.log(keys.length);
   const diversity = entMax > 0 ? ent / entMax : 1;
-  // Mono-domain ~0.72 general efficiency; balanced ~1.05
-  const general = 0.72 + diversity * 0.33;
+  const ranked = [...keys].sort((a, b) => w[b]! - w[a]!);
+  const topTwoMass = (w[ranked[0]!] ?? 0) + (w[ranked[1]!] ?? 0);
+  // Narrowing starts just before 60%, then eases smoothly toward the cap.
+  // Smoothstep keeps small recipe changes from causing a discontinuous cliff.
+  const concentration = Math.max(0, Math.min(1, (topTwoMass - 0.58) / 0.42));
+  const specialization = concentration * concentration * (3 - 2 * concentration);
+  const generalPenalty = Math.min(0.5, specialization * 0.5);
+  const general = (1 + diversity * 0.05) * (1 - generalPenalty);
+  const dominantDomains = ranked
+    .slice(0, 2)
+    .filter((domain) => (w[domain] ?? 0) >= 0.18);
 
   const domainBoost: Record<string, number> = {};
   for (const k of keys) {
-    domainBoost[k] = Math.min(1, (w[k] ?? 0) * 1.65);
+    const share = w[k] ?? 0;
+    const dominantLift = dominantDomains.includes(k)
+      ? specialization * Math.sqrt(share) * 0.45
+      : 0;
+    domainBoost[k] = Math.min(1, share * 1.65 + dominantLift);
   }
-  return { general: Math.max(0.65, Math.min(1.08, general)), domainBoost };
+  return {
+    general: Math.max(0.5, Math.min(1.08, general)),
+    domainBoost,
+    specialization,
+    generalPenalty,
+    dominantDomains,
+  };
 }
 
 /**

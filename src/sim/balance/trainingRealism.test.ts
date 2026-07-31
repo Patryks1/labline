@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   COMPUTE_OPTIMAL_TOKENS_PER_PARAMETER,
   denseTrainingPfDays,
+  estimateTrainingEconomics,
   FLOPS_PER_PF_DAY,
   moeTrainingComputeParamsB,
   trainCostPfDays,
@@ -15,8 +16,11 @@ import {
   estimateTrainingMemoryGb,
   supportsTrainingFormat,
   trainingFormatThroughput,
+  trainingNumericsEconomicsProfile,
   validateTrainingNumerics,
 } from './trainingPrecision'
+import { buildScaledModel } from './modelBuild'
+import { ECONOMY } from './economy'
 
 describe('training formula v2', () => {
   it('matches exact C≈6ND reference values before calendar compression', () => {
@@ -142,6 +146,96 @@ describe('training formula v2', () => {
 })
 
 describe('training numerical formats', () => {
+  const numerics = (computeFormat: 'fp32' | 'fp16_mixed' | 'fp8_hybrid' | 'nvfp4') => ({
+    computeFormat,
+    nativeWeightFormat: 'float' as const,
+    recipeVersion: 1,
+  })
+
+  it('prices setup at roughly twenty-five times the old upfront baseline', () => {
+    const estimate = estimateTrainingEconomics({
+      paramsB: 1,
+      family: 'dense',
+      trainEfficiency: 1,
+      trainingTokensMTok: 140_000,
+      verificationTokensMTok: 0,
+      numerics: numerics('fp16_mixed'),
+    })
+    const oldSetupCost =
+      estimate.targetPfDays *
+      ECONOMY.trainUpfrontPerPfDay *
+      0.08 *
+      estimate.precision.upfrontCashMultiplier
+
+    expect(oldSetupCost).toBeGreaterThan(4_000)
+    expect(oldSetupCost).toBeLessThan(6_000)
+    expect(estimate.setupCost / oldSetupCost).toBeCloseTo(25, 3)
+    expect(estimate.setupCost).toBeGreaterThan(100_000)
+    expect(estimate.setupCost).toBeLessThan(140_000)
+  })
+
+  it('makes FP32 the highest-cost, highest-ceiling training recipe', () => {
+    const common = {
+      paramsB: 70,
+      family: 'dense' as const,
+      trainEfficiency: 0.8,
+      trainingTokensMTok: 1_400_000,
+      verificationTokensMTok: 100_000,
+    }
+    const fp32 = estimateTrainingEconomics({ ...common, numerics: numerics('fp32') })
+    const fp16 = estimateTrainingEconomics({ ...common, numerics: numerics('fp16_mixed') })
+    const fp8 = estimateTrainingEconomics({ ...common, numerics: numerics('fp8_hybrid') })
+
+    expect(fp32.targetPfDays).toBeGreaterThan(fp16.targetPfDays)
+    expect(fp32.upfrontCash).toBeGreaterThan(fp16.upfrontCash)
+    expect(fp32.cashBurnPerDay).toBeGreaterThan(fp16.cashBurnPerDay)
+    expect(fp32.precision.qualityCeilingMultiplier).toBeGreaterThan(
+      fp16.precision.qualityCeilingMultiplier,
+    )
+    expect(fp8.targetPfDays).toBeLessThan(fp16.targetPfDays)
+    expect(fp8.upfrontCash).toBeLessThan(fp16.upfrontCash)
+    expect(fp8.cashBurnPerDay).toBeLessThan(fp16.cashBurnPerDay)
+  })
+
+  it('trades lower-precision memory and compute for volatility and hard quality caps', () => {
+    const fp16Memory = estimateTrainingMemoryGb({
+      paramsB: 70,
+      numerics: numerics('fp16_mixed'),
+    })
+    const nvfp4Memory = estimateTrainingMemoryGb({
+      paramsB: 70,
+      numerics: numerics('nvfp4'),
+    })
+    const common = {
+      id: 'precision-model',
+      name: 'Precision model',
+      paramsB: 70,
+      family: 'dense' as const,
+      day: 1,
+      dataCoverage: 20,
+      dataQuality: 1.35,
+      researchMult: 1.14,
+      outcomeSeed: 9,
+    }
+    const fp32 = buildScaledModel({ ...common, trainingNumerics: numerics('fp32') })
+    const fp16 = buildScaledModel({ ...common, trainingNumerics: numerics('fp16_mixed') })
+    const nvfp4 = buildScaledModel({ ...common, trainingNumerics: numerics('nvfp4') })
+    const fp16Precision = trainingNumericsEconomicsProfile(numerics('fp16_mixed'))
+    const nvfp4Precision = trainingNumericsEconomicsProfile(numerics('nvfp4'))
+
+    expect(nvfp4Memory.requiredHbmGb).toBeLessThan(fp16Memory.requiredHbmGb)
+    expect(nvfp4Precision.lossVolatilityMultiplier).toBeGreaterThan(
+      fp16Precision.lossVolatilityMultiplier,
+    )
+    expect(nvfp4.capability).toBeLessThan(fp16.capability)
+    expect(fp16.capability).toBeLessThan(fp32.capability)
+    expect(nvfp4.inferCostMult).toBeLessThan(fp16.inferCostMult)
+    expect(nvfp4.capability).toBeLessThanOrEqual(fp32.capability * 0.9 + 1e-9)
+    for (const score of Object.values(nvfp4.benchmarks)) {
+      expect(score).toBeLessThan(100)
+    }
+  })
+
   it('gates FP8 and NVFP4 by hardware generation', () => {
     expect(supportsTrainingFormat(1, 'bf16_mixed')).toBe(true)
     expect(supportsTrainingFormat(1, 'fp8_hybrid')).toBe(false)

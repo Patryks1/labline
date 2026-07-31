@@ -14,6 +14,7 @@ import {
   retargetMapCameraRotation,
   rotateMapCameraHeading,
   sampleMapCameraRotation,
+  sanitizeMapTargetComponent,
   shortestMapCameraHeadingDelta,
 } from './mapControls'
 
@@ -196,5 +197,15 @@ describe('map drag controls', () => {
     const end = footprintAt(1, 'low', 20)
     expect(midway[0].x).not.toBeCloseTo(start[0].x)
     expect(midway[0].x).not.toBeCloseTo(end[0].x)
+  })
+
+  it('recovers finite camera target components after non-finite pan samples', () => {
+    // Regression: a single NaN target component used to poison the camera
+    // matrix and every projected ray, leaving the map white until reload.
+    expect(sanitizeMapTargetComponent(Number.NaN)).toBe(0)
+    expect(sanitizeMapTargetComponent(Number.POSITIVE_INFINITY)).toBe(0)
+    expect(sanitizeMapTargetComponent(Number.NEGATIVE_INFINITY)).toBe(0)
+    expect(sanitizeMapTargetComponent(12.5)).toBe(12.5)
+    expect(sanitizeMapTargetComponent(Number.NaN, 7)).toBe(7)
   })
 })

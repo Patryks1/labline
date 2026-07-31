@@ -11,6 +11,7 @@ import type {
   TrainingForecast,
   TrainingOutcome,
 } from '../types'
+import { mixFit } from './modelScaling'
 
 export const CAPABILITY_DOMAINS: CapabilityDomain[] = [
   'language',
@@ -85,6 +86,11 @@ export function deriveModelCapabilities(input: ModelCapabilityInputs): ModelCapa
   const dataSignal = 1 - Math.exp(-Math.max(0, input.effectiveDataRatio) / 6)
   const scaleSignal = clamp01(input.finalCapability / 100)
   const dataQuality = clamp01(input.dataQuality / 100)
+  const mix = mixFit(input.domainWeights)
+  const weightTotal = Object.values(input.domainWeights).reduce(
+    (sum, value) => sum + Math.max(0, value ?? 0),
+    0,
+  )
   const generalSignal =
     0.55 * scaleSignal + 0.2 * computeSignal + 0.25 * dataSignal * dataQuality
   const domains = {} as Record<CapabilityDomain, number>
@@ -93,12 +99,22 @@ export function deriveModelCapabilities(input: ModelCapabilityInputs): ModelCapa
     const coefficients = DOMAIN_AFFINITY[domain]
     let affinity = 0
     for (const [dataDomain, coefficient] of Object.entries(coefficients) as [DataDomain, number][]) {
-      affinity += Math.max(0, input.domainWeights[dataDomain] ?? 0) * coefficient
+      affinity +=
+        (Math.max(0, input.domainWeights[dataDomain] ?? 0) /
+          Math.max(1e-9, weightTotal)) *
+        coefficient
     }
     const domainEvidence =
       1 - Math.exp(-(Math.max(0, input.effectiveDataRatio) * clamp01(affinity)) / 2)
     const latent = 0.58 * generalSignal + 0.42 * domainEvidence * dataQuality
-    domains[domain] = clampScore(saturate(latent) * 0.82 + qualityAxis(domain, input.quality) * 0.18)
+    const affinitySignal = clamp01(affinity)
+    const specializationLift =
+      9 * mix.specialization * Math.sqrt(scaleSignal) * affinitySignal
+    domains[domain] = clampScore(
+      saturate(latent) * 0.82 +
+        qualityAxis(domain, input.quality) * 0.18 +
+        specializationLift,
+    )
   }
 
   if (!modalityAvailable(input.io, 'image')) domains.vision = Math.min(domains.vision, 12)

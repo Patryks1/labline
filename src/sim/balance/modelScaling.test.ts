@@ -62,11 +62,35 @@ describe("first-class math and science scaling", () => {
     const math = mixFit({ math: 1 });
     const science = mixFit({ science: 1 });
 
-    expect(math.general).toBeCloseTo(0.72, 12);
+    expect(math.general).toBeCloseTo(0.5, 12);
     expect(math.domainBoost.math).toBe(1);
     expect(math.domainBoost.science).toBe(0);
     expect(science.domainBoost.science).toBe(1);
     expect(science.domainBoost.math).toBe(0);
+  });
+
+  it("smoothly narrows general capability once the top domains exceed 60%", () => {
+    const broad = mixFit({ chat: 0.2, code: 0.15, math: 0.15, science: 0.15, law: 0.1, health: 0.1, image: 0.05, video: 0.05, audio: 0.05 });
+    const threshold = mixFit({ math: 0.4, code: 0.21, chat: 0.13, science: 0.13, law: 0.13 });
+    const extreme = mixFit({ math: 0.96, chat: 0.04 });
+
+    expect(threshold.general).toBeLessThan(broad.general);
+    expect(threshold.specialization).toBeGreaterThan(0);
+    expect(extreme.generalPenalty).toBeCloseTo(0.5, 12);
+    expect(extreme.general).toBeGreaterThanOrEqual(0.5);
+    expect(extreme.domainBoost.math).toBe(1);
+  });
+
+  it("does not let specialization bypass parameter ceilings", () => {
+    const tiny = scaleIntelligence({
+      paramsB: 0.1,
+      dataCoverage: 20,
+      dataQuality: 1.35,
+      mixWeights: { math: 1 },
+      researchMult: 1.12,
+    });
+    expect(tiny.capability).toBeLessThan(35);
+    expect(tiny.benchCeilings.math).toBeLessThan(70);
   });
 
   it("makes narrow math and science corpora lead their own benchmark family", () => {

@@ -93,6 +93,12 @@ function snapshotKey(state: SimState): string {
     referenceId(player.deployedRacks),
     referenceId(player.rackDesigns),
     referenceId(state.dataHallLayouts),
+    // Nested layout mutations replace per-hall objects while sometimes keeping
+    // the outer map identity in transitional callers; revisions must invalidate.
+    Object.values(state.dataHallLayouts ?? {})
+      .map((layout) => `${layout.facilityId}:${layout.revision}:${layout.analysis?.revision ?? 0}`)
+      .sort()
+      .join(","),
     referenceId(player.models),
     referenceId(player.pricing),
     referenceId(player.trainingJob),
@@ -173,8 +179,24 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
   const utilCap = Math.min(0.98, player.utilCap);
   const pue = Math.max(1.05, player.pue - campus.pueReduction) * playerHallPueMultiplier(state);
 
-  const priorServeDuty =
-    Math.max(0, state.lastMarket.servedPf ?? 0) / Math.max(1e-6, fleet.flopsPf);
+  // Local hardware and remote contracts are tracked separately. Netting would
+  // incorrectly erase a simultaneous local sale and remote purchase. Resolve
+  // them before electrical duty so inbound work never inflates local MW and
+  // outbound sales still keep their hosted power bill.
+  const legacyLeases = playerLegacyLeaseCapacity(state);
+  const providerContracts = labContractCapacityPf(state, state.playerLabId);
+  const remoteFlops = Math.max(
+    0,
+    legacyLeases.inboundPf + providerContracts.inboundPf,
+  );
+  const remoteGpuEquivalent = remoteFlops / 0.7;
+  const remoteVramGb = remoteAcceleratorRamGb(remoteFlops);
+  const remoteSystemRamGb = remoteGpuEquivalent * 512;
+  const leasedOut = Math.max(
+    0,
+    legacyLeases.outboundPf + providerContracts.outboundPf,
+  );
+
   const listedTrainingJobs = player.trainingJobs ?? [];
   const trainingJobs = player.trainingJob
     ? [
@@ -194,8 +216,25 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
   const configured = normalizeAllocation(player.allocation);
   const trainingDuty = hasTraining ? configured.training * 0.9 : 0;
   const researchDuty = hasResearch ? configured.research * 0.9 : 0;
-  const inferenceDuty = priorServeDuty;
-  const requestedDuty = inferenceDuty + trainingDuty + researchDuty;
+  // Only local served PF drives campus electricity. Remote purchases already
+  // include their provider host stack, and sold outbound capacity remains a
+  // local hosting duty even when it is no longer available for local jobs.
+  const totalServePf = Math.max(0, state.lastMarket.servedPf ?? 0);
+  const localFleetPf = Math.max(0, fleet.flopsPf);
+  const localKeepShare =
+    localFleetPf > 1e-9
+      ? Math.max(0, Math.min(1, (localFleetPf - leasedOut) / localFleetPf))
+      : 0;
+  const localServeCapacityPf = Math.max(0, localFleetPf - leasedOut);
+  const totalServeCapacityPf = Math.max(1e-9, localServeCapacityPf + remoteFlops);
+  const localServeShare = localServeCapacityPf / totalServeCapacityPf;
+  const localServePf = totalServePf * localServeShare;
+  const inferenceDuty =
+    localFleetPf > 1e-9 ? Math.min(1, localServePf / localFleetPf) : 0;
+  const outboundDuty =
+    localFleetPf > 1e-9 ? Math.min(1, leasedOut / localFleetPf) : 0;
+  const requestedDuty =
+    inferenceDuty + trainingDuty * localKeepShare + researchDuty * localKeepShare + outboundDuty;
   const dutyCycle = Math.max(
     0.05,
     Math.min(
@@ -212,14 +251,20 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
   });
   const mwDemand = fleetPower.demandMw;
   const dynamicShareDenominator = Math.max(1e-9, requestedDuty);
+  const trainingDynamic =
+    fleetPower.dynamicMw *
+    ((trainingDuty * localKeepShare) / dynamicShareDenominator);
+  const researchDynamic =
+    fleetPower.dynamicMw *
+    ((researchDuty * localKeepShare) / dynamicShareDenominator);
+  const inferenceDynamic =
+    fleetPower.dynamicMw *
+    ((inferenceDuty + outboundDuty) / dynamicShareDenominator);
   const mwBreakdown = {
     idle: fleetPower.idleMw,
-    training:
-      fleetPower.dynamicMw * (trainingDuty / dynamicShareDenominator),
-    inference:
-      fleetPower.dynamicMw * (inferenceDuty / dynamicShareDenominator),
-    research:
-      fleetPower.dynamicMw * (researchDuty / dynamicShareDenominator),
+    training: trainingDynamic,
+    inference: inferenceDynamic,
+    research: researchDynamic,
   };
   const mwForecast = {
     training: fleetPowerDraw({
@@ -237,8 +282,9 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
   };
   if (requestedDuty <= 1e-9) mwBreakdown.idle += fleetPower.dynamicMw;
   const power = resolvePlayerPowerMw(state, mwDemand);
-  const mwAvailable = Math.max(0.05, power.mwAvailable);
-  // Brownout floor — underpowered halls slow down, they don't black out
+  const mwAvailable = power.mwAvailable;
+  // powerDerateForSupply owns the brownout throughput floor; reported physical
+  // availability remains zero when the campus has no supply.
   const powerLimit = powerDerateForSupply(mwDemand, mwAvailable);
   const powerDerate = powerLimit.derate;
   const powerThrottled = powerLimit.throttled;
@@ -255,22 +301,12 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
   const trainV = vramPressure(state, "train");
   const serveV = vramPressure(state, "serve");
 
-  // Local hardware and remote contracts are tracked separately. Netting would
-  // incorrectly erase a simultaneous local sale and remote purchase.
-  const legacyLeases = playerLegacyLeaseCapacity(state);
-  const providerContracts = labContractCapacityPf(state, state.playerLabId);
-  const remoteFlops = Math.max(
-    0,
-    legacyLeases.inboundPf + providerContracts.inboundPf,
-  );
-  const remoteGpuEquivalent = remoteFlops / 0.7;
-  const remoteVramGb = remoteAcceleratorRamGb(remoteFlops);
-  const remoteSystemRamGb = remoteGpuEquivalent * 512;
-  const leasedOut = Math.max(
-    0,
-    legacyLeases.outboundPf + providerContracts.outboundPf,
-  );
-  let fleetFlops = Math.max(0, fleet.flopsPf - leasedOut);
+  // Match labEngine: derate hosted local capacity first, then commit outbound
+  // contracts from the powered residual. Deducting nominal sold PF before the
+  // brownout derate creates free effective capacity for the seller.
+  const hostedLocalPf = localFleetPf * powerDerate * rackDerate;
+  const outboundCommittedPf = Math.min(hostedLocalPf, leasedOut);
+  let fleetFlops = Math.max(0, hostedLocalPf - outboundCommittedPf);
   const active = player.models.find(
     (m) => m.id === player.pricing.activeModelId,
   );
@@ -330,7 +366,8 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
   const effectiveUtil = Math.min(0.98, utilCap * (1 + engUtil));
   // Local fleet is power/rack/memory constrained. Remote capacity includes its
   // provider host stack, so local VRAM, RAM, CPU, and power never penalize it.
-  const localBase = fleetFlops * effectiveUtil * powerDerate * rackDerate;
+  // fleetFlops is already hosted residual after power/rack derate + outbound commit.
+  const localBase = fleetFlops * effectiveUtil;
   const remoteServingMemoryReady =
     serveV.needGb <= remoteVramGb + 1e-9 &&
     (serveV.systemRamNeedGb ?? 0) <= remoteSystemRamGb + 1e-9;

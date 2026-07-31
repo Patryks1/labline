@@ -47,6 +47,7 @@ import {
   estimateSyntheticQuality,
   teacherCapabilityForDataDomain,
 } from "../balance/modelCapabilities";
+import { syntheticTrainingProfile } from "../balance/syntheticTraining";
 import { appendDatasetAsset, syntheticDatasetAsset } from "./dataAssets";
 import { playerStaff } from "./staff";
 import {
@@ -1596,14 +1597,25 @@ export function consumeForTraining(
     const attributedReal = Math.max(0, baseVolume - base.syntheticUnits);
     const requestedMultiplier = Math.max(
       0,
-      Math.min(3, planIn?.syntheticMultiplier ?? 3),
+      Math.min(7, planIn?.syntheticMultiplier ?? 7),
     );
     let remainingGenerationBudget = Math.max(
       0,
       attributedReal * requestedMultiplier - base.syntheticUnits,
     );
+    const dataAttribution = ensureLabData(state);
+    const totalProcessedNow = totalProcessed(dataAttribution);
+    const watermark = Math.max(0, opts?.priorWatermarkMTok ?? 0);
+    const newSinceTrain =
+      opts?.mode === "continue"
+        ? Math.max(0, totalProcessedNow - watermark)
+        : totalProcessedNow;
+    const newFrac =
+      opts?.mode === "continue" && totalProcessedNow > 0
+        ? Math.min(1, newSinceTrain / totalProcessedNow)
+        : 1;
     for (const domain of DATA_DOMAINS) {
-      const short = Math.min(
+      let short = Math.min(
         remainingGenerationBudget,
         Math.max(0, wanted * weights[domain] - (consumed[domain] ?? 0)),
       );
@@ -1619,8 +1631,69 @@ export function consumeForTraining(
         eligibleTeachers.find((model) => model.id === selectedTeacherId) ??
         eligibleTeachers[0];
       if (!teacher) continue;
-      const teacherSignal = specialistDomainBoost(teacher, domain);
-      const quality = Math.min(92, 48 + teacherSignal * 1.8 + verifierBonus);
+      const teacherDomainCapability = teacherCapabilityForDataDomain(
+        teacher,
+        domain,
+      );
+      const frontierDomainCapability = Math.max(
+        teacherDomainCapability,
+        ...state.player.models.map((model) =>
+          teacherCapabilityForDataDomain(model, domain),
+        ),
+        ...state.rivals.flatMap((rival) =>
+          rival.models.map((model) =>
+            teacherCapabilityForDataDomain(model, domain),
+          ),
+        ),
+      );
+      const domainStock = normalizeDomainStock(
+        dataAttribution.stocks[domain],
+      );
+      const realAnchor = Math.max(
+        0,
+        Math.min(
+          wanted * weights[domain],
+          Math.max(
+            0,
+            domainStock.processed -
+              domainStock.fromSynthHQ -
+              domainStock.fromSynthLQ,
+          ) * newFrac,
+        ),
+      );
+      if (realAnchor <= 0.01) continue;
+      const profile = syntheticTrainingProfile({
+        realMTok: realAnchor,
+        syntheticMTok: short,
+        teacherCapability: teacherDomainCapability,
+        frontierCapability: frontierDomainCapability,
+        teacherReliability: teacher.quality.reliability,
+        dataQuality: domainStock.quality,
+        // Auto-fill is immediate and reserves no generation compute. Expansion
+        // beyond 2x therefore requires previously generated stock or an
+        // explicit synthesis job that actually burns research PF.
+        computePfDays: 0,
+        seed: `${state.seed}:${state.day}:${domain}:${teacher.id}`,
+      });
+      short = Math.min(short, profile.effectiveSyntheticMTok);
+      if (short <= 0.01) continue;
+      const provenance = {
+        teacherModelIds: [teacher.id],
+        generationDepth: 1,
+        promptDiversity: Math.min(1, 0.65 + teacher.quality.reliability / 300),
+        verifierStrength:
+          domain === "code" || domain === "math" ? verifierBonus / 8 : 0,
+        candidatesPerAccepted: verifierBonus > 0 ? 4 : 1,
+        humanAnchorShare: 0.08,
+      };
+      const quality = Math.min(
+        92,
+        estimateSyntheticQuality({
+          domain,
+          teacherDomainCapability,
+          provenance,
+        }).quality,
+      );
       const qualityTier = quality >= 58 ? ("hq" as const) : ("lq" as const);
       const prior = consumed[domain] ?? 0;
       const priorQuality = domainQuality[domain] ?? base.qualityUsed;

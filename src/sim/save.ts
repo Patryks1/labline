@@ -431,6 +431,14 @@ function normalizeTrainingJob(job: TrainingJob): TrainingJob {
     0,
     job.economics?.trainingCostAccrued ?? Math.max(0, (job.cashSunk ?? 0) - setupCost - dataCost),
   )
+  const completedPostTrainStages = new Set(job.completedPostTrainStages ?? [])
+  if (
+    job.postTrain !== 'none' &&
+    job.postTrainTarget > 0 &&
+    job.postTrainProgress + 1e-9 >= job.postTrainTarget
+  ) {
+    completedPostTrainStages.add(job.postTrain)
+  }
   return {
     ...job,
     backbone,
@@ -441,6 +449,9 @@ function normalizeTrainingJob(job: TrainingJob): TrainingJob {
     numerics: trainingNumerics,
     minCalendarDays: Math.max(0, job.minCalendarDays ?? 0),
     daysElapsed: Math.max(0, job.daysElapsed ?? 0),
+    postTrainDaysElapsed: Math.max(0, job.postTrainDaysElapsed ?? 0),
+    completedPostTrainStages: [...completedPostTrainStages],
+    postTrainStageEffectiveness: { ...(job.postTrainStageEffectiveness ?? {}) },
     computePriority: Math.max(10, Math.min(100, job.computePriority ?? 50)),
     reservedPf: Math.max(0, job.reservedPf ?? 0),
     paused: job.paused ?? false,
@@ -451,6 +462,9 @@ function normalizeTrainingJob(job: TrainingJob): TrainingJob {
     recommendedPfDays,
     extensionDays: Math.max(0, job.extensionDays ?? 0),
     awaitingDecision: job.awaitingDecision ?? false,
+    energyMwDays: Math.max(0, job.energyMwDays ?? 0),
+    energyMWh: Math.max(0, job.energyMWh ?? ((job.energyMwDays ?? 0) * 24)),
+    daysRemaining: Math.max(0, job.daysRemaining ?? 0),
     economics: {
       setupCost,
       dataCost,
@@ -462,8 +476,39 @@ function normalizeTrainingJob(job: TrainingJob): TrainingJob {
 
 function normalizeModelComputeV2(model: Model): Model {
   const trainingNumerics = model.trainingNumerics ?? LEGACY_TRAINING_NUMERICS
+  const completedPostTrainStages = new Set(model.completedPostTrainStages ?? [])
+  if (model.postTrain !== 'none') completedPostTrainStages.add(model.postTrain)
+  const postTrainStageEffectiveness = { ...(model.postTrainStageEffectiveness ?? {}) }
+  const legacyEffectiveness = Math.max(
+    0.2,
+    Math.min(
+      1,
+      (model.capability * 0.45 +
+        model.quality.reliability * 0.3 +
+        model.quality.reasoning * 0.25) /
+        100,
+    ),
+  )
+  for (const stage of completedPostTrainStages) {
+    postTrainStageEffectiveness[stage] ??= legacyEffectiveness
+  }
+  const toolsTrained = completedPostTrainStages.has('tools')
+  const io = toolsTrained
+    ? {
+        ...(model.io ?? ioForPreset(model.productPreset ?? presetFromFamily(model.family), model.capability)),
+        tools: Math.max(model.io?.tools ?? 0, model.capability * 0.55),
+      }
+    : model.io
   return {
-    ...normalizeModelEvaluations(model),
+    ...normalizeModelEvaluations({
+      ...model,
+      io,
+      modalities: toolsTrained
+        ? [...new Set([...model.modalities, 'tools' as const])]
+        : model.modalities,
+      completedPostTrainStages: [...completedPostTrainStages],
+      postTrainStageEffectiveness,
+    }),
     trainingFormulaVersion: model.trainingFormulaVersion ?? 1,
     trainingNumerics,
     deploymentArtifacts: ensureArray(model.deploymentArtifacts),

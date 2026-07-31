@@ -110,7 +110,13 @@ function buildTrainBreakdown(
 ): PoolBreakdown {
   const poolPf = snap.pools.training
   const powerMw = snap.mwBreakdown.training
-  const job = state.player.trainingJob
+  const listedJobs = state.player.trainingJobs ?? []
+  const legacyJob = state.player.trainingJob
+  const jobs = legacyJob
+    ? [legacyJob, ...listedJobs.filter((entry) => entry.id !== legacyJob.id)]
+    : listedJobs
+  const activeJobs = jobs.filter((entry) => !entry.paused)
+  const job = activeJobs[0] ?? legacyJob ?? listedJobs[0]
   const lines: BreakdownLine[] = [
     {
       label: 'Pool PF',
@@ -141,28 +147,52 @@ function buildTrainBreakdown(
   let utilizationLabel = 'Idle'
   let summary = 'No training job — train PF is idle.'
 
-  if (job) {
-    const progress = job.progressPfDays / Math.max(1e-6, job.targetPfDays)
-    const remaining = Math.max(0, job.targetPfDays - job.progressPfDays)
-    // Job consumes train pool linearly each day (see tickTraining)
+  if (activeJobs.length > 0 || state.player.safetyCampaign) {
+    const totalRemaining = activeJobs.reduce(
+      (sum, entry) => sum + Math.max(0, entry.targetPfDays - entry.progressPfDays),
+      0,
+    )
     const burn = poolPf
-    const daysLeft = burn > 1e-6 ? remaining / burn : Infinity
+    const daysLeft = burn > 1e-6 ? totalRemaining / burn : Infinity
     utilization = 1
-    utilizationLabel = 'In use'
-    summary = `Training ${formatParams(job.targetParamsB)} · ${pct01(progress)} complete.`
+    utilizationLabel = activeJobs.length > 1 ? `${activeJobs.length} jobs` : 'In use'
+    const headline = job
+      ? `Training ${formatParams(job.targetParamsB)}`
+      : 'Safety campaign running'
+    summary =
+      activeJobs.length > 1
+        ? `${headline} · ${activeJobs.length} active jobs share the train pool.`
+        : `${headline} · ${pct01(job ? job.progressPfDays / Math.max(1e-6, job.targetPfDays) : 0)} complete.`
+    if (job) {
+      lines.push(
+        {
+          label: activeJobs.length > 1 ? 'Lead job' : 'Job',
+          value: `${job.mode ?? 'pretrain'} · ${formatParams(job.targetParamsB)}`,
+        },
+        {
+          label: 'Progress',
+          value: `${fmtPf(job.progressPfDays)} / ${fmtPf(job.targetPfDays)} PF·d`,
+          bar: Math.min(1, job.progressPfDays / Math.max(1e-6, job.targetPfDays)),
+        },
+      )
+    }
+    if (activeJobs.length > 1) {
+      lines.push({
+        label: 'Active jobs',
+        value: String(activeJobs.length),
+      })
+    }
+    if (state.player.safetyCampaign) {
+      lines.push({
+        label: 'Safety campaign',
+        value: state.player.safetyCampaign.modelId,
+        muted: true,
+      })
+    }
     lines.push(
       {
-        label: 'Job',
-        value: `${job.mode ?? 'pretrain'} · ${formatParams(job.targetParamsB)}`,
-      },
-      {
-        label: 'Progress',
-        value: `${fmtPf(job.progressPfDays)} / ${fmtPf(job.targetPfDays)} PF·d`,
-        bar: Math.min(1, progress),
-      },
-      {
         label: 'Burn today',
-        value: `${fmtPf(burn)} PF (full pool)`,
+        value: `${fmtPf(burn)} PF (shared pool)`,
       },
       {
         label: 'ETA',
@@ -354,6 +384,7 @@ function buildResearchBreakdown(
   const dataShare = Math.max(0, 1 - techShare)
   const researchPf = poolPf * techShare
   const job = state.player.activeResearch
+  const programs = state.player.researchPrograms ?? []
   const staff = playerStaff(state)
   const lines: BreakdownLine[] = [
     {
@@ -391,6 +422,13 @@ function buildResearchBreakdown(
   let utilization = 0
   let utilizationLabel = 'Idle'
   let summary = 'No active research — research PF is idle.'
+
+  if (programs.length > 0) {
+    lines.push({
+      label: 'Programs',
+      value: `${programs.length} active`,
+    })
+  }
 
   if (job) {
     const node = getResearchNode(job.nodeId)
@@ -430,6 +468,15 @@ function buildResearchBreakdown(
         value: Number.isFinite(daysLeft) ? `~${Math.ceil(daysLeft)}d` : '—',
       },
     )
+  } else if (programs.length > 0) {
+    utilization = 1
+    utilizationLabel = 'Programs'
+    summary = `${programs.length} research program${programs.length === 1 ? '' : 's'} drawing from the research pool.`
+    lines.push({
+      label: 'Status',
+      value: 'Programs running — tech-tree node idle',
+      muted: true,
+    })
   } else {
     lines.push({
       label: 'Status',

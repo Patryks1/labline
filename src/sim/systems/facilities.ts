@@ -72,6 +72,30 @@ export function citiesOf(state: SimState): MapCity[] {
   return raw.map((c, i) => enrichCity(c, i))
 }
 
+export const CITY_UTILITY_CONNECTOR_RANGE_TILES = 50
+
+function commissionedPlayerGridConnectors(state: SimState): MapTile[] {
+  return facilityAnchorTiles(state, { ownerId: 'player' }).filter(
+    (tile) =>
+      tile.kind === 'substation' &&
+      tile.buildingProgress >= tile.buildingTarget &&
+      tile.mwCapacity > 0,
+  )
+}
+
+/** Cities reachable from at least one commissioned player grid connector. */
+export function citiesInGridConnectorRange(state: SimState): MapCity[] {
+  const connectors = commissionedPlayerGridConnectors(state)
+  if (connectors.length === 0) return []
+  return citiesOf(state).filter((city) =>
+    connectors.some(
+      (connector) =>
+        tileDist(connector.x, connector.y, city.cx, city.cy) <=
+        CITY_UTILITY_CONNECTOR_RANGE_TILES,
+    ),
+  )
+}
+
 function enrichCity(
   c: {
     id: string
@@ -152,18 +176,9 @@ export function powerBalance(state: SimState): {
   generationCostDay: number
 } {
   const snap = computeSnapshot(state)
-  // Demand only from powered halls' share of fleet — approximate with full fleet * powered fraction
-  const halls = facilityAnchorTiles(state, { ownerId: 'player' }).filter(
-    (t) =>
-      isDcKind(t.kind) && isDcAnchor(t) &&
-      t.buildingProgress >= t.buildingTarget,
-  )
-  const poweredUnits = halls
-    .filter(isHallPowered)
-    .reduce((s, t) => s + Math.max(1, t.racksUsed), 0)
-  const allUnits = halls.reduce((s, t) => s + Math.max(1, t.racksUsed), 0) || 1
-  const poweredFrac = Math.max(0.05, Math.min(1, poweredUnits / allUnits))
-  const demandMw = snap.mwDemand * (halls.length === 0 ? 1 : poweredFrac)
+  // Snapshot demand already reflects live powered-hall fleet draw. Do not
+  // discount again by powered fraction or export/import accounting double-cuts.
+  const demandMw = Math.max(0, snap.mwDemand)
 
   const power = resolvePlayerPowerMw(state, demandMw)
   const surplusMw = Math.max(0, power.mwGeneration - demandMw)
@@ -261,11 +276,8 @@ export function cityGridConnectorCapacity(
 ): CityGridConnectorCapacity {
   const city = citiesOf(state).find((candidate) => candidate.id === cityId)
   if (!city) return { connectorCount: 0, totalMw: 0, committedMw: 0, availableMw: 0 }
-  const connectors = facilityAnchorTiles(state, { ownerId: 'player' }).filter(
+  const connectors = commissionedPlayerGridConnectors(state).filter(
     (tile) =>
-      tile.kind === 'substation' &&
-      tile.buildingProgress >= tile.buildingTarget &&
-      tile.mwCapacity > 0 &&
       tileDist(tile.x, tile.y, city.cx, city.cy) <= city.powerRadius,
   )
   const totalMw = connectors.reduce((sum, connector) => sum + connector.mwCapacity, 0)

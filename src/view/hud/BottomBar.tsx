@@ -56,9 +56,9 @@ export function BottomBar() {
         <div className="relative z-10 mb-1.5 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap font-mono text-[0.75rem]">
           <Stat
             label="Compute"
-            value={pf(snap.effectiveFlopsPf)}
+            value={pf(snap.rawFlopsPf)}
             className="hidden sm:inline-flex"
-            title={`Effective compute ${pf(snap.effectiveFlopsPf)} · yield ${pct(breakdown.fleetYield, 0)}`}
+            title={`Raw capacity ${pf(snap.rawFlopsPf)} · effective compute ${pf(snap.effectiveFlopsPf)} · yield ${pct(breakdown.fleetYield, 0)}`}
           />
           <Stat
             label="Power"
