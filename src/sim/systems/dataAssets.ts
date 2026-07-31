@@ -277,33 +277,63 @@ export function createDataManifest(input: {
   seed: number
   runId: string
 }): { data: LabData; manifest: DataManifest } {
-  const consumedDomains = Object.entries(input.consumed).filter(([, amount]) => (amount ?? 0) > 0)
-  const relevant = (input.data.assets ?? []).filter((asset) =>
-    consumedDomains.some(([domain]) => (asset.domainWeights[domain as DataDomain] ?? 0) > 0),
+  const consumedDomains = Object.entries(input.consumed).filter(
+    ([, amount]) => (amount ?? 0) > 0,
+  ) as [DataDomain, number][]
+  const allocations = new Map<DatasetAsset, number>()
+  let uniqueMTok = 0
+
+  for (const [domain, requestedRaw] of consumedDomains) {
+    const requested = Math.max(0, requestedRaw)
+    const domainAssets = (input.data.assets ?? [])
+      .map((asset) => ({
+        asset,
+        available:
+          Math.max(0, asset.volumeMTok) *
+          Math.max(0, asset.domainWeights[domain] ?? 0),
+      }))
+      .filter(({ available }) => available > 0)
+    const available = domainAssets.reduce((sum, lot) => sum + lot.available, 0)
+    const consumed = Math.min(requested, available)
+    uniqueMTok += consumed
+    if (available <= 0 || consumed <= 0) continue
+
+    // Stocks expose blended domain inventory rather than lot selection. Use a
+    // proportional draw so manifest quality/contamination matches that blend,
+    // while no asset can supply more than its domain-weighted share.
+    for (const { asset, available: assetAvailable } of domainAssets) {
+      const allocated = consumed * (assetAvailable / available)
+      allocations.set(asset, (allocations.get(asset) ?? 0) + allocated)
+    }
+  }
+
+  const allocatedMTok = [...allocations.values()].reduce(
+    (sum, amount) => sum + amount,
+    0,
   )
-  const available = relevant.reduce((sum, asset) => sum + asset.volumeMTok, 0)
-  const weight = relevant.reduce((sum, asset) => sum + Math.max(0.001, asset.volumeMTok), 0)
   const quality =
-    weight > 0
-      ? relevant.reduce((sum, asset) => sum + asset.quality * Math.max(0.001, asset.volumeMTok), 0) /
-        weight
+    allocatedMTok > 0
+      ? [...allocations.entries()].reduce(
+          (sum, [asset, amount]) => sum + asset.quality * amount,
+          0,
+        ) / allocatedMTok
       : 0
   const contamination =
-    weight > 0
-      ? relevant.reduce(
-          (sum, asset) => sum + asset.contaminationRisk * Math.max(0.001, asset.volumeMTok),
+    allocatedMTok > 0
+      ? [...allocations.entries()].reduce(
+          (sum, [asset, amount]) => sum + asset.contaminationRisk * amount,
           0,
-        ) / weight
+        ) / allocatedMTok
       : 0
   const total = Math.max(0, input.totalMTok)
   const manifest: DataManifest = {
     id: seededId('manifest', input.seed, input.day, input.runId),
-    assetIds: relevant.map((asset) => asset.id).sort(),
+    assetIds: [...allocations.keys()].map((asset) => asset.id).sort(),
     domainWeights: Object.fromEntries(
       consumedDomains.map(([domain, amount]) => [domain, (amount ?? 0) / Math.max(1e-9, total)]),
     ),
-    uniqueMTok: Math.min(total, available),
-    repeatedMTok: Math.max(0, total - available),
+    uniqueMTok: Math.min(total, uniqueMTok),
+    repeatedMTok: Math.max(0, total - uniqueMTok),
     effectiveQuality: quality,
     contaminationRisk: contamination,
     createdDay: input.day,

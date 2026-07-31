@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useUiStore } from "./uiStore";
 import { createGame, type CreateGameOpts } from "../sim/createGame";
 import { tickDay, computeSnapshot } from "../sim/tick";
 import {
@@ -1140,6 +1141,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
   },
 
   startGame: async (opts) => {
+    useUiStore.getState().clearNegotiations();
     set({
       phase: "loading",
       lifecycleError: null,
@@ -1267,7 +1269,9 @@ export const useGameStore = create<GameStore>((set, get) => ({
       });
       await yieldForPaint();
       resetAutosaveTracking(state.day);
-      set({ ...applyLoadedState(state), saveStatus: "idle" });
+      const loadedState = applyLoadedState(state);
+      useUiStore.getState().clearNegotiations();
+      set({ ...loadedState, saveStatus: "idle" });
       return { ok: true as const };
     } catch (e) {
       const msg = e instanceof SaveError ? e.message : "Load failed.";

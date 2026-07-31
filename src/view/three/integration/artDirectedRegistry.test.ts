@@ -7,6 +7,8 @@ import {
   type RenderInstance,
 } from '../v2'
 import {
+  ADDITIONAL_RESIDENTIAL_ARCHETYPES,
+  ADDITIONAL_URBAN_ARCHETYPES,
   AUTHORED_INDUSTRIAL_ARCHETYPES,
   AUTHORED_RESIDENTIAL_ARCHETYPES,
   AUTHORED_TERRAIN_ARCHETYPES,
@@ -148,6 +150,22 @@ describe('art-directed instanced archetypes', () => {
     // family fallbacks instead of creating one draw call per catalog entry.
     const fallbackGeometries = new Set(catalogIds.map(id => registry.get(id).geometry.far))
     expect(fallbackGeometries.size).toBeLessThanOrEqual(30)
+    registry.dispose()
+  })
+
+  it('exposes thirteen housing and fourteen urban additions at normal zoom', () => {
+    const registry = createArtDirectedArchetypeRegistry()
+    expect(ADDITIONAL_RESIDENTIAL_ARCHETYPES).toHaveLength(13)
+    expect(ADDITIONAL_URBAN_ARCHETYPES).toHaveLength(14)
+    expect(new Set(ADDITIONAL_RESIDENTIAL_ARCHETYPES)).not.toContain(DefaultArchetype.house)
+    expect(new Set(ADDITIONAL_URBAN_ARCHETYPES)).not.toContain(DefaultArchetype.cityTowerA)
+    expect(new Set(ADDITIONAL_URBAN_ARCHETYPES)).not.toContain(DefaultArchetype.cityTowerB)
+    for (const id of [...ADDITIONAL_RESIDENTIAL_ARCHETYPES, ...ADDITIONAL_URBAN_ARCHETYPES]) {
+      const definition = registry.get(id)
+      expect(definition.geometry.mid, `mid geometry for ${id}`).not.toBeNull()
+      expect(definition.material.mid, `mid material for ${id}`).not.toBeNull()
+      expect((definition.material.mid as THREE.MeshStandardMaterial).dithering).toBe(false)
+    }
     registry.dispose()
   })
 

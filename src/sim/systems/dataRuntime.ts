@@ -170,6 +170,20 @@ export function resolvedProcessingQuality(
   return clamp(requestedQuality * 0.7 + dataQuality * 12 + staffSkill * 4, 0, 95)
 }
 
+/**
+ * Fraction of inspected raw records accepted into the training-ready corpus.
+ * A loose pass preserves most records; a high quality target pays for its lift
+ * by rejecting duplicates, unsafe records, and low-signal examples.
+ *
+ * The 50–88% band is a deliberately conservative gameplay calibration based
+ * on public web-data pipelines, where successive filtering and per-snapshot
+ * deduplication remove a material share of extracted text.
+ */
+export function processingAcceptanceYield(qualityTarget: number): number {
+  const target = clamp(qualityTarget, 30, 95)
+  return 0.88 - ((target - 30) / 65) * 0.38
+}
+
 export function enqueueAutomaticProcessing(input: {
   data: LabData
   day: number
@@ -221,6 +235,8 @@ export interface ProcessDataJobsResult {
   cash: number
   cashSpent: number
   processedMTok: number
+  /** Inspected raw volume rejected by quality, safety, and dedup filters. */
+  rejectedMTok: number
   blockedForCash: boolean
 }
 
@@ -238,6 +254,7 @@ export function processDataJobs(input: {
   let throughput = Math.max(0, input.throughputMTok)
   let cashSpent = 0
   let processedMTok = 0
+  let rejectedMTok = 0
   let blockedForCash = false
   const queue: ProcessJob[] = []
 
@@ -262,7 +279,6 @@ export function processDataJobs(input: {
     cash -= cost
     cashSpent += cost
     throughput -= step * meta.processHard
-    processedMTok += step
     const left = job.remaining - step
     const stock = data.stocks[job.domain]
     const quality = resolvedProcessingQuality(
@@ -270,39 +286,57 @@ export function processDataJobs(input: {
       input.dataQuality,
       input.staff ?? EMPTY_STAFF,
     )
-    const newProcessed = stock.processed + step
+    const accepted = step * processingAcceptanceYield(job.qualityTarget)
+    const rejected = step - accepted
+    processedMTok += accepted
+    rejectedMTok += rejected
+    const newProcessed = stock.processed + accepted
     stock.quality =
       newProcessed > 0
-        ? (stock.quality * stock.processed + quality * step) / newProcessed
+        ? (stock.quality * stock.processed + quality * accepted) / newProcessed
         : quality
     stock.processed = newProcessed
-    stock.fromUser = (stock.fromUser ?? 0) + step * 0.85
-    stock.fromWeb = (stock.fromWeb ?? 0) + step * 0.15
-    data.dayProcessed += step
-    data.lifetimeProcessed += step
+    // Queued raw stock currently comes from consented product traffic. Public
+    // crawl and licensed market assets already enter as processed lots with
+    // their own source and rights metadata; do not mutate those lineages here.
+    stock.fromUser = (stock.fromUser ?? 0) + accepted
+    data.dayProcessed += accepted
+    data.lifetimeProcessed += accepted
     const automaticTraffic = job.id.startsWith('proc-auto-')
     const assetId = automaticTraffic
       ? `dataset-processed-traffic-${job.domain}`
       : `dataset-${job.id}`
     const priorAsset = data.assets.find((asset) => asset.id === assetId)
+    const assetVolume = (priorAsset?.volumeMTok ?? 0) + accepted
+    const assetQuality =
+      assetVolume > 0
+        ? ((priorAsset?.quality ?? quality) * (priorAsset?.volumeMTok ?? 0) +
+            quality * accepted) /
+          assetVolume
+        : quality
     data = appendDatasetAsset(
       data,
       processedTrafficDatasetAsset({
         id: assetId,
         domain: job.domain,
-        // Automatic product traffic is one reusable domain asset, not one
-        // persisted dataset per day. Manual/licensed jobs retain their IDs.
-        volumeMTok: automaticTraffic
-          ? (priorAsset?.volumeMTok ?? 0) + step
-          : job.total - left,
-        quality,
+        // Every partial/automatic pass extends one reusable accepted lineage;
+        // rejected raw records never appear as training-ready asset volume.
+        volumeMTok: assetVolume,
+        quality: assetQuality,
         day: input.day,
       }),
     )
-    if (left > 0.5) queue.push({ ...job, remaining: left })
+    if (left > 1e-9) queue.push({ ...job, remaining: left })
   }
   data.processQueue = queue
-  return { data, cash, cashSpent, processedMTok, blockedForCash }
+  return {
+    data,
+    cash,
+    cashSpent,
+    processedMTok,
+    rejectedMTok,
+    blockedForCash,
+  }
 }
 
 /** Same aggregate quality update for every lab after processing/synthesis. */

@@ -19,7 +19,6 @@ import { MapSurfaceLayer } from './surfaceLayer'
 import { TrafficLayer } from './trafficLayer'
 import { WorldVoidLayer } from './worldVoidLayer'
 import {
-  LOD_TIERS,
   LodTier,
   type ChunkId,
   type RenderInstance,
@@ -105,7 +104,9 @@ export class ViewportMapRenderer {
       tileSize: this.source.tileSize,
     })
     const initialLod = options.initialLod ?? LodTier.mid
-    this.lod = new ScreenSpaceLod(initialLod, options.lodTransitionMs ?? 200)
+    // Distinct LOD meshes cannot share complementary fragment coverage safely.
+    // Wait for the requested tier, then swap the complete representation.
+    this.lod = new ScreenSpaceLod(initialLod, options.lodTransitionMs ?? 0)
     this.metrics = new ViewportRendererMetrics(initialLod)
     this.chunks = new ViewportChunkManager(
       this.source.width,
@@ -261,11 +262,7 @@ export class ViewportMapRenderer {
       return true
     }
 
-    for (const tier of LOD_TIERS) this.registry.setTierCoverage(tier, 0)
-    for (let layerIndex = 0; layerIndex < lod.layers.length; layerIndex++) {
-      const layer = lod.layers[layerIndex]!
-      const direction = lod.layers.length === 2 && layerIndex === 0 ? 'outgoing' : 'incoming'
-      this.registry.setTierCoverage(layer.tier, layer.coverage, direction)
+    for (const layer of lod.layers) {
       for (const chunkId of selection.visible) {
         ensureLayer(chunkId, layer.tier, true)
       }

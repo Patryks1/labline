@@ -3,6 +3,8 @@ import { createGame } from '../createGame'
 import {
   benchmarkTrainingJob,
   cancelTraining,
+  completeTrainingJobsNow,
+  keepInternal,
   selectPostTrain,
   startTraining,
   trainingStageFailurePlan,
@@ -19,6 +21,56 @@ function started(seed = 930) {
 }
 
 describe('training lifecycle controls', () => {
+  it('creates and finalizes an omni product on a sparse backbone without dropping active params', () => {
+    let state = createGame(929)
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        cash: 2_000_000_000,
+        researchUnlocked: [
+          ...state.player.researchUnlocked,
+          'mm_vision',
+          'mm_diff',
+          'mm_video',
+          'mm_omni',
+          'moe_basics',
+          'moe_routing',
+          'data_mix',
+        ],
+      },
+    }
+    state = startTraining(state, {
+      name: 'Sparse Omni',
+      family: 'omni',
+      backbone: 'moe',
+      productPreset: 'omni',
+      paramsB: 0.1,
+      activeParamsB: 0.01,
+      dataPlan: {
+        totalUnits: 200,
+        weights: { chat: 0.4, image: 0.2, audio: 0.2, video: 0.2 },
+        allowSynthetic: true,
+      },
+    })
+
+    expect(state.player.trainingJob, state.alerts[0]?.message).toMatchObject({
+      family: 'omni',
+      backbone: 'moe',
+      productPreset: 'omni',
+      activeParamsB: 0.01,
+    })
+
+    state = completeTrainingJobsNow(state)
+    state = keepInternal(state)
+    expect(state.player.models.find((model) => model.name === 'Sparse Omni')).toMatchObject({
+      family: 'omni',
+      backbone: 'moe',
+      productPreset: 'omni',
+      activeParamsB: 0.01,
+    })
+  })
+
   it('cancels exactly one concurrent job and preserves the compatibility mirror', () => {
     let state = started()
     state = startTraining(state, { name: 'Second', family: 'dense', paramsB: 1 })
@@ -32,14 +84,21 @@ describe('training lifecycle controls', () => {
     expect(state.player.trainingJob?.id).toBe(state.player.trainingJobs?.[0]?.id)
   })
 
-  it('uses one deterministic approximately-five-percent failure roll per stage', () => {
+  it('keeps mature catastrophic failures rare and scales them with recipe risk', () => {
     const repeated = trainingStageFailurePlan({ id: 'same', outcomeSeed: 42 }, 'base')
     expect(trainingStageFailurePlan({ id: 'same', outcomeSeed: 42 }, 'base')).toEqual(repeated)
     const failures = Array.from({ length: 2_000 }, (_, seed) =>
       trainingStageFailurePlan({ id: `job-${seed}`, outcomeSeed: seed }, 'base').willFail,
     ).filter(Boolean).length
-    expect(failures).toBeGreaterThan(65)
-    expect(failures).toBeLessThan(135)
+    const highRiskFailures = Array.from({ length: 2_000 }, (_, seed) =>
+      trainingStageFailurePlan(
+        { id: `job-${seed}`, outcomeSeed: seed, outcomeRisk: 'high' },
+        'base',
+      ).willFail,
+    ).filter(Boolean).length
+    expect(failures).toBeGreaterThan(15)
+    expect(failures).toBeLessThan(55)
+    expect(highRiskFailures).toBeGreaterThan(failures * 4)
   })
 
   it('lets a completed checkpoint choose a specific researched post-train stage', () => {
@@ -49,8 +108,8 @@ describe('training lifecycle controls', () => {
       ...state,
       player: {
         ...state.player,
-        trainingJobs: [{ ...job, progressPfDays: job.targetPfDays }],
-        trainingJob: { ...job, progressPfDays: job.targetPfDays },
+        trainingJobs: [{ ...job, progressPfDays: job.targetPfDays, daysElapsed: job.minCalendarDays }],
+        trainingJob: { ...job, progressPfDays: job.targetPfDays, daysElapsed: job.minCalendarDays },
         researchUnlocked: [...state.player.researchUnlocked, 'align_rlhf'],
       },
     }

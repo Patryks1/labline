@@ -17,6 +17,8 @@ import {
   type TileId as WorldTileId,
 } from '../../../sim/world'
 import {
+  ADDITIONAL_RESIDENTIAL_ARCHETYPES,
+  ADDITIONAL_URBAN_ARCHETYPES,
   AUTHORED_INDUSTRIAL_ARCHETYPES,
   AUTHORED_RESIDENTIAL_ARCHETYPES,
   AUTHORED_TERRAIN_ARCHETYPES,
@@ -49,6 +51,65 @@ import {
   type TileId,
   type ViewportRenderSource,
 } from '../v2'
+
+export const RESIDENTIAL_VARIANTS_PER_CHUNK = 8
+export const URBAN_VARIANTS_PER_CHUNK = 8
+export const FOUNDATION_CLEARANCE_EPSILON = 0.001
+// City placement keeps complete authored building parcels within this rise.
+// Guard it here so max-corner support cannot silently create larger air gaps.
+export const MAX_FOUNDATION_SLOPE_GAP = 0.2
+
+export interface BuildingChunkPalette {
+  readonly residential: readonly number[]
+  readonly urban: readonly number[]
+}
+
+/**
+ * Bound building-material batches inside a chunk while rotating through the
+ * complete authored catalog across the world. Consecutive chunk IDs expose
+ * every addition, and selection inside the palette remains seed-stable.
+ */
+export function buildingPaletteForChunk(
+  chunkId: number,
+  chunksWide = 1,
+): BuildingChunkPalette {
+  const safeChunksWide = Math.max(1, Math.trunc(chunksWide))
+  const safeChunkId = Math.trunc(chunkId)
+  const chunkX = ((safeChunkId % safeChunksWide) + safeChunksWide) % safeChunksWide
+  const chunkY = Math.floor(safeChunkId / safeChunksWide)
+  const palette = (family: readonly number[], size: number): number[] => {
+    // Keep both grid axes meaningful. Deriving the offset from a flat chunk ID
+    // alone can make every vertical neighbour identical whenever chunksWide is
+    // a multiple of the family length.
+    const start = (
+      ((chunkX * size + chunkY * (size - 4)) % family.length) + family.length
+    ) % family.length
+    return Array.from({ length: Math.min(size, family.length) }, (_, offset) =>
+      family[(start + offset) % family.length]!,
+    )
+  }
+  return {
+    residential: palette(ADDITIONAL_RESIDENTIAL_ARCHETYPES, RESIDENTIAL_VARIANTS_PER_CHUNK),
+    urban: palette(ADDITIONAL_URBAN_ARCHETYPES, URBAN_VARIANTS_PER_CHUNK),
+  }
+}
+
+/**
+ * Give cardinally neighbouring one-tile parcels different silhouettes while
+ * keeping the choice independent of traversal order. The seed rotates the
+ * cadence rather than hashing every parcel back into occasional local clones.
+ */
+export function buildingVariantIndexForParcel(
+  x: number,
+  y: number,
+  seed: number,
+  variantCount: number,
+): number {
+  const count = Math.max(1, Math.trunc(variantCount))
+  const phase = mix32(seed ^ 0x6a09_e667) % count
+  const cadence = Math.trunc(x) + Math.imul(Math.trunc(y), 3) + phase
+  return ((cadence % count) + count) % count
+}
 
 export const MAP_TILE_SIZE = 1.05
 export const RENDER_CHUNK_SIZE = 32
@@ -645,25 +706,35 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     const anchorX = parcel.anchorTileId % this.width
     const anchorY = Math.floor(parcel.anchorTileId / this.width)
     const random = mix32((parcel.anchorTileId + 1) ^ Math.imul(world.descriptor.seed, 0x9e37_79b1))
+    const palette = buildingPaletteForChunk(
+      this.urbanParcelRenderChunk(parcel),
+      this.chunksWide,
+    )
+    const paletteIndex = (variants: readonly number[]) => buildingVariantIndexForParcel(
+      anchorX,
+      anchorY,
+      world.descriptor.seed,
+      variants.length,
+    )
     let archetypeId: number
     if (parcel.class === 'skyscraper') {
-      archetypeId = SingleBuildingArchetype.skyscraper
+      // Multi-cell cores keep the purpose-built proportional skyscraper. The
+      // ordinary one-cell parcels below distribute the streamed World V4
+      // catalog without increasing instance count or changing parcel layout.
+      archetypeId = parcel.footprintTileIds.length > 1
+        ? SingleBuildingArchetype.skyscraper
+        : palette.urban[paletteIndex(palette.urban)]!
     } else if (parcel.class === 'small') {
-      const choice = random % 10
-      archetypeId = parcel.style === 'suburban' && choice < 6
-        ? SingleBuildingArchetype.detachedHouse
-        : choice < 8 ? SingleBuildingArchetype.smallShop : SingleBuildingArchetype.rowhouse
+      archetypeId = palette.residential[paletteIndex(palette.residential)]!
     } else {
-      archetypeId = (random & 3) === 0
-        ? SingleBuildingArchetype.officeTower
-        : SingleBuildingArchetype.midRise
+      archetypeId = palette.urban[paletteIndex(palette.urban)]!
     }
     return {
       entityId: stableStringId(parcel.id),
       pickTileId: parcel.anchorTileId,
       archetypeId,
       x: (anchorX + (parcel.width - 1) * 0.5) * MAP_TILE_SIZE,
-      y: this.foundationElevation(parcel.footprintTileIds) + 0.015,
+      y: this.foundationElevation(parcel.footprintTileIds) + FOUNDATION_CLEARANCE_EPSILON,
       z: (anchorY + (parcel.height - 1) * 0.5) * MAP_TILE_SIZE,
       // Rectangular parcel scaling must stay aligned with its authoritative
       // footprint; a quarter turn would visually spill a 2x1 tower into its
@@ -765,7 +836,7 @@ export class SimViewportRenderSource implements ViewportRenderSource {
         ? AuthoredSceneryArchetype.constructionShell
         : facilityArchetypeFor(facility.kind, size),
       x: ((minX + maxX) * 0.5) * MAP_TILE_SIZE,
-      y: this.foundationElevation(facility.footprint) + 0.015,
+      y: this.foundationElevation(facility.footprint) + FOUNDATION_CLEARANCE_EPSILON,
       z: ((minY + maxY) * 0.5) * MAP_TILE_SIZE,
       yaw: 0,
       scaleX: width * MAP_TILE_SIZE * 0.82,
@@ -885,7 +956,19 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     for (const tileId of footprint) {
       const x = tileId % this.width
       const y = Math.floor(tileId / this.width)
-      max = Math.max(max, this.getTileElevation(x, y))
+      // Tile-center elevation can be below one or more corners on a slope,
+      // allowing a coplanar ground slice to flicker through a GLB foundation
+      // as the camera moves. Support the complete parcel at its highest true
+      // terrain corner; a one-millimetre presentation lift at the call site
+      // keeps the remaining base face out of the depth-equality band without
+      // visibly increasing the gap over the parcel's lower slope edge.
+      max = Math.max(
+        max,
+        this.getCornerElevation(x, y),
+        this.getCornerElevation(x + 1, y),
+        this.getCornerElevation(x, y + 1),
+        this.getCornerElevation(x + 1, y + 1),
+      )
     }
     return Number.isFinite(max) ? max : 0
   }

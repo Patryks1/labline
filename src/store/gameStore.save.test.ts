@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildSaveMeta, clearAllSaves, SAVE_VERSION } from '../sim/save'
 import { setGameSaveWriterForTests, useGameStore } from './gameStore'
+import { useUiStore } from './uiStore'
 
 describe('async game save lifecycle', () => {
   beforeEach(async () => {
@@ -55,6 +56,22 @@ describe('async game save lifecycle', () => {
     expect(await pending).toEqual({ ok: true })
     expect(useGameStore.getState().state.day).toBe(23)
     expect(useGameStore.getState().state.map.world).toBeDefined()
+  })
+
+  it('retains the current run negotiation state when loading fails', async () => {
+    useUiStore.getState().updateComputeNegotiation('provider-a', (current) => ({
+      ...current,
+      status: 'countered',
+      transcript: [{ side: 'provider', text: 'Counter offer', day: 4, sequence: 0 }],
+    }))
+
+    const result = await useGameStore.getState().loadGame('8')
+
+    expect(result.ok).toBe(false)
+    expect(useUiStore.getState().computeNegotiations['provider-a']).toMatchObject({
+      status: 'countered',
+      transcript: [{ text: 'Counter offer' }],
+    })
   })
 
   it('debounces day autosaves and flushes immediately on pause', async () => {

@@ -130,9 +130,17 @@ describe('concurrent training memory placement', () => {
         allocation: { training: 1, inference: 0, research: 0 },
       },
     }
-    const solo = startTraining(base, {
+    const soloStarted = startTraining(base, {
       name: 'Solo', family: 'dense', paramsB: 1, computePriority: 50,
     })
+    const solo = {
+      ...soloStarted,
+      player: {
+        ...soloStarted.player,
+        trainingJob: { ...soloStarted.player.trainingJob!, targetPfDays: 1_000 },
+        trainingJobs: soloStarted.player.trainingJobs!.map((job) => ({ ...job, targetPfDays: 1_000 })),
+      },
+    }
     const soloNext = tickTraining(solo)
     const soloProgress = soloNext.player.trainingJob!.progressPfDays
 
@@ -142,6 +150,14 @@ describe('concurrent training memory placement', () => {
     shared = startTraining(shared, {
       name: 'Two', family: 'dense', paramsB: 1, computePriority: 50,
     })
+    shared = {
+      ...shared,
+      player: {
+        ...shared.player,
+        trainingJob: { ...shared.player.trainingJob!, targetPfDays: 1_000 },
+        trainingJobs: shared.player.trainingJobs!.map((job) => ({ ...job, targetPfDays: 1_000 })),
+      },
+    }
     const sharedNext = tickTraining(shared)
     for (const job of sharedNext.player.trainingJobs ?? []) {
       expect(job.progressPfDays).toBeGreaterThan(0)

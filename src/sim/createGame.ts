@@ -228,7 +228,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
     seed,
     cfg.rivalCount,
     regions.map((region) => region.id),
-    300_000_000,
+    ECONOMY.incumbentStartingEnterpriseValue,
     cfg.difficulty,
   )
   const compactWorld = staticWorld ? createDynamicWorld(staticWorld) : undefined
@@ -474,7 +474,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
         kind: 'on_demand',
         regionId: 'global-cloud',
         pf: 24,
-        pricePerPfDay: 480,
+        pricePerPfDay: 120,
         daysLeft: 180,
         daysTotal: 180,
         interruptionRisk: 0.002,

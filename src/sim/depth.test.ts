@@ -265,6 +265,10 @@ function forceCompleteJob(state: SimState): SimState {
               job.targetPfDays,
               job.recommendedPfDays ?? 0,
             ),
+            daysElapsed: Math.max(
+              job.daysElapsed ?? 0,
+              job.minCalendarDays ?? 0,
+            ),
             awaitingDecision: false,
             paused: false,
             stallReason: null,
@@ -342,12 +346,20 @@ describe('MoE size + hosting', () => {
     const dense = { ...moe, family: 'dense' as const, paramsB: 10, activeParamsB: undefined }
     const hostMoe = modelHostNeed(moe)
     const hostDense = modelHostNeed(dense)
+    const hostSparseOmni = modelHostNeed({
+      ...moe,
+      family: 'omni' as const,
+      backbone: 'moe' as const,
+    })
     // Same ~10B active path → similar host PF; MoE total 200 does not explode compute
     expect(hostMoe.hostPf).toBeLessThan(hostDense.hostPf * 1.35)
     expect(hostMoe.hostPf).toBeGreaterThan(hostDense.hostPf * 0.5)
     // VRAM for MoE experts is higher than a 10B dense
     expect(hostMoe.vramGb).toBeGreaterThan(hostDense.vramGb)
     expect(hostMoe.note.toLowerCase()).toContain('active')
+    expect(hostSparseOmni.vramGb).toBeCloseTo(hostMoe.vramGb)
+    expect(hostSparseOmni.hostPf).toBeCloseTo(hostMoe.hostPf)
+    expect(hostSparseOmni.note.toLowerCase()).toContain('active')
   })
 })
 
@@ -601,9 +613,11 @@ describe('distill ~80% retention vs cheaper train', () => {
       distillTeacherShare: 0.85,
     })
     expect(s.player.trainingJob?.mode).toBe('distill')
-    // Raw distill cost stays cheaper than pretrain; calendar floor may enlarge targetPfDays.
+    // Raw distill cost stays cheaper than pretrain; calendar time is tracked
+    // separately and must never manufacture PF work.
     expect(distillCost).toBeLessThan(pretrainCost)
-    expect(s.player.trainingJob!.targetPfDays).toBeGreaterThanOrEqual(distillCost)
+    expect(s.player.trainingJob!.targetPfDays).toBeGreaterThan(0)
+    expect(s.player.trainingJob!.minCalendarDays).toBeGreaterThan(0)
     expect(s.player.trainingJob!.distillTeacherShare).toBeGreaterThan(0.8)
 
     s = forceCompleteJob(s)

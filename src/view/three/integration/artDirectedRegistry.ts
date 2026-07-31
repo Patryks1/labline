@@ -12,7 +12,6 @@ import {
   ArchetypeRegistry,
   DefaultArchetype,
   LodTier,
-  installDitherTransition,
   type ArchetypeDefinition,
 } from '../v2'
 
@@ -254,6 +253,10 @@ export const AUTHORED_VEGETATION_ARCHETYPES = [
 export const AUTHORED_RESIDENTIAL_ARCHETYPES = [DefaultArchetype.house, ...range(432, 444)] as const
 export const AUTHORED_URBAN_ARCHETYPES = [DefaultArchetype.cityTowerA, DefaultArchetype.cityTowerB, ...range(445, 458)] as const
 export const AUTHORED_INDUSTRIAL_ARCHETYPES = [DefaultArchetype.warehouse, ...range(459, 467)] as const
+
+/** World V4 additions, excluding the original one-house/two-tower catalog. */
+export const ADDITIONAL_RESIDENTIAL_ARCHETYPES = range(432, 444) as readonly number[]
+export const ADDITIONAL_URBAN_ARCHETYPES = range(445, 458) as readonly number[]
 
 /**
  * Shared, close-up-readable archetypes. Near tiers use compound silhouettes
@@ -706,12 +709,10 @@ function createTierMaterial(tier: LodTier): THREE.MeshStandardMaterial {
     fog: true,
     transparent: false,
     depthWrite: true,
-    dithering: true,
+    // Three's display-space color dithering crawls across moving geometry.
+    dithering: false,
   })
-  installDitherTransition(material)
-  const installDither = material.onBeforeCompile
-  material.onBeforeCompile = (shader, renderer) => {
-    installDither(shader, renderer)
+  material.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nattribute float ownerMix;')
       .replace(

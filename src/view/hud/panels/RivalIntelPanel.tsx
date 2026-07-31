@@ -418,6 +418,15 @@ export function RivalIntelPanel() {
                 <RangeBar label="Cash" values={estimate?.cash} format={money} />
               </div>
               <div className="mt-3 space-y-0.5">
+                <StatRow label="Focus" value={estimate?.focus ?? rival.archetype.replaceAll("_", " ")} />
+                <StatRow
+                  label={
+                    estimate?.currentBetConfidence == null
+                      ? "Current bet"
+                      : `Current bet (${pct(estimate.currentBetConfidence, 0)} conf.)`
+                  }
+                  value={estimate?.currentBet ?? "Undisclosed"}
+                />
                 <StatRow
                   label="Debt"
                   value={

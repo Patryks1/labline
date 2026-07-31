@@ -40,9 +40,14 @@ export const MODEL_STACK_MODULES: readonly ModelStackModule[] = [
     trainCostMult: 1.02, hostingMult: 0.92, speedMult: 1.24, capabilityBonus: 0,
   },
   {
-    id: 'sys_medusa', name: 'Multi-Token Heads', focus: 'Intelligence',
-    description: 'Predict several tokens while improving planning signal.',
-    trainCostMult: 1.06, hostingMult: 0.96, speedMult: 1.3, capabilityBonus: 0.6,
+    id: 'sys_medusa', name: 'Medusa Decode Heads', focus: 'Speed',
+    description: 'Attach auxiliary heads and verify a tree of draft tokens in parallel.',
+    trainCostMult: 1.04, hostingMult: 0.96, speedMult: 1.3, capabilityBonus: 0,
+  },
+  {
+    id: 'dense_mtp', name: 'Training-Time MTP', focus: 'Intelligence',
+    description: 'Train auxiliary future-token objectives into the base model.', families: ['dense', 'moe', 'omni'],
+    trainCostMult: 1.08, hostingMult: 1, speedMult: 1, capabilityBonus: 1.1,
   },
   {
     id: 'dense_opt', name: 'Better Optimizers', focus: 'Intelligence',

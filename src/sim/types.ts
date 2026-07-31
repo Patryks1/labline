@@ -1300,6 +1300,10 @@ export interface TrainingJob {
   activeParamsB?: number;
   targetPfDays: number;
   progressPfDays: number;
+  /** Integration/validation time gate, independent of allocated PF. */
+  minCalendarDays?: number;
+  /** Funded, unpaused active days accumulated toward the calendar gate. */
+  daysElapsed?: number;
   postTrain: PostTrainStage;
   postTrainProgress: number;
   postTrainTarget: number;
@@ -2152,6 +2156,12 @@ export interface RivalLab {
   allocation: Allocation;
   researchUnlocked: string[];
   models: Model[];
+  /**
+   * Save-compatible record of distinct products shipped by this rival. The
+   * serving fleet is intentionally bounded, so lifecycle policy must not use
+   * `models` alone as its historical memory.
+   */
+  releaseMilestones?: RivalReleaseMilestone[];
   pricing: ProductPricing;
   brandTrust: number;
   activeResearch: string | null;
@@ -2394,13 +2404,18 @@ export interface TrainingSpec {
   dataPlan: TrainingDataPlan;
   mode: TrainMode;
   teacherId?: string;
+  distillTeacherShare?: number;
   modelStack?: string[];
 }
 
 export interface TrainingForecast {
   targetPfDays: number;
+  /** Physical fleet draw at the planned training allocation. */
+  powerMw: number;
   etaDays: number;
+  minCalendarDays: number;
   upfrontCash: number;
+  cashBurnPerDay: number;
   weightedMTok: number;
   effectiveDataRatio: number;
   repeatedDataEpochs: number;
@@ -2420,7 +2435,22 @@ export interface RivalPublicEstimate {
   debt: [number, number];
   runwayDays: [number, number];
   announcedProject: string | null;
+  /** Publicly inferable strategic posture; never exposes private recipes. */
+  focus?: string;
+  /** Product/backbone currently being trained or the next disclosed research bet. */
+  currentBet?: string;
+  /** Confidence in `currentBet`, separate from broad operating-range confidence. */
+  currentBetConfidence?: number;
+  /** Present only when the named research program was actually disclosed. */
+  researchDisclosure?: Exclude<ResearchDisclosure, "secret">;
   confidence: number;
+}
+
+export interface RivalReleaseMilestone {
+  productPreset: ModelProductPreset;
+  backbone: ModelBackbone;
+  modelId: string;
+  releaseDay: number;
 }
 
 /** Rival multi-day pretrain — progresses with train-allocation PF. */
@@ -2428,10 +2458,17 @@ export interface RivalTrainJob {
   id: string;
   name: string;
   family: ModelFamily;
+  backbone?: ModelBackbone;
+  productPreset?: ModelProductPreset;
+  io?: ModelIO;
   paramsB: number;
   activeParamsB?: number;
   targetPfDays: number;
   progressPfDays: number;
+  /** Calendar integration/validation floor, independent of PF work. */
+  minCalendarDays?: number;
+  /** Funded, unpaused active days accrued toward the calendar floor. */
+  daysElapsed?: number;
   modalities: Modality[];
   /** Planned volume vs min for size (can be &lt;1 if risking undertrain) */
   dataCoverage: number;

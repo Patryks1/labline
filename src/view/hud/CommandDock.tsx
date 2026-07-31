@@ -396,6 +396,21 @@ function FeedView() {
       name: rival.name,
       project: rival.publicEstimate!.announcedProject!,
     }))
+  const profile = (kind: 'event' | 'ops' | 'wire' | 'rival', seed: number, name?: string) => {
+    if (kind === 'event') return { source: 'World Desk', handle: 'worlddesk', mark: 'WD', verified: true }
+    if (kind === 'ops') return { source: 'GridWatch', handle: 'gridwatch', mark: 'GW', verified: true }
+    if (kind === 'rival') return { source: name ?? 'Lab Dispatch', handle: (name ?? 'labdispatch').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15), mark: (name ?? 'LD').split(/\s+/).map((part) => part[0]).join('').slice(0, 2), verified: true }
+    const wires = [
+      { source: 'Compute Ledger', handle: 'computeledger', mark: 'CL', verified: true },
+      { source: 'Silicon Valley Post', handle: 'svpost', mark: 'SV', verified: true },
+      { source: 'Model Citizen', handle: 'modelcitizen', mark: 'MC', verified: false },
+    ]
+    return wires[Math.abs(seed) % wires.length]!
+  }
+  const newsDayLabel = (line: string) => {
+    const match = /^Day\s+(\d+):/i.exec(line)
+    return match ? `D${match[1]}` : undefined
+  }
 
   return (
     <div className="space-y-3">
@@ -408,10 +423,10 @@ function FeedView() {
       </div>
 
       <div className="anim-stagger space-y-2">
-        {state.activeEvents.map((event) => (
+        {state.activeEvents.map((event, index) => (
           <FeedPost
             key={`${event.id}-${event.day}`}
-            source="World Event"
+            {...profile('event', index)}
             dayLabel={`D${event.day}`}
             timeLabel={`${event.duration}d left`}
             tone="warning"
@@ -428,8 +443,7 @@ function FeedView() {
         {announcements.map((entry) => (
           <FeedPost
             key={entry.id}
-            source={entry.name}
-            dayLabel={`D${state.day}`}
+            {...profile('rival', entry.id.length, entry.name)}
             timeLabel="Announcement"
             tone="research"
             body={
@@ -441,10 +455,10 @@ function FeedView() {
           />
         ))}
 
-        {alerts.map((alert) => (
+        {alerts.map((alert, index) => (
           <FeedPost
             key={alert.id}
-            source="Ops"
+            {...profile('ops', index)}
             dayLabel={`D${alert.day}`}
             tone={alert.severity === 'danger' ? 'danger' : alert.severity === 'warn' ? 'warning' : 'neutral'}
             body={alert.message}
@@ -454,8 +468,8 @@ function FeedView() {
         {news.map((line, index) => (
           <FeedPost
             key={`${line}-${index}`}
-            source="Wire"
-            dayLabel={`D${Math.max(0, state.day - index)}`}
+            {...profile('wire', index)}
+            dayLabel={newsDayLabel(line)}
             tone="neutral"
             body={line}
           />

@@ -20,39 +20,6 @@ export interface ArchetypeDefinition {
   material: Readonly<Record<LodTier, THREE.Material | null>>
 }
 
-interface DitherState {
-  value: number
-  direction: number
-}
-
-const DITHER_FRAGMENT = /* glsl */ `
-uniform float uLodCoverage;
-uniform float uLodDirection;
-float lodDitherThreshold(vec2 p) {
-  // Stable interleaved screen-door pattern; complementary coverage avoids alpha sorting.
-  return fract(52.9829189 * fract(dot(floor(p), vec2(0.06711056, 0.00583715))));
-}
-`
-
-/** Add an opaque screen-door transition hook without enabling transparency. */
-export function installDitherTransition(material: THREE.Material): DitherState {
-  const state: DitherState = { value: 1, direction: 1 }
-  material.userData.lodCoverage = state
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.uLodCoverage = state
-    shader.uniforms.uLodDirection = { get value() { return state.direction } }
-    shader.fragmentShader = shader.fragmentShader
-      .replace('void main() {', `${DITHER_FRAGMENT}\nvoid main() {`)
-      .replace(
-        '#include <dithering_fragment>',
-        `float lodThreshold = lodDitherThreshold(gl_FragCoord.xy);\nif (uLodCoverage <= 0.0 || (uLodCoverage < 1.0 && ((uLodDirection > 0.0 && lodThreshold > uLodCoverage) || (uLodDirection < 0.0 && lodThreshold < 1.0 - uLodCoverage)))) discard;\n#include <dithering_fragment>`,
-      )
-  }
-  material.customProgramCacheKey = () => 'labline-lod-screen-door-v1'
-  material.needsUpdate = true
-  return state
-}
-
 export class ArchetypeRegistry {
   private readonly definitions = new Map<ArchetypeId, ArchetypeDefinition>()
   // Definitions can be replaced while authored bundles stream in. Resident
@@ -89,25 +56,6 @@ export class ArchetypeRegistry {
 
   has(id: ArchetypeId): boolean {
     return this.definitions.has(id)
-  }
-
-  setTierCoverage(
-    tier: LodTier,
-    coverage: number,
-    direction: 'incoming' | 'outgoing' = 'incoming',
-  ): void {
-    const clamped = Math.max(0, Math.min(1, coverage))
-    const visited = new Set<THREE.Material>()
-    for (const definition of [...this.definitions.values(), ...this.retiredDefinitions]) {
-      const material = definition.material[tier]
-      if (!material || visited.has(material)) continue
-      visited.add(material)
-      const state = material.userData.lodCoverage as DitherState | undefined
-      if (state) {
-        state.value = clamped
-        state.direction = direction === 'incoming' ? 1 : -1
-      }
-    }
   }
 
   dispose(): void {
@@ -206,8 +154,8 @@ function createTierMaterial(name: LodTier, roughness: number, metalness: number)
     flatShading: name !== LodTier.near,
     transparent: false,
     depthWrite: true,
+    dithering: false,
   })
-  installDitherTransition(material)
   return material
 }
 

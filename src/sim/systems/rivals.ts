@@ -6,6 +6,9 @@ import type {
   LabData,
   MapTile,
   Model,
+  ModelBackbone,
+  ModelIO,
+  ModelProductPreset,
   ProductPricing,
   ResearchDisclosure,
   ResearchProgram,
@@ -27,11 +30,10 @@ import {
   totalProcessed,
 } from '../balance/data'
 import { buildScaledModel } from '../balance/modelBuild'
-import { trainCostPfDays } from '../balance/training'
-import { enforceMinTrainingDuration, MIN_TRAINING_DAYS } from './trainingDuration'
+import { estimateTrainingEconomics } from '../balance/training'
 import { ECONOMY } from '../balance/economy'
 import { getResearchNode } from '../balance/research'
-import { analyzeTrainingData } from '../balance/trainingV3'
+import { analyzeTrainingData, ioForPreset } from '../balance/trainingV3'
 import {
   deriveModelCapabilities,
   estimateSyntheticQuality,
@@ -79,9 +81,11 @@ import {
   rivalTrainingHardwareGeneration,
 } from './rivalStrategy'
 import {
+  estimateTrainingMemoryGb,
   LEGACY_TRAINING_NUMERICS,
   trainingFormatThroughput,
 } from '../balance/trainingPrecision'
+import { computeLabSnapshot } from './labEngine'
 
 /** Legacy compatibility marker; v3 never checks this as a release gate. */
 export const RIVAL_FIRST_RELEASE_DAY = 1
@@ -226,6 +230,112 @@ export function rivalTrainingWeights(
   }
 }
 
+export interface RivalModelBet {
+  family: Model['family']
+  backbone: ModelBackbone
+  productPreset: ModelProductPreset
+  io: ModelIO
+  modalities: Model['modalities']
+  activeParamsRatio?: number
+  label: string
+}
+
+function normalizeRivalReleaseMilestones(
+  rival: Pick<RivalLab, 'models' | 'releaseMilestones'>,
+): NonNullable<RivalLab['releaseMilestones']> {
+  const milestones = (rival.releaseMilestones ?? []).map((milestone) => ({ ...milestone }))
+  const seen = new Set(
+    milestones.map((milestone) => `${milestone.productPreset}:${milestone.backbone}`),
+  )
+  for (const model of rival.models) {
+    if (model.release !== 'released' && !model.shipped) continue
+    const productPreset = model.productPreset ??
+      (model.family === 'diffusion' ? 'image_generation' :
+        model.family === 'video' ? 'video_generation' :
+          model.family === 'omni' ? 'omni' : 'language')
+    const backbone = model.backbone ??
+      (model.family === 'moe' ? 'moe' :
+        model.family === 'diffusion' || model.family === 'video' ? 'diffusion' : 'dense')
+    const key = `${productPreset}:${backbone}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    milestones.push({
+      productPreset,
+      backbone,
+      modelId: model.id,
+      releaseDay: model.releaseDay,
+    })
+  }
+  return milestones
+}
+
+/**
+ * Choose a product and a parameter topology independently. Multimodal labs
+ * deliberately ship each newly unlocked product line before converging on an
+ * omni product, then revisit omni on a sparse backbone once MoE is available.
+ */
+export function rivalNextModelBet(rival: Pick<RivalLab, 'archetype' | 'researchUnlocked' | 'models' | 'releaseMilestones'>): RivalModelBet {
+  const unlocked = new Set(rival.researchUnlocked)
+  const released = rival.models.filter((model) => model.release === 'released' || model.shipped)
+  const milestones = rival.releaseMilestones ?? []
+  const hasPreset = (preset: ModelProductPreset, backbone?: ModelBackbone) =>
+    milestones.some(
+      (milestone) =>
+        milestone.productPreset === preset &&
+        (backbone == null || milestone.backbone === backbone),
+    ) ||
+    released.some((model) =>
+      (model.productPreset ?? (model.family === 'diffusion' ? 'image_generation' : model.family === 'video' ? 'video_generation' : model.family === 'omni' ? 'omni' : 'language')) === preset &&
+      (backbone == null || (model.backbone ?? (model.family === 'moe' ? 'moe' : model.family === 'diffusion' || model.family === 'video' ? 'diffusion' : 'dense')) === backbone),
+    )
+  const bet = (
+    family: Model['family'],
+    backbone: ModelBackbone,
+    productPreset: ModelProductPreset,
+    modalities: Model['modalities'],
+    label: string,
+    activeParamsRatio?: number,
+  ): RivalModelBet => ({
+    family,
+    backbone,
+    productPreset,
+    io: ioForPreset(productPreset),
+    modalities,
+    label,
+    activeParamsRatio,
+  })
+
+  if (rival.archetype === 'multimodal') {
+    if (unlocked.has('mm_vision') && !hasPreset('audio')) {
+      return bet('dense', 'dense', 'audio', ['text', 'audio'], 'audio product')
+    }
+    if (unlocked.has('mm_diff') && !hasPreset('image_generation')) {
+      return bet('diffusion', 'diffusion', 'image_generation', ['text', 'image'], 'image generator')
+    }
+    if (unlocked.has('mm_video') && !hasPreset('video_generation')) {
+      return bet('video', 'diffusion', 'video_generation', ['text', 'image', 'video'], 'video generator')
+    }
+    if (unlocked.has('mm_omni') && !hasPreset('omni', 'dense')) {
+      return bet('omni', 'dense', 'omni', ['text', 'image', 'audio', 'video', 'tools'], 'dense omni product')
+    }
+    if (unlocked.has('mm_omni') && unlocked.has('moe_basics') && !hasPreset('omni', 'moe')) {
+      return bet('omni', 'moe', 'omni', ['text', 'image', 'audio', 'video', 'tools'], 'sparse omni product', 0.12)
+    }
+    if (unlocked.has('mm_omni')) {
+      const useMoe = unlocked.has('moe_basics')
+      return bet('omni', useMoe ? 'moe' : 'dense', 'omni', ['text', 'image', 'audio', 'video', 'tools'], useMoe ? 'sparse omni iteration' : 'omni iteration', useMoe ? 0.12 : undefined)
+    }
+    if (unlocked.has('mm_video')) return bet('video', 'diffusion', 'video_generation', ['text', 'image', 'video'], 'video iteration')
+    if (unlocked.has('mm_diff')) return bet('diffusion', 'diffusion', 'image_generation', ['text', 'image'], 'image iteration')
+    if (unlocked.has('mm_vision')) return bet('dense', 'dense', 'audio', ['text', 'audio'], 'audio iteration')
+  }
+
+  if (rival.archetype === 'efficiency' && unlocked.has('moe_basics')) {
+    return bet('moe', 'moe', 'language', ['text', 'tools'], 'efficient MoE', 0.08)
+  }
+  return bet('dense', 'dense', 'language', ['text', 'tools'], 'language model')
+}
+
 /** Controller policy only: all pools still draw from the same physical PF. */
 export function rivalAllocationPolicy(
   archetype: RivalLab['archetype'],
@@ -296,6 +406,7 @@ export function rivalCatchUpScaleTarget(input: {
 export function rivalResearchTrainingModifiers(
   unlocked: readonly string[],
   family: Model['family'],
+  backbone?: ModelBackbone,
 ): { trainEfficiency: number; researchMult: number } {
   const effects = aggregateEffects([...unlocked])
   return {
@@ -306,7 +417,7 @@ export function rivalResearchTrainingModifiers(
     researchMult:
       1 +
       Math.min(0.12, (effects.capabilityBonus ?? 0) * 0.015) +
-      (family === 'moe' && unlocked.includes('moe_hier') ? 0.04 : 0),
+      ((backbone === 'moe' || (backbone == null && family === 'moe')) && unlocked.includes('moe_hier') ? 0.04 : 0),
   }
 }
 
@@ -369,6 +480,40 @@ function rivalTrainPf(
   })
 }
 
+function rivalTrainingMemoryReady(
+  rival: RivalLab,
+  job: Pick<
+    RivalTrainJob,
+    'paramsB' | 'activeParamsB' | 'family' | 'trainingNumerics'
+  >,
+  physical: ReturnType<typeof computeLabSnapshot>,
+): boolean {
+  const allocationTotal =
+    Math.max(0, rival.allocation.training) +
+    Math.max(0, rival.allocation.inference) +
+    Math.max(0, rival.allocation.research)
+  const trainingShare =
+    allocationTotal > 1e-9
+      ? Math.max(0, rival.allocation.training) / allocationTotal
+      : 0.34
+  const memory = estimateTrainingMemoryGb({
+    paramsB: job.paramsB,
+    activeParamsB: job.activeParamsB,
+    family: job.family,
+    numerics: job.trainingNumerics ?? LEGACY_TRAINING_NUMERICS,
+    activationCheckpointing: rival.researchUnlocked.includes('opt_checkpoint'),
+  })
+  const fits = (hbmGb: number, systemRamGb: number) =>
+    hbmGb * trainingShare + 1e-9 >= memory.requiredHbmGb &&
+    systemRamGb * trainingShare + 1e-9 >= memory.requiredSystemRamGb
+  // WAN-separated provider and local clusters are distinct placement domains;
+  // their memory cannot be summed to make one indivisible model fit.
+  return (
+    fits(physical.localVramGb, physical.localSystemRamGb) ||
+    fits(physical.remoteVramGb, physical.remoteSystemRamGb)
+  )
+}
+
 /**
  * Apply at most the numerics-adjusted useful work available this tick. The
  * caller conserves the raw PF pool before converting it through the job's
@@ -390,6 +535,9 @@ export function progressRivalTrainingJob(
     job: {
       ...job,
       progressPfDays: job.progressPfDays + workAppliedPfDays,
+      daysElapsed:
+        (job.daysElapsed ?? 0) +
+        (availableEffectivePfDays > 0 && !job.paused ? 1 : 0),
     },
     workAppliedPfDays,
   }
@@ -787,7 +935,8 @@ export function tickRivals(state: SimState): SimState {
     // Physical facilities/contracts do not change while this controller plans
     // its day. Resolve that expensive compact-world snapshot once, while still
     // applying the evolving allocation/staff fields from `next` below.
-    const effectiveFlopsPf = rivalEffectiveFlops(state, r)
+    const physicalCompute = computeLabSnapshot(state, r.id)
+    const effectiveFlopsPf = physicalCompute.rawFlopsPf
     let next: RivalLab = {
       ...r,
       pricing: { ...r.pricing },
@@ -796,6 +945,7 @@ export function tickRivals(state: SimState): SimState {
         quality: { ...m.quality },
         benchmarks: { ...m.benchmarks },
       })),
+      releaseMilestones: normalizeRivalReleaseMilestones(r),
       researchUnlocked: [...r.researchUnlocked],
       researchQueue: [...(r.researchQueue ?? [])],
       researchLeads: (r.researchLeads ?? []).map((lead) => ({
@@ -1362,7 +1512,8 @@ export function tickRivals(state: SimState): SimState {
     if (next.trainingJob) {
       let job = { ...next.trainingJob }
       const burn = job.cashBurnPerDay ?? 0
-      const canFund = next.cash >= burn
+      const memoryReady = rivalTrainingMemoryReady(next, job, physicalCompute)
+      const canFund = memoryReady && next.cash >= burn
       if (canFund) next.cash -= burn
       const trainingNumerics = job.trainingNumerics ?? LEGACY_TRAINING_NUMERICS
       job.trainingNumerics = trainingNumerics
@@ -1411,7 +1562,10 @@ export function tickRivals(state: SimState): SimState {
           )
         }
       }
-      if (job.progressPfDays >= job.targetPfDays) {
+      if (
+        job.progressPfDays >= job.targetPfDays &&
+        (job.daysElapsed ?? 0) >= (job.minCalendarDays ?? 0)
+      ) {
         // Finalize via shared buildScaledModel (data shortfall / LQ → capability hit)
         const gen =
           1 +
@@ -1443,6 +1597,7 @@ export function tickRivals(state: SimState): SimState {
         const trainingModifiers = rivalResearchTrainingModifiers(
           next.researchUnlocked,
           job.family,
+          job.backbone,
         )
         let released = buildScaledModel({
           id: `${next.id}-r${state.day}`,
@@ -1450,6 +1605,9 @@ export function tickRivals(state: SimState): SimState {
           paramsB: job.paramsB,
           activeParamsB: job.activeParamsB,
           family: job.family,
+          backbone: job.backbone,
+          productPreset: job.productPreset,
+          io: job.io,
           modalities: job.modalities,
           day: state.day,
           dataCoverage: job.dataCoverage,
@@ -1540,6 +1698,24 @@ export function tickRivals(state: SimState): SimState {
           )
         }
 
+        const productPreset = released.productPreset ?? 'language'
+        const backbone = released.backbone ?? 'dense'
+        if (
+          !(next.releaseMilestones ?? []).some(
+            (milestone) =>
+              milestone.productPreset === productPreset && milestone.backbone === backbone,
+          )
+        ) {
+          next.releaseMilestones = [
+            ...(next.releaseMilestones ?? []),
+            {
+              productPreset,
+              backbone,
+              modelId: released.id,
+              releaseDay: state.day,
+            },
+          ]
+        }
         next.models = [released, ...next.models.slice(0, 3)]
         next.pricing = { ...next.pricing, activeModelId: released.id }
         next.trainingJob = null
@@ -1559,6 +1735,9 @@ export function tickRivals(state: SimState): SimState {
       // Start a new job sized for available data (risk under-train like player)
       const prev = next.models[0]
       let family: Model['family'] = 'dense'
+      let backbone: ModelBackbone = 'dense'
+      let productPreset: ModelProductPreset = 'language'
+      let io: ModelIO = ioForPreset('language')
       let modalities: Model['modalities'] = ['text']
       let activeParamsB: number | undefined
 
@@ -1629,6 +1808,16 @@ export function tickRivals(state: SimState): SimState {
         }
       }
 
+      const modelBet = rivalNextModelBet(next)
+      family = modelBet.family
+      backbone = modelBet.backbone
+      productPreset = modelBet.productPreset
+      io = modelBet.io
+      modalities = modelBet.modalities
+      activeParamsB = modelBet.activeParamsRatio
+        ? Math.max(0.1, paramsB * modelBet.activeParamsRatio)
+        : undefined
+
       const dataNeed = minDataMTokForParams(paramsB)
       const useHQ =
         next.trainPreferSynthHQ !== false && next.researchUnlocked.includes('data_synth')
@@ -1658,6 +1847,9 @@ export function tickRivals(state: SimState): SimState {
       const dataAnalysis = analyzeTrainingData({
         paramsB,
         family,
+        backbone,
+        productPreset,
+        io,
         plan: recipe.plan,
         data: next.data!,
         actualMTok: usable,
@@ -1675,36 +1867,42 @@ export function tickRivals(state: SimState): SimState {
         const trainingModifiers = rivalResearchTrainingModifiers(
           next.researchUnlocked,
           family,
+          backbone,
         )
         const trainingNumerics = chooseRivalTrainingNumerics(next, family)
-        const targetPf = trainCostPfDays({
+        const trainShare = Math.max(0.4, Math.min(0.95, recipe.plan.trainShare))
+        const economics = estimateTrainingEconomics({
           paramsB,
           activeParamsB,
           family,
+          backbone,
           trainEfficiency: trainingModifiers.trainEfficiency,
-          dataRatio: dataAnalysis.effectiveDataRatio,
+          trainingTokensMTok: usable * trainShare,
+          verificationTokensMTok: usable * (1 - trainShare),
           modalityComputeMult: dataAnalysis.modalityComputeMult,
+          dataCost: recipe.cashCost,
         })
-
-        const formatThroughputPreview = trainingFormatThroughput(
-          rivalTrainingHardwareGeneration(next),
-          trainingNumerics,
+        const scaledTargetPf = economics.targetPfDays
+        const cashSunk = economics.upfrontCash
+        const cashBurnPerDay = economics.cashBurnPerDay
+        const memoryReady = rivalTrainingMemoryReady(
+          next,
+          {
+            paramsB,
+            activeParamsB,
+            family,
+            trainingNumerics,
+          },
+          physicalCompute,
         )
-        const dailyThroughput = Math.max(
-          0,
-          rivalTrainPf(next, state, effectiveFlopsPf) *
-            pace.researchSpeed *
-            formatThroughputPreview,
-        )
-        const scaledTargetPf = enforceMinTrainingDuration(
-          Math.max(3, targetPf),
-          dailyThroughput,
-          MIN_TRAINING_DAYS,
-        )
-        const cashSunk = Math.floor(scaledTargetPf * ECONOMY.trainUpfrontPerPfDay)
-        const cashBurnPerDay = Math.floor(
-          ECONOMY.trainCashBurnPerPfDay * Math.sqrt(Math.max(1, paramsB)),
-        )
+        if (!memoryReady) {
+          if (state.day % 7 === hashSeed(state.seed, next.id, 'train-memory-news') % 7) {
+            news.push(
+              `Day ${state.day}: ${next.name} delays training — the run does not fit in accelerator HBM and host RAM.`,
+            )
+          }
+          return next
+        }
         if (next.cash < cashSunk) {
           if (state.day % 7 === hashSeed(state.seed, next.id, 'train-news') % 7) {
             news.push(`Day ${state.day}: ${next.name} delays training — insufficient cash.`)
@@ -1717,10 +1915,15 @@ export function tickRivals(state: SimState): SimState {
           id: `rt-${next.id}-${state.day}`,
           name: `${next.name.split(' ')[0]}-train`,
           family,
+          backbone,
+          productPreset,
+          io,
           paramsB,
           activeParamsB,
           targetPfDays: scaledTargetPf,
           progressPfDays: 0,
+          minCalendarDays: economics.minCalendarDays,
+          daysElapsed: 0,
           modalities,
           dataCoverage: recipe.coverage,
           dataQuality: recipe.qualityUsed,
@@ -1728,7 +1931,7 @@ export function tickRivals(state: SimState): SimState {
           includeSynthLQ: useLQ,
           synthLqShare: recipe.synthLqShare ?? 0,
           trainShare: recipe.plan.trainShare,
-          totalMTok: recipe.plan.totalMTok,
+          totalMTok: usable,
           outcomeSeed: hashSeed(state.seed, next.id, state.day, paramsB, family, 'train-outcome'),
           outcomeRisk: dataAnalysis.risk,
           effectiveDataRatio: dataAnalysis.effectiveDataRatio,

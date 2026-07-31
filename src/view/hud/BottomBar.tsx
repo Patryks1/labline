@@ -7,7 +7,7 @@ import {
 } from '../../sim/systems/computeBreakdown'
 import { useGameStore } from '../../store/gameStore'
 import { computeSnapshot, inferenceTokensPerDay } from '../../sim/tick'
-import { computeMw, mw, num, pct, pfToMw } from './format'
+import { mw, num, pct, pf } from './format'
 import { SliderField } from './ui/SliderField'
 
 /**
@@ -39,7 +39,7 @@ export function BottomBar() {
   }
 
   const poolSub = (p: PoolBreakdown) =>
-    `${computeMw(pfToMw(p.poolPf))} · ${p.utilizationLabel} ${pct(Math.min(1, p.utilization), 0)}`
+    `${pf(p.poolPf)} · ${mw(p.powerMw)} · ${p.utilizationLabel} ${pct(Math.min(1, p.utilization), 0)}`
 
   const servedRatio = state.lastMarket.playerDemandMTok > 0
     ? Math.min(1, state.lastMarket.servedMTok / state.lastMarket.playerDemandMTok)
@@ -48,14 +48,17 @@ export function BottomBar() {
   const powerTight = snap.mwAvailable > 0 && snap.mwDemand / snap.mwAvailable >= 0.9
 
   return (
-    <footer className="operations-shell pointer-events-none">
+    <footer
+      className="operations-shell pointer-events-none"
+      data-expanded={expanded ? 'true' : 'false'}
+    >
       <div className="hud-surface pointer-events-auto absolute inset-x-2 bottom-2 rounded-lg px-3 py-2">
         <div className="relative z-10 mb-1.5 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap font-mono text-[0.75rem]">
           <Stat
             label="Compute"
-            value={computeMw(pfToMw(snap.effectiveFlopsPf))}
+            value={pf(snap.effectiveFlopsPf)}
             className="hidden sm:inline-flex"
-            title={`Effective compute ${computeMw(pfToMw(snap.effectiveFlopsPf))} · yield ${pct(breakdown.fleetYield, 0)}`}
+            title={`Effective compute ${pf(snap.effectiveFlopsPf)} · yield ${pct(breakdown.fleetYield, 0)}`}
           />
           <Stat
             label="Power"
@@ -199,7 +202,11 @@ function PoolTooltip({ pool, accent }: { pool: PoolBreakdown; accent: string }) 
       </div>
       <div className="flex items-baseline justify-between gap-3 font-mono text-[0.75rem]">
         <span className="text-muted">Effective work</span>
-        <span className="text-bone">{computeMw(pfToMw(pool.poolPf))} · {pool.utilizationLabel}</span>
+        <span className="text-bone">{pf(pool.poolPf)} · {pool.utilizationLabel}</span>
+      </div>
+      <div className="flex items-baseline justify-between gap-3 font-mono text-[0.75rem]">
+        <span className="text-muted">Power draw</span>
+        <span className="text-bone">{mw(pool.powerMw)}</span>
       </div>
       {blocker ? (
         <p className="rounded-md border border-amber/30 bg-amber/10 px-2 py-1 text-[0.6875rem] leading-snug text-amber">

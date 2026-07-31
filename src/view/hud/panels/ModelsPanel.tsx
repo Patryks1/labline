@@ -16,8 +16,6 @@ import type {
 } from "../../../sim/types";
 import {
   PARAM_PRESETS,
-  estimateTrainDays,
-  estimateTrainingRun,
   formatParams,
   recommendedChips,
 } from "../../../sim/balance/training";
@@ -30,7 +28,6 @@ import {
   forecastTrainingV3,
   ioForPreset,
 } from "../../../sim/balance/trainingV3";
-import { ECONOMY } from "../../../sim/balance/economy";
 import {
   capabilityCeiling,
   normalizeDataQuality,
@@ -53,9 +50,10 @@ import { energyPriceForState } from "../../../sim/systems/map";
 import { computeSnapshot } from "../../../sim/tick";
 import {
   playerTrainingResourcePlan,
+  trainingMinimumStatus,
   trainingRamFitForNewJob,
 } from "../../../sim/systems/training";
-import { money, num } from "../format";
+import { money, mw, num } from "../format";
 import { SizeSlider } from "../ui/SizeSlider";
 import { ResearchUnlockLink } from "../ui/ResearchUnlockLink";
 import { modelTrainVramGb, modelVramGb } from "../../../sim/balance/racks";
@@ -395,12 +393,15 @@ export function ModelsPanel() {
           dataPlan: recipePlan,
           mode,
           teacherId: mode === "distill" ? teacherId || undefined : undefined,
+          distillTeacherShare: mode === "distill" ? teacherShare : undefined,
           modelStack: selectedStack,
         },
         labData,
         dataQuality: state.player.dataQuality,
         trainEfficiency: state.player.trainEfficiency,
         trainPoolPf: snap.pools.training,
+        trainPowerMw: snap.mwForecast.training,
+        teacherParamsB: teachers.find((model) => model.id === teacherId)?.paramsB,
       }),
     [
       modelIteration.name,
@@ -412,11 +413,14 @@ export function ModelsPanel() {
       recipePlan,
       mode,
       teacherId,
+      teacherShare,
       selectedStack,
       labData,
       state.player.dataQuality,
       state.player.trainEfficiency,
       snap.pools.training,
+      snap.mwForecast.training,
+      teachers,
     ],
   );
   const capabilityLimit = useMemo(() => {
@@ -424,7 +428,7 @@ export function ModelsPanel() {
     const researchMult =
       1 +
       Math.min(0.12, (effects.capabilityBonus ?? 0) * 0.015) +
-      (family === "moe" && unlocked.includes("moe_hier") ? 0.04 : 0);
+      (backbone === "moe" && unlocked.includes("moe_hier") ? 0.04 : 0);
     const teacherCapability =
       mode === "distill"
         ? teachers.find((model) => model.id === teacherId)?.capability
@@ -433,6 +437,7 @@ export function ModelsPanel() {
       paramsB: trainParamsB,
       activeParamsB,
       family,
+      backbone,
       dataCoverage: trainingForecast.effectiveDataRatio,
       dataQuality: normalizeDataQuality({
         labDataQuality: state.player.dataQuality,
@@ -445,6 +450,7 @@ export function ModelsPanel() {
   }, [
     unlocked,
     family,
+    backbone,
     mode,
     teachers,
     teacherId,
@@ -500,67 +506,11 @@ export function ModelsPanel() {
     setShowPreviousCorpus(true);
   }, [mode, continueFromId, continueModel]);
 
-  const trainingRun = useMemo(() => {
-    let estimate = estimateTrainingRun({
-      paramsB:
-        mode === "continue"
-          ? (teachers.find((t) => t.id === continueFromId)?.paramsB ?? paramsB)
-          : paramsB,
-      family:
-        mode === "continue"
-          ? (teachers.find((t) => t.id === continueFromId)?.family ?? family)
-          : family,
-      trainEfficiency: state.player.trainEfficiency,
-      activeParamsB,
-      mode:
-        mode === "continue"
-          ? "pretrain"
-          : mode === "distill"
-            ? "distill"
-            : "pretrain",
-      teacherParamsB: teachers.find((t) => t.id === teacherId)?.paramsB,
-      trainingTokensMTok: dataMTok * trainShare,
-      verificationTokensMTok: dataMTok * (1 - trainShare),
-      modalityComputeMult:
-        trainingForecast.modalityComputeMult * stackModifiers.trainCostMult,
-    });
-    if (mode === "continue") {
-      estimate = {
-        ...estimate,
-        trainingPfDays: estimate.trainingPfDays * 0.22,
-        verificationPfDays: estimate.verificationPfDays * 0.22,
-        physicalPfDays: estimate.physicalPfDays * 0.22,
-        gamePfDays: estimate.gamePfDays * 0.22,
-      };
-    }
-    return estimate;
-  }, [
-    paramsB,
-    family,
-    state.player.trainEfficiency,
-    activeParamsB,
-    mode,
-    teacherId,
-    teachers,
-    continueFromId,
-    dataMTok,
-    trainShare,
-    trainingForecast.modalityComputeMult,
-    stackModifiers.trainCostMult,
-  ]);
-
-  const costPf = trainingRun.gamePfDays;
-  const setupCost = Math.max(
-    1_000,
-    Math.floor(costPf * ECONOMY.trainUpfrontPerPfDay),
-  );
   const dataCost = Math.max(0, Math.floor(dataMTok * 0.35));
-  const dailyCost = Math.max(
-    250,
-    Math.floor(costPf * (ECONOMY.trainCashBurnPerPfDay ?? 180)),
-  );
-  const upfront = setupCost + dataCost;
-  const daysEst = estimateTrainDays(costPf, snap.pools.training);
+  const setupCost = Math.max(0, trainingForecast.upfrontCash - dataCost);
+  const dailyCost = trainingForecast.cashBurnPerDay;
+  const upfront = trainingForecast.upfrontCash;
+  const daysEst = trainingForecast.etaDays;
   const hostWeightFormat = trainingFormat.includes("fp32")
     ? "fp32"
     : trainingFormat.includes("fp8") || trainingFormat.includes("nvfp4")
@@ -569,7 +519,7 @@ export function ModelsPanel() {
   const hostRamGb = modelVramGb(
     trainParamsB,
     activeParamsB,
-    trainFamily,
+    backbone === "moe" ? "moe" : trainFamily,
     hostWeightFormat,
   );
   const recChips = recommendedChips(paramsB, family);
@@ -578,7 +528,7 @@ export function ModelsPanel() {
       estimateTrainingMemoryGb({
         paramsB: trainParamsB,
         activeParamsB,
-        family,
+        family: backbone === "moe" ? "moe" : family,
         numerics: {
           computeFormat: trainingFormat,
           nativeWeightFormat,
@@ -590,13 +540,18 @@ export function ModelsPanel() {
       trainParamsB,
       activeParamsB,
       family,
+      backbone,
       trainingFormat,
       nativeWeightFormat,
       unlocked,
     ],
   );
   const needVramGb = Math.max(
-    modelTrainVramGb(trainParamsB, activeParamsB, family),
+    modelTrainVramGb(
+      trainParamsB,
+      activeParamsB,
+      backbone === "moe" ? "moe" : family,
+    ),
     trainingMemory.totalGb,
   );
   const prospectiveRamFit = trainingRamFitForNewJob(
@@ -604,6 +559,7 @@ export function ModelsPanel() {
     needVramGb,
     computePriority,
     snap,
+    trainingMemory.requiredSystemRamGb,
   );
   const underProvisioned =
     snap.chipCount > 0 && snap.chipCount < recChips * 0.35;
@@ -893,7 +849,7 @@ export function ModelsPanel() {
             onKeepInternal={(jobId) => keepInternal(jobId)}
             onSelectPostTrain={(jobId, stage) => selectPostTrain(jobId, stage)}
             safetyProps={
-              job.progressPfDays >= job.targetPfDays && !job.failed
+              trainingMinimumStatus(job).ok
                 ? {
                     model:
                       state.player.models.find((m) => m.name === job.name) ??
@@ -1056,38 +1012,32 @@ export function ModelsPanel() {
                 ) : null}
 
                 <div className="space-y-2.5">
-                  <div className="grid items-end gap-2 lg:grid-cols-[minmax(12rem,1fr)_auto_auto]">
-                    <label className="block min-w-0 text-[0.8125rem] text-muted">
-                      Model name
-                      <input
-                        value={name}
-                        onChange={(event) => setName(event.target.value)}
-                        className={`mt-1 w-full rounded-md border bg-void px-2 py-1.5 text-sm text-bone outline-none focus:border-mint/50 ${
-                          nameTaken ? "border-danger/60" : "border-line"
-                        }`}
-                        aria-invalid={nameTaken}
-                        aria-label="Model family name"
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setName(
-                          generateUniqueModelName({
+                  <div className="grid items-end gap-2 lg:grid-cols-[minmax(12rem,1fr)_auto]">
+                    <div className="block min-w-0 text-[0.8125rem] text-muted">
+                      <label htmlFor="model-family-name">Model name</label>
+                      <div className={`relative mt-1 flex rounded-md border bg-void focus-within:border-mint/50 ${nameTaken ? "border-danger/60" : "border-line"}`}>
+                        <input
+                          id="model-family-name"
+                          value={name}
+                          onChange={(event) => setName(event.target.value)}
+                          className="min-w-0 flex-1 bg-transparent px-2 py-1.5 pr-10 text-sm text-bone outline-none"
+                          aria-invalid={nameTaken}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setName(generateUniqueModelName({
                             playerModels: state.player.models,
-                            rivalModels: state.rivals.flatMap(
-                              (rival) => rival.models,
-                            ),
+                            rivalModels: state.rivals.flatMap((rival) => rival.models),
                             jobs,
-                          }),
-                        )
-                      }
-                      className="rounded-md border border-line bg-void px-2.5 py-1.5 text-bone hover:border-mint/40 hover:text-mint"
-                      title="Generate a unique name"
-                      aria-label="Generate unique model name"
-                    >
-                      <DiceFive aria-hidden="true" size={18} weight="duotone" />
-                    </button>
+                          }))}
+                          className="absolute inset-y-0 right-0 grid w-9 place-items-center text-muted transition hover:bg-panel-2 hover:text-mint"
+                          title="Generate a unique name"
+                          aria-label="Generate unique model name"
+                        >
+                          <DiceFive aria-hidden="true" size={18} weight="duotone" />
+                        </button>
+                      </div>
+                    </div>
                     <fieldset className="min-w-0">
                       <legend className="text-[0.8125rem] text-muted">
                         Backbone
@@ -1215,7 +1165,7 @@ export function ModelsPanel() {
               <div className="space-y-3">
                 <div className="rounded-md border border-line/60 bg-void/25 p-2.5">
                   <SizeSlider
-                    label={family === "moe" ? "Total size" : "Model size"}
+                    label={backbone === "moe" ? "Total size" : "Model size"}
                     value={paramsB}
                     disabled={mode === "continue"}
                     disabledReason={
@@ -1227,7 +1177,7 @@ export function ModelsPanel() {
                       const next = applyParamsB(p);
                       setSizeVal(next.val);
                       setSizeUnit(next.unit);
-                      if (family === "moe") {
+                      if (backbone === "moe") {
                         const act = Math.min(p, Math.max(0.1, p * 0.1));
                         const a = applyParamsB(act);
                         setActiveVal(a.val);
@@ -1235,7 +1185,7 @@ export function ModelsPanel() {
                       }
                     }}
                   />
-                  {family === "moe" && mode !== "continue" ? (
+                  {backbone === "moe" && mode !== "continue" ? (
                     <div className="mt-2">
                       <SizeSlider
                         label={`Active params (${
@@ -1591,7 +1541,19 @@ export function ModelsPanel() {
                   <p className="text-[0.8125rem] text-bone">
                     {forecastVerdict}
                   </p>
-                  <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-8">
+                  <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-10">
+                    <MetricTile
+                      label="Work"
+                      value={`${num(trainingForecast.targetPfDays, 1)} PF·d`}
+                      detail={`${num(snap.pools.training, 2)} PF available`}
+                      tone="train"
+                    />
+                    <MetricTile
+                      label="Power"
+                      value={mw(trainingForecast.powerMw)}
+                      detail="physical fleet draw"
+                      tone="warning"
+                    />
                     <MetricTile
                       label="Calendar"
                       value={
@@ -1642,17 +1604,23 @@ export function ModelsPanel() {
                     <MetricTile
                       label="Host RAM"
                       value={`${num(hostRamGb, 0)} GB`}
-                      detail={`${hostWeightFormat} · ${family === "moe" ? "MoE half-offload" : "dense"}`}
+                      detail={`${hostWeightFormat} · ${backbone === "moe" ? "MoE half-offload" : "dense"}`}
                       tone="neutral"
                     />
                     <MetricTile
-                      label="Training RAM"
+                      label="Training HBM"
                       value={`${num(prospectiveRamFit.candidateAllocatedGb, 0)} / ${num(needVramGb, 0)} GB`}
                       detail={
                         prospectiveRamFit.ready
                           ? `assigned / required · ${Math.round(trainingResources.trainingAllocationShare * 100)}% allocation`
                           : `hard limit · blocks ${prospectiveRamFit.blockerName ?? "new run"}`
                       }
+                      tone={prospectiveRamFit.ready ? "positive" : "danger"}
+                    />
+                    <MetricTile
+                      label="Training host RAM"
+                      value={`${num(prospectiveRamFit.candidateSystemRamAllocatedGb, 0)} / ${num(trainingMemory.requiredSystemRamGb, 0)} GB`}
+                      detail={`bottleneck · ${prospectiveRamFit.blockerResource ?? "none"}`}
                       tone={prospectiveRamFit.ready ? "positive" : "danger"}
                     />
                   </div>

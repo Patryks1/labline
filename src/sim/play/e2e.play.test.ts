@@ -179,7 +179,8 @@ describe('e2e training depth', () => {
         allowSynthetic: true,
       },
     })
-    expect(s.player.trainingJob?.dataPlan.totalUnits).toBe(1.5)
+    expect(s.player.trainingJob?.dataPlan.totalUnits).toBeGreaterThan(0)
+    expect(s.player.trainingJob?.dataPlan.totalUnits).toBeLessThanOrEqual(1.5)
     expect(s.player.trainingJob?.dataConsumed).toBeDefined()
     expect(s.player.trainingJob?.cashSunk).toBeGreaterThan(0)
 
@@ -189,7 +190,20 @@ describe('e2e training depth', () => {
       ...s,
       player: {
         ...s.player,
-        trainingJob: { ...job, progressPfDays: job.targetPfDays },
+        trainingJob: {
+          ...job,
+          progressPfDays: job.targetPfDays,
+          daysElapsed: job.minCalendarDays ?? 0,
+        },
+        trainingJobs: (s.player.trainingJobs ?? [job]).map((candidate) =>
+          candidate.id === job.id
+            ? {
+                ...candidate,
+                progressPfDays: candidate.targetPfDays,
+                daysElapsed: candidate.minCalendarDays ?? 0,
+              }
+            : candidate,
+        ),
       },
     }
     s = advancePostTrain(s)
@@ -203,7 +217,8 @@ describe('e2e training depth', () => {
     }
     s = releaseFromJob(s)
     const m = s.player.models[0]!
-    expect(m.dataPlan?.totalUnits).toBe(1.5)
+    expect(m.dataPlan?.totalUnits).toBeGreaterThan(0)
+    expect(m.dataPlan?.totalUnits).toBeLessThanOrEqual(1.5)
     expect(m.capability).toBeGreaterThan(5)
 
     // Continue train

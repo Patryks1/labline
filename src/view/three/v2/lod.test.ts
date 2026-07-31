@@ -3,6 +3,20 @@ import { LOD_THRESHOLDS, ScreenSpaceLod, selectLodTier } from './lod'
 import { LodTier } from './types'
 
 describe('screen-space LOD', () => {
+  it('atomically swaps the default layer only after its target is ready', () => {
+    let ready = false
+    const lod = new ScreenSpaceLod(LodTier.mid)
+
+    expect(lod.update(36, 0, () => ready).layers).toEqual([
+      { tier: LodTier.mid, coverage: 1 },
+    ])
+    ready = true
+    const swapped = lod.update(36, 1, () => ready)
+    expect(lod.transitionMs).toBe(0)
+    expect(swapped.transitioning).toBe(false)
+    expect(swapped.layers).toEqual([{ tier: LodTier.near, coverage: 1 }])
+  })
+
   it('reaches the same decisive tier regardless of zoom path', () => {
     const ready = () => true
     const fromFar = new ScreenSpaceLod(LodTier.mid, 0)

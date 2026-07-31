@@ -709,17 +709,14 @@ export function createEmptyLabData(): LabData {
   const stocks = {} as Record<DataDomain, DomainStock>
   for (const d of DATA_DOMAINS) stocks[d] = emptyDomainStock()
 
-  // 500 MTok starter as web crawl, weighted toward chat/code
+  // 500 MTok scrappy public-text foundation. Multimodal and regulated-domain
+  // holdings must be earned through collection or explicit acquisitions.
   const seed: Partial<Record<DataDomain, number>> = {
-    chat: 190,
-    code: 100,
-    math: 40,
-    science: 35,
-    image: 40,
-    law: 25,
-    health: 20,
-    audio: 30,
-    video: 20,
+    chat: 290,
+    code: 145,
+    math: 35,
+    science: 25,
+    image: 5,
   }
   let total = 0
   for (const d of DATA_DOMAINS) {

@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
-import type { MapTile, SimState } from '../types'
+import type { MapTile, Model, SimState } from '../types'
 import { dcBayUsage } from './dcRacks'
 import {
   deployRackBatchAcrossHalls,
+  fleetHostSnapshot,
   fillAllAvailableRackBays,
+  modelHostNeed,
   quoteRackDeployment,
 } from './hosting'
 import { isDcAnchor, isDcKind } from './map'
@@ -81,6 +83,64 @@ function withLegacyHalls(
     },
   }
 }
+
+function releasedModel(id: string, paramsB: number, activeParamsB = paramsB): Model {
+  return {
+    id,
+    name: id,
+    family: activeParamsB < paramsB ? 'moe' : 'dense',
+    backbone: activeParamsB < paramsB ? 'moe' : 'dense',
+    paramsB,
+    activeParamsB,
+    inferCostMult: 1,
+    release: 'released',
+    shipped: true,
+  } as Model
+}
+
+describe('grounded hosting requirements', () => {
+  it('scales the minimum replica PF linearly with active parameters', () => {
+    const seven = modelHostNeed(releasedModel('dense-7', 7))
+    const fourteen = modelHostNeed(releasedModel('dense-14', 14))
+    const moeSmall = modelHostNeed(releasedModel('moe-small', 70, 8))
+    const moeLarge = modelHostNeed(releasedModel('moe-large', 700, 8))
+
+    expect(fourteen.hostPf).toBeCloseTo(seven.hostPf * 2, 12)
+    expect(moeLarge.hostPf).toBeCloseTo(moeSmall.hostPf, 12)
+    expect(moeLarge.vramGb).toBeGreaterThan(moeSmall.vramGb * 5)
+  })
+
+  it('adds simultaneous model replica floors instead of sharing cross-model batching', () => {
+    const first = releasedModel('first', 2)
+    const second = releasedModel('second', 3)
+    const created = createGame(91_117)
+    const state: SimState = {
+      ...created,
+      player: {
+        ...created.player,
+        models: [first, second],
+        pricing: {
+          ...created.player.pricing,
+          activeModelId: first.id,
+          apiModelIds: [first.id, second.id],
+        },
+      },
+      lastMarket: {
+        ...created.lastMarket,
+        demandPf: 0,
+        servedPf: 0,
+        capacityPf: 0,
+      },
+    }
+    const snapshot = fleetHostSnapshot(state)
+    const minimumSum = snapshot.models.reduce((sum, model) => sum + model.hostPf, 0)
+
+    expect(snapshot.models).toHaveLength(2)
+    expect(snapshot.pfNeed).toBeCloseTo(minimumSum, 12)
+    expect(snapshot.computeCoverage).toBeGreaterThanOrEqual(0)
+    expect(snapshot.vramCoverage).toBeGreaterThanOrEqual(0)
+  })
+})
 
 describe('fillAllAvailableRackBays', () => {
   it('reserves every free bay in completed halls and ignores construction', () => {

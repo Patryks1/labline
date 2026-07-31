@@ -17,10 +17,9 @@ import { createRng } from '../rng'
 import { normalizeWeights, totalProcessed } from './data'
 import { scaleIntelligence } from './modelScaling'
 import {
+  estimateTrainingEconomics,
   modalityComputeMultiplier,
-  trainCostPfDays,
 } from './training'
-import { ECONOMY } from './economy'
 import { modelStackModifiers } from './modelStack'
 
 const DOMAIN_COUNT = 9
@@ -179,9 +178,12 @@ export function analyzeTrainingData(opts: {
   }
 }
 
-export function serviceProfileForModel(model: Pick<Model, 'paramsB' | 'activeParamsB' | 'family' | 'tokPerSecMult' | 'capability'>): ServiceProfile {
+export function serviceProfileForModel(
+  model: Pick<Model, 'paramsB' | 'activeParamsB' | 'family' | 'tokPerSecMult' | 'capability'> &
+    Partial<Pick<Model, 'backbone'>>,
+): ServiceProfile {
   const active =
-    model.family === 'moe'
+    model.family === 'moe' || model.backbone === 'moe'
       ? Math.max(0.1, (model.activeParamsB ?? model.paramsB * 0.1) * 1.15)
       : Math.max(0.1, model.paramsB)
   const baseTps = 128 * Math.pow(7 / active, 0.34) * Math.max(0.2, model.tokPerSecMult)
@@ -256,10 +258,15 @@ export function forecastTrainingV3(opts: {
   dataQuality: number
   trainEfficiency: number
   trainPoolPf: number
+  trainPowerMw?: number
+  teacherParamsB?: number
 }): TrainingForecast {
   const family = familyFromSpec(opts.spec.backbone, opts.spec.productPreset)
   const stack = modelStackModifiers(opts.spec.modelStack ?? [], family)
   const requested = opts.spec.dataPlan.totalMTok ?? opts.spec.dataPlan.totalUnits
+  const actualMTok = opts.spec.dataPlan.allowSynthetic
+    ? requested
+    : Math.min(requested, totalProcessed(opts.labData))
   const analysis = analyzeTrainingData({
     paramsB: opts.spec.paramsB,
     family,
@@ -268,24 +275,31 @@ export function forecastTrainingV3(opts: {
     io: opts.spec.io,
     plan: opts.spec.dataPlan,
     data: opts.labData,
-    actualMTok: opts.spec.dataPlan.allowSynthetic
-      ? requested
-      : Math.min(requested, totalProcessed(opts.labData)),
+    actualMTok,
     quality: opts.dataQuality * 70,
   })
-  const targetPfDays = trainCostPfDays({
+  const trainShare = Math.max(0, Math.min(1, opts.spec.dataPlan.trainShare ?? 0.82))
+  const economics = estimateTrainingEconomics({
     paramsB: opts.spec.paramsB,
     activeParamsB: opts.spec.activeParamsB,
     family,
+    backbone: opts.spec.backbone,
     trainEfficiency: opts.trainEfficiency,
-    mode: opts.spec.mode === 'distill' ? 'distill' : 'pretrain',
-    dataRatio: analysis.effectiveDataRatio,
+    mode: opts.spec.mode,
+    teacherParamsB: opts.teacherParamsB,
+    distillTeacherShare: opts.spec.distillTeacherShare,
+    trainingTokensMTok: actualMTok * trainShare,
+    verificationTokensMTok: actualMTok * (1 - trainShare),
     modalityComputeMult: analysis.modalityComputeMult,
-  }) * stack.trainCostMult
+    trainCostMult: stack.trainCostMult,
+    dataCost: actualMTok * 0.35,
+  })
+  const targetPfDays = economics.targetPfDays
   const scale = scaleIntelligence({
     paramsB: opts.spec.paramsB,
     activeParamsB: opts.spec.activeParamsB,
     family,
+    backbone: opts.spec.backbone,
     dataCoverage: analysis.effectiveDataRatio,
     dataQuality: analysis.qualityWeight,
     mixWeights: opts.spec.dataPlan.weights,
@@ -294,13 +308,20 @@ export function forecastTrainingV3(opts: {
     paramsB: opts.spec.paramsB,
     activeParamsB: opts.spec.activeParamsB,
     family,
+    backbone: opts.spec.backbone,
     tokPerSecMult: family === 'moe' ? 0.85 : family === 'omni' ? 0.35 : 0.75,
     capability: scale.capability + stack.capabilityBonus,
   }
   return {
     targetPfDays,
-    etaDays: opts.trainPoolPf > 0.001 ? Math.ceil(targetPfDays / opts.trainPoolPf) : Number.POSITIVE_INFINITY,
-    upfrontCash: Math.floor(targetPfDays * ECONOMY.trainUpfrontPerPfDay),
+    powerMw: Math.max(0, opts.trainPowerMw ?? 0),
+    etaDays:
+      opts.trainPoolPf > 0.001
+        ? Math.max(economics.minCalendarDays, Math.ceil(targetPfDays / opts.trainPoolPf))
+        : Number.POSITIVE_INFINITY,
+    minCalendarDays: economics.minCalendarDays,
+    upfrontCash: economics.upfrontCash,
+    cashBurnPerDay: economics.cashBurnPerDay,
     weightedMTok: analysis.effectiveMTok,
     effectiveDataRatio: analysis.effectiveDataRatio,
     repeatedDataEpochs: analysis.repeatedEpochs,

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { Handshake, PaperPlaneTilt } from "@phosphor-icons/react";
 import {
   activeCityPowerContracts,
@@ -22,7 +22,13 @@ import {
   resolvePlayerPowerMw,
 } from "../../../sim/systems/map";
 import { useGameStore } from "../../../store/gameStore";
-import { useUiStore } from "../../../store/uiStore";
+import {
+  EMPTY_NEGOTIATION,
+  formatNegotiationTimestamp,
+  powerNegotiationKey,
+  reopenEndedNegotiation,
+  useUiStore,
+} from "../../../store/uiStore";
 import { computeSnapshot } from "../../../sim/tick";
 import { money, mw } from "../format";
 import {
@@ -42,18 +48,16 @@ import {
 } from "../ui/kit";
 import {
   NegotiationHeader,
+  NegotiationComposer,
   NegotiationMessage,
   NegotiationMetric,
   NegotiationSlider,
-  type NegotiationStatus,
 } from "../ui/NegotiationRoom";
 
 type NegotiationState = {
   mode: "import" | "export";
   cityId: string;
   offerPrice?: number;
-  status: NegotiationStatus;
-  message?: string;
 };
 
 type PowerTab = "status" | "contracts" | "desk";
@@ -78,7 +82,6 @@ export function PowerPanel() {
   const [negotiation, setNegotiation] = useState<NegotiationState>(() => ({
     mode: "import",
     cityId: cities[0]?.city.id ?? "",
-    status: "idle",
   }));
 
   const short = Math.max(
@@ -354,16 +357,21 @@ function ContractDesk({
   contractTerm: number;
   setContractTerm: (days: number) => void;
   negotiation: NegotiationState;
-  setNegotiation: (negotiation: NegotiationState) => void;
+  setNegotiation: Dispatch<SetStateAction<NegotiationState>>;
   gridStatus: string;
   gridConstrained: boolean;
 }) {
-  const [utilityFailures, setUtilityFailures] = useState<
-    Record<string, number>
-  >({});
-  const [utilityCooldowns, setUtilityCooldowns] = useState<
-    Record<string, number>
-  >({});
+  const conversationKey = powerNegotiationKey(negotiation.cityId, negotiation.mode);
+  const conversation = useUiStore((store) => store.powerNegotiations[conversationKey] ?? EMPTY_NEGOTIATION);
+  const updatePowerNegotiation = useUiStore((store) => store.updatePowerNegotiation);
+  const saveConversation = (
+    patch: Partial<typeof conversation>,
+    append: typeof conversation.transcript = [],
+  ) => updatePowerNegotiation(conversationKey, (current) => ({
+    ...current,
+    ...patch,
+    transcript: [...current.transcript, ...append.map((line, index) => ({ ...line, day: state.day, sequence: current.transcript.length + index }))],
+  }));
   const importQuote =
     negotiation.mode === "import"
       ? powerImportNegotiationQuote(
@@ -410,9 +418,20 @@ function ContractDesk({
         : (exportQuote?.ceilingPricePerMWh ?? 1) * 1.18,
     ),
   );
-  const contactAgainDay = utilityCooldowns[negotiation.cityId] ?? 0;
+  const contactAgainDay = conversation.contactAgainDay;
   const contactLocked = state.day < contactAgainDay;
   const canNegotiate = (activeQuote?.contractMw ?? 0) >= 1 && !contactLocked;
+  const selectedContractActive = negotiation.mode === "import"
+    ? state.cityPowerContracts.some((contract) =>
+        (conversation.contractId ? contract.id === conversation.contractId : contract.cityId === negotiation.cityId) && contract.daysLeft > 0)
+    : state.powerExportContracts.some((contract) =>
+        (conversation.contractId ? contract.id === conversation.contractId : contract.cityId === negotiation.cityId) && contract.daysLeft > 0);
+  useEffect(() => {
+    if (conversation.status !== "signed" || selectedContractActive) return;
+    updatePowerNegotiation(conversationKey, (current) =>
+      reopenEndedNegotiation(current, false),
+    );
+  }, [conversation.status, conversationKey, selectedContractActive, updatePowerNegotiation]);
   const resetNegotiation = (
     patch: Partial<Pick<NegotiationState, "cityId" | "mode">> = {},
   ) => {
@@ -420,10 +439,15 @@ function ContractDesk({
       ...negotiation,
       ...patch,
       offerPrice: undefined,
-      status: "idle",
-      message: undefined,
     });
+    if (!patch.cityId && !patch.mode) saveConversation({ status: "idle", message: undefined, proposal: undefined });
   };
+  useEffect(() => {
+    if (!conversation.proposal || (conversation.status !== "countered" && conversation.status !== "agreed")) return;
+    setContractMw(conversation.proposal.capacity);
+    setContractTerm(conversation.proposal.termDays);
+    setNegotiation((current) => ({ ...current, offerPrice: conversation.proposal?.offer }));
+  }, [conversation.proposal, conversation.status, conversationKey, setContractMw, setContractTerm, setNegotiation]);
 
   const commitNegotiation = (price: number) => {
     const before =
@@ -452,93 +476,58 @@ function ContractDesk({
         : next.powerExportContracts.length;
     setState(next);
     if (after > before) {
-      setNegotiation({
-        ...negotiation,
-        offerPrice: price,
-        status: "signed",
-        message: `Deal accepted. ${mw(activeQuote?.contractMw ?? 0)} is live now at ${money(price)}/MWh.`,
-      });
+      const activation = `Deal activated. ${mw(activeQuote?.contractMw ?? 0)} is live now at ${money(price)}/MWh.`;
+      const contractId = negotiation.mode === "import"
+        ? next.cityPowerContracts.find((contract) => !state.cityPowerContracts.some((existing) => existing.id === contract.id))?.id
+        : next.powerExportContracts.find((contract) => !state.powerExportContracts.some((existing) => existing.id === contract.id))?.id;
+      setNegotiation({ ...negotiation, offerPrice: price });
+      saveConversation({ status: "signed", message: activation, contractId }, [{ side: "provider", text: activation, status: "signed" }]);
     } else {
-      setNegotiation({
-        ...negotiation,
-        offerPrice: price,
-        status: "declined",
-        message:
-          "We could not activate this contract. Check cash, generation, and connector headroom.",
-      });
+      setNegotiation({ ...negotiation, offerPrice: price });
+      saveConversation(
+        { status: "declined", message: "We could not activate this contract. Check cash, generation, and connector headroom." },
+        [{ side: "provider", text: "Activation failed. Check cash, generation, and connector headroom.", status: "declined" }],
+      );
     }
   };
 
   const submitOffer = () => {
-    if (importQuote) {
-      const result = evaluatePowerImportOffer(importQuote, offerPrice);
-      if (result.accepted)
-        setNegotiation({
-          ...negotiation,
-          offerPrice: result.agreedPricePerMWh,
-          status: "agreed",
-          message: `We agree at ${money(result.agreedPricePerMWh)}/MWh. Accept to activate or decline to reset.`,
-        });
-      else {
-        const failures = (utilityFailures[negotiation.cityId] ?? 0) + 1;
-        setUtilityFailures((current) => ({
-          ...current,
-          [negotiation.cityId]: failures,
-        }));
-        if (failures >= 3) {
-          setUtilityCooldowns((current) => ({
-            ...current,
-            [negotiation.cityId]: state.day + 30,
-          }));
-        }
-        setNegotiation({
-          ...negotiation,
-          offerPrice: Math.round(result.agreedPricePerMWh),
-          status: "countered",
-          message:
-            failures >= 3
-              ? `That is the third failed offer. Contact us again on day ${state.day + 30}.`
-              : `That price is too low. Our firm counter is ${money(result.agreedPricePerMWh)}/MWh.`,
-        });
-      }
+    const proposal = `${negotiation.mode === "import" ? "Buy" : "Sell"} ${contractMw} MW for ${contractTerm} days at ${money(offerPrice)}/MWh.`;
+    const result = importQuote
+      ? evaluatePowerImportOffer(importQuote, offerPrice)
+      : exportQuote
+        ? evaluatePowerExportOffer(exportQuote, offerPrice)
+        : null;
+    if (!result) return;
+    const agreedPrice = Math.round(result.agreedPricePerMWh);
+    setNegotiation({ ...negotiation, offerPrice: agreedPrice });
+    if (result.accepted) {
+      const agreement = `We agree at ${money(result.agreedPricePerMWh)}/MWh. Accept to activate.`;
+      saveConversation(
+        { status: "agreed", message: agreement, proposal: { capacity: contractMw, termDays: contractTerm, offer: agreedPrice } },
+        [{ side: "player", text: proposal }, { side: "provider", text: agreement, status: "agreed" }],
+      );
       return;
     }
-    if (exportQuote) {
-      const result = evaluatePowerExportOffer(exportQuote, offerPrice);
-      if (result.accepted)
-        setNegotiation({
-          ...negotiation,
-          offerPrice: result.agreedPricePerMWh,
-          status: "agreed",
-          message: `We agree at ${money(result.agreedPricePerMWh)}/MWh. Accept to activate or decline to reset.`,
-        });
-      else {
-        const failures = (utilityFailures[negotiation.cityId] ?? 0) + 1;
-        setUtilityFailures((current) => ({
-          ...current,
-          [negotiation.cityId]: failures,
-        }));
-        if (failures >= 3) {
-          setUtilityCooldowns((current) => ({
-            ...current,
-            [negotiation.cityId]: state.day + 30,
-          }));
-        }
-        setNegotiation({
-          ...negotiation,
-          offerPrice: Math.round(result.agreedPricePerMWh),
-          status: "countered",
-          message:
-            failures >= 3
-              ? `That is the third failed offer. Contact us again on day ${state.day + 30}.`
-              : `That asking price is too high. Our firm counter is ${money(result.agreedPricePerMWh)}/MWh.`,
-        });
-      }
-    }
+    const failures = conversation.failures + 1;
+    const locked = failures >= 3;
+    const response = locked
+      ? `Talks paused until day ${state.day + 30}.`
+      : `Our firm counter is ${money(result.agreedPricePerMWh)}/MWh.`;
+    saveConversation(
+      {
+        status: locked ? "declined" : "countered",
+        message: response,
+        failures,
+        contactAgainDay: locked ? state.day + 30 : conversation.contactAgainDay,
+        proposal: { capacity: contractMw, termDays: contractTerm, offer: agreedPrice },
+      },
+      [{ side: "player", text: proposal }, { side: "provider", text: response, status: locked ? "declined" : "countered" }],
+    );
   };
 
   const providerCopy =
-    negotiation.status === "signed"
+    conversation.status === "signed"
       ? "The agreement is active. Power and settlement start immediately."
       : importQuote
         ? canNegotiate
@@ -564,7 +553,7 @@ function ContractDesk({
       <NegotiationHeader
         title="Utility desk"
         subtitle="Power contract negotiation"
-        status={negotiation.status}
+        status={conversation.status}
       />
 
       <div className="space-y-2 p-3">
@@ -613,28 +602,22 @@ function ContractDesk({
             <span className="mt-0.5 block text-muted">{providerCopy}</span>
           </NegotiationMessage>
 
-          <NegotiationMessage side="player" name="You">
-            <span className="font-medium text-bone">Here’s my proposal.</span>
-            <span className="mt-0.5 block text-muted">
-              {negotiation.mode === "import" ? "Buy" : "Sell"} {contractMw} MW
-              for {contractTerm} days at {money(offerPrice)}/MWh.
-            </span>
-          </NegotiationMessage>
-
-          {negotiation.message ? (
+          {conversation.transcript.map((line, index) => (
             <NegotiationMessage
-              side="provider"
-              name={`${activeQuote?.cityName ?? selectedCity?.city.name ?? "City"} Utility`}
-              status={negotiation.status}
+              key={`${index}-${line.text}`}
+              side={line.side}
+              name={line.side === "player" ? "You" : `${activeQuote?.cityName ?? selectedCity?.city.name ?? "City"} Utility`}
+              status={line.status}
+              timestamp={formatNegotiationTimestamp(line, state.day, index)}
             >
-              {negotiation.message}
+              {line.text}
             </NegotiationMessage>
-          ) : null}
+          ))}
         </div>
 
-        {negotiation.status !== "signed" && negotiation.status !== "agreed" ? (
+        {conversation.status !== "signed" && conversation.status !== "agreed" ? (
           <>
-            <div className="rounded-lg border border-line/70 bg-void/45 p-2">
+            <NegotiationComposer>
               <div className="mb-1.5 flex items-center justify-between gap-2">
                 <span className="font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
                   Your offer
@@ -675,17 +658,13 @@ function ContractDesk({
                   min={sliderMin}
                   max={sliderMax}
                   suffix="/MWh"
-                  onChange={(value) =>
-                    setNegotiation({
-                      ...negotiation,
-                      offerPrice: value,
-                      status: "idle",
-                      message: undefined,
-                    })
-                  }
+                  onChange={(value) => {
+                    setNegotiation({ ...negotiation, offerPrice: value });
+                    saveConversation({ status: "idle", message: undefined, proposal: undefined });
+                  }}
                 />
               </div>
-            </div>
+            </NegotiationComposer>
 
             <div className="grid grid-cols-4 gap-1 font-mono text-[0.6875rem]">
               <NegotiationMetric
@@ -707,7 +686,7 @@ function ContractDesk({
           </>
         ) : null}
 
-        {negotiation.status === "idle" && (
+        {conversation.status === "idle" && (
           <HudButton
             type="button"
             variant="primary"
@@ -719,7 +698,7 @@ function ContractDesk({
             Send proposal
           </HudButton>
         )}
-        {negotiation.status === "countered" && (
+        {conversation.status === "countered" && (
           <div className="grid grid-cols-2 gap-2">
             <HudButton
               variant="primary"
@@ -733,7 +712,7 @@ function ContractDesk({
             </HudButton>
           </div>
         )}
-        {negotiation.status === "agreed" && (
+        {conversation.status === "agreed" && (
           <div className="grid grid-cols-2 gap-2">
             <HudButton
               variant="primary"
@@ -746,13 +725,13 @@ function ContractDesk({
             </HudButton>
           </div>
         )}
-        {negotiation.status === "signed" && (
+        {conversation.status === "signed" && (
           <div className="flex items-center justify-center gap-1.5 rounded-md border border-mint/35 bg-mint/10 px-2 py-1.5 text-[0.8125rem] font-medium text-mint">
             <Handshake size={16} weight="duotone" />
             Contract active
           </div>
         )}
-        {negotiation.status === "declined" && (
+        {conversation.status === "declined" && (
           <HudButton
             type="button"
             variant="ghost"

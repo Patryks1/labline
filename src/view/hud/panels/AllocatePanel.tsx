@@ -106,9 +106,14 @@ export function AllocatePanel() {
         >
           <div className="space-y-0.5">
             <StatRow
-              label="VRAM have / need"
+              label="HBM have / need"
               value={`${gb(host.vramHave)} / ${gb(host.vramNeed)}`}
               tone={host.vramHave < host.vramNeed ? 'danger' : 'positive'}
+            />
+            <StatRow
+              label="Host RAM have / need"
+              value={`${gb(host.systemRamHave)} / ${gb(host.systemRamNeed)}`}
+              tone={host.systemRamHave < host.systemRamNeed ? 'danger' : 'positive'}
             />
             <StatRow
               label="Serve PF have / need"
@@ -116,34 +121,34 @@ export function AllocatePanel() {
               tone={host.pfServe < host.pfNeed * 0.75 ? 'warning' : 'neutral'}
             />
             <StatRow
-              label="Compute util"
-              value={pct(Math.min(host.computeUtil, 2), 0)}
-              tone={
-                host.computeUtil < 0.65
-                  ? 'warning'
-                  : host.computeUtil > 1.05
-                    ? 'danger'
-                    : 'positive'
-              }
+              label="Compute coverage"
+              value={pct(Math.min(host.computeCoverage, 2), 0)}
+              tone={host.computeCoverage < 0.85 ? 'warning' : 'positive'}
             />
             <StatRow
-              label="Short on"
+              label="Bottleneck"
               value={host.shortOn === 'ok' ? 'balanced' : host.shortOn}
               tone={host.shortOn === 'ok' ? 'positive' : 'danger'}
             />
           </div>
           <div className="mt-2 space-y-1.5">
             <MeterBar
-              label="VRAM cover"
-              value={Math.min(1, host.vramUtil)}
-              detail={`${Math.min(120, host.vramUtil * 100).toFixed(0)}%`}
-              tone={host.vramUtil >= 0.95 ? 'positive' : 'warning'}
+              label="HBM cover"
+              value={Math.min(1, host.vramCoverage)}
+              detail={`${Math.min(120, host.vramCoverage * 100).toFixed(0)}%`}
+              tone={host.vramCoverage >= 0.95 ? 'positive' : 'warning'}
             />
             <MeterBar
-              label="Compute util"
-              value={Math.min(1, host.computeUtil)}
-              detail={`${Math.min(120, host.computeUtil * 100).toFixed(0)}%`}
-              tone={host.computeUtil >= 0.7 && host.computeUtil <= 1.05 ? 'positive' : 'warning'}
+              label="Host RAM cover"
+              value={Math.min(1, host.systemRamCoverage)}
+              detail={`${Math.min(120, host.systemRamCoverage * 100).toFixed(0)}%`}
+              tone={host.systemRamCoverage >= 1 ? 'positive' : 'warning'}
+            />
+            <MeterBar
+              label="Compute coverage"
+              value={Math.min(1, host.computeCoverage)}
+              detail={`${Math.min(120, host.computeCoverage * 100).toFixed(0)}%`}
+              tone={host.computeCoverage >= 0.85 ? 'positive' : 'warning'}
             />
           </div>
 

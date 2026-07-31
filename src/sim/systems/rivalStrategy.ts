@@ -220,6 +220,21 @@ export function planRivalResearchPath(
   const staffResearchers = rival.staff?.researcher ?? 0
   if (staffResearchers < 1) return []
 
+  // Product-focused labs finish their disclosed modality ladder before
+  // wandering into generic marginal upgrades. Prerequisites still come from
+  // the common planner and retain the same staff, PF-day, and cash gates.
+  if (rival.archetype === 'multimodal' && scheduled.length === 0) {
+    const milestone = ['mm_vision', 'mm_diff', 'mm_video', 'mm_omni', 'moe_basics']
+      .find((nodeId) => !rival.researchUnlocked.includes(nodeId))
+    if (milestone) {
+      const path = planResearchPath(rival.researchUnlocked, scheduled, milestone)
+      const first = path.nodeIds[0] ? getResearchNode(path.nodeIds[0]) : undefined
+      if (!path.reason && first && staffResearchers >= minResearchersForNode(first.id)) {
+        return path.nodeIds
+      }
+    }
+  }
+
   const choices = RESEARCH_NODES.flatMap((node) => {
     if (rival.researchUnlocked.includes(node.id) || scheduled.includes(node.id)) return []
     const path = planResearchPath(rival.researchUnlocked, scheduled, node.id)

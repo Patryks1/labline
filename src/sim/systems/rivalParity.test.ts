@@ -5,6 +5,7 @@ import {
   progressRivalTrainingJob,
   tickRivals,
 } from './rivals'
+import { syncLabIndex } from './labEngine'
 
 function activeJob(rivalId: string): RivalTrainJob {
   return {
@@ -136,5 +137,46 @@ describe('rival compute parity', () => {
     const fp16Work = (fp16.trainingJob?.progressPfDays ?? 10) - 10
     const fp8Work = (fp8.trainingJob?.progressPfDays ?? 10) - 10
     expect(fp8Work).toBeGreaterThan(fp16Work)
+  })
+
+  it('uses the same hard HBM and host-RAM placement gate for rival training', () => {
+    const created = createGame(733)
+    const target = created.rivals[0]!
+    const largeJob: RivalTrainJob = {
+      ...activeJob(target.id),
+      paramsB: 100,
+      activeParamsB: 100,
+      trainingNumerics: {
+        computeFormat: 'fp16_mixed',
+        nativeWeightFormat: 'float',
+        recipeVersion: 1,
+      },
+    }
+    const stateFor = (chips: number) =>
+      syncLabIndex({
+        ...created,
+        rivals: created.rivals.map((rival) =>
+          rival.id === target.id
+            ? {
+                ...rival,
+                chips,
+                flopsPf: chips * 0.7,
+                trainingJob: largeJob,
+              }
+            : rival,
+        ),
+      })
+
+    const blocked = tickRivals(stateFor(1)).rivals.find(
+      (rival) => rival.id === target.id,
+    )!
+    const admitted = tickRivals(stateFor(100)).rivals.find(
+      (rival) => rival.id === target.id,
+    )!
+
+    expect(blocked.trainingJob?.progressPfDays).toBe(largeJob.progressPfDays)
+    expect(admitted.trainingJob?.progressPfDays).toBeGreaterThan(
+      largeJob.progressPfDays,
+    )
   })
 })

@@ -1,7 +1,7 @@
 import { LodTier, type EntityId } from './types'
 
 export const LOD_THRESHOLDS = {
-  // Begin loading/cross-fading the full-detail tier before the camera reaches
+  // Begin loading the full-detail tier before the camera reaches
   // the unequivocal close-up band (28px/tile). This gives the prefetch ring a
   // full zoom interval to become resident instead of forcing a late swap.
   enterNear: 22,
@@ -16,7 +16,7 @@ export const LOD_THRESHOLDS = {
 
 export interface LodLayer {
   tier: LodTier
-  /** Complementary screen-door coverage, 0..1. */
+  /** Transition weight. The production renderer uses complete layers only. */
   coverage: number
 }
 
@@ -45,7 +45,7 @@ export class ScreenSpaceLod {
   private desiredTier: LodTier
   private transition: Transition | null = null
 
-  constructor(initial: LodTier = LodTier.mid, transitionMs = 200) {
+  constructor(initial: LodTier = LodTier.mid, transitionMs = 0) {
     this.activeTier = initial
     this.desiredTier = initial
     this.transitionMs = Math.max(0, transitionMs)

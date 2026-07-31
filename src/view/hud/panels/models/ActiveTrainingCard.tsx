@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { PostTrainStage, TrainingJob } from '../../../../sim/types'
 import {
   canReleaseTrainingJob,
+  trainingMinimumStatus,
   type TrainingResourceAllocation,
 } from '../../../../sim/systems/training'
 import { formatParams } from '../../../../sim/balance/training'
@@ -72,7 +73,9 @@ export function ActiveTrainingCard({
       ? 0
       : trainingPoolPf * ((job.computePriority ?? 50) / prioritySum)
   const remainingPf = Math.max(0, job.targetPfDays - job.progressPfDays)
-  const etaDays = allocatedPf > 0.05 ? remainingPf / allocatedPf : Infinity
+  const calendarRemaining = Math.max(0, (job.minCalendarDays ?? 0) - (job.daysElapsed ?? 0))
+  const computeEta = remainingPf <= 1e-9 ? 0 : allocatedPf > 0.05 ? remainingPf / allocatedPf : Infinity
+  const etaDays = Math.max(computeEta, calendarRemaining)
   const currentLoss = job.lossHistory?.at(-1)?.loss
   const recommended = job.recommendedPfDays ?? job.targetPfDays
   const atRecommended = job.progressPfDays + 1e-9 >= recommended
@@ -81,9 +84,9 @@ export function ActiveTrainingCard({
   const economics = job.economics
   const snapshots = job.benchmarkSnapshots ?? []
   const canBenchmarkMid = !job.failed && progress >= 0.1 && (job.lastBenchmarkDay == null || day - job.lastBenchmarkDay >= 7)
-  const done = !job.failed && job.progressPfDays >= job.targetPfDays
+  const done = trainingMinimumStatus(job).ok
   const ramBlocked = Boolean(
-    resources && !resources.ramReady && !job.failed && !job.paused && !done,
+    resources && (!resources.ramReady || !resources.systemRamReady) && !job.failed && !job.paused && !done,
   )
   const awaiting = Boolean(job.awaitingDecision)
   const modeLabel =
@@ -126,9 +129,14 @@ export function ActiveTrainingCard({
               {num(allocatedPf, 1)} PF/d · priority {job.computePriority ?? 50}
             </p>
             {resources ? (
-              <p className={resources.ramReady ? 'text-muted' : 'text-danger'}>
-                RAM {num(resources.ramAllocatedGb, 0)} / {num(resources.ramRequiredGb, 0)} GB
-              </p>
+              <>
+                <p className={resources.bottleneck === 'none' ? 'text-muted' : 'text-danger'}>
+                  HBM {num(resources.ramAllocatedGb, 0)} / {num(resources.ramRequiredGb, 0)} GB · host RAM {num(resources.systemRamAllocatedGb, 0)} / {num(resources.systemRamRequiredGb, 0)} GB
+                </p>
+                <p className={resources.bottleneck === 'none' ? 'text-muted' : 'text-danger'}>
+                  Bottleneck: {resources.bottleneck === 'none' ? 'none' : resources.bottleneck.replace('_', ' ')}
+                </p>
+              </>
             ) : null}
           </div>
         </div>
@@ -136,7 +144,7 @@ export function ActiveTrainingCard({
         <MeterBar
           label="Progress"
           value={progress}
-          detail={`${pct}% · ${etaDays === Infinity ? 'stalled' : `~${etaDays.toFixed(0)}d left`}`}
+          detail={`${pct}% · ${etaDays === Infinity ? 'stalled' : `~${etaDays.toFixed(0)}d left`} · calendar ${job.daysElapsed ?? 0}/${job.minCalendarDays ?? 0}d`}
           tone="train"
           live={!job.failed && !job.paused && !done && !ramBlocked}
         />

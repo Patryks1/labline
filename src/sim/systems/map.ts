@@ -14,7 +14,7 @@ import type { GameConfig } from '../balance/gameConfig'
 import { defaultGameConfig } from '../balance/gameConfig'
 import { ECONOMY } from '../balance/economy'
 import { getChassis } from '../balance/racks'
-import { getRackSku } from '../balance/rackSkus'
+import { getChipDef } from '../balance/chips'
 import { generateProceduralMap } from './mapGen'
 import {
   commitWorldBatch,
@@ -43,6 +43,7 @@ import {
   transportLogisticsOpexSurcharge,
 } from './transport'
 import { energyContractCapacityMw } from './energyAccounting'
+import { calculateFleetVariableOpex } from './fleetOperatingCosts'
 
 export const BUILDABLE_KINDS: BuildableKind[] = [
   'dc',
@@ -1640,49 +1641,74 @@ export function gridScarcity(state: SimState): GridScarcitySnapshot {
   return snapshot
 }
 
-/**
- * Facility opex = completed building shells + live fleet load.
- * Empty halls stay cheap; full GPU halls cost real cooling/ops cash.
- */
-export function playerBuildingOpex(state: SimState): number {
-  let opex = 0
+/** Completed building-shell opex for any lab, before live-fleet variable costs. */
+export function labFacilityShellOpex(state: SimState, labId: LabId): number {
+  let shellOpex = 0
   let logistics = 0
   if (usesCompactWorld(state)) {
-    for (const facility of compactCompletedFacilitiesForOwner(state, state.playerLabId) ?? []) {
-      const shellOpex = facility.stats?.opexPerDay ?? 0
-      opex += shellOpex
+    for (const facility of compactCompletedFacilitiesForOwner(state, labId) ?? []) {
+      const facilityOpex = facility.stats?.opexPerDay ?? 0
+      shellOpex += facilityOpex
       logistics += transportLogisticsOpexSurcharge(
-        shellOpex,
+        facilityOpex,
         facilityTransportAccess(state, facility.id),
       )
     }
   } else {
-    for (const t of facilityAnchorTiles(state, { ownerId: state.playerLabId })) {
+    for (const t of facilityAnchorTiles(state, { ownerId: labId })) {
       if (t.buildingProgress < t.buildingTarget) continue
       if (t.kind === 'empty' || t.kind === 'city') continue
-      opex += t.opexPerDay
+      shellOpex += t.opexPerDay
     }
   }
-  // Live racks/GPUs drive ops beyond flat DC opex (no fleetStats — avoid map↔racks cycle)
-  let liveGpus = 0
-  let liveMw = 0
-  for (const r of state.player.rackFleet ?? []) {
-    if (r.status !== 'live' || r.count <= 0) continue
-    liveGpus += r.count
-    try {
-      const sku = getRackSku(r.skuId)
-      liveMw += sku.mw * r.count
-    } catch {
-      liveMw += 0.007 * r.count
-    }
+  return shellOpex * (ECONOMY.facilityOpexMultiplier ?? 1) + logistics
+}
+
+/** Rack/GPU and MW variable opex from the physical fleet owned by any lab. */
+export function labFleetVariableOpex(state: SimState, labId: LabId): number {
+  if (labId === state.playerLabId) {
+    const looseAccelerators = state.player.chips.map((inventory) => {
+      let mwPerDevice = 0.006
+      try {
+        mwPerDevice = getChipDef(inventory.defId).mwPerChip
+      } catch {
+        // Preserve a conservative load for unknown imported chip definitions.
+      }
+      return { count: inventory.count, mwPerDevice }
+    })
+    return calculateFleetVariableOpex({
+      rackFleet: state.player.rackFleet,
+      rackDesigns: state.player.rackDesigns,
+      looseAccelerators,
+    }).totalOpexDay
   }
-  for (const inv of state.player.chips) {
-    liveGpus += inv.count
-    liveMw += inv.count * 0.006
+
+  const rival = state.rivals.find((candidate) => candidate.id === labId)
+  if (!rival) return 0
+  let abstractChipMw = 0.0008
+  try {
+    abstractChipMw = getChipDef('gen2').mwPerChip
+  } catch {
+    // Rival compatibility fleets were originally valued as the shared gen-2 chip.
   }
-  opex += liveGpus * (ECONOMY.rackOpexPerGpuDay ?? 420)
-  opex += liveMw * (ECONOMY.rackOpexPerMwDay ?? 18_000)
-  return opex * (ECONOMY.facilityOpexMultiplier ?? 1) + logistics
+  return calculateFleetVariableOpex({
+    rackFleet: rival.rackFleet,
+    rackDesigns: rival.rackDesigns,
+    looseAccelerators: [{ count: rival.chips, mwPerDevice: abstractChipMw }],
+  }).totalOpexDay
+}
+
+/**
+ * Facility opex = completed building shells + live fleet load.
+ * The shell multiplier applies only to shells; variable fleet opex is already
+ * expressed as its final daily cash cost.
+ */
+export function labBuildingOpex(state: SimState, labId: LabId): number {
+  return labFacilityShellOpex(state, labId) + labFleetVariableOpex(state, labId)
+}
+
+export function playerBuildingOpex(state: SimState): number {
+  return labBuildingOpex(state, state.playerLabId)
 }
 
 export function ownerLabel(owner: TileOwner, state: SimState): string {

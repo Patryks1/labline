@@ -79,9 +79,8 @@ describe('simulation v3 shared rules', () => {
       trainingTokensMTok: 6_000_000,
     })
     const denseEquivalentCost = trainCostPfDays({
-      // Formula v2: 32B active + 5% of the inactive expert set for
-      // routing/communication overhead = 80.4B effective compute parameters.
-      paramsB: 80.4,
+      // Formula v2: 32B active path plus a bounded 10% systems overhead.
+      paramsB: 35.2,
       family: 'dense',
       trainEfficiency: 1,
       trainingTokensMTok: 6_000_000,

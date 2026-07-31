@@ -273,7 +273,7 @@ describe('training and ship', () => {
       s = tickTraining(s)
       if (
         s.player.trainingJob &&
-        s.player.trainingJob.progressPfDays >= s.player.trainingJob.targetPfDays
+        s.player.trainingJob.awaitingDecision
       )
         break
     }
@@ -457,7 +457,8 @@ describe('economy smoke', () => {
   it('prices owned generation at 60% of equivalent grid energy', () => {
     const gridCost = 10 * 24 * ECONOMY.energyBasePrice
     const ownCost = onsiteGenerationUpkeepDay(10, ECONOMY.energyBasePrice)
-    expect(ECONOMY.energyBasePrice).toBeGreaterThan(450)
+    expect(ECONOMY.energyBasePrice).toBeGreaterThanOrEqual(80)
+    expect(ECONOMY.energyBasePrice).toBeLessThanOrEqual(150)
     expect(ownCost).toBeCloseTo(gridCost * 0.6, 8)
     expect(ownCost).toBeLessThan(gridCost)
   })
@@ -477,8 +478,8 @@ describe('economy smoke', () => {
     expect(rivals.every((r) => r.models.length === 0)).toBe(true)
   })
 
-  it('map has three regions', () => {
+  it('map exposes the configured metro regions', () => {
     const g = createGame(6)
-    expect(g.map.regions.length).toBe(3)
+    expect(g.map.regions.length).toBe(g.config.cityCount)
   })
 })

@@ -170,4 +170,99 @@ describe('canonical dataset assets', () => {
     expect(data.manifests).toEqual([manifest])
     expect(base.manifests).toEqual([])
   })
+
+  it('limits availability to each asset domain-weighted share', () => {
+    const base = createEmptyLabData()
+    base.assets = [
+      {
+        ...base.assets[0]!,
+        id: 'mixed-lot',
+        volumeMTok: 100,
+        domainWeights: { chat: 0.2, code: 0.8 },
+      },
+    ]
+    const { manifest } = createDataManifest({
+      data: base,
+      consumed: { chat: 50 },
+      totalMTok: 50,
+      day: 2,
+      seed: 8,
+      runId: 'weighted-domain',
+    })
+
+    expect(manifest.uniqueMTok).toBeCloseTo(20, 12)
+    expect(manifest.repeatedMTok).toBeCloseTo(30, 12)
+    expect(manifest.assetIds).toEqual(['mixed-lot'])
+  })
+
+  it('weights quality and contamination only by consumed domain fractions', () => {
+    const base = createEmptyLabData()
+    const foundation = base.assets[0]!
+    base.assets = [
+      {
+        ...foundation,
+        id: 'unrelated-clean-code',
+        volumeMTok: 10_000,
+        domainWeights: { code: 1 },
+        quality: 100,
+        contaminationRisk: 0,
+      },
+      {
+        ...foundation,
+        id: 'dirty-chat',
+        volumeMTok: 10,
+        domainWeights: { chat: 1 },
+        quality: 20,
+        contaminationRisk: 0.9,
+      },
+    ]
+    const { manifest } = createDataManifest({
+      data: base,
+      consumed: { chat: 10 },
+      totalMTok: 10,
+      day: 4,
+      seed: 9,
+      runId: 'no-laundering',
+    })
+
+    expect(manifest.assetIds).toEqual(['dirty-chat'])
+    expect(manifest.uniqueMTok).toBe(10)
+    expect(manifest.effectiveQuality).toBe(20)
+    expect(manifest.contaminationRisk).toBeCloseTo(0.9, 12)
+  })
+
+  it('uses proportional consumed fractions for blended domain provenance', () => {
+    const base = createEmptyLabData()
+    const foundation = base.assets[0]!
+    base.assets = [
+      {
+        ...foundation,
+        id: 'clean-chat',
+        volumeMTok: 90,
+        domainWeights: { chat: 1 },
+        quality: 90,
+        contaminationRisk: 0.01,
+      },
+      {
+        ...foundation,
+        id: 'noisy-chat',
+        volumeMTok: 10,
+        domainWeights: { chat: 1 },
+        quality: 10,
+        contaminationRisk: 0.91,
+      },
+    ]
+    const { manifest } = createDataManifest({
+      data: base,
+      consumed: { chat: 10 },
+      totalMTok: 10,
+      day: 5,
+      seed: 10,
+      runId: 'proportional-blend',
+    })
+
+    expect(manifest.assetIds).toEqual(['clean-chat', 'noisy-chat'])
+    expect(manifest.effectiveQuality).toBeCloseTo(82, 12)
+    expect(manifest.contaminationRisk).toBeCloseTo(0.1, 12)
+  })
 })

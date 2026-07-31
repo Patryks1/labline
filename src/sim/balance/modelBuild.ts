@@ -5,7 +5,10 @@
 import type {
   BenchmarkScores,
   Model,
+  ModelBackbone,
   ModelFamily,
+  ModelIO,
+  ModelProductPreset,
   Modality,
   PostTrainStage,
   QualityAxes,
@@ -34,6 +37,9 @@ export interface BuildScaledModelOpts {
   paramsB: number;
   activeParamsB?: number;
   family: ModelFamily;
+  backbone?: ModelBackbone;
+  productPreset?: ModelProductPreset;
+  io?: ModelIO;
   modalities?: Modality[];
   day: number;
   /** 0–2+ coverage vs recommended volume */
@@ -76,10 +82,12 @@ function normalizeQuality(q: number): number {
  */
 export function buildScaledModel(opts: BuildScaledModelOpts): Model {
   const family = opts.family;
+  const backbone = opts.backbone ?? backboneFromFamily(family);
   const activeParamsB =
     opts.activeParamsB ??
-    (family === "moe" ? Math.max(0.1, opts.paramsB * 0.08) : undefined);
-  const postTrain = opts.postTrain ?? "rlhf";
+    (backbone === "moe" ? Math.max(0.1, opts.paramsB * 0.08) : undefined);
+  // Post-training is earned work, never an implicit rival/player bonus.
+  const postTrain = opts.postTrain ?? "none";
   const unlocked = opts.researchUnlocked ?? [];
   const researchMult = opts.researchMult ?? 1 + unlocked.length * 0.004;
   const lqShare = Math.max(0, Math.min(1, opts.synthLqShare ?? 0));
@@ -89,6 +97,7 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
     paramsB: opts.paramsB,
     activeParamsB,
     family,
+    backbone,
     dataCoverage: Math.max(0.05, opts.dataCoverage),
     dataQuality:
       normalizeQuality(opts.dataQuality) * (0.85 + 0.15 * (1 - lqShare)),
@@ -102,7 +111,7 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
       video: 0.05,
     },
     researchMult:
-      family === "moe" && !unlocked.includes("moe_routing")
+      (family === "moe" || opts.backbone === "moe") && !unlocked.includes("moe_routing")
         ? researchMult * 0.55
         : researchMult,
     trainComplete: opts.trainComplete ?? 1,
@@ -163,7 +172,7 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
   }
   capability = Math.min(capability, capabilityCeiling(scaleIn).capability);
 
-  const moe = family === "moe";
+  const moe = backbone === "moe";
   const inferCostMult = opts.inferCostMult ?? (moe ? 0.75 : 1);
   // Each model gets its own in/out list from size/family/capability costs
   const apiSug = suggestApiInOut({
@@ -174,12 +183,14 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
     inferCostMult,
     capability,
     markupPct: 120,
+    applyModelMult: true,
   });
-  const preset = presetFromFamily(family);
+  const preset = opts.productPreset ?? presetFromFamily(family);
   const serviceProfile = serviceProfileForModel({
     paramsB: opts.paramsB,
     activeParamsB,
     family,
+    backbone,
     tokPerSecMult: opts.tokPerSecMult ?? (moe ? 0.9 : 0.7),
     capability,
   });
@@ -190,9 +201,9 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
     family,
     paramsB: opts.paramsB,
     activeParamsB,
-    backbone: backboneFromFamily(family),
+    backbone,
     productPreset: preset,
-    io: ioForPreset(preset, capability),
+    io: opts.io ?? ioForPreset(preset, capability),
     capability,
     modalities,
     quality,

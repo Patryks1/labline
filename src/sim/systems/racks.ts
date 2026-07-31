@@ -23,6 +23,7 @@ import {
 } from './map'
 import { seededId } from '../rng'
 import { ensureRackUnitIds } from './dataHallLayouts'
+import { servingPlacementNeed } from './servingPlacement'
 
 /** Blueprint → orderable custom SKU (kept here to avoid rackSkus ↔ racks cycle). */
 export function designToSku(design: RackDesign): RackSku | null {
@@ -436,7 +437,15 @@ export function clearSlot(design: RackDesign, slotId: string): RackDesign {
 export function vramPressure(
   state: SimState,
   mode: 'train' | 'serve',
-): { needGb: number; haveGb: number; derate: number; modelName?: string } {
+): {
+  needGb: number
+  haveGb: number
+  derate: number
+  systemRamNeedGb?: number
+  systemRamHaveGb?: number
+  systemRamDerate?: number
+  modelName?: string
+} {
   const fleet = fleetStats(state)
   if (mode === 'train') {
     const listed = state.player.trainingJobs ?? []
@@ -491,30 +500,27 @@ export function vramPressure(
           : `${residentNames[0]} + ${residentNames.length - 1} more`,
     }
   }
-  const model =
-    (() => {
-          const m = state.player.models.find(
-            (x) =>
-              x.id === state.player.pricing.activeModelId &&
-              (x.release === 'released' || x.shipped),
-          )
-          return m
-            ? {
-                name: m.name,
-                paramsB: m.paramsB,
-                activeParamsB: m.activeParamsB,
-                family: m.family,
-              }
-            : null
-        })()
-
-  if (!model) {
-    return { needGb: 0, haveGb: fleet.vramGb, derate: 1 }
-  }
-  const need = modelVramGb(model.paramsB, model.activeParamsB, model.family)
+  const placement = servingPlacementNeed(state)
+  const need = placement.hbmNeedGb
   const have = fleet.vramGb
+  const systemRamNeed = placement.systemRamNeedGb
+  const systemRamHave = fleet.systemRamGb
   const derate = need <= 0 ? 1 : Math.min(1, have / need)
-  return { needGb: need, haveGb: have, derate, modelName: model.name }
+  return {
+    needGb: need,
+    haveGb: have,
+    derate,
+    systemRamNeedGb: systemRamNeed,
+    systemRamHaveGb: systemRamHave,
+    systemRamDerate:
+      systemRamNeed <= 0 ? 1 : Math.min(1, systemRamHave / systemRamNeed),
+    modelName:
+      placement.placements.length === 1
+        ? placement.placements[0]!.model.name
+        : placement.placements.length > 1
+          ? `${placement.placements[0]!.model.name} + ${placement.placements.length - 1} more`
+          : undefined,
+  }
 }
 
 function alert(state: SimState, severity: 'info' | 'warn' | 'danger', message: string): SimState {

@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+  defaultServingKvShape,
   familyServeMult,
   estimateServingWorkload,
+  kvCacheMemoryGb,
   modelServeCostMult,
   mtokPerDayFromTps,
   sizeTokMult,
@@ -134,6 +136,48 @@ describe('tokenServe', () => {
     expect(bf16.bottleneck).toBe('hbm_capacity')
     expect(fp8.physicalPfDays).toBeLessThan(bf16.physicalPfDays)
     expect(fp8.weightMemoryGb).toBeLessThan(bf16.weightMemoryGb)
+  })
+
+  it('derives KV bytes from layers, KV heads, head width, tokens, and concurrency', () => {
+    const shape = { layers: 32, kvHeads: 8, headDim: 128 }
+    const expectedGb = (2 * 4 * 1_024 * 32 * 8 * 128 * 2) / 1e9
+    expect(kvCacheMemoryGb({
+      concurrentRequests: 4,
+      liveTokensPerRequest: 1_024,
+      bytesPerElement: 2,
+      shape,
+    })).toBeCloseTo(expectedGb, 12)
+  })
+
+  it('scales KV capacity linearly with concurrency and never divides it by batch size', () => {
+    const input = {
+      model: dense7,
+      inputMTok: 10,
+      outputMTok: 2,
+      avgInputTokens: 768,
+      avgOutputTokens: 256,
+      concurrentRequests: 4,
+      kvShape: { layers: 32, kvHeads: 8, headDim: 128 },
+    }
+    const batchOne = estimateServingWorkload({ ...input, batchSize: 1 })
+    const batchSixtyFour = estimateServingWorkload({ ...input, batchSize: 64 })
+    const twiceConcurrency = estimateServingWorkload({
+      ...input,
+      concurrentRequests: 8,
+      batchSize: 64,
+    })
+
+    expect(batchSixtyFour.kvCacheGb).toBeCloseTo(batchOne.kvCacheGb, 12)
+    expect(twiceConcurrency.kvCacheGb).toBeCloseTo(batchOne.kvCacheGb * 2, 12)
+  })
+
+  it('provides a bounded documented fallback KV shape', () => {
+    const small = defaultServingKvShape(1)
+    const large = defaultServingKvShape(70)
+    expect(small.layers).toBeGreaterThanOrEqual(16)
+    expect(large.layers).toBeGreaterThan(small.layers)
+    expect(large.kvHeads).toBeGreaterThanOrEqual(small.kvHeads)
+    expect(large.headDim).toBe(128)
   })
 
   it('SKU tok scales with model size', () => {

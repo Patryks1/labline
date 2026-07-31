@@ -1,8 +1,14 @@
 import { useMemo, useState } from 'react'
-import { BENCHMARK_DEFS } from '../../../sim/balance/benchmarks'
+import type { BenchmarkMetricId } from '../../../sim/types'
 import { formatParams } from '../../../sim/balance/training'
+import {
+  EVALUATION_MARKETS,
+  SUITE_METRICS,
+  evaluationMarketsForModel,
+  suiteForEvaluationMarket,
+  type EvaluationMarket,
+} from '../../../sim/balance/evaluationSuites'
 import { collectLeaderboardModels } from '../../../sim/systems/rivals'
-import { isGenerationOnlyModel } from '../../../sim/systems/modelEligibility'
 import { useGameStore } from '../../../store/gameStore'
 import { num } from '../format'
 import {
@@ -33,21 +39,26 @@ type BenchTab = 'leaderboard' | 'reviews'
 export function BenchmarksPanel() {
   const state = useGameStore((s) => s.state)
   const [showAll, setShowAll] = useState(false)
-  const [sortId, setSortId] = useState<'cap' | string>('cap')
+  const [sortId, setSortId] = useState<'cap' | BenchmarkMetricId>('cap')
+  const [market, setMarket] = useState<EvaluationMarket>('language')
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null)
   const [tab, setTab] = useState<BenchTab>('leaderboard')
 
   const rows = useMemo(() => {
     const all = collectLeaderboardModels(state)
-    const generalModels = all.filter((row) => !isGenerationOnlyModel(row.model))
+    const marketModels = all.filter((row) => evaluationMarketsForModel(row.model).includes(market))
+    const suite = suiteForEvaluationMarket(market)
     return sortId === 'cap'
-      ? generalModels
-      : [...generalModels].sort((a, b) => {
-          const sa = a.model.benchmarks[sortId as keyof typeof a.model.benchmarks] ?? 0
-          const sb = b.model.benchmarks[sortId as keyof typeof b.model.benchmarks] ?? 0
+      ? marketModels
+      : [...marketModels].sort((a, b) => {
+          const sa = a.model.benchmarkSuites?.[suite]?.[sortId] ?? 0
+          const sb = b.model.benchmarkSuites?.[suite]?.[sortId] ?? 0
           return sb - sa
         })
-  }, [state, sortId])
+  }, [state, sortId, market])
+
+  const suiteId = suiteForEvaluationMarket(market)
+  const metrics = SUITE_METRICS[suiteId]
 
   const visible = showAll ? rows : rows.slice(0, PAGE)
   const hidden = Math.max(0, rows.length - PAGE)
@@ -57,16 +68,16 @@ export function BenchmarksPanel() {
 
   const leaders = useMemo(() => {
     const map: Record<string, number> = {}
-    for (const d of BENCHMARK_DEFS) {
+    for (const d of metrics) {
       let best = -1
       for (const r of rows) {
-        const s = r.model.benchmarks[d.id] ?? 0
+        const s = r.model.benchmarkSuites?.[suiteId]?.[d.id] ?? 0
         if (s > best) best = s
       }
       map[d.id] = best
     }
     return map
-  }, [rows])
+  }, [rows, metrics, suiteId])
 
   const playerBest = useMemo(() => {
     let best = 0
@@ -90,13 +101,13 @@ export function BenchmarksPanel() {
     let best = 0
     for (const r of rows) {
       if (!r.isPlayer) continue
-      const scores = BENCHMARK_DEFS.map((d) => r.model.benchmarks[d.id] ?? 0)
+      const scores = metrics.map((d) => r.model.benchmarkSuites?.[suiteId]?.[d.id] ?? 0)
       const avg =
         scores.length === 0 ? 0 : scores.reduce((sum, value) => sum + value, 0) / scores.length
       if (avg > best) best = avg
     }
     return best
-  }, [rows])
+  }, [rows, metrics, suiteId])
 
   const activeAudits = useMemo(() => {
     const day = state.day
@@ -195,9 +206,23 @@ export function BenchmarksPanel() {
       <div key={tab} className="panel-swap mt-3 space-y-3">
         {tab === 'leaderboard' ? (
           <>
+            <div className="flex flex-wrap gap-1" aria-label="Evaluation market">
+              {EVALUATION_MARKETS.map((candidate) => (
+                <SortChip
+                  key={candidate.id}
+                  active={market === candidate.id}
+                  onClick={() => {
+                    setMarket(candidate.id)
+                    setSortId('cap')
+                    setShowAll(false)
+                  }}
+                  label={candidate.label}
+                />
+              ))}
+            </div>
             <div className="flex flex-wrap gap-1">
               <SortChip active={sortId === 'cap'} onClick={() => setSortId('cap')} label="Capability" />
-              {BENCHMARK_DEFS.map((d) => (
+              {metrics.map((d) => (
                 <SortChip
                   key={d.id}
                   active={sortId === d.id}
@@ -259,8 +284,8 @@ export function BenchmarksPanel() {
                     <th className="px-1.5 py-2">Lab</th>
                     <th className="px-1.5 py-2">Size</th>
                     <th className="px-1.5 py-2">Cap</th>
-                    {BENCHMARK_DEFS.map((d) => (
-                      <th key={d.id} className="px-1 py-2 text-center" title={d.name}>
+                    {metrics.map((d) => (
+                      <th key={d.id} className="px-1 py-2 text-center" title={d.label}>
                         {d.short}
                       </th>
                     ))}
@@ -315,8 +340,8 @@ export function BenchmarksPanel() {
                         >
                           {num(r.model.capability, 0)}
                         </td>
-                        {BENCHMARK_DEFS.map((d) => {
-                          const s = r.model.benchmarks[d.id] ?? 0
+                        {metrics.map((d) => {
+                          const s = r.model.benchmarkSuites?.[suiteId]?.[d.id] ?? 0
                           const isLead = s >= (leaders[d.id] ?? 0) - 0.05 && s > 1
                           return (
                             <td

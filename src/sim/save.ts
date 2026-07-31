@@ -22,6 +22,7 @@ import type {
 import { calendarForDay, formatCampaignDate } from './campaign'
 import { DEMAND_MODEL_VERSION, ECONOMY, WORLD_POPULATION } from './balance/economy'
 import { normalizeModelEvaluations } from './balance/evaluationSuites'
+import { backboneFromFamily, ioForPreset, presetFromFamily } from './balance/trainingV3'
 import { scoreDesign } from './balance/racks'
 import {
   createWorldMarkets,
@@ -420,6 +421,8 @@ const LEGACY_TRAINING_NUMERICS: TrainingNumerics = {
 }
 
 function normalizeTrainingJob(job: TrainingJob): TrainingJob {
+  const backbone = job.backbone ?? backboneFromFamily(job.family)
+  const productPreset = job.productPreset ?? presetFromFamily(job.family)
   const trainingNumerics = job.trainingNumerics ?? job.numerics ?? LEGACY_TRAINING_NUMERICS
   const recommendedPfDays = Math.max(0, job.recommendedPfDays ?? job.targetPfDays)
   const setupCost = Math.max(0, job.economics?.setupCost ?? Math.max(0, (job.cashSunk ?? 0) - Math.max(0, job.cashBurnPerDay ?? 0)))
@@ -430,9 +433,14 @@ function normalizeTrainingJob(job: TrainingJob): TrainingJob {
   )
   return {
     ...job,
+    backbone,
+    productPreset,
+    io: job.io ?? ioForPreset(productPreset),
     trainingFormulaVersion: job.trainingFormulaVersion ?? 1,
     trainingNumerics,
     numerics: trainingNumerics,
+    minCalendarDays: Math.max(0, job.minCalendarDays ?? 0),
+    daysElapsed: Math.max(0, job.daysElapsed ?? 0),
     computePriority: Math.max(10, Math.min(100, job.computePriority ?? 50)),
     reservedPf: Math.max(0, job.reservedPf ?? 0),
     paused: job.paused ?? false,
@@ -469,9 +477,9 @@ function rivalJobToCanonical(job: RivalTrainJob): TrainingJob {
     id: job.id,
     name: job.name,
     family: job.family,
-    backbone: job.family === 'moe' ? 'moe' : 'dense',
-    productPreset: 'language',
-    io: { inputs: { text: 50 }, outputs: { text: 50 }, tools: 0 },
+    backbone: job.backbone ?? backboneFromFamily(job.family),
+    productPreset: job.productPreset ?? presetFromFamily(job.family),
+    io: job.io ?? ioForPreset(job.productPreset ?? presetFromFamily(job.family)),
     targetParamsB: job.paramsB,
     activeParamsB: job.activeParamsB,
     targetPfDays: job.targetPfDays,

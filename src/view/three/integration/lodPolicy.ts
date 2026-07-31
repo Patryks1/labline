@@ -7,18 +7,14 @@ export const CLOSE_UP_NEAR_PIXELS = 28
 
 /**
  * Compatibility seam for the close-up policy. The renderer owns readiness and
- * complementary coverage so this layer must never suppress the last complete
- * representation.
+ * atomic tier swaps, so this layer must never suppress the last complete tier.
  */
 export function enforceCloseUpNearOnly(
   _registry: ArchetypeRegistry,
   update: ViewportUpdateResult,
   _pixelsPerTile: number,
 ): ViewportUpdateResult {
-  // ScreenSpaceLod starts the near transition before this band and retains the
-  // outgoing tier until every visible near chunk is ready. Snapping coverage
-  // here used to create both a visible pop and an all-props-missing frame.
-  // Keep this integration seam for callers/tests, but never override the
-  // renderer's readiness-safe complementary layers.
+  // ScreenSpaceLod requests near before this band and retains the active tier
+  // until every visible near chunk is ready. Keep this seam for callers/tests.
   return update
 }

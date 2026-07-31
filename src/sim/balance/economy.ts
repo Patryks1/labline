@@ -142,7 +142,7 @@ export const ECONOMY = {
   daysPerMonth: 30,
   /** Base wholesale $/MWh before regional mult & grid scarcity */
   // Compute campuses face industrial firm-power pricing, not household power.
-  energyBasePrice: 495,
+  energyBasePrice: 95,
   /** Variable upkeep for owned generation as a share of equivalent grid MWh. */
   onsiteGenerationCostShare: 0.6,
   /**
@@ -162,10 +162,10 @@ export const ECONOMY = {
    * Proxy MW draw per PF of wholesale compute (≈ H-class rack density).
    * Lease floor = this × PUE × 24h × $/MWh × computeLeaseEnergyMarkup.
    */
-  mwPerPfProxy: 0.011,
+  mwPerPfProxy: 0.001,
   /** Seller must clear ≥ this × energy cost of the leased PF */
   computeLeaseEnergyMarkup: 1.5,
-  chipAmortDays: 600,
+  chipAmortDays: 900,
   /** Network/egress-ish variable $/MTok (small vs power) */
   bandwidthPerMTok: 0.025,
   softmaxTemp: 1.4,
@@ -179,6 +179,12 @@ export const ECONOMY = {
    */
   startingCash: 20_000_000,
   startingChips: 0,
+  /**
+   * Established rivals enter as funded incumbents, not copies of the player's
+   * seed-stage lab. Their policies differ, but all operating costs and physical
+   * work still settle through the same market, compute, data and research rules.
+   */
+  incumbentStartingEnterpriseValue: 300_000_000,
   /**
    * Sub allowance MTok/user/day at usageMultiplier = 1.
    * The baseline Plus plan includes 20M tokens/month. A 1B dense model is
@@ -210,12 +216,12 @@ export const ECONOMY = {
   subCapacityShare: 0.38,
   /** Default API share of inference under constraint (0–1). API is the larger demand pool. */
   defaultApiVsSubPriority: 0.62,
-  /** Live rack opex: $/day per GPU-equivalent rack unit (cooling, staff, spares) */
-  rackOpexPerGpuDay: 780,
+  /** Live 8-accelerator node opex/day beyond power and amortization. */
+  rackOpexPerGpuDay: 140,
   /** Extra $/day per MW of live fleet draw beyond energy bill */
-  rackOpexPerMwDay: 34_000,
+  rackOpexPerMwDay: 5_000,
   /** Facility shells, cooling, fleet operations, security, and maintenance. */
-  facilityOpexMultiplier: 9,
+  facilityOpexMultiplier: 1,
   /** Early util floor before software research — less punitive so one hall can ship product */
   startingUtilCap: 0.48,
   /** Early serving stack — research still pushes toward 1.0–1.4 */

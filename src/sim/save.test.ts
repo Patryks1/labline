@@ -48,7 +48,7 @@ describe('save / load v11', () => {
     expect(back.player.cash).toBe(123_456_789)
     expect(back.map.storage).toBe('legacy')
     expect(back.map.tiles.length).toBe(state.map.tiles.length)
-    expect(back.map.energyPricePerMWh).toBe(ECONOMY.energyBasePrice * 0.7)
+    expect(back.map.energyPricePerMWh).toBe(100)
     expect(back.config.difficulty).toBe('normal')
   })
 
@@ -220,6 +220,41 @@ describe('save / load v11', () => {
     const loaded = parseSave(JSON.stringify(legacy))
     expect(loaded.state.seed).toBe(706)
     expect(loaded.state.map.storage).toBe('legacy')
+  })
+
+  it('preserves rival topology and product fields while canonicalizing legacy jobs', () => {
+    const state = createGame({ seed: 707, difficulty: 'normal' })
+    const rival = state.rivals[0]!
+    rival.trainingJobs = []
+    rival.trainingJob = {
+      id: 'legacy-sparse-omni',
+      name: 'Legacy Sparse Omni',
+      family: 'omni',
+      backbone: 'moe',
+      productPreset: 'omni',
+      io: { inputs: { text: 80, image: 70 }, outputs: { text: 80 }, tools: 60 },
+      paramsB: 100,
+      activeParamsB: 10,
+      targetPfDays: 100,
+      progressPfDays: 20,
+      modalities: ['text', 'image', 'tools'],
+      dataCoverage: 1,
+      dataQuality: 70,
+      includeSynthHQ: false,
+      includeSynthLQ: false,
+      synthLqShare: 0,
+      trainShare: 0.82,
+      totalMTok: 1_000,
+    }
+
+    const restored = roundTripState(state)
+    expect(restored.rivals[0]!.trainingJobs?.[0]).toMatchObject({
+      family: 'omni',
+      backbone: 'moe',
+      productPreset: 'omni',
+      activeParamsB: 10,
+      io: { inputs: { text: 80, image: 70 }, outputs: { text: 80 }, tools: 60 },
+    })
   })
 
   it('never serializes million-tile static buffers or runtime indexes', () => {

@@ -13,6 +13,7 @@ import {
   engineerUtilBonus,
 } from "./staff";
 import { playerHallPueMultiplier } from "./dataHallLayouts";
+import { fleetPowerDraw, powerDerateForSupply } from "./computePower";
 
 export interface ComputeSnapshot {
   rawFlopsPf: number;
@@ -20,6 +21,15 @@ export interface ComputeSnapshot {
   pue: number;
   mwDemand: number;
   mwAvailable: number;
+  /** Physical facility draw; PF pools remain authoritative work quantities. */
+  mwBreakdown: {
+    idle: number;
+    training: number;
+    inference: number;
+    research: number;
+  };
+  /** Physical draw if each offline pool runs its configured share. */
+  mwForecast: { training: number; research: number };
   powerDerate: number;
   effectiveFlopsPf: number;
   pools: { training: number; inference: number; research: number };
@@ -29,6 +39,8 @@ export interface ComputeSnapshot {
   rackCap: number;
   racksUsed: number;
   vramGb: number;
+  localVramGb: number;
+  remoteVramGb: number;
   /** Accelerator RAM reserved for training by the configured compute allocation. */
   trainingRamGb: number;
   vramNeedTrain: number;
@@ -36,6 +48,8 @@ export interface ComputeSnapshot {
   vramDerateTrain: number;
   vramDerateServe: number;
   systemRamGb: number;
+  localSystemRamGb: number;
+  remoteSystemRamGb: number;
   systemRamNeed: number;
   systemRamDerate: number;
   cpuScore: number;
@@ -78,7 +92,9 @@ function snapshotKey(state: SimState): string {
     referenceId(player.chips),
     referenceId(player.deployedRacks),
     referenceId(player.rackDesigns),
+    referenceId(state.dataHallLayouts),
     referenceId(player.models),
+    referenceId(player.pricing),
     referenceId(player.trainingJob),
     referenceId(player.trainingJobs),
     referenceId(player.activeResearch),
@@ -176,29 +192,56 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
     (player.researchPrograms?.length ?? 0) > 0 ||
     Boolean(player.safetyCampaign);
   const configured = normalizeAllocation(player.allocation);
+  const trainingDuty = hasTraining ? configured.training * 0.9 : 0;
+  const researchDuty = hasResearch ? configured.research * 0.9 : 0;
+  const inferenceDuty = priorServeDuty;
+  const requestedDuty = inferenceDuty + trainingDuty + researchDuty;
   const dutyCycle = Math.max(
     0.05,
     Math.min(
       0.95,
-      priorServeDuty +
-        (hasTraining ? configured.training * 0.9 : 0) +
-        (hasResearch ? configured.research * 0.9 : 0),
+      requestedDuty,
     ),
   );
-  // Real accelerators retain idle draw; incremental power follows useful duty.
-  const dynamicFleetMw =
-    fleet.idleMw +
-    Math.max(0, fleet.mw - fleet.idleMw) * Math.pow(dutyCycle, 1.2);
   // Power: fleet draw * effective PUE; grid is shared with rivals (own gen is private)
-  const mwDemand = dynamicFleetMw * pue;
+  const fleetPower = fleetPowerDraw({
+    fullLoadMw: fleet.mw,
+    idleMw: fleet.idleMw,
+    dutyCycle,
+    pue,
+  });
+  const mwDemand = fleetPower.demandMw;
+  const dynamicShareDenominator = Math.max(1e-9, requestedDuty);
+  const mwBreakdown = {
+    idle: fleetPower.idleMw,
+    training:
+      fleetPower.dynamicMw * (trainingDuty / dynamicShareDenominator),
+    inference:
+      fleetPower.dynamicMw * (inferenceDuty / dynamicShareDenominator),
+    research:
+      fleetPower.dynamicMw * (researchDuty / dynamicShareDenominator),
+  };
+  const mwForecast = {
+    training: fleetPowerDraw({
+      fullLoadMw: fleet.mw,
+      idleMw: fleet.idleMw,
+      dutyCycle: configured.training,
+      pue,
+    }).demandMw,
+    research: fleetPowerDraw({
+      fullLoadMw: fleet.mw,
+      idleMw: fleet.idleMw,
+      dutyCycle: configured.research,
+      pue,
+    }).demandMw,
+  };
+  if (requestedDuty <= 1e-9) mwBreakdown.idle += fleetPower.dynamicMw;
   const power = resolvePlayerPowerMw(state, mwDemand);
   const mwAvailable = Math.max(0.05, power.mwAvailable);
   // Brownout floor — underpowered halls slow down, they don't black out
-  const POWER_FLOOR = 0.22;
-  const powerDerateRaw =
-    mwDemand > mwAvailable ? mwAvailable / Math.max(1e-6, mwDemand) : 1;
-  const powerDerate = Math.min(1, Math.max(POWER_FLOOR, powerDerateRaw));
-  const powerThrottled = powerDerateRaw < 0.999;
+  const powerLimit = powerDerateForSupply(mwDemand, mwAvailable);
+  const powerDerate = powerLimit.derate;
+  const powerThrottled = powerLimit.throttled;
 
   const rackCap = energy.rackCap;
   const installedRackUnits = fleet.rackUnitsUsed;
@@ -220,6 +263,9 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
     0,
     legacyLeases.inboundPf + providerContracts.inboundPf,
   );
+  const remoteGpuEquivalent = remoteFlops / 0.7;
+  const remoteVramGb = remoteAcceleratorRamGb(remoteFlops);
+  const remoteSystemRamGb = remoteGpuEquivalent * 512;
   const leasedOut = Math.max(
     0,
     legacyLeases.outboundPf + providerContracts.outboundPf,
@@ -236,7 +282,11 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
       (sum, job) => sum + Math.max(0, job.targetParamsB),
       0,
     ) + Math.max(0, safetyTrainingModel?.paramsB ?? 0);
-  if (active?.family === "moe" && fleetFlops > 0) {
+  if (
+    (active?.backbone === "moe" ||
+      (active?.backbone == null && active?.family === "moe")) &&
+    fleetFlops > 0
+  ) {
     fleetFlops *= 1.05;
   }
   const rawFlops = Math.max(0, fleetFlops + remoteFlops);
@@ -263,9 +313,15 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
   const cpuDerate =
     cpuNeed <= 1 ? 1 : Math.min(1, Math.max(0.35, cpuScore / cpuNeed));
 
-  // Serving can degrade under memory pressure. Training memory is a hard
-  // per-job admission gate in training.ts, so it must not softly derate PF.
-  const serveMem = Math.max(0.3, serveV.derate);
+  // Serving requires the complete deployment to reside in accelerator HBM,
+  // with host RAM available for bounded staging. We intentionally do not
+  // model implicit CPU/offload serving: that would hide an infeasible fleet
+  // behind a misleading trickle of tokens. Training has its own per-job hard
+  // placement gate in training.ts.
+  const localServingMemoryReady =
+    serveV.derate >= 1 - 1e-9 &&
+    (serveV.systemRamDerate ?? 1) >= 1 - 1e-9;
+  const serveMem = localServingMemoryReady ? 1 : 0;
 
   // Engineers improve util conversion and train/serve efficiency
   const engUtil = engineerUtilBonus(state);
@@ -275,7 +331,11 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
   // Local fleet is power/rack/memory constrained. Remote capacity includes its
   // provider host stack, so local VRAM, RAM, CPU, and power never penalize it.
   const localBase = fleetFlops * effectiveUtil * powerDerate * rackDerate;
-  const remoteBase = remoteFlops * effectiveUtil;
+  const remoteServingMemoryReady =
+    serveV.needGb <= remoteVramGb + 1e-9 &&
+    (serveV.systemRamNeedGb ?? 0) <= remoteSystemRamGb + 1e-9;
+  const remoteBase =
+    remoteFlops * effectiveUtil * (remoteServingMemoryReady ? 1 : 0);
   const alloc = configured;
 
   // Reservations are guarantees, not hard partitions. Serving claims its p95
@@ -283,8 +343,7 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
   const fullRawPool = Math.max(0, localBase + remoteBase);
   const fullTrainCapacity = (localBase + remoteBase) * (1 + engTrain);
   const fullInferCapacity =
-    (localBase * serveMem * (0.7 + 0.2 * systemRamDerate + 0.1 * cpuDerate) +
-      remoteBase) *
+    (localBase * serveMem * (0.9 + 0.1 * cpuDerate) + remoteBase) *
     (1 + engServe);
   const fullResearchCapacity =
     localBase * (0.55 + 0.45 * cpuDerate) * (0.8 + 0.2 * systemRamDerate) +
@@ -350,7 +409,7 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
   const combinedServeMem = weightedRemoteDerate(
     fleetFlops,
     remoteFlops,
-    serveMem,
+    serveV.derate,
   );
   const combinedSystemRam = weightedRemoteDerate(
     fleetFlops,
@@ -358,8 +417,7 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
     systemRamDerate,
   );
   const combinedCpu = weightedRemoteDerate(fleetFlops, remoteFlops, cpuDerate);
-  const remoteGpuEquivalent = remoteFlops / 0.7;
-  const totalVramGb = fleet.vramGb + remoteAcceleratorRamGb(remoteFlops);
+  const totalVramGb = fleet.vramGb + remoteVramGb;
   const trainingRamGb = totalVramGb * alloc.training;
   const combinedTrainMem =
     trainV.needGb > 0 ? Math.min(1, trainingRamGb / trainV.needGb) : 1;
@@ -383,6 +441,8 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
     pue,
     mwDemand,
     mwAvailable,
+    mwBreakdown,
+    mwForecast,
     powerDerate: combinedPowerDerate,
     effectiveFlopsPf: trainPool * trainBoost + inferPool + researchPool,
     pools: {
@@ -398,12 +458,16 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
     // still uses the full installed count so imported over-cap saves throttle.
     racksUsed: Math.min(rackCap, installedRackUnits),
     vramGb: totalVramGb,
+    localVramGb: fleet.vramGb,
+    remoteVramGb,
     trainingRamGb,
     vramNeedTrain: trainV.needGb,
     vramNeedServe: serveV.needGb,
     vramDerateTrain: combinedTrainMem,
     vramDerateServe: combinedServeMem,
-    systemRamGb: systemRamGb + remoteGpuEquivalent * 512,
+    systemRamGb: systemRamGb + remoteSystemRamGb,
+    localSystemRamGb: systemRamGb,
+    remoteSystemRamGb,
     systemRamNeed,
     systemRamDerate: combinedSystemRam,
     cpuScore: cpuScore + remoteGpuEquivalent * 40,

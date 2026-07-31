@@ -43,10 +43,9 @@ import {
 import { playerStaff } from "../../../sim/systems/staff";
 import { useGameStore } from "../../../store/gameStore";
 import { computeSnapshot } from "../../../sim/tick";
-import { money, num } from "../format";
+import { money, mw, num } from "../format";
 import { GameCard, LiveDot, MeterBar, StatRow } from "../ui/kit";
 import {
-  EmptyState,
   HudButton,
   MetricTile,
   StatusChip,
@@ -182,6 +181,7 @@ export function ResearchPanel() {
           <MetricTile
             label="Pool"
             value={`${num(snap.pools.research, 2)} PF`}
+            detail={`${mw(snap.mwForecast.research)} physical draw`}
             tone="research"
           />
           <MetricTile
@@ -213,29 +213,13 @@ export function ResearchPanel() {
           <div className="panel-scroll min-h-0 flex-1 space-y-2 overflow-y-auto pr-0.5">
             {usesPodPrograms ? (
               <>
-                <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <p className="inline-flex items-center gap-1.5 text-[0.8125rem] text-muted">
                     {(activePrograms.length > 0 || !!active) && (
                       <LiveDot className="text-research" />
                     )}
                     Pods · queue
                   </p>
-                  <select
-                    className="hud-select min-w-40 text-[0.75rem]"
-                    value={selectedPodId}
-                    onChange={(event) => setSelectedPodId(event.target.value)}
-                  >
-                    {pods.map((pod) => {
-                      const lead = leads.find(
-                        (candidate) => candidate.id === pod.leadId,
-                      );
-                      return (
-                        <option key={pod.id} value={pod.id}>
-                          {pod.name} · {lead?.name ?? "No lead"}
-                        </option>
-                      );
-                    })}
-                  </select>
                 </div>
                 <div className="anim-stagger grid gap-2">
                   {pods.map((pod) => {
@@ -439,7 +423,7 @@ export function ResearchPanel() {
               </div>
             </div>
           )}
-          <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 overflow-hidden xl:grid-cols-[minmax(0,1fr)_minmax(16rem,20rem)]">
+          <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden">
             <div
               ref={canvas.viewportRef}
               onPointerDown={canvas.onPointerDown}
@@ -574,239 +558,270 @@ export function ResearchPanel() {
                       : nodeVisualStatus(state, n.id);
                   const sel = selectedId === n.id;
                   const highlighted = highlightedId === n.id;
+                  const expandedWidth = 340;
+                  const expandedLeft =
+                    n.x + expandedWidth > layout.width - 12
+                      ? Math.max(12, n.x + n.w - expandedWidth)
+                      : n.x;
                   return (
-                    <button
+                    <div
                       key={n.id}
-                      type="button"
-                      onClick={() => setSelectedId(n.id)}
-                      onDoubleClick={() =>
-                        usesPodPrograms
-                          ? apply(queueResearchProgram(state, n.id))
-                          : startOrQueue(n.id)
-                      }
-                      className={`absolute z-10 rounded-lg border px-2 py-1.5 text-left transition ${nodeClass(st, sel, def.riskLevel)} ${highlighted ? "ring-2 ring-research shadow-[0_0_1.5rem_rgba(147,116,255,0.45)]" : ""}`}
+                      className={`absolute ${sel ? "z-30" : "z-10"}`}
                       style={{
-                        left: n.x,
+                        left: sel ? expandedLeft : n.x,
                         top: n.y,
-                        width: n.w,
-                        height: n.h,
+                        width: sel ? expandedWidth : n.w,
                       }}
-                      title={def.description}
                     >
-                      {def.riskLevel && (
-                        <span className="absolute right-1.5 top-1 rounded border border-danger/50 bg-danger/15 px-1 font-mono text-[0.5rem] font-semibold uppercase tracking-wider text-danger">
-                          {def.riskLevel} risk
-                        </span>
-                      )}
-                      <div
-                        className={`truncate text-[0.8125rem] font-medium leading-tight text-bone ${def.riskLevel ? "pr-14" : ""}`}
+                      <button
+                        type="button"
+                        aria-expanded={sel}
+                        onClick={() => setSelectedId(sel ? null : n.id)}
+                        onDoubleClick={(event) => {
+                          event.stopPropagation();
+                          setSelectedId(n.id);
+                          if (usesPodPrograms) {
+                            apply(queueResearchProgram(state, n.id));
+                          } else {
+                            startOrQueue(n.id);
+                          }
+                        }}
+                        className={`relative block w-full rounded-lg border px-2 py-1.5 text-left transition ${nodeClass(st, sel, def.riskLevel)} ${sel ? "rounded-b-none !overflow-visible opacity-100" : ""} ${highlighted ? "ring-2 ring-research shadow-[0_0_1.5rem_rgba(147,116,255,0.45)]" : ""}`}
+                        style={{ height: n.h }}
+                        title={sel ? "Collapse research details" : def.description}
                       >
-                        {def.name}
-                      </div>
-                      <div className="mt-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
-                        {st === "done" ? (
-                          <span className="text-mint">DONE</span>
-                        ) : (
-                          <>
-                            {def.costPfDays} PF
-                            {st === "queued" ? " · Q" : ""}
-                            {st === "active" ? " · …" : ""}
-                            {st === "blocked" || st === "locked"
-                              ? " · locked"
-                              : ""}
-                          </>
+                        {def.riskLevel && (
+                          <span className="absolute right-1.5 top-1 rounded border border-danger/50 bg-danger/15 px-1 font-mono text-[0.5rem] font-semibold uppercase tracking-wider text-danger">
+                            {def.riskLevel} risk
+                          </span>
                         )}
-                      </div>
-                    </button>
+                        <div
+                          className={`truncate text-[0.8125rem] font-medium leading-tight text-bone ${def.riskLevel ? "pr-14" : ""}`}
+                        >
+                          {def.name}
+                        </div>
+                        <div className="mt-0.5 flex items-center justify-between gap-2 font-mono text-[0.6875rem] tabular-nums text-muted">
+                          <span>
+                            {st === "done" ? (
+                              <span className="text-mint">DONE</span>
+                            ) : (
+                              <>
+                                {def.costPfDays} PF
+                                {st === "queued" ? " · Q" : ""}
+                                {st === "active" ? " · …" : ""}
+                                {st === "blocked" || st === "locked"
+                                  ? " · locked"
+                                  : ""}
+                              </>
+                            )}
+                          </span>
+                          {sel && (
+                            <span className="text-research">details ↑</span>
+                          )}
+                        </div>
+                      </button>
+
+                      {sel && selected && status && (
+                        <div
+                          className="panel-scroll max-h-[30rem] overflow-y-auto rounded-b-lg border border-t-0 border-research/50 bg-panel-2 p-3 text-left shadow-[0_1rem_2.5rem_rgba(0,0,0,0.55)] backdrop-blur-md"
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onWheel={(event) => event.stopPropagation()}
+                        >
+                          <div className="mb-2 flex items-start justify-between gap-2">
+                            <p className="hud-eyebrow">
+                              {
+                                RESEARCH_BRANCHES[
+                                  researchBranchForNode(selected.id)
+                                ].label
+                              }
+                            </p>
+                            <StatusChip tone={statusTone(status)}>
+                              {status}
+                            </StatusChip>
+                          </div>
+
+                          <div className="space-y-2">
+                            {!usesPodPrograms && (
+                              <div className="flex flex-wrap gap-1.5">
+                                {status !== "done" &&
+                                  status !== "active" &&
+                                  status !== "queued" &&
+                                  status !== "blocked" && (
+                                    <HudButton
+                                      variant="primary"
+                                      className="!px-3 !py-1 text-[0.8125rem]"
+                                      onClick={() => startOrQueue(selected.id)}
+                                    >
+                                      {status === "locked"
+                                        ? `Queue unlock path${selectedPath.length > 1 ? ` (${selectedPath.length})` : ""}`
+                                        : active
+                                          ? "Queue"
+                                          : "Start"}
+                                    </HudButton>
+                                  )}
+                                {status === "available" && active && (
+                                  <HudButton
+                                    variant="ghost"
+                                    className="!px-2 !py-1 text-[0.8125rem]"
+                                    onClick={() =>
+                                      apply(enqueueResearch(state, selected.id))
+                                    }
+                                  >
+                                    Queue
+                                  </HudButton>
+                                )}
+                                {status === "queued" && (
+                                  <HudButton
+                                    variant="ghost"
+                                    className="!px-2 !py-1 text-[0.8125rem]"
+                                    onClick={() =>
+                                      apply(dequeueResearch(state, selected.id))
+                                    }
+                                  >
+                                    Remove
+                                  </HudButton>
+                                )}
+                              </div>
+                            )}
+
+                            {status === "available" &&
+                              selectedPod &&
+                              !selectedPod.assignmentId &&
+                              !selectedProgram && (
+                                <HudButton
+                                  variant="primary"
+                                  className="w-full"
+                                  onClick={() =>
+                                    apply(
+                                      startResearchProgram(
+                                        state,
+                                        selected.id,
+                                        selectedPod.id,
+                                      ),
+                                    )
+                                  }
+                                >
+                                  Assign {selectedPod.name}
+                                </HudButton>
+                              )}
+                            {usesPodPrograms &&
+                              (status === "available" ||
+                                status === "locked") && (
+                                <HudButton
+                                  variant="secondary"
+                                  className="w-full"
+                                  onClick={() =>
+                                    apply(
+                                      queueResearchProgram(state, selected.id),
+                                    )
+                                  }
+                                >
+                                  {status === "locked"
+                                    ? `Queue unlock path${selectedPath.length > 1 ? ` · ${selectedPath.length} methods` : ""}`
+                                    : "Queue for next available pod"}
+                                </HudButton>
+                              )}
+                            {usesPodPrograms && status === "queued" && (
+                              <HudButton
+                                variant="ghost"
+                                className="w-full"
+                                onClick={() =>
+                                  apply(
+                                    dequeueResearchProgram(state, selected.id),
+                                  )
+                                }
+                              >
+                                Remove from queue
+                              </HudButton>
+                            )}
+
+                            {selectedPod?.assignmentId &&
+                              status === "available" && (
+                                <div className="rounded-md border border-amber/30 bg-amber/10 px-2 py-1.5 text-[0.75rem] text-amber">
+                                  {selectedPod.name} is already assigned. Select
+                                  an available pod card.
+                                </div>
+                              )}
+                            {selectedProgram && (
+                              <div className="rounded-md border border-research/30 bg-research/10 px-2 py-1.5 text-[0.75rem] text-research">
+                                In {selectedProgram.phase} with{" "}
+                                {pods.find(
+                                  (pod) => pod.id === selectedProgram.podId,
+                                )?.name ?? "assigned pod"}{" "}
+                                · {selectedProgram.evidence.length} evidence
+                              </div>
+                            )}
+
+                            <p className="text-[0.8125rem] leading-snug text-muted">
+                              {selected.description}
+                            </p>
+
+                            <div className="grid grid-cols-2 gap-x-3">
+                              <StatRow
+                                label="PF target"
+                                value={`~${num(researchPfTarget(state, selected), 0)}`}
+                                strong
+                              />
+                              <StatRow
+                                label="Days"
+                                value={`≥${researchDaysTarget(selected, researcherCount)}`}
+                              />
+                              <StatRow
+                                label="Cash"
+                                value={`~${money(researchCashEstimate(state, selected))}`}
+                              />
+                              <StatRow
+                                label="Staff"
+                                value={`${minResearchersForNode(selected.id)}R`}
+                                tone={
+                                  researcherCount >=
+                                  minResearchersForNode(selected.id)
+                                    ? "positive"
+                                    : "warning"
+                                }
+                              />
+                              <StatRow
+                                label="Rate now"
+                                value={`${num(estimateResearchRate(state, selected.id).pfPerDay, 2)} PF/d`}
+                                tone="research"
+                              />
+                              <StatRow
+                                label="Power"
+                                value={mw(snap.mwForecast.research)}
+                              />
+                            </div>
+
+                            {selected.prereqs.length > 0 && (
+                              <p className="text-[0.75rem] text-muted">
+                                Needs{" "}
+                                {selected.prereqs
+                                  .map((p) => getResearchNode(p).name)
+                                  .join(", ")}
+                              </p>
+                            )}
+
+                            <EffectsLine effects={selected.effects} />
+
+                            {selected.riskLevel && (
+                              <div className="rounded-md border border-danger/40 bg-danger/10 px-2.5 py-2">
+                                <div className="font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.12em] text-danger">
+                                  {selected.riskLevel} variance
+                                </div>
+                                <p className="mt-1 text-[0.75rem] leading-snug text-muted">
+                                  Higher breakthrough odds and capability
+                                  upside, with more failed runs and a safety
+                                  penalty.
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   );
                 })}
               </div>
             </div>
-
-            <aside className="panel-scroll min-h-0 overflow-y-auto rounded-lg border border-line bg-panel-2">
-              {selected && status ? (
-                <GameCard
-                  pad={false}
-                  className="border-0 bg-transparent"
-                  eyebrow={
-                    RESEARCH_BRANCHES[researchBranchForNode(selected.id)].label
-                  }
-                  title={selected.name}
-                  tone="research"
-                  actions={
-                    <StatusChip tone={statusTone(status)}>{status}</StatusChip>
-                  }
-                >
-                  <div className="space-y-2 p-3">
-                    {!usesPodPrograms && (
-                      <div className="flex flex-wrap gap-1.5">
-                        {status !== "done" &&
-                          status !== "active" &&
-                          status !== "queued" &&
-                          status !== "blocked" && (
-                            <HudButton
-                              variant="primary"
-                              className="!px-3 !py-1 text-[0.8125rem]"
-                              onClick={() => startOrQueue(selected.id)}
-                            >
-                              {status === "locked"
-                                ? `Queue unlock path${selectedPath.length > 1 ? ` (${selectedPath.length})` : ""}`
-                                : active
-                                  ? "Queue"
-                                  : "Start"}
-                            </HudButton>
-                          )}
-                        {status === "available" && active && (
-                          <HudButton
-                            variant="ghost"
-                            className="!px-2 !py-1 text-[0.8125rem]"
-                            onClick={() =>
-                              apply(enqueueResearch(state, selected.id))
-                            }
-                          >
-                            Queue
-                          </HudButton>
-                        )}
-                        {status === "queued" && (
-                          <HudButton
-                            variant="ghost"
-                            className="!px-2 !py-1 text-[0.8125rem]"
-                            onClick={() =>
-                              apply(dequeueResearch(state, selected.id))
-                            }
-                          >
-                            Remove
-                          </HudButton>
-                        )}
-                      </div>
-                    )}
-
-                    {status === "available" &&
-                      selectedPod &&
-                      !selectedPod.assignmentId &&
-                      !selectedProgram && (
-                        <HudButton
-                          variant="primary"
-                          className="w-full"
-                          onClick={() =>
-                            apply(
-                              startResearchProgram(
-                                state,
-                                selected.id,
-                                selectedPod.id,
-                              ),
-                            )
-                          }
-                        >
-                          Assign {selectedPod.name}
-                        </HudButton>
-                      )}
-                    {usesPodPrograms &&
-                      (status === "available" || status === "locked") && (
-                        <HudButton
-                          variant="secondary"
-                          className="w-full"
-                          onClick={() =>
-                            apply(queueResearchProgram(state, selected.id))
-                          }
-                        >
-                          {status === "locked"
-                            ? `Queue unlock path${selectedPath.length > 1 ? ` · ${selectedPath.length} methods` : ""}`
-                            : "Queue for next available pod"}
-                        </HudButton>
-                      )}
-                    {usesPodPrograms && status === "queued" && (
-                      <HudButton
-                        variant="ghost"
-                        className="w-full"
-                        onClick={() =>
-                          apply(dequeueResearchProgram(state, selected.id))
-                        }
-                      >
-                        Remove from queue
-                      </HudButton>
-                    )}
-
-                    {selectedPod?.assignmentId && status === "available" && (
-                      <div className="rounded-md border border-amber/30 bg-amber/10 px-2 py-1.5 text-[0.75rem] text-amber">
-                        {selectedPod.name} is already assigned. Select an
-                        available pod.
-                      </div>
-                    )}
-                    {selectedProgram && (
-                      <div className="rounded-md border border-research/30 bg-research/10 px-2 py-1.5 text-[0.75rem] text-research">
-                        In {selectedProgram.phase} with{" "}
-                        {pods.find((pod) => pod.id === selectedProgram.podId)
-                          ?.name ?? "assigned pod"}{" "}
-                        · {selectedProgram.evidence.length} evidence
-                      </div>
-                    )}
-
-                    <p className="text-[0.8125rem] leading-snug text-muted">
-                      {selected.description}
-                    </p>
-
-                    <div className="grid grid-cols-2 gap-x-3">
-                      <StatRow
-                        label="PF target"
-                        value={`~${num(researchPfTarget(state, selected), 0)}`}
-                        strong
-                      />
-                      <StatRow
-                        label="Days"
-                        value={`≥${researchDaysTarget(selected, researcherCount)}`}
-                      />
-                      <StatRow
-                        label="Cash"
-                        value={`~${money(researchCashEstimate(state, selected))}`}
-                      />
-                      <StatRow
-                        label="Staff"
-                        value={`${minResearchersForNode(selected.id)}R`}
-                        tone={
-                          researcherCount >= minResearchersForNode(selected.id)
-                            ? "positive"
-                            : "warning"
-                        }
-                      />
-                      <StatRow
-                        label="Rate now"
-                        value={`${num(estimateResearchRate(state, selected.id).pfPerDay, 2)} PF/d`}
-                        tone="research"
-                      />
-                    </div>
-
-                    {selected.prereqs.length > 0 && (
-                      <p className="text-[0.75rem] text-muted">
-                        Needs{" "}
-                        {selected.prereqs
-                          .map((p) => getResearchNode(p).name)
-                          .join(", ")}
-                      </p>
-                    )}
-
-                    <EffectsLine effects={selected.effects} />
-
-                    {selected.riskLevel && (
-                      <div className="rounded-md border border-danger/40 bg-danger/10 px-2.5 py-2">
-                        <div className="font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.12em] text-danger">
-                          {selected.riskLevel} variance
-                        </div>
-                        <p className="mt-1 text-[0.75rem] leading-snug text-muted">
-                          Higher breakthrough odds and capability upside, with
-                          more failed runs and a safety penalty.
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                </GameCard>
-              ) : (
-                <EmptyState
-                  title="Select a research node"
-                  description="Review prerequisites, staffing, cash, and effects before starting."
-                />
-              )}
-            </aside>
           </div>
         </div>
       </div>

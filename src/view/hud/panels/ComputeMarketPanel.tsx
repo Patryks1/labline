@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Handshake, PaperPlaneTilt } from "@phosphor-icons/react";
 import {
   acceptComputeOffer,
@@ -8,7 +8,12 @@ import {
   rejectComputeOffer,
 } from "../../../sim/systems/computeMarket";
 import { useGameStore } from "../../../store/gameStore";
-import { useUiStore } from "../../../store/uiStore";
+import {
+  EMPTY_NEGOTIATION,
+  formatNegotiationTimestamp,
+  reopenEndedNegotiation,
+  useUiStore,
+} from "../../../store/uiStore";
 import {
   computeMw,
   computeMwValue,
@@ -29,6 +34,7 @@ import { remoteAcceleratorRamGb } from "../../../sim/systems/compute";
 import { CapacitySalesCeilingCard } from "../ui/CapacitySalesCeilingCard";
 import {
   NegotiationHeader,
+  NegotiationComposer,
   NegotiationMessage,
   NegotiationMetric,
   NegotiationSlider,
@@ -130,25 +136,28 @@ export function ComputeMarketPanel() {
   const [cloudPf, setCloudPf] = useState(24);
   const [cloudTerm, setCloudTerm] = useState(90);
   const [offerPercent, setOfferPercent] = useState(95);
-  const [negotiationStatus, setNegotiationStatus] =
-    useState<NegotiationStatus>("idle");
-  const [negotiationMessage, setNegotiationMessage] = useState("");
-  const [chatHistory, setChatHistory] = useState<ChatLine[]>([]);
-  const [failedAttemptsByProvider, setFailedAttemptsByProvider] = useState<
-    Record<string, number>
-  >({});
-  const [contactAgainByProvider, setContactAgainByProvider] = useState<
-    Record<string, number>
-  >({});
-  const clearNegotiation = () => {
-    setNegotiationStatus("idle");
-    setNegotiationMessage("");
-    setChatHistory([]);
-  };
+  const updateComputeNegotiation = useUiStore((store) => store.updateComputeNegotiation);
+  const conversation = useUiStore((store) => store.computeNegotiations[cloudProviderId] ?? EMPTY_NEGOTIATION);
+  const negotiationStatus = conversation.status;
+  const negotiationMessage = conversation.message ?? "";
+  const chatHistory = conversation.transcript;
+  const saveConversation = (
+    patch: Partial<typeof conversation>,
+    append: ChatLine[] = [],
+  ) => updateComputeNegotiation(cloudProviderId, (current) => ({
+    ...current,
+    ...patch,
+    transcript: [...current.transcript, ...append.map((line, index) => ({ ...line, day: state.day, sequence: current.transcript.length + index }))],
+  }));
   const continueNegotiation = () => {
-    setNegotiationStatus("idle");
-    setNegotiationMessage("");
+    saveConversation({ status: "idle", message: undefined });
   };
+  useEffect(() => {
+    if (!conversation.proposal || (conversation.status !== "countered" && conversation.status !== "agreed")) return;
+    setCloudPf(conversation.proposal.capacity);
+    setCloudTerm(conversation.proposal.termDays);
+    setOfferPercent(conversation.proposal.offer);
+  }, [cloudProviderId, conversation.proposal, conversation.status]);
   const cloudQuote = useMemo(
     () =>
       quoteComputeContract(state, {
@@ -174,8 +183,8 @@ export function ComputeMarketPanel() {
       (cloudPf / Math.max(1, selectedProvider?.availablePf ?? 1)) * 25 +
       dealEvent.satisfactionDelta,
   );
-  const failedAttempts = failedAttemptsByProvider[cloudProviderId] ?? 0;
-  const contactAgainDay = contactAgainByProvider[cloudProviderId] ?? 0;
+  const failedAttempts = conversation.failures;
+  const contactAgainDay = conversation.contactAgainDay;
   const contactLocked = state.day < contactAgainDay;
   const negotiatedQuote = useMemo(() => {
     const bonusPf = Math.max(
@@ -221,6 +230,21 @@ export function ComputeMarketPanel() {
       contract.buyerLabId === state.playerLabId &&
       contract.status !== "expired",
   );
+  const selectedProviderContractActive = state.computeContracts.some(
+    (contract) =>
+      (conversation.contractId
+        ? contract.id === conversation.contractId
+        : contract.providerId === cloudProviderId) &&
+      contract.buyerLabId === state.playerLabId &&
+      contract.status !== "expired" &&
+      contract.daysLeft > 0,
+  );
+  useEffect(() => {
+    if (conversation.status !== "signed" || selectedProviderContractActive) return;
+    updateComputeNegotiation(cloudProviderId, (current) =>
+      reopenEndedNegotiation(current, false),
+    );
+  }, [cloudProviderId, conversation.status, selectedProviderContractActive, updateComputeNegotiation]);
   const capacitySnapshot = computeLabSnapshot(state, state.playerLabId);
   const providerBoughtPf = state.computeContracts
     .filter(
@@ -308,11 +332,7 @@ export function ComputeMarketPanel() {
           ariaLabel="Compute market views"
           active={tab}
           onChange={(id) => {
-            const nextTab = id as MarketTab;
-            if (tab === "negotiate" && nextTab !== "negotiate") {
-              clearNegotiation();
-            }
-            setTab(nextTab);
+            setTab(id as MarketTab);
           }}
           items={[
             { id: "negotiate", label: "Provider desk" },
@@ -356,7 +376,6 @@ export function ComputeMarketPanel() {
                           ),
                         ),
                       );
-                      clearNegotiation();
                     }}
                     className="min-w-0 flex-1 bg-transparent text-right text-[0.8125rem] font-medium text-bone outline-none"
                     aria-label="Compute provider"
@@ -378,6 +397,7 @@ export function ComputeMarketPanel() {
                   <NegotiationMessage
                     side="provider"
                     name={selectedProvider?.name ?? "Provider"}
+                    timestamp={`Day ${state.day} · 09:00`}
                   >
                     <span className="font-medium text-bone">
                       {dealEvent.title}
@@ -397,6 +417,7 @@ export function ComputeMarketPanel() {
                           : (selectedProvider?.name ?? "Provider")
                       }
                       status={line.status}
+                      timestamp={formatNegotiationTimestamp(line, state.day, index)}
                     >
                       {line.text}
                     </NegotiationMessage>
@@ -418,7 +439,7 @@ export function ComputeMarketPanel() {
                 {negotiationStatus !== "signed" &&
                 negotiationStatus !== "agreed" ? (
                   <>
-                    <div className="rounded-lg border border-line/70 bg-void/45 p-2">
+                    <NegotiationComposer>
                       <div className="space-y-1.5">
                         <NegotiationSlider
                           label="Compute"
@@ -474,7 +495,7 @@ export function ComputeMarketPanel() {
                           }}
                         />
                       </div>
-                    </div>
+                    </NegotiationComposer>
 
                     <div className="grid grid-cols-5 gap-1 font-mono text-[0.6875rem]">
                       <NegotiationMetric
@@ -525,57 +546,30 @@ export function ComputeMarketPanel() {
                     className="flex w-full items-center justify-center gap-1.5"
                     onClick={() => {
                       const proposal = `${computeMw(pfToMw(cloudPf))} for ${cloudTerm} days at ${offerPercent}% of list.`;
-                      setChatHistory((history) => [
-                        ...history,
-                        { side: "player", text: proposal },
-                      ]);
                       if (providerSatisfaction >= 58) {
                         const agreement =
                           "We agree to these terms. Accept to activate the contract, or decline to keep negotiating.";
-                        setChatHistory((history) => [
-                          ...history,
-                          {
-                            side: "provider",
-                            text: agreement,
-                            status: "agreed",
-                          },
-                        ]);
-                        setNegotiationStatus("agreed");
-                        setNegotiationMessage(agreement);
+                        saveConversation(
+                          { status: "agreed", message: agreement, proposal: { capacity: cloudPf, termDays: cloudTerm, offer: offerPercent } },
+                          [{ side: "player", text: proposal }, { side: "provider", text: agreement, status: "agreed" }],
+                        );
                         return;
                       }
                       if (providerSatisfaction < 30) {
                         const failures = failedAttempts + 1;
-                        setFailedAttemptsByProvider((current) => ({
-                          ...current,
-                          [cloudProviderId]: failures,
-                        }));
                         const refusal =
                           "That offer is too low. Improve the price or reduce the capacity.";
-                        setChatHistory((history) => [
-                          ...history,
-                          {
-                            side: "provider",
-                            text: refusal,
-                            status: "declined",
-                          },
-                        ]);
                         if (failures >= 3) {
-                          setContactAgainByProvider((current) => ({
-                            ...current,
-                            [cloudProviderId]: state.day + 30,
-                          }));
                           const lockMsg = `We are ending talks. Contact us again on day ${state.day + 30}.`;
-                          setChatHistory((history) => [
-                            ...history,
-                            {
-                              side: "provider",
-                              text: lockMsg,
-                              status: "declined",
-                            },
-                          ]);
-                          setNegotiationStatus("declined");
-                          setNegotiationMessage(lockMsg);
+                          saveConversation(
+                            { status: "declined", message: lockMsg, failures, contactAgainDay: state.day + 30 },
+                            [{ side: "player", text: proposal }, { side: "provider", text: refusal, status: "declined" }, { side: "provider", text: lockMsg, status: "declined" }],
+                          );
+                        } else {
+                          saveConversation(
+                            { status: "idle", message: refusal, failures },
+                            [{ side: "player", text: proposal }, { side: "provider", text: refusal, status: "declined" }],
+                          );
                         }
                         return;
                       }
@@ -596,16 +590,10 @@ export function ComputeMarketPanel() {
                       setCloudPf(counterPf);
                       setCloudTerm(counterTerm);
                       const counterText = `We can do ${computeMw(pfToMw(counterPf))} for ${counterTerm} days at ${counter}% of list. Accept or decline.`;
-                      setChatHistory((history) => [
-                        ...history,
-                        {
-                          side: "provider",
-                          text: counterText,
-                          status: "countered",
-                        },
-                      ]);
-                      setNegotiationStatus("countered");
-                      setNegotiationMessage(counterText);
+                      saveConversation(
+                        { status: "countered", message: counterText, proposal: { capacity: counterPf, termDays: counterTerm, offer: counter } },
+                        [{ side: "player", text: proposal }, { side: "provider", text: counterText, status: "countered" }],
+                      );
                     }}
                   >
                     <PaperPlaneTilt size={15} weight="fill" />
@@ -628,10 +616,11 @@ export function ComputeMarketPanel() {
                           negotiatedQuote,
                         );
                         setState(signed);
+                        const contractId = signed.computeContracts.find(
+                          (contract) => !state.computeContracts.some((existing) => existing.id === contract.id),
+                        )?.id;
                         const activeMsg = `Contract active. ${computeMw(pfToMw(negotiatedQuote.contract.pf))} is online.`;
-                        setChatHistory([]);
-                        setNegotiationStatus("signed");
-                        setNegotiationMessage(activeMsg);
+                        saveConversation({ status: "signed", message: activeMsg, contractId }, [{ side: "provider", text: activeMsg, status: "signed" }]);
                       }}
                     >
                       Accept counter
@@ -639,15 +628,10 @@ export function ComputeMarketPanel() {
                     <HudButton
                       variant="ghost"
                       onClick={() => {
-                        setChatHistory((history) => [
-                          ...history,
-                          {
-                            side: "player",
-                            text: "Declining that counter. Adjusting the package.",
-                          },
-                        ]);
-                        setNegotiationStatus("idle");
-                        setNegotiationMessage("");
+                        saveConversation(
+                          { status: "idle", message: undefined },
+                          [{ side: "player", text: "Declining that counter. Adjusting the package." }],
+                        );
                       }}
                     >
                       Decline
@@ -664,10 +648,11 @@ export function ComputeMarketPanel() {
                           negotiatedQuote,
                         );
                         setState(signed);
+                        const contractId = signed.computeContracts.find(
+                          (contract) => !state.computeContracts.some((existing) => existing.id === contract.id),
+                        )?.id;
                         const activeMsg = `Contract active. ${computeMw(pfToMw(negotiatedQuote.contract.pf))} is online.`;
-                        setChatHistory([]);
-                        setNegotiationStatus("signed");
-                        setNegotiationMessage(activeMsg);
+                        saveConversation({ status: "signed", message: activeMsg, contractId }, [{ side: "provider", text: activeMsg, status: "signed" }]);
                       }}
                     >
                       Accept agreement
@@ -675,15 +660,10 @@ export function ComputeMarketPanel() {
                     <HudButton
                       variant="ghost"
                       onClick={() => {
-                        setChatHistory((history) => [
-                          ...history,
-                          {
-                            side: "player",
-                            text: "Declining those terms. I want to revise the package.",
-                          },
-                        ]);
-                        setNegotiationStatus("idle");
-                        setNegotiationMessage("");
+                        saveConversation(
+                          { status: "idle", message: undefined },
+                          [{ side: "player", text: "Declining those terms. I want to revise the package." }],
+                        );
                       }}
                     >
                       Decline

@@ -31,12 +31,23 @@ export interface ServingWorkloadInput {
   avgOutputTokens?: number
   concurrentRequests?: number
   batchSize?: number
+  /** KV-cache precision is independent of weight precision; defaults to BF16. */
+  kvCachePrecision?: ServingPrecision
+  /** Explicit attention shape; otherwise a documented dense/GQA estimate is used. */
+  kvShape?: Partial<ServingKvShape>
   servingEfficiency?: number
   /** Effective PF available to this workload after fleet utilization/derates. */
   availablePfDays?: number
   /** Aggregate resident HBM and bandwidth, when the caller knows them. */
   hbmGb?: number
+  systemRamGb?: number
   hbmBandwidthTBps?: number
+}
+
+export interface ServingKvShape {
+  layers: number
+  kvHeads: number
+  headDim: number
 }
 
 export interface ServingWorkloadEstimate {
@@ -50,10 +61,12 @@ export interface ServingWorkloadEstimate {
   kvCacheGb: number
   workspaceGb: number
   residentMemoryGb: number
+  requiredSystemRamGb: number
   computeSeconds: number | null
   memorySeconds: number | null
   fitsHbm: boolean | null
-  bottleneck: 'compute' | 'memory_bandwidth' | 'hbm_capacity' | 'unknown'
+  fitsSystemRam: boolean | null
+  bottleneck: 'compute' | 'memory_bandwidth' | 'hbm_capacity' | 'system_ram_capacity' | 'unknown'
 }
 
 export type ServeModelPick = Pick<
@@ -63,6 +76,43 @@ export type ServeModelPick = Pick<
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Number.isFinite(value) ? value : min))
+}
+
+/**
+ * Estimate an attention shape when a model record does not expose one.
+ *
+ * The fallback uses P ~= 12 * L * d^2 and the common decoder aspect ratio
+ * d ~= 128 * L, so L ~= cbrt(P / (12*128^2)). It then assumes 128-wide heads
+ * and four query heads per KV head (GQA). Published architectures should pass
+ * `kvShape`; this approximation is only for fleet planning.
+ */
+export function defaultServingKvShape(activeParamsB: number): ServingKvShape {
+  const activeParams = Math.max(0.05, activeParamsB) * 1e9
+  const layers = Math.round(clamp(Math.cbrt(activeParams / (12 * 128 ** 2)), 16, 128))
+  const queryHeads = layers
+  return {
+    layers,
+    kvHeads: Math.round(clamp(Math.ceil(queryHeads / 4), 4, 32)),
+    headDim: 128,
+  }
+}
+
+/** K and V are [batch, kvHeads, tokens, headDim] at every layer. */
+export function kvCacheMemoryGb(input: {
+  concurrentRequests: number
+  liveTokensPerRequest: number
+  bytesPerElement: number
+  shape: ServingKvShape
+}): number {
+  const bytes =
+    2 *
+    Math.max(1, input.concurrentRequests) *
+    Math.max(1, input.liveTokensPerRequest) *
+    Math.max(1, input.shape.layers) *
+    Math.max(1, input.shape.kvHeads) *
+    Math.max(1, input.shape.headDim) *
+    Math.max(0.125, input.bytesPerElement)
+  return bytes / 1e9
 }
 
 /** Runtime efficiency relative to the calibrated BF16 work estimate. */
@@ -127,6 +177,74 @@ export function precisionBytesPerWeight(precision: ServingPrecision | undefined)
   }
 }
 
+/** Packed scales, zero-points, and alignment metadata retained beside weights. */
+export function quantizationStorageOverhead(precision: ServingPrecision | undefined): number {
+  switch (precision) {
+    case 'fp8':
+    case 'int8':
+      return 1.03
+    case 'int4':
+      return 1.08
+    case 'nvfp4':
+      return 1.06
+    case 'ternary_1_58':
+      return 1.15
+    default:
+      return 1
+  }
+}
+
+export interface ServingMemoryInput {
+  model: Pick<Model, 'paramsB' | 'activeParamsB' | 'family'>
+  precision?: ServingPrecision
+  kvCachePrecision?: ServingPrecision
+  avgInputTokens?: number
+  avgOutputTokens?: number
+  concurrentRequests?: number
+  kvShape?: Partial<ServingKvShape>
+}
+
+/** Shared resident-weight, workspace, KV, and host-staging placement formula. */
+export function estimateServingMemory(input: ServingMemoryInput): Pick<
+  ServingWorkloadEstimate,
+  'weightMemoryGb' | 'kvCacheGb' | 'workspaceGb' | 'residentMemoryGb' | 'requiredSystemRamGb'
+> {
+  const activeB = Math.max(0.05, input.model.activeParamsB ?? input.model.paramsB)
+  const totalB = Math.max(activeB, Math.max(0.05, input.model.paramsB))
+  const avgInput = Math.max(1, input.avgInputTokens ?? DEFAULT_AVG_INPUT_TOKENS)
+  const avgOutput = Math.max(1, input.avgOutputTokens ?? DEFAULT_AVG_OUTPUT_TOKENS)
+  const concurrency = Math.max(1, input.concurrentRequests ?? 1)
+  const fallback = defaultServingKvShape(activeB)
+  const shape: ServingKvShape = {
+    layers: Math.max(1, Math.round(input.kvShape?.layers ?? fallback.layers)),
+    kvHeads: Math.max(1, Math.round(input.kvShape?.kvHeads ?? fallback.kvHeads)),
+    headDim: Math.max(1, Math.round(input.kvShape?.headDim ?? fallback.headDim)),
+  }
+  const weightMemoryGb =
+    totalB * precisionBytesPerWeight(input.precision) * quantizationStorageOverhead(input.precision)
+  const kvCacheGb = kvCacheMemoryGb({
+    concurrentRequests: concurrency,
+    liveTokensPerRequest: avgInput + avgOutput,
+    bytesPerElement: precisionBytesPerWeight(input.kvCachePrecision ?? 'bf16'),
+    shape,
+  })
+  // Kernel scratch is active-path-sensitive, while quantized matmuls retain
+  // scale/unpack buffers. It therefore shrinks less quickly than the weights.
+  const workspaceGb = Math.max(
+    0.5,
+    activeB * 0.12 + weightMemoryGb * (precisionBytesPerWeight(input.precision) < 2 ? 0.05 : 0.03),
+  )
+  const residentMemoryGb = weightMemoryGb + kvCacheGb + workspaceGb
+  // Host RAM stages deployments and bounded cache spill; it must not become an
+  // implicit full expert-offload tier. Reserve is capped per hosted artifact.
+  const requiredSystemRamGb = clamp(
+    8 + weightMemoryGb * 0.1 + kvCacheGb * 0.25 + workspaceGb * 0.5,
+    16,
+    256,
+  )
+  return { weightMemoryGb, kvCacheGb, workspaceGb, residentMemoryGb, requiredSystemRamGb }
+}
+
 /** Linear active-parameter throughput relative to the historical 7B display. */
 export function sizeTokMult(model: Pick<Model, 'paramsB' | 'activeParamsB'>): number {
   const active = Math.max(0.05, model.activeParamsB ?? model.paramsB)
@@ -159,7 +277,6 @@ export function estimateServingWorkload(
     0.05,
     input.model.activeParamsB ?? input.model.paramsB,
   ) * 1e9
-  const totalParams = Math.max(activeParams, Math.max(0.05, input.model.paramsB) * 1e9)
   const avgInput = Math.max(1, input.avgInputTokens ?? DEFAULT_AVG_INPUT_TOKENS)
   const avgOutput = Math.max(1, input.avgOutputTokens ?? DEFAULT_AVG_OUTPUT_TOKENS)
   const contextOverhead = 1 + clamp(avgInput / 4_096, 0, 8) * 0.08
@@ -176,20 +293,8 @@ export function estimateServingWorkload(
   const efficiency = serveEffFactor(input.servingEfficiency ?? 1)
   const effectivePfDays = physicalPfDays / efficiency
 
-  const bytesPerWeight = precisionBytesPerWeight(input.precision)
-  const weightMemoryGb = (totalParams * bytesPerWeight) / 1e9
-  const concurrency = Math.max(1, input.concurrentRequests ?? 1)
-  // Approximate KV as a fraction of the model state scaled by live context.
-  // This is intentionally reported separately from weights so paged attention
-  // and KV precision research can modify it without altering token FLOPs.
-  const kvCacheGb =
-    weightMemoryGb *
-    0.18 *
-    concurrency *
-    clamp((avgInput + avgOutput) / 4_096, 0.02, 8) /
-    Math.max(1, input.batchSize ?? concurrency)
-  const workspaceGb = Math.max(0.5, weightMemoryGb * 0.12)
-  const residentMemoryGb = weightMemoryGb + kvCacheGb + workspaceGb
+  const memory = estimateServingMemory(input)
+  const { weightMemoryGb, kvCacheGb, workspaceGb, residentMemoryGb, requiredSystemRamGb } = memory
   const availablePfDays = input.availablePfDays
   const computeSeconds =
     availablePfDays != null && availablePfDays > 0
@@ -198,6 +303,7 @@ export function estimateServingWorkload(
 
   // Weight streaming is amortized by the live batch. This is a lower-bound
   // bandwidth diagnostic, not another hidden throughput multiplier.
+  const concurrency = Math.max(1, input.concurrentRequests ?? 1)
   const batch = Math.max(1, input.batchSize ?? Math.min(32, concurrency))
   const requests = requestedMTok > 0
     ? (requestedMTok * 1e6) / Math.max(1, avgInput + avgOutput)
@@ -208,9 +314,13 @@ export function estimateServingWorkload(
       ? streamedBytes / (input.hbmBandwidthTBps * 1e12)
       : null
   const fitsHbm = input.hbmGb == null ? null : residentMemoryGb <= input.hbmGb
+  const fitsSystemRam =
+    input.systemRamGb == null ? null : requiredSystemRamGb <= input.systemRamGb
   const bottleneck =
     fitsHbm === false
       ? 'hbm_capacity'
+      : fitsSystemRam === false
+        ? 'system_ram_capacity'
       : memorySeconds != null && computeSeconds != null && memorySeconds > computeSeconds
         ? 'memory_bandwidth'
         : computeSeconds != null
@@ -228,9 +338,11 @@ export function estimateServingWorkload(
     kvCacheGb,
     workspaceGb,
     residentMemoryGb,
+    requiredSystemRamGb,
     computeSeconds,
     memorySeconds,
     fitsHbm,
+    fitsSystemRam,
     bottleneck,
   }
 }
@@ -323,7 +435,7 @@ export function tokensPerDayFromSnapshot(
   servingEfficiency: number,
   _inferenceShare: number,
 ): number {
-  if (!model || snap.vramDerateServe < 0.2) return 0
+  if (!model) return 0
   return tokensPerDayCapacity({
     effectivePfDays: Math.max(0, snap.pools.inference),
     model,
@@ -339,7 +451,7 @@ export function tokensPerDayFromSnapshotPrecise(
   inferenceShare?: number,
   opts?: { engServe?: number; powerOnly?: number },
 ): number {
-  if (!model || snap.vramDerateServe < 0.2) return 0
+  if (!model) return 0
   let effectivePfDays = Math.max(0, snap.pools.inference)
   // Explicit overrides are useful for previews/tests. Normal simulation calls
   // consume the already-derated inference pool exactly once.

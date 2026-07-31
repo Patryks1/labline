@@ -1,4 +1,5 @@
-import type { DataMix, ModelFamily } from '../types'
+import type { DataMix, ModelBackbone, ModelFamily, TrainMode } from '../types'
+import { ECONOMY } from './economy'
 
 /** One petaflop-day is 10^15 FLOP/s for 86,400 seconds. */
 export const FLOPS_PER_PF_DAY = 8.64e19
@@ -22,6 +23,37 @@ export interface TrainingRunEstimate {
   verificationPfDays: number
   physicalPfDays: number
   gamePfDays: number
+}
+
+export interface TrainingEconomicsEstimate extends TrainingRunEstimate {
+  targetPfDays: number
+  minCalendarDays: number
+  setupCost: number
+  dataCost: number
+  upfrontCash: number
+  cashBurnPerDay: number
+}
+
+export function minimumTrainingCalendarDays(opts: {
+  paramsB: number
+  family: ModelFamily
+  backbone?: ModelBackbone
+  mode?: TrainMode
+}): number {
+  const paramsB = Math.max(0.001, opts.paramsB)
+  const scaleDays = 10 + 7.5 * Math.log10(paramsB)
+  const familyMult =
+    opts.family === 'video'
+      ? 1.25
+      : opts.family === 'omni'
+        ? 1.15
+        : opts.family === 'diffusion'
+          ? 1.1
+          : opts.backbone === 'moe' || opts.family === 'moe'
+            ? 1.05
+            : 1
+  const modeMult = opts.mode === 'continue' ? 0.45 : opts.mode === 'distill' ? 0.65 : 1
+  return Math.ceil(Math.max(5, Math.min(45, scaleDays * familyMult * modeMult)))
 }
 
 export const PARAM_PRESETS = [
@@ -84,10 +116,17 @@ function legacyMoePfDays(totalB: number, activeB: number): number {
  * Active experts dominate FLOPs; inactive experts add routing, balancing and
  * communication overhead. Total parameters remain the basis for memory.
  */
-export function moeTrainingComputeParamsB(totalB: number, activeB: number): number {
+export const DEFAULT_MOE_ACTIVE_PATH_OVERHEAD = 0.1
+
+export function moeTrainingComputeParamsB(
+  totalB: number,
+  activeB: number,
+  overhead: number = DEFAULT_MOE_ACTIVE_PATH_OVERHEAD,
+): number {
   const total = Math.max(0.001, totalB)
   const active = Math.max(0.001, Math.min(activeB, total))
-  return active + (total - active) * 0.05
+  const boundedOverhead = Math.max(0.05, Math.min(0.2, overhead))
+  return Math.min(total, active * (1 + boundedOverhead))
 }
 
 /** Exact dense-transformer training work C ≈ 6ND, expressed in PF-days. */
@@ -152,6 +191,7 @@ function distillationComputeMultiplier(paramsB: number, teacherParamsB?: number)
 function legacyTrainCostPfDays(opts: {
   paramsB: number
   family: ModelFamily
+  backbone?: ModelBackbone
   trainEfficiency: number
   activeParamsB?: number
   mode?: 'pretrain' | 'distill'
@@ -160,11 +200,12 @@ function legacyTrainCostPfDays(opts: {
   modalityComputeMult?: number
 }): number {
   let base: number
-  if (opts.family === 'moe') {
+  if (opts.backbone === 'moe' || (opts.backbone == null && opts.family === 'moe')) {
     base = legacyMoePfDays(opts.paramsB, opts.activeParamsB ?? opts.paramsB * 0.1)
   } else {
-    base = legacyDensePfDays(opts.paramsB) * familyArchitectureComputeMultiplier(opts.family)
+    base = legacyDensePfDays(opts.paramsB)
   }
+  base *= familyArchitectureComputeMultiplier(opts.family)
   if (opts.mode === 'distill') {
     base *= distillationComputeMultiplier(opts.paramsB, opts.teacherParamsB)
   }
@@ -177,6 +218,7 @@ function legacyTrainCostPfDays(opts: {
 export function trainCostPfDays(opts: {
   paramsB: number
   family: ModelFamily
+  backbone?: ModelBackbone
   trainEfficiency: number
   activeParamsB?: number
   mode?: 'pretrain' | 'distill'
@@ -204,6 +246,7 @@ export function trainCostPfDays(opts: {
 export function estimateTrainingRun(opts: {
   paramsB: number
   family: ModelFamily
+  backbone?: ModelBackbone
   trainEfficiency: number
   activeParamsB?: number
   mode?: 'pretrain' | 'distill'
@@ -215,7 +258,7 @@ export function estimateTrainingRun(opts: {
 }): TrainingRunEstimate {
 
   const computeParamsB =
-    opts.family === 'moe'
+    opts.backbone === 'moe' || (opts.backbone == null && opts.family === 'moe')
       ? moeTrainingComputeParamsB(
           opts.paramsB,
           opts.activeParamsB ?? opts.paramsB * 0.1,
@@ -250,6 +293,75 @@ export function estimateTrainingRun(opts: {
     verificationPfDays: heldOutPfDays,
     physicalPfDays,
     gamePfDays: physicalPfDays / TRAINING_CALENDAR_COMPRESSION / efficiency,
+  }
+}
+
+/**
+ * Shared player forecast/start economics. Physical work comes only from the
+ * actual train and verification token counts; quality affects outcomes, not
+ * the bill. Setup reserves cluster/orchestration capacity without prepaying a
+ * second full PF-scaled training bill.
+ */
+export function estimateTrainingEconomics(opts: {
+  paramsB: number
+  family: ModelFamily
+  backbone?: ModelBackbone
+  trainEfficiency: number
+  activeParamsB?: number
+  mode?: TrainMode
+  teacherParamsB?: number
+  distillTeacherShare?: number
+  trainingTokensMTok: number
+  verificationTokensMTok: number
+  modalityComputeMult?: number
+  trainCostMult?: number
+  dataCost?: number
+}): TrainingEconomicsEstimate {
+  const run = estimateTrainingRun({
+    paramsB: opts.paramsB,
+    family: opts.family,
+    backbone: opts.backbone,
+    trainEfficiency: opts.trainEfficiency,
+    activeParamsB: opts.activeParamsB,
+    mode: opts.mode === 'distill' ? 'distill' : 'pretrain',
+    teacherParamsB: opts.teacherParamsB,
+    trainingTokensMTok: opts.trainingTokensMTok,
+    verificationTokensMTok: opts.verificationTokensMTok,
+    modalityComputeMult: opts.modalityComputeMult,
+  })
+  const modeMult =
+    opts.mode === 'continue'
+      ? 0.22
+      : opts.mode === 'distill'
+        ? 0.82 + (1 - Math.max(0.05, Math.min(0.95, opts.distillTeacherShare ?? 0.72))) * 0.45
+        : 1
+  const costMult = modeMult * Math.max(0.05, opts.trainCostMult ?? 1)
+  const scale = (value: number) => value * costMult
+  const targetPfDays = scale(run.gamePfDays)
+  const minCalendarDays = minimumTrainingCalendarDays(opts)
+  const setupCost = Math.max(
+    1_000,
+    Math.floor(targetPfDays * ECONOMY.trainUpfrontPerPfDay * 0.08),
+  )
+  const dataCost = Math.max(0, Math.floor(opts.dataCost ?? 0))
+  const totalTokens = Math.max(0, opts.trainingTokensMTok + opts.verificationTokensMTok)
+  const cashBurnPerDay = Math.floor(
+    ECONOMY.trainCashBurnPerPfDay *
+      Math.sqrt(Math.max(1, opts.paramsB)) *
+      (1 + Math.log10(Math.max(10, totalTokens)) * 0.08),
+  )
+  return {
+    ...run,
+    trainingPfDays: scale(run.trainingPfDays),
+    verificationPfDays: scale(run.verificationPfDays),
+    physicalPfDays: scale(run.physicalPfDays),
+    gamePfDays: targetPfDays,
+    targetPfDays,
+    minCalendarDays,
+    setupCost,
+    dataCost,
+    upfrontCash: setupCost + dataCost,
+    cashBurnPerDay,
   }
 }
 

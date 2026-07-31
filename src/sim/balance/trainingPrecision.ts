@@ -180,9 +180,17 @@ export function validateTrainingNumerics(opts: {
 }
 
 export interface TrainingMemoryEstimate {
+  weightStateGb: number
+  gradientStateGb: number
+  optimizerStateGb: number
   persistentStateGb: number
   activationWorkspaceGb: number
   communicationBuffersGb: number
+  /** Accelerator-resident live state required for useful training work. */
+  requiredHbmGb: number
+  /** Bounded host staging for checkpoints, optimizer paging, and activations. */
+  requiredSystemRamGb: number
+  /** @deprecated Alias of requiredHbmGb for save/UI compatibility. */
   totalGb: number
   /** Packed checkpoint weight footprint, not live training state. */
   packedCheckpointGb: number
@@ -209,9 +217,13 @@ export function estimateTrainingMemoryGb(opts: {
   const numerics = opts.numerics ?? DEFAULT_TRAINING_NUMERICS
   const precision = TRAINING_PRECISION_PROFILES[numerics.computeFormat]
 
-  // Typical Adam-style aggregate: weights/gradients, FP32 master copy and two
-  // FP32 moments total approximately 16 bytes/parameter even for AMP recipes.
-  const persistentStateGb = totalB * 16
+  // Adam-style live state. Lower-precision recipes retain BF16 weights and
+  // gradients plus an FP32 master copy; FP32 has no separate master copy.
+  const fullFp32 = numerics.computeFormat === 'fp32'
+  const weightStateGb = totalB * (fullFp32 ? 4 : 2) + (fullFp32 ? 0 : totalB * 4)
+  const gradientStateGb = totalB * (fullFp32 ? 4 : 2)
+  const optimizerStateGb = totalB * 8
+  const persistentStateGb = weightStateGb + gradientStateGb + optimizerStateGb
   const checkpointingMult = opts.activationCheckpointing ? 0.45 : 1
   const activationWorkspaceGb =
     Math.max(4, activeB * 1.5) * precision.activationMemoryMultiplier * checkpointingMult
@@ -221,11 +233,27 @@ export function estimateTrainingMemoryGb(opts: {
       ? totalB * (1.58 / 8)
       : totalB * (numerics.computeFormat === 'fp32' ? 4 : 2)
 
+  const requiredHbmGb = persistentStateGb + activationWorkspaceGb + communicationBuffersGb
+  // Host memory is staging, not a second complete copy of cluster state. Keep
+  // it large enough for an atomic checkpoint plus bounded live-state paging.
+  const requiredSystemRamGb = Math.max(
+    16,
+    packedCheckpointGb * 1.25 +
+      optimizerStateGb * 0.08 +
+      gradientStateGb * 0.05 +
+      activationWorkspaceGb * 0.1,
+  )
+
   return {
+    weightStateGb,
+    gradientStateGb,
+    optimizerStateGb,
     persistentStateGb,
     activationWorkspaceGb,
     communicationBuffersGb,
-    totalGb: persistentStateGb + activationWorkspaceGb + communicationBuffersGb,
+    requiredHbmGb,
+    requiredSystemRamGb,
+    totalGb: requiredHbmGb,
     packedCheckpointGb,
   }
 }

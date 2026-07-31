@@ -40,6 +40,15 @@ export function rivalStaff(state: SimState, rivalId: string): StaffHeadcount {
   return clampStaff(r?.staff ?? emptyStaff())
 }
 
+/** Product-specific staffing target; generic rivals stay deliberately lean. */
+export function rivalResearcherHiringTarget(
+  rival: Pick<SimState['rivals'][number], 'archetype' | 'researchUnlocked'>,
+): number {
+  return rival.archetype === 'multimodal' && !rival.researchUnlocked.includes('mm_omni')
+    ? 8
+    : 3
+}
+
 /** Desk seats from completed HQs. Identical for every lab controller. */
 export function labHqStaffCap(state: SimState, labId: string): number {
   let cap = BASE_REMOTE_TEAM_SEATS
@@ -346,6 +355,10 @@ export function tickStaff(state: SimState): SimState {
   })
   s = withCities(s, cities)
 
+  // Multimodal labs need enough researchers to clear the video/omni ladder
+  // (depth gates require 5 and 8 respectively). Other rivals retain the
+  // conservative three-researcher target so this product policy is not a
+  // global research-speed buff.
   // Rival applications use the same queued city-talent clearing as the player.
   for (const riv of s.rivals) {
     const staff = clampStaff(riv.staff ?? emptyStaff())
@@ -353,7 +366,7 @@ export function tickStaff(state: SimState): SimState {
     const city = cities.find((candidate) => candidate.id === riv.regionId) ?? cities[0]
     if (!city?.talentAvailable) continue
     const role: StaffRole =
-      (staff.researcher ?? 0) < 3
+      (staff.researcher ?? 0) < rivalResearcherHiringTarget(riv)
         ? 'researcher'
         : (staff.data_processor ?? 0) < 2
           ? 'data_processor'

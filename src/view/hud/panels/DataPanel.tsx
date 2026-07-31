@@ -292,7 +292,7 @@ export function DataPanel() {
         />
         <MetricTile
           label="Today"
-          value={`+${formatTokens(data.dayProcessed + (data.daySynthMTok ?? 0))}`}
+          value={`+${formatTokens(data.dayProcessed)}`}
           detail={`${data.assets.length} assets · ${data.manifests.length} manifests`}
           tone={autoSynthJob ? "research" : "neutral"}
         />

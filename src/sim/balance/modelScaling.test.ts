@@ -94,6 +94,30 @@ describe("first-class math and science scaling", () => {
 });
 
 describe("grounded sparse scaling", () => {
+  it("uses a sparse omni active path without losing omni benchmark semantics", () => {
+    const common = {
+      paramsB: 100,
+      activeParamsB: 10,
+      family: "omni" as const,
+      dataCoverage: 6,
+      dataQuality: 1,
+      mixWeights: { chat: 0.4, image: 0.2, video: 0.2, audio: 0.2 },
+    };
+    const denseOmni = scaleIntelligence({ ...common, backbone: "dense" });
+    const sparseOmni = scaleIntelligence({ ...common, backbone: "moe" });
+    const sparseLanguage = scaleIntelligence({
+      ...common,
+      family: "moe",
+      backbone: "moe",
+    });
+
+    expect(sparseOmni.capability).toBeLessThan(denseOmni.capability);
+    expect(sparseOmni.paramPotential).toBeCloseTo(sparseLanguage.paramPotential);
+    expect(sparseOmni.benchCeilings.vision).toBeGreaterThan(
+      sparseLanguage.benchCeilings.vision,
+    );
+  });
+
   it("values inactive experts partially rather than as dense-equivalent capacity", () => {
     const effective = effectiveScaleParamsB(10, 1, "moe");
 

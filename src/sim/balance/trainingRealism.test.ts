@@ -75,7 +75,7 @@ describe('training formula v2', () => {
   })
 
   it('uses active MoE work plus a small routing/communication overhead', () => {
-    expect(moeTrainingComputeParamsB(1_000, 32)).toBeCloseTo(80.4, 10)
+    expect(moeTrainingComputeParamsB(1_000, 32)).toBeCloseTo(35.2, 10)
     const tokens = 1_000_000
     const moe = trainCostPfDays({
       paramsB: 1_000,
@@ -85,12 +85,49 @@ describe('training formula v2', () => {
       trainingTokensMTok: tokens,
     })
     const dense = trainCostPfDays({
-      paramsB: 80.4,
+      paramsB: 35.2,
       family: 'dense',
       trainEfficiency: 1,
       trainingTokensMTok: tokens,
     })
     expect(moe).toBeCloseTo(dense, 8)
+  })
+
+  it('matches published Chinchilla and Llama 3 dense-work anchors', () => {
+    expect(denseTrainingPfDays(70, 1_400_000)).toBeCloseTo(6.8055555556e3, 6)
+    expect(denseTrainingPfDays(405, 15_600_000)).toBeCloseTo(438_750, 3)
+  })
+
+  it('bounds explicit MoE active-path overhead between five and twenty percent', () => {
+    expect(moeTrainingComputeParamsB(671, 37, 0)).toBeCloseTo(38.85)
+    expect(moeTrainingComputeParamsB(671, 37, 1)).toBeCloseTo(44.4)
+  })
+
+  it('combines sparse topology work with the omni architecture multiplier', () => {
+    const common = {
+      paramsB: 100,
+      activeParamsB: 10,
+      trainEfficiency: 1,
+      trainingTokensMTok: 100_000,
+    }
+    const sparseLanguage = trainCostPfDays({
+      ...common,
+      family: 'moe',
+      backbone: 'moe',
+    })
+    const sparseOmni = trainCostPfDays({
+      ...common,
+      family: 'omni',
+      backbone: 'moe',
+    })
+    const denseOmni = trainCostPfDays({
+      ...common,
+      family: 'omni',
+      backbone: 'dense',
+    })
+
+    expect(sparseOmni).toBeCloseTo(sparseLanguage * 1.45 * 1.35, 8)
+    expect(sparseOmni).toBeLessThan(denseOmni)
   })
 
   it('keeps the flattened v1 curve available only by explicit version', () => {

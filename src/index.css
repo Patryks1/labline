@@ -625,10 +625,19 @@ button:not(:disabled):active {
 .game-shell {
   --workspace-width: 0px;
   --intel-width: var(--hud-intel-rail);
+  --hud-bottom-operations-top: var(--hud-ops);
+  --hud-bottom-zone-gap: 0.75rem;
+  --hud-bottom-telemetry-bottom: calc(var(--hud-bottom-operations-top) + var(--hud-bottom-zone-gap));
   display: grid;
   grid-template-columns: var(--hud-rail) var(--workspace-width) minmax(0, 1fr) var(--intel-width);
   grid-template-rows: var(--hud-top) minmax(0, 1fr) var(--hud-ops);
   transition: grid-template-columns 200ms ease;
+}
+
+/* Expanded operational telemetry grows above its nominal grid row. Move map
+   telemetry into a separate vertical zone instead of letting the two overlap. */
+.game-shell:has(.operations-shell[data-expanded='true']) {
+  --hud-bottom-operations-top: calc(var(--hud-ops) + 4.75rem);
 }
 
 .game-shell[data-workspace-open='true'][data-presentation='drawer'] {
@@ -836,7 +845,7 @@ button:not(:disabled):active {
 
 .map-navigator {
   left: calc(var(--hud-rail) + 0.75rem);
-  bottom: calc(var(--hud-ops) + 0.75rem);
+  bottom: var(--hud-bottom-telemetry-bottom);
   width: clamp(21.5rem, 23vw, 23rem);
   max-width: calc(100vw - var(--hud-rail) - var(--intel-width) - 1.5rem);
   max-height: calc(100dvh - var(--hud-top) - var(--hud-ops) - 1.5rem);
@@ -911,16 +920,17 @@ button:not(:disabled):active {
 }
 
 @media (max-width: 1000px), (max-height: 760px) {
+  .game-shell { --hud-bottom-zone-gap: 0.5rem; }
   .map-navigator-launcher {
     display: flex;
     left: calc(var(--hud-rail) + 0.5rem);
-    bottom: calc(var(--hud-ops) + 0.5rem);
+    bottom: var(--hud-bottom-telemetry-bottom);
   }
 
   .map-navigator {
     display: none;
     left: max(0.5rem, env(safe-area-inset-left));
-    bottom: calc(var(--hud-ops) + 0.5rem);
+    bottom: var(--hud-bottom-telemetry-bottom);
     width: min(23rem, calc(100vw - 1rem));
     max-width: calc(100vw - 1rem);
     max-height: calc(100dvh - var(--hud-top) - var(--hud-ops) - 1rem);

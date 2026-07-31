@@ -310,11 +310,65 @@ describe('MapSurfaceLayer road autotiling', () => {
     surface.dispose()
   })
 
-  it('renders compiled degree-two turns and junction metadata with three material groups', () => {
+  it('separates compiled junction fans from segment ribbons in depth', () => {
     const width = 3
     const height = 3
     const transport = new Uint16Array(width * height)
     const packed = (mask: number) => mask | (TRANSPORT_ROAD_CLASS.collector << TRANSPORT_CLASS_SHIFT) | TRANSPORT_FLAGS.settlement
+    transport[3] = packed(1 << 2)
+    transport[4] = packed((1 << 2) | (1 << 4) | (1 << 6))
+    transport[5] = packed(1 << 6)
+    transport[7] = packed(1 << 0)
+    const world: StaticWorld = {
+      descriptor: { formatVersion: WORLD_FORMAT_VERSION, generatorVersion: WORLD_GENERATOR_VERSION_V3,
+        seed: 1, width, height, chunkSize: 3, cityCount: 2, landValueBase: 1,
+        landValueCityPeak: 2, energyPricePerMWh: 1, waterCoverage: 0.02 },
+      kind: new Uint8Array(width * height), region: new Uint8Array(width * height),
+      feature: new Uint16Array(width * height), variantMask: new Uint8Array(width * height), transport,
+      cities: [], regions: [], lakes: [], starterPads: [], staticHash: 'junction-depth',
+      coverage: { water: 0, urban: 0, forest: 0 },
+    }
+    const network = compileRoadNetwork(world)
+    const source: ViewportRenderSource = {
+      width, height, tileSize: 1, useHeightfieldRoadMeshes: true,
+      getRoadNetwork: () => network, getRoadNetworkRevision: () => 0,
+      getCornerElevation: () => 0.1, getTileElevation: () => 0.1,
+      readSurface(tileId, out) {
+        out.kind = SurfaceKind.grass; out.region = 0; out.flags = 0
+        out.transport = transport[tileId] || undefined
+        out.neighborMask = transport[tileId]! & 0xff
+      },
+      getChunkInstances: () => [], getChunkRevision: () => 0,
+    }
+    const surface = new MapSurfaceLayer({ width, height, tileSize: 1, source, chunkSize: 3 })
+    surface.updateVisibleChunks(new Set([0]), () => ({ minX: 0, maxX: width, minY: 0, maxY: height }))
+    const road = surface.roadRoot.children[0] as THREE.Mesh
+    expect(road.geometry.groups.length).toBeLessThanOrEqual(3)
+    expect(road.geometry.getAttribute('position').count).toBeGreaterThan(24)
+    expect(network.junctions.some((junction) => junction.ports.length === 3)).toBe(true)
+    const asphalt = road.geometry.groups.find((group) => group.materialIndex === 1)!
+    expect(asphalt.count).toBeGreaterThan(0)
+    const index = road.geometry.index!
+    const positions = road.geometry.getAttribute('position')
+    const asphaltHeights = new Set(Array.from(
+      { length: asphalt.count },
+      (_, offset) => positions.getY(index.getX(asphalt.start + offset)).toFixed(3),
+    ))
+    expect(asphaltHeights).toContain('0.140')
+    expect(asphaltHeights).toContain('0.142')
+    const materials = road.material as THREE.MeshStandardMaterial[]
+    expect(materials.every((material) => material.polygonOffset)).toBe(true)
+    expect(materials[2]!.polygonOffsetFactor).toBeLessThan(materials[1]!.polygonOffsetFactor)
+    surface.dispose()
+  })
+
+  it('renders a continuous compiled degree-two turn with three material groups', () => {
+    const width = 3
+    const height = 3
+    const transport = new Uint16Array(width * height)
+    const packed = (mask: number) => mask
+      | (TRANSPORT_ROAD_CLASS.collector << TRANSPORT_CLASS_SHIFT)
+      | TRANSPORT_FLAGS.settlement
     transport[3] = packed(1 << 2)
     transport[4] = packed((1 << 6) | (1 << 4))
     transport[7] = packed(1 << 0)

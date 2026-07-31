@@ -9,8 +9,6 @@ import { orderRacksIntoDc } from '../systems/dcRacks'
 import {
   startTraining,
   advancePostTrain,
-  canReleaseTrainingJob,
-  extendTraining,
   releaseFromJob,
   keepInternal,
 } from '../systems/training'
@@ -355,9 +353,7 @@ export function botAct(state: SimState): SimState {
   if (s.player.trainingJob) {
     const job = s.player.trainingJob
     if (job.awaitingDecision) {
-      s = canReleaseTrainingJob(job).ok
-        ? releaseFromJob(s)
-        : extendTraining(s, job.id)
+      s = releaseFromJob(s)
     } else if (job.progressPfDays >= job.targetPfDays) {
       if (job.postTrain === 'none') {
         s = advancePostTrain(s)
@@ -684,8 +680,19 @@ export function runSmokeBootstrap(seed = 7): PlayReport {
             trainingJob: {
               ...job,
               progressPfDays: job.targetPfDays,
+              daysElapsed: job.minCalendarDays ?? 0,
               awaitingDecision: false,
             },
+            trainingJobs: (s.player.trainingJobs ?? [job]).map((candidate) =>
+              candidate.id === job.id
+                ? {
+                    ...candidate,
+                    progressPfDays: candidate.targetPfDays,
+                    daysElapsed: candidate.minCalendarDays ?? 0,
+                    awaitingDecision: false,
+                  }
+                : candidate,
+            ),
           },
         }
         job = s.player.trainingJob!

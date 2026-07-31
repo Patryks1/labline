@@ -50,10 +50,13 @@ describe('authoritative training programs', () => {
     expect(program.targetSegments).toEqual(['indie_api', 'science'])
     expect(program.integratedMethods).toEqual(['dense_basics'])
     expect(program.dataManifestId).toBeTruthy()
-    expect(state.player.data.manifests.find((manifest) => manifest.id === program.dataManifestId)).toMatchObject({
-      domainWeights: job.dataPlan.weights,
-      assetIds: ['dataset-public-foundation-2026'],
-    })
+    const manifest = state.player.data.manifests.find(
+      (candidate) => candidate.id === program.dataManifestId,
+    )!
+    expect(manifest.assetIds).toEqual(['dataset-public-foundation-2026'])
+    expect(Object.values(manifest.domainWeights).reduce((sum, weight) => sum + (weight ?? 0), 0)).toBeCloseTo(1)
+    expect(manifest.domainWeights.audio ?? 0).toBe(0)
+    expect(manifest.domainWeights.video ?? 0).toBe(0)
     expect(state.player.researchPods?.find((pod) => pod.id === 'pod-foundations')?.assignmentId).toBe(job.id)
     expect(program.domainForecasts.code?.high).toBeGreaterThan(program.domainForecasts.code?.low ?? 0)
   })
@@ -125,7 +128,20 @@ describe('authoritative training programs', () => {
       ...state,
       player: {
         ...state.player,
-        trainingJob: { ...stabilized, progressPfDays: stabilized.targetPfDays },
+        trainingJob: {
+          ...stabilized,
+          progressPfDays: stabilized.targetPfDays,
+          daysElapsed: stabilized.minCalendarDays ?? 0,
+        },
+        trainingJobs: (state.player.trainingJobs ?? [stabilized]).map((job) =>
+          job.id === stabilized.id
+            ? {
+                ...job,
+                progressPfDays: job.targetPfDays,
+                daysElapsed: job.minCalendarDays ?? 0,
+              }
+            : job,
+        ),
       },
     }
     state = finalizeModel(state, programId, 'released')

@@ -12,7 +12,7 @@ import { buildScaledModel } from './balance/modelBuild'
 import { tickDay } from './tick'
 
 describe('shared lab compute pools', () => {
-  it('difficulty changes rival policy quality, not starting resources', () => {
+  it('difficulty changes rival pressure while preserving shared incumbent endowments', () => {
     const easy = createGame({ seed: 902, difficulty: 'easy' })
     const hard = createGame({ seed: 902, difficulty: 'hard' })
     const resources = (state: ReturnType<typeof createGame>) =>
@@ -23,7 +23,11 @@ describe('shared lab compute pools', () => {
         flopsPf: rival.flopsPf,
         dataMTok: rival.dataMTok,
       }))
-    expect(resources(easy)).toEqual(resources(hard))
+    expect(hard.rivals.length).toBeGreaterThan(easy.rivals.length)
+    const hardById = new Map(resources(hard).map((rival) => [rival.id, rival]))
+    for (const rival of resources(easy)) {
+      expect(hardById.get(rival.id)).toEqual(rival)
+    }
   })
 
   it('settles rival operating cash into the same reconciled finance shape', () => {

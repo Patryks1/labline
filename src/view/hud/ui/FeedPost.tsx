@@ -1,6 +1,7 @@
 /* eslint-disable react/only-export-components -- shared FeedTone/FeedPostProps used by menu + dock */
 /* oxlint-disable react(only-export-components) -- shared feed types live beside FeedPost */
 import type { ReactNode } from 'react'
+import { ChatCircle, CheckCircle, Heart, Repeat } from '@phosphor-icons/react'
 import { StatusChip } from './HudPrimitives'
 
 export type FeedTone = 'neutral' | 'positive' | 'warning' | 'danger' | 'serve' | 'research'
@@ -15,6 +16,8 @@ export interface FeedPostProps {
   mark?: ReactNode
   footer?: ReactNode
   className?: string
+  handle?: string
+  verified?: boolean
 }
 
 const TONE_BORDER: Record<FeedTone, string> = {
@@ -46,6 +49,8 @@ export function FeedPost({
   mark,
   footer,
   className = '',
+  handle,
+  verified = false,
 }: FeedPostProps) {
   const initial = source.trim().slice(0, 1).toUpperCase() || '·'
   return (
@@ -64,6 +69,8 @@ export function FeedPost({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <strong className="truncate text-[0.8125rem] text-bone">{source}</strong>
+            {verified ? <CheckCircle aria-label="Verified" weight="fill" className="shrink-0 text-infer" size={14} /> : null}
+            {handle ? <span className="truncate text-[0.6875rem] text-muted">@{handle}</span> : null}
             {dayLabel ? (
               <span className="font-mono text-[0.6875rem] tabular-nums text-muted">{dayLabel}</span>
             ) : null}
@@ -74,6 +81,13 @@ export function FeedPost({
             {tone !== 'neutral' ? <StatusChip tone={TONE_CHIP[tone]}>{tone}</StatusChip> : null}
           </div>
           <div className="mt-1 text-[0.8125rem] leading-snug text-bone">{body}</div>
+          {handle ? (
+            <div className="mt-2 flex max-w-[13rem] items-center justify-between text-muted" aria-hidden="true">
+              <span className="flex items-center gap-1"><ChatCircle size={13} /></span>
+              <span className="flex items-center gap-1"><Repeat size={13} /></span>
+              <span className="flex items-center gap-1"><Heart size={13} /></span>
+            </div>
+          ) : null}
           {footer ? <div className="mt-2">{footer}</div> : null}
         </div>
       </div>

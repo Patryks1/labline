@@ -41,7 +41,7 @@ const SCENARIOS: { id: ScenarioId; label: string; blurb: string }[] = [
   {
     id: 'easy',
     label: 'Easy',
-    blurb: 'Noisier rival forecasts and slower decisions.',
+    blurb: '40% more runway, lower build and research costs, and four slower rivals.',
   },
   {
     id: 'normal',
@@ -51,7 +51,7 @@ const SCENARIOS: { id: ScenarioId; label: string; blurb: string }[] = [
   {
     id: 'hard',
     label: 'Hard',
-    blurb: 'Sharper forecasts, faster decisions and riskier bets.',
+    blurb: '25% less runway, higher build and research costs, and sharper rivals.',
   },
   {
     id: 'custom',
@@ -65,22 +65,22 @@ type NewGameStep = 0 | 1 | 2
 
 const MENU_NEWS_POSTS = [
   {
-    source: 'Labline Ops', dayLabel: 'Today', timeLabel: 'Roads 0.6', tone: 'positive' as const,
+    source: 'Labline Ops', timeLabel: 'Roads 0.6', tone: 'positive' as const,
     title: 'Street generation pass shipped',
     detail: 'Road furniture now sits on verges, junctions use seeded signals, and zebra crossings span eligible approaches.',
   },
   {
-    source: 'World Systems', dayLabel: 'Today', timeLabel: 'Generator V6.3', tone: 'research' as const,
+    source: 'World Systems', timeLabel: 'Generator V6.3', tone: 'research' as const,
     title: 'Neighborhood loops opened',
     detail: 'New worlds reject street branches that collide with existing roads and open short local-road cycles.',
   },
   {
-    source: 'Interface', dayLabel: 'Recent', timeLabel: 'Menu', tone: 'serve' as const,
+    source: 'Interface', timeLabel: 'Menu', tone: 'serve' as const,
     title: 'Sandbox setup now uses steps',
     detail: 'Identity, market controls, and launch review each fit into a compact screen without scrolling.',
   },
   {
-    source: 'Simulation', dayLabel: 'Recent', timeLabel: 'Systems', tone: 'warning' as const,
+    source: 'Simulation', timeLabel: 'Systems', tone: 'warning' as const,
     title: 'Larger living worlds',
     detail: 'Expanded maps, city statistics, municipal power, traffic, and suburban growth now share one world model.',
   },
@@ -273,7 +273,6 @@ export function NewGameMenu() {
               <FeedPost
                 key={post.title}
                 source={post.source}
-                dayLabel={post.dayLabel}
                 timeLabel={post.timeLabel}
                 tone={post.tone}
                 className="main-menu-news-post"
@@ -449,7 +448,7 @@ export function NewGameMenu() {
         {tab === 'news' && (
           <div className="anim-stagger mt-5 space-y-2">
             {MENU_NEWS_POSTS.map((post) => (
-              <FeedPost key={post.title} source={post.source} dayLabel={post.dayLabel} timeLabel={post.timeLabel} tone={post.tone} body={<><strong className="text-bone">{post.title}</strong> — {post.detail}</>} />
+              <FeedPost key={post.title} source={post.source} timeLabel={post.timeLabel} tone={post.tone} body={<><strong className="text-bone">{post.title}</strong> — {post.detail}</>} />
             ))}
           </div>
         )}

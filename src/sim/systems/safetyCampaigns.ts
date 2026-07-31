@@ -5,7 +5,6 @@ import type {
 import { normalizeModelEvaluations } from '../balance/evaluationSuites'
 import { computeSnapshot } from './compute'
 import { playerTrainingResourcePlan } from './training'
-import { enforceMinTrainingDuration, MIN_TRAINING_DAYS } from './trainingDuration'
 import { playerStaff } from './staff'
 import { createRng, hashSeed, seededId } from '../rng'
 
@@ -74,20 +73,7 @@ export function safetyCampaignEstimate(
   const paramsB = Math.max(0.01, model.paramsB)
   const dataMTok = Math.max(1, model.dataTokensUsedMTok ?? model.dataTrainMTok ?? 1)
   const scale = Math.log10(paramsB + 1) + Math.log10(dataMTok + 10) * 0.35
-  let totalPfDays = (6 + scale * 7) * mult
-  // Safety campaigns are day-based training jobs: scale the training lane so
-  // estimated duration is at least 30 days at current shared training throughput.
-  const snap = computeSnapshot(state)
-  const activeTrainingJobs = state.player.trainingJobs?.length ?? (state.player.trainingJob ? 1 : 0)
-  const sharedTrainingPool = snap.pools.training / Math.max(1, activeTrainingJobs + 1)
-  const dailyTrainingThroughput = sharedTrainingPool * 0.6
-  const trainingShare = 0.6
-  const trainingTarget = enforceMinTrainingDuration(
-    totalPfDays * trainingShare,
-    dailyTrainingThroughput,
-    MIN_TRAINING_DAYS,
-  )
-  totalPfDays = trainingTarget / trainingShare
+  const totalPfDays = (6 + scale * 7) * mult
   const minimumResearchers = Math.max(1, Math.ceil(scale * 5 + paramsB * 0.02))
   const qualityInputs = ['chat', 'law', 'health'] as const
   const qualityValues = qualityInputs.map(

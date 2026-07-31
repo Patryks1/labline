@@ -12,6 +12,7 @@
 import type {
   BenchmarkId,
   BenchmarkScores,
+  ModelBackbone,
   ModelFamily,
   QualityAxes,
 } from "../types";
@@ -47,6 +48,8 @@ export interface ScaleInputs {
   paramsB: number;
   activeParamsB?: number;
   family?: ModelFamily;
+  /** Compute topology; product family remains authoritative for benchmark policy. */
+  backbone?: ModelBackbone;
   /** 0–1.2+ data volume vs recommended for this size (Chinchilla-ish coverage) */
   dataCoverage: number;
   /**
@@ -109,6 +112,7 @@ export function capabilityCeiling(input: ScaleInputs): CapabilityCeilingResult {
     input.paramsB,
     input.activeParamsB,
     input.family,
+    input.backbone,
   );
   const sizeBase = 12 + potential * 76;
   const quality = Math.max(0.3, Math.min(1.4, input.dataQuality));
@@ -158,9 +162,10 @@ export function effectiveScaleParamsB(
   paramsB: number,
   activeParamsB?: number,
   family?: ModelFamily,
+  backbone?: ModelBackbone,
 ): number {
   const n = Math.max(0.001, paramsB);
-  if (family === "moe") {
+  if (backbone === "moe" || (backbone == null && family === "moe")) {
     const active = Math.max(0.001, Math.min(n, activeParamsB ?? n * 0.1));
     const partialExpertCapacity = active + (n - active) * 0.35;
     return Math.min(n * 0.9, partialExpertCapacity);
@@ -178,8 +183,9 @@ export function paramScalePotential(
   paramsB: number,
   activeParamsB?: number,
   family?: ModelFamily,
+  backbone?: ModelBackbone,
 ): number {
-  const n = effectiveScaleParamsB(paramsB, activeParamsB, family);
+  const n = effectiveScaleParamsB(paramsB, activeParamsB, family, backbone);
   // log10 of parameter count in millions
   const u = Math.log10(Math.max(n, 1e-5) * 1000);
   // Sigmoid centered near ~30B (u≈4.5)
@@ -295,6 +301,7 @@ export function scaleIntelligence(input: ScaleInputs): ScaleResult {
     input.paramsB,
     input.activeParamsB,
     input.family,
+    input.backbone,
   );
   const dataFit = dataFitScore(input.dataCoverage, input.dataQuality);
   const { general: mixGeneral, domainBoost } = mixFit(input.mixWeights);
@@ -544,6 +551,7 @@ export function modelBenchCeiling(
     paramsB: number;
     activeParamsB?: number;
     family?: ModelFamily;
+    backbone?: ModelBackbone;
     capability: number;
   },
   benchId: BenchmarkId,
@@ -561,6 +569,7 @@ export function modelBenchCeiling(
     model.paramsB,
     model.activeParamsB,
     model.family,
+    model.backbone,
   );
   const use = Math.min(intel, sizeIntel * 1.15);
   const ceilings = benchCeilingsFromIntelligence(use, {}, model.family);

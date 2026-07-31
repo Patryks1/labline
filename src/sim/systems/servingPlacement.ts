@@ -1,0 +1,152 @@
+import { estimateServingMemory } from "../balance/tokenServe";
+import type {
+  Model,
+  ProductPricing,
+  ServePrecision,
+  SimState,
+} from "../types";
+
+export interface HostedServingPlacement {
+  model: Model;
+  precision: ServePrecision;
+  concurrentRequests: number;
+  contextTokens: number;
+  memory: ReturnType<typeof estimateServingMemory>;
+}
+
+export interface ServingPlacementNeed {
+  placements: HostedServingPlacement[];
+  hbmNeedGb: number;
+  systemRamNeedGb: number;
+}
+
+function publicModels(models: Model[]): Model[] {
+  return models.filter(
+    (model) => model.release === "released" || model.shipped,
+  );
+}
+
+/** Models that must be resident at once for the active API and enabled plans. */
+export function hostedServingModels(input: {
+  models: Model[];
+  pricing: ProductPricing;
+}): Model[] {
+  const published = publicModels(input.models);
+  if (published.length === 0) return [];
+  const fallback = published.find(
+    (model) => model.id === input.pricing.activeModelId,
+  ) ?? [...published].sort((a, b) => b.capability - a.capability)[0];
+  const publicIds = new Set(published.map((model) => model.id));
+  const apiIds = new Set(
+    (input.pricing.apiModelIds ?? (fallback ? [fallback.id] : [])).filter(
+      (id) => publicIds.has(id),
+    ),
+  );
+  const subscriptionIds = new Set<string>();
+  for (const plan of input.pricing.plans) {
+    if (!plan.enabled) continue;
+    for (const id of plan.modelIds) {
+      if (publicIds.has(id)) subscriptionIds.add(id);
+    }
+  }
+  if (subscriptionIds.size === 0 && fallback) subscriptionIds.add(fallback.id);
+  const ids = new Set([...apiIds, ...subscriptionIds]);
+  const selected = published.filter((model) => ids.has(model.id));
+  return selected;
+}
+
+/** Use the highest-memory precision promised by any channel serving the model. */
+export function servingPrecisionForModel(
+  pricing: ProductPricing,
+  model: Model,
+  apiListed = true,
+): ServePrecision {
+  const candidates: ServePrecision[] = [
+    ...(apiListed
+      ? [pricing.apiServePrecisionByModel?.[model.id] ?? "fp16"]
+      : []),
+    ...pricing.plans
+      .filter((plan) => plan.enabled && plan.modelIds.includes(model.id))
+      .map(
+        (plan) =>
+          plan.servePrecisionByModel?.[model.id] ??
+          plan.servePrecision ??
+          "fp16",
+      ),
+  ];
+  return (
+    candidates.sort(
+      (a, b) =>
+        estimateServingMemory({ model, precision: b }).residentMemoryGb -
+        estimateServingMemory({ model, precision: a }).residentMemoryGb,
+    )[0] ?? "fp16"
+  );
+}
+
+/** Shared placement calculation used by both capacity admission and the HUD. */
+export function servingPlacementNeedForLab(input: {
+  models: Model[];
+  pricing: ProductPricing;
+  demandMTok: number;
+}): ServingPlacementNeed {
+  const models = hostedServingModels(input);
+  if (models.length === 0) {
+    return { placements: [], hbmNeedGb: 0, systemRamNeedGb: 0 };
+  }
+  const averageRequestTokens = 1_408;
+  const peakConcurrency = Math.max(
+    1,
+    Math.ceil(
+      ((Math.max(0, input.demandMTok) * 1e6) /
+        averageRequestTokens /
+        86_400) *
+        12,
+    ),
+  );
+  const concurrentRequests = Math.max(
+    1,
+    Math.ceil(peakConcurrency / models.length),
+  );
+  const contextTokens = 1_024;
+  const apiIds = new Set(input.pricing.apiModelIds ?? []);
+  const implicitApiFallback = input.pricing.apiModelIds == null;
+  const placements = models.map((model) => {
+    const precision = servingPrecisionForModel(
+      input.pricing,
+      model,
+      apiIds.has(model.id) ||
+        (implicitApiFallback && model.id === input.pricing.activeModelId),
+    );
+    return {
+      model,
+      precision,
+      concurrentRequests,
+      contextTokens,
+      memory: estimateServingMemory({
+        model,
+        precision,
+        concurrentRequests,
+        avgInputTokens: contextTokens,
+      }),
+    };
+  });
+  return {
+    placements,
+    hbmNeedGb: placements.reduce(
+      (sum, placement) => sum + placement.memory.residentMemoryGb,
+      0,
+    ),
+    systemRamNeedGb: placements.reduce(
+      (sum, placement) => sum + placement.memory.requiredSystemRamGb,
+      0,
+    ),
+  };
+}
+
+export function servingPlacementNeed(state: SimState): ServingPlacementNeed {
+  return servingPlacementNeedForLab({
+    models: state.player.models,
+    pricing: state.player.pricing,
+    demandMTok: state.lastMarket?.playerDemandMTok ?? 0,
+  });
+}

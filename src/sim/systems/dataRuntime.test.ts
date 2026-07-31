@@ -6,6 +6,7 @@ import {
   dataProcessingThroughput,
   enqueueAutomaticProcessing,
   processDataJobs,
+  processingAcceptanceYield,
   resolvedProcessingQuality,
   syntheticGenerationMTokPerDay,
   updateDataQualityIndex,
@@ -27,6 +28,43 @@ function rawCorpus(): LabData {
 }
 
 describe('controller-neutral data runtime', () => {
+  it('uses a monotone calibrated acceptance yield from 88% to 50%', () => {
+    expect(processingAcceptanceYield(30)).toBeCloseTo(0.88, 12)
+    expect(processingAcceptanceYield(95)).toBeCloseTo(0.5, 12)
+    expect(processingAcceptanceYield(70)).toBeLessThan(
+      processingAcceptanceYield(50),
+    )
+    expect(processingAcceptanceYield(70)).toBeGreaterThan(0.5)
+  })
+
+  it('conserves inspected raw volume across accepted and rejected output', () => {
+    const data = createEmptyLabData()
+    data.stocks.chat.raw = 10
+    const beforeProcessed = data.stocks.chat.processed
+    const queued = enqueueAutomaticProcessing({
+      data,
+      day: 3,
+      labId: 'mass-check',
+      dataQuality: 1,
+      staff: STAFF,
+    })
+    const result = processDataJobs({
+      data: queued,
+      cash: 5_000_000,
+      throughputMTok: 100,
+      dataQuality: 1,
+      staff: STAFF,
+      day: 3,
+    })
+    const accepted = result.data.stocks.chat.processed - beforeProcessed
+
+    expect(result.data.stocks.chat.raw).toBe(0)
+    expect(result.data.processQueue).toHaveLength(0)
+    expect(accepted).toBeCloseTo(result.processedMTok, 12)
+    expect(accepted + result.rejectedMTok).toBeCloseTo(10, 12)
+    expect(accepted).toBeLessThan(10)
+  })
+
   it('collects identical domain volumes for equal served traffic and policy inputs', () => {
     const input = {
       data: createEmptyLabData(),
@@ -190,8 +228,43 @@ describe('controller-neutral data runtime', () => {
       (asset) => asset.id === 'dataset-processed-traffic-code',
     )
     expect(assets).toHaveLength(1)
-    expect(assets[0]?.volumeMTok).toBeCloseTo(12, 8)
+    expect(assets[0]?.volumeMTok).toBeCloseTo(
+      12 * processingAcceptanceYield(75),
+      8,
+    )
     expect(assets[0]?.acquiredDay).toBe(1)
+  })
+
+  it('preserves public stock while accepted traffic remains restricted user data', () => {
+    const data = createEmptyLabData()
+    const webBefore = data.stocks.chat.fromWeb
+    data.stocks.chat.raw = 8
+    const queued = enqueueAutomaticProcessing({
+      data,
+      day: 7,
+      labId: 'provenance-check',
+      dataQuality: 1,
+      staff: STAFF,
+    })
+    const result = processDataJobs({
+      data: queued,
+      cash: 5_000_000,
+      throughputMTok: 100,
+      dataQuality: 1,
+      staff: STAFF,
+      day: 7,
+    })
+    const asset = result.data.assets.find(
+      (candidate) => candidate.id === 'dataset-processed-traffic-chat',
+    )
+
+    expect(result.data.stocks.chat.fromWeb).toBe(webBefore)
+    expect(result.data.stocks.chat.fromUser).toBeCloseTo(
+      result.processedMTok,
+      12,
+    )
+    expect(asset).toMatchObject({ source: 'user', rights: 'restricted' })
+    expect(asset?.volumeMTok).toBeCloseTo(result.processedMTok, 12)
   })
 
   it('processes small collected traffic into visible user provenance', () => {

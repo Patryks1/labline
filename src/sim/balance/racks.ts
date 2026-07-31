@@ -3,6 +3,8 @@ import type {
   ModuleDef,
   RackDesign,
   RackDesignStats,
+  ModelFamily,
+  ServePrecision,
   TrainingNumerics,
 } from '../types'
 import { RACK_PF_MULTIPLIER } from './rackSkus'
@@ -10,6 +12,7 @@ import {
   estimateTrainingMemoryGb,
   LEGACY_TRAINING_NUMERICS,
 } from './trainingPrecision'
+import { estimateServingMemory, precisionBytesPerWeight } from './tokenServe'
 
 /** Grid is 6 columns × N rows of 1×1 cells; larger slots span cells. */
 export const CHASSIS_CATALOG: ChassisDef[] = [
@@ -379,34 +382,21 @@ export function scoreDesign(design: RackDesign): RackDesignStats {
 /**
  * Rough VRAM need for a model (GB).
  * FP16 weights ≈ 2 bytes/param.
- * MoE: experts mostly resident (total) + hot active path / activations.
+ * MoE: all experts are resident for normal low-latency serving; active
+ * parameters affect workspace/compute, not weight residency.
  * Hosting *compute* (PF) uses active only — see modelHostNeed.
  */
 /** Bytes per parameter for a serving precision. */
 export function servePrecisionBytes(precision: string = 'fp16'): number {
-  switch (precision) {
-    case 'fp32':
-      return 4
-    case 'bf16':
-    case 'fp16':
-      return 2
-    case 'fp8':
-    case 'int8':
-      return 1
-    case 'nvfp4':
-    case 'int4':
-      return 0.5
-    case 'ternary_1_58':
-      return 0.2
-    default:
-      return 2
-  }
+  return precision === 'fp32' ? 4 : precisionBytesPerWeight(precision as ServePrecision)
 }
 
 /**
  * Rough VRAM need for a model (GB).
- * Dense uses total params; MoE uses active + 0.5*(total-active) resident experts.
- * Precision scales bytes/weight; KV-cache + workspace are shared headroom.
+ * Dense and MoE both keep total weights resident. Expert offload must be an
+ * explicit deployment policy with its own bandwidth/latency penalty rather
+ * than a hidden residency discount. Precision scales bytes/weight; KV-cache
+ * and workspace are coarse shared headroom in this model-level estimate.
  */
 export function modelVramGb(
   paramsB: number,
@@ -414,16 +404,12 @@ export function modelVramGb(
   family?: string,
   precision: string = 'fp16',
 ): number {
-  const bytes = servePrecisionBytes(precision)
   const total = Math.max(0.01, paramsB)
   const active = Math.max(0.01, activeParamsB ?? total)
-  const isMoe = family === 'moe' && activeParamsB != null
-  // MoE: offloaded experts count half toward resident memory.
-  const residentB = isMoe ? active + 0.5 * Math.max(0, total - active) : total
-  const weightGb = (residentB * 1e9 * bytes) / (1024 ** 3)
-  const kvCacheGb = Math.max(2, active * 0.35 * (bytes / 2))
-  const workspaceGb = Math.max(4, active * 0.25)
-  return weightGb + kvCacheGb + workspaceGb
+  return estimateServingMemory({
+    model: { paramsB: total, activeParamsB: active, family: family as ModelFamily },
+    precision: precision === 'fp32' ? 'bf16' : precision as ServePrecision,
+  }).residentMemoryGb
 }
 
 export function modelTrainVramGb(

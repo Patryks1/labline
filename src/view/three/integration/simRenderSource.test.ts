@@ -3,10 +3,10 @@ import { createGame } from '../../../sim/createGame'
 import { TERRAIN_KIND, type Facility, type TileId } from '../../../sim/world'
 import { DefaultArchetype, LodTier, RenderBiome, SurfaceKind, type SurfaceTexel } from '../v2'
 import {
+  ADDITIONAL_RESIDENTIAL_ARCHETYPES,
+  ADDITIONAL_URBAN_ARCHETYPES,
   AUTHORED_INDUSTRIAL_ARCHETYPES,
-  AUTHORED_RESIDENTIAL_ARCHETYPES,
   AUTHORED_TERRAIN_ARCHETYPES,
-  AUTHORED_URBAN_ARCHETYPES,
   AUTHORED_VEGETATION_ARCHETYPES,
   AuthoredSceneryArchetype,
   SceneryArchetype,
@@ -16,10 +16,16 @@ import {
 import {
   MAX_RETAINED_CHUNK_LAYERS,
   MAX_RETAINED_CHUNKS,
+  FOUNDATION_CLEARANCE_EPSILON,
+  MAX_FOUNDATION_SLOPE_GAP,
+  RESIDENTIAL_VARIANTS_PER_CHUNK,
   SimViewportRenderSource,
+  URBAN_VARIANTS_PER_CHUNK,
   acceptsNaturalSpacing,
   biomeDetailThreshold,
   biomeVegetationThreshold,
+  buildingPaletteForChunk,
+  buildingVariantIndexForParcel,
   decorationOverlapsRoadFootprint,
   isRockDetail,
   naturalPatchDensity,
@@ -29,6 +35,68 @@ import {
 import { planUrbanParcels } from './urbanParcelPlanner'
 
 describe('SimViewportRenderSource', () => {
+  it('keeps spatial chunk palettes deterministic, distinct, and fully reachable', () => {
+    const chunksWide = 4
+    const palettes = Array.from(
+      { length: 16 },
+      (_, chunkId) => buildingPaletteForChunk(chunkId, chunksWide),
+    )
+    expect(buildingPaletteForChunk(5, chunksWide)).toEqual(buildingPaletteForChunk(5, chunksWide))
+    expect(Math.max(...palettes.map(value => value.residential.length))).toBe(
+      RESIDENTIAL_VARIANTS_PER_CHUNK,
+    )
+    expect(Math.max(...palettes.map(value => value.urban.length))).toBe(URBAN_VARIANTS_PER_CHUNK)
+    expect(new Set(palettes.flatMap(value => value.residential))).toEqual(
+      new Set(ADDITIONAL_RESIDENTIAL_ARCHETYPES),
+    )
+    expect(new Set(palettes.flatMap(value => value.urban))).toEqual(
+      new Set(ADDITIONAL_URBAN_ARCHETYPES),
+    )
+    for (const palette of palettes) {
+      expect(palette.residential).toHaveLength(RESIDENTIAL_VARIANTS_PER_CHUNK)
+      expect(new Set(palette.residential)).toHaveLength(RESIDENTIAL_VARIANTS_PER_CHUNK)
+      expect(palette.urban).toHaveLength(URBAN_VARIANTS_PER_CHUNK)
+      expect(new Set(palette.urban)).toHaveLength(URBAN_VARIANTS_PER_CHUNK)
+    }
+    for (let chunkId = 0; chunkId < palettes.length; chunkId++) {
+      const right = chunkId % chunksWide < chunksWide - 1 ? chunkId + 1 : undefined
+      const below = chunkId + chunksWide < palettes.length ? chunkId + chunksWide : undefined
+      for (const adjacent of [right, below]) {
+        if (adjacent === undefined) continue
+        expect(palettes[adjacent]!.residential).not.toEqual(palettes[chunkId]!.residential)
+        expect(palettes[adjacent]!.urban).not.toEqual(palettes[chunkId]!.urban)
+      }
+    }
+  })
+
+  it('cycles cardinally neighboring parcels through different local variants', () => {
+    const origin = buildingVariantIndexForParcel(17, 23, 77, RESIDENTIAL_VARIANTS_PER_CHUNK)
+    expect(buildingVariantIndexForParcel(17, 23, 77, RESIDENTIAL_VARIANTS_PER_CHUNK)).toBe(origin)
+    expect(buildingVariantIndexForParcel(18, 23, 77, RESIDENTIAL_VARIANTS_PER_CHUNK)).not.toBe(origin)
+    expect(buildingVariantIndexForParcel(17, 24, 77, RESIDENTIAL_VARIANTS_PER_CHUNK)).not.toBe(origin)
+    expect(new Set(
+      Array.from(
+        { length: RESIDENTIAL_VARIANTS_PER_CHUNK },
+        (_, offset) => buildingVariantIndexForParcel(17 + offset, 23, 77, RESIDENTIAL_VARIANTS_PER_CHUNK),
+      ),
+    ).size).toBe(RESIDENTIAL_VARIANTS_PER_CHUNK)
+
+    const seamVariant = (
+      family: 'residential' | 'urban',
+      x: number,
+      y: number,
+    ) => {
+      const chunksWide = 4
+      const chunkId = Math.floor(y / 32) * chunksWide + Math.floor(x / 32)
+      const variants = buildingPaletteForChunk(chunkId, chunksWide)[family]
+      return variants[buildingVariantIndexForParcel(x, y, 77, variants.length)]
+    }
+    for (const family of ['residential', 'urban'] as const) {
+      expect(seamVariant(family, 31, 23)).not.toBe(seamVariant(family, 32, 23))
+      expect(seamVariant(family, 17, 31)).not.toBe(seamVariant(family, 17, 32))
+    }
+  })
+
   it('exposes and revision-caches the shared compiled road network', () => {
     const state = compactGame()
     const world = state.map.world!
@@ -292,37 +360,95 @@ describe('SimViewportRenderSource', () => {
     ] as const) {
       expect(family.some(id => used.has(id)), name).toBe(true)
     }
-    expect([
-      SingleBuildingArchetype.detachedHouse,
-      SingleBuildingArchetype.smallShop,
-      SingleBuildingArchetype.rowhouse,
-    ].some(id => used.has(id)), 'single-building residential').toBe(true)
-    expect([
-      SingleBuildingArchetype.midRise,
-      SingleBuildingArchetype.officeTower,
-      SingleBuildingArchetype.skyscraper,
-    ].some(id => used.has(id)), 'single-building urban').toBe(true)
-    expect(AUTHORED_RESIDENTIAL_ARCHETYPES.some(id => used.has(id)), 'legacy residential kits').toBe(false)
-    expect(AUTHORED_URBAN_ARCHETYPES.some(id => used.has(id)), 'legacy urban kits').toBe(false)
+    expect(ADDITIONAL_RESIDENTIAL_ARCHETYPES.some(id => used.has(id)), 'authored residential').toBe(true)
+    expect(ADDITIONAL_URBAN_ARCHETYPES.some(id => used.has(id)), 'authored urban').toBe(true)
+    expect(used.has(SingleBuildingArchetype.skyscraper), 'multi-cell skyscraper').toBe(true)
   })
 
-  it('renders every V5 city/house parcel exactly once with a single-building archetype', () => {
+  it('renders every generated city/house parcel exactly once and reaches every building addition', () => {
     const state = compactGame()
     const world = state.map.world!
     const source = new SimViewportRenderSource(state)
     const plan = liveParcelPlan(world)
-    const singleBuildingIds = new Set<number>(Object.values(SingleBuildingArchetype))
+    const parcelArchetypeIds = new Set<number>([
+      ...ADDITIONAL_RESIDENTIAL_ARCHETYPES,
+      ...ADDITIONAL_URBAN_ARCHETYPES,
+      SingleBuildingArchetype.skyscraper,
+    ])
     const records = allChunkInstances(source)
-    const parcelRecords = records.filter((record) => singleBuildingIds.has(record.archetypeId))
+    const parcelRecords = records.filter((record) => parcelArchetypeIds.has(record.archetypeId))
 
     expect(parcelRecords).toHaveLength(plan.parcels.length)
     expect(new Set(parcelRecords.map((record) => record.entityId)).size).toBe(plan.parcels.length)
+    const used = new Set(parcelRecords.map((record) => record.archetypeId))
+    expect(ADDITIONAL_RESIDENTIAL_ARCHETYPES.filter(id => !used.has(id))).toEqual([])
+    expect(ADDITIONAL_URBAN_ARCHETYPES.filter(id => !used.has(id))).toEqual([])
+    const residentialIds = new Set(ADDITIONAL_RESIDENTIAL_ARCHETYPES)
+    const urbanIds = new Set(ADDITIONAL_URBAN_ARCHETYPES)
+    for (let chunkId = 0; chunkId < source.chunksWide * source.chunksHigh; chunkId++) {
+      const chunkIds = new Set(
+        (source.getChunkInstances(chunkId, LodTier.near) ?? []).map(record => record.archetypeId),
+      )
+      expect([...chunkIds].filter(id => residentialIds.has(id)).length).toBeLessThanOrEqual(
+        RESIDENTIAL_VARIANTS_PER_CHUNK,
+      )
+      expect([...chunkIds].filter(id => urbanIds.has(id)).length).toBeLessThanOrEqual(
+        URBAN_VARIANTS_PER_CHUNK,
+      )
+    }
+    const recordByAnchor = new Map(parcelRecords.map(record => [record.pickTileId, record]))
+    let neighboringOneTilePairs = 0
+    for (const parcel of plan.parcels) {
+      if (parcel.footprintTileIds.length !== 1) continue
+      const x = parcel.anchorTileId % source.width
+      const neighbors = [
+        x + 1 < source.width ? plan.parcelForTile(parcel.anchorTileId + 1) : undefined,
+        plan.parcelForTile(parcel.anchorTileId + source.width),
+      ]
+      for (const neighbor of neighbors) {
+        if (!neighbor || neighbor.footprintTileIds.length !== 1) continue
+        neighboringOneTilePairs++
+        expect(
+          recordByAnchor.get(neighbor.anchorTileId)!.archetypeId,
+          `neighboring parcel silhouettes ${parcel.id} / ${neighbor.id}`,
+        ).not.toBe(recordByAnchor.get(parcel.anchorTileId)!.archetypeId)
+      }
+    }
+    expect(neighboringOneTilePairs).toBeGreaterThan(20)
+    let largestFoundationSlopeGap = 0
     for (const parcel of plan.parcels) {
       const matches = parcelRecords.filter((record) => record.pickTileId === parcel.anchorTileId)
       expect(matches, parcel.id).toHaveLength(1)
-      expect(matches[0]!.archetypeId).toBeGreaterThanOrEqual(500)
-      expect(matches[0]!.archetypeId).toBeLessThanOrEqual(505)
+      expect(parcelArchetypeIds.has(matches[0]!.archetypeId)).toBe(true)
+      if (parcel.class === 'small') {
+        expect(residentialIds.has(matches[0]!.archetypeId), parcel.id).toBe(true)
+      } else if (parcel.class === 'skyscraper' && parcel.footprintTileIds.length > 1) {
+        expect(matches[0]!.archetypeId, parcel.id).toBe(SingleBuildingArchetype.skyscraper)
+      } else {
+        expect(urbanIds.has(matches[0]!.archetypeId), parcel.id).toBe(true)
+      }
+      const corners = parcel.footprintTileIds.flatMap((id) => {
+        const x = id % source.width
+        const y = Math.floor(id / source.width)
+        return [
+          source.getCornerElevation(x, y),
+          source.getCornerElevation(x + 1, y),
+          source.getCornerElevation(x, y + 1),
+          source.getCornerElevation(x + 1, y + 1),
+        ]
+      })
+      const highestCorner = Math.max(...corners)
+      expect(matches[0]!.y, `foundation clearance for ${parcel.id}`).toBeGreaterThan(highestCorner)
+      expect(matches[0]!.y - highestCorner, `foundation gap for ${parcel.id}`).toBeCloseTo(
+        FOUNDATION_CLEARANCE_EPSILON,
+        6,
+      )
+      largestFoundationSlopeGap = Math.max(
+        largestFoundationSlopeGap,
+        highestCorner - Math.min(...corners),
+      )
     }
+    expect(largestFoundationSlopeGap).toBeLessThanOrEqual(MAX_FOUNDATION_SLOPE_GAP + 1e-9)
   })
 
   it('centers and scales multi-tile skyscrapers and selects their complete footprint from every cell', () => {
@@ -453,8 +579,15 @@ describe('SimViewportRenderSource', () => {
       ]),
     )
     const playerRender = playerRecords.find((record) => record.color === 0x3dffc0)
+    const playerX = playerAnchor % source.width
+    const playerY = Math.floor(playerAnchor / source.width)
     expect(playerRender?.y).toBeCloseTo(
-      source.getTileElevation(playerAnchor % source.width, Math.floor(playerAnchor / source.width)) + 0.015,
+      Math.max(
+        source.getCornerElevation(playerX, playerY),
+        source.getCornerElevation(playerX + 1, playerY),
+        source.getCornerElevation(playerX, playerY + 1),
+        source.getCornerElevation(playerX + 1, playerY + 1),
+      ) + FOUNDATION_CLEARANCE_EPSILON,
     )
     expect(source.getCornerElevation(1, 1)).not.toBe(0)
     expect(rivalRecords).toEqual(

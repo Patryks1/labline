@@ -369,6 +369,10 @@ const LAKE_BASIN_DEPTH = 0.16
 const ROAD_SURFACE_LIFT = 0.040
 const ROAD_SHOULDER_LIFT = 0.024
 const ROAD_MARKING_LIFT = 0.058
+// Compiled segment ribbons terminate inside junction fans. A tiny additional
+// layer separation prevents their same-material, differently tessellated
+// surfaces from depth-fighting during camera motion.
+const ROAD_JUNCTION_LAYER_LIFT = 0.002
 // Keep overview silhouettes clean: paint appears only once the camera enters
 // the close-detail band, then reaches full opacity at the near-art threshold.
 const ROAD_MARKING_FADE_START_PPT = 24
@@ -1035,9 +1039,9 @@ export class MapSurfaceLayer {
       const halfWidth = Math.max(...incident.map((segment) => segment!.profile.halfWidth),
         network.profiles[maxClass as keyof typeof network.profiles]?.halfWidth ?? 0.21) * this.tileSize
       appendRoadJunctionPolygon(positions, uvs, indices, groups, 0, junction, halfWidth * 1.18,
-        ROAD_SHOULDER_LIFT, this.tileSize, sampleHeight)
+        ROAD_SHOULDER_LIFT + ROAD_JUNCTION_LAYER_LIFT, this.tileSize, sampleHeight)
       appendRoadJunctionPolygon(positions, uvs, indices, groups, 1, junction, halfWidth,
-        ROAD_SURFACE_LIFT, this.tileSize, sampleHeight)
+        ROAD_SURFACE_LIFT + ROAD_JUNCTION_LAYER_LIFT, this.tileSize, sampleHeight)
       if (junction.hasStopLines) appendJunctionStopLines(positions, uvs, indices, groups,
         junction, halfWidth, this.tileSize, sampleHeight)
       if (junction.hasCrosswalks) appendJunctionCrosswalks(positions, uvs, indices, groups,

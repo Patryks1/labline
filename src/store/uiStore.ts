@@ -40,8 +40,8 @@ export interface RenderSettings {
 
 export const RENDER_PRESETS: Record<RenderPreset, RenderSettings> = {
   performance: { pixelRatio: 0.75, decorativeTraffic: false, lodTransitionMs: 0 },
-  balanced: { pixelRatio: 1, decorativeTraffic: true, lodTransitionMs: 200 },
-  quality: { pixelRatio: 1.5, decorativeTraffic: true, lodTransitionMs: 250 },
+  balanced: { pixelRatio: 1, decorativeTraffic: true, lodTransitionMs: 0 },
+  quality: { pixelRatio: 1.5, decorativeTraffic: true, lodTransitionMs: 0 },
 }
 
 export interface ConfirmRequest {
@@ -64,6 +64,66 @@ export interface ReleaseEvent {
   capability: number
 }
 
+export type NegotiationOutcome = 'idle' | 'countered' | 'declined' | 'agreed' | 'signed'
+
+export interface NegotiationTranscriptLine {
+  side: 'provider' | 'player'
+  text: string
+  status?: NegotiationOutcome
+  day?: number
+  /** Monotonic position in the retained conversation, not a wall-clock minute. */
+  sequence?: number
+  /** Legacy sequence field retained for conversations created before sequence was named. */
+  minute?: number
+}
+
+export interface PersistedNegotiation {
+  status: NegotiationOutcome
+  message?: string
+  transcript: NegotiationTranscriptLine[]
+  failures: number
+  contactAgainDay: number
+  contractId?: string
+  proposal?: { capacity: number; termDays: number; offer: number }
+}
+
+export const EMPTY_NEGOTIATION: PersistedNegotiation = {
+  status: 'idle',
+  transcript: [],
+  failures: 0,
+  contactAgainDay: 0,
+}
+
+export function createEmptyNegotiation(): PersistedNegotiation {
+  return { ...EMPTY_NEGOTIATION, transcript: [] }
+}
+
+export function formatNegotiationTimestamp(
+  line: Pick<NegotiationTranscriptLine, 'day' | 'sequence' | 'minute'>,
+  fallbackDay: number,
+  fallbackSequence: number,
+): string {
+  const sequence = line.sequence ?? line.minute ?? fallbackSequence
+  return `Day ${line.day ?? fallbackDay} · message ${sequence + 1}`
+}
+
+/** Reopens a completed desk without discarding the audit trail from prior deals. */
+export function reopenEndedNegotiation(
+  current: PersistedNegotiation,
+  hasActiveContract: boolean,
+): PersistedNegotiation {
+  if (current.status !== 'signed' || hasActiveContract) return current
+  return {
+    ...current,
+    status: 'idle',
+    message: undefined,
+    proposal: undefined,
+    contractId: undefined,
+    failures: 0,
+    contactAgainDay: 0,
+  }
+}
+
 interface UiPreferences extends AudioPreferences {
   interfaceScale: InterfaceScale
   renderPreset: RenderPreset
@@ -76,6 +136,8 @@ interface UiPreferences extends AudioPreferences {
   mapCameraHeading: MapCameraHeading
   mapCameraTilt: MapCameraTilt
   cloudsVisible: boolean
+  computeNegotiations: Record<string, PersistedNegotiation>
+  powerNegotiations: Record<string, PersistedNegotiation>
   setInterfaceScale: (scale: InterfaceScale) => void
   setRenderPreset: (preset: RenderPreset) => void
   setReducedMotion: (reduced: boolean) => void
@@ -95,6 +157,13 @@ interface UiPreferences extends AudioPreferences {
   setMasterVolume: (volume: number) => void
   setMusicVolume: (volume: number) => void
   setEffectsVolume: (volume: number) => void
+  updateComputeNegotiation: (providerId: string, update: (current: PersistedNegotiation) => PersistedNegotiation) => void
+  updatePowerNegotiation: (counterpartyKey: string, update: (current: PersistedNegotiation) => PersistedNegotiation) => void
+  clearNegotiations: () => void
+}
+
+export function powerNegotiationKey(cityId: string, mode: 'import' | 'export'): string {
+  return `${cityId}:${mode}`
 }
 
 export function resolveAutoScale(viewportHeight: number): number {
@@ -165,6 +234,8 @@ export const useUiStore = create<UiPreferences>()(
       mapCameraHeading: DEFAULT_MAP_CAMERA_HEADING,
       mapCameraTilt: DEFAULT_MAP_CAMERA_TILT,
       cloudsVisible: true,
+      computeNegotiations: {},
+      powerNegotiations: {},
       ...DEFAULT_AUDIO_PREFERENCES,
       setInterfaceScale: (interfaceScale) => set({ interfaceScale }),
       setRenderPreset: (renderPreset) => set({ renderPreset }),
@@ -194,6 +265,13 @@ export const useUiStore = create<UiPreferences>()(
       setMasterVolume: (masterVolume) => set({ masterVolume: validVolume(masterVolume, 1) }),
       setMusicVolume: (musicVolume) => set({ musicVolume: validVolume(musicVolume, 0.7) }),
       setEffectsVolume: (effectsVolume) => set({ effectsVolume: validVolume(effectsVolume, 0.8) }),
+      updateComputeNegotiation: (providerId, update) => set((state) => ({
+        computeNegotiations: { ...state.computeNegotiations, [providerId]: update(state.computeNegotiations[providerId] ?? createEmptyNegotiation()) },
+      })),
+      updatePowerNegotiation: (counterpartyKey, update) => set((state) => ({
+        powerNegotiations: { ...state.powerNegotiations, [counterpartyKey]: update(state.powerNegotiations[counterpartyKey] ?? createEmptyNegotiation()) },
+      })),
+      clearNegotiations: () => set({ computeNegotiations: {}, powerNegotiations: {} }),
     }),
     {
       name: 'labline-ui-v1',

@@ -33,6 +33,7 @@ import {
 import { cityPopulationDemandMultiplier } from './cityGrowth'
 import {
   labFacilityEnergyTotals,
+  labBuildingOpex,
   resolvePlayerPowerMw,
   playerBuildingOpex,
   playerLatencyScore,
@@ -632,16 +633,7 @@ export function rivalInferCapacityPf(
   if (state && r.id) {
     const physical =
       resolvedPhysical ?? computeLabSnapshot(state, r.id)
-    const engineers = Math.max(0, (r as RivalLab).staff?.engineer ?? 0)
-    return labInferCapacityWorkPf({
-      flopsPf: physical.rawFlopsPf,
-      hardwareTokPerSec: physical.hardwareTokPerSec,
-      utilCap: r.utilCap,
-      allocation: r.allocation,
-      servingEfficiency: r.servingEfficiency,
-      dataGenResearchShare: r.data?.dataGenResearchShare,
-      engineerServeBonus: Math.min(0.2, engineers * 0.015),
-    })
+    return physical.inferenceWorkPf
   }
   return labInferCapacityWorkPf({
     flopsPf: r.flopsPf,
@@ -1626,21 +1618,7 @@ export function tickMarket(state: SimState): SimState {
       physical.spotPowerMw * 24 * state.map.energyPricePerMWh +
       onsiteGenerationUpkeepDay(rivalGenerationMw, state.map.energyPricePerMWh)
     const wageCost = labStaffWagePerDay(state, r.id)
-    let buildingCost = 0
-    if (state.map.storage === 'compact' && state.map.world) {
-      for (const facility of
-        compactCompletedFacilitiesForOwner(state, r.id) ?? []) {
-        buildingCost += facility.stats?.opexPerDay ?? 0
-      }
-    } else {
-      buildingCost = facilityAnchorTiles(state, { ownerId: r.id }).reduce(
-        (sum, facility) =>
-          sum +
-          (facility.buildingProgress >= facility.buildingTarget ? facility.opexPerDay : 0),
-        0,
-      )
-    }
-    buildingCost *= ECONOMY.facilityOpexMultiplier ?? 1
+    const buildingCost = labBuildingOpex(state, r.id)
     const operatingOpex = energyCost + wageCost + buildingCost + (r.marketingSpendPerDay ?? 0)
     const dayOpex = operatingOpex + leaseOut
     const rackCapital = (r.rackFleet ?? []).reduce(

@@ -35,6 +35,8 @@ export interface PoolBreakdown {
   title: string
   /** Effective PF in this pool today */
   poolPf: number
+  /** Incremental physical fleet draw attributed to this pool. */
+  powerMw: number
   /** Share of allocation (0–1) */
   allocShare: number
   /**
@@ -107,11 +109,16 @@ function buildTrainBreakdown(
   allocShare: number,
 ): PoolBreakdown {
   const poolPf = snap.pools.training
+  const powerMw = snap.mwBreakdown.training
   const job = state.player.trainingJob
   const lines: BreakdownLine[] = [
     {
       label: 'Pool PF',
       value: `${fmtPf(poolPf)} PF`,
+    },
+    {
+      label: 'Power draw',
+      value: `${powerMw.toFixed(3)} MW`,
     },
     {
       label: 'Allocation',
@@ -174,6 +181,7 @@ function buildTrainBreakdown(
     id: 'training',
     title: 'Train pool',
     poolPf,
+    powerMw,
     allocShare,
     utilization,
     utilizationLabel,
@@ -188,6 +196,7 @@ function buildServeBreakdown(
   allocShare: number,
 ): PoolBreakdown {
   const poolPf = snap.pools.inference
+  const powerMw = snap.mwBreakdown.inference
   const lm = state.lastMarket
   const model = state.player.models.find(
     (m) =>
@@ -228,6 +237,10 @@ function buildServeBreakdown(
     {
       label: 'Token Cap',
       value: `${fmtMTok(liveCap)} MTok/d`,
+    },
+    {
+      label: 'Power draw',
+      value: `${powerMw.toFixed(3)} MW`,
     },
     {
       label: 'Demand / Cap',
@@ -321,6 +334,7 @@ function buildServeBreakdown(
     id: 'inference',
     title: 'Serve pool',
     poolPf,
+    powerMw,
     allocShare,
     utilization: util,
     utilizationLabel,
@@ -335,6 +349,7 @@ function buildResearchBreakdown(
   allocShare: number,
 ): PoolBreakdown {
   const poolPf = snap.pools.research
+  const powerMw = snap.mwBreakdown.research
   const techShare = researchPoolForTech(state)
   const dataShare = Math.max(0, 1 - techShare)
   const researchPf = poolPf * techShare
@@ -344,6 +359,10 @@ function buildResearchBreakdown(
     {
       label: 'Pool PF',
       value: `${fmtPf(poolPf)} PF`,
+    },
+    {
+      label: 'Power draw',
+      value: `${powerMw.toFixed(3)} MW`,
     },
     {
       label: 'Allocation',
@@ -423,6 +442,7 @@ function buildResearchBreakdown(
     id: 'research',
     title: 'Research pool',
     poolPf,
+    powerMw,
     allocShare,
     utilization,
     utilizationLabel,

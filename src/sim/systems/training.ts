@@ -8,8 +8,10 @@ import type {
   StartTrainingOpts,
   TrainingComputeFormat,
   TrainingJob,
+  TrainingNumerics,
 } from "../types";
 import { computeSnapshot } from "./compute";
+import type { ComputeSnapshot } from "./compute";
 import {
   normalizeDataQuality,
   postTrainStrength,
@@ -25,6 +27,7 @@ import {
   clampDistillTeacherShare,
   distillFromTeacher,
   DISTILL_RETENTION,
+  estimateTrainingEconomics,
   formatParams,
   sizeGate,
   suggestedApiPricePerMTok,
@@ -34,6 +37,7 @@ import {
   allocateTrainingHardwarePools,
   allocateWeightedTrainingCompute,
   DEFAULT_TRAINING_NUMERICS,
+  estimateTrainingMemoryGb,
   LEGACY_TRAINING_NUMERICS,
   validateTrainingNumerics,
 } from "../balance/trainingPrecision";
@@ -47,10 +51,6 @@ import {
   serviceProfileForModel,
 } from "../balance/trainingV3";
 import { createRng, hashSeed, seededId } from "../rng";
-import {
-  enforceMinTrainingDuration,
-  MIN_TRAINING_DAYS,
-} from "./trainingDuration";
 
 export const RELEASE_LOSS_GATE = 2;
 export const TRAINING_EXTENSION_DAYS = 10;
@@ -58,7 +58,6 @@ export const TRAINING_BENCHMARK_MIN_PROGRESS = 0.1;
 export const TRAINING_BENCHMARK_COOLDOWN_DAYS = 7;
 import { suggestApiInOut } from "../balance/pricing";
 import { DATA_DOMAIN_META, DATA_DOMAINS } from "../balance/data";
-import { ECONOMY } from "../balance/economy";
 import { modelTrainVramGb } from "../balance/racks";
 import { fleetStats, resolveRackSku } from "./racks";
 import { modelCanCurateDataDomain } from "./modelEligibility";
@@ -237,10 +236,15 @@ export interface TrainingResourceAllocation {
   ramAllocatedGb: number;
   ramRequiredGb: number;
   ramReady: boolean;
+  systemRamAllocatedGb: number;
+  systemRamRequiredGb: number;
+  systemRamReady: boolean;
+  bottleneck: "none" | "hbm" | "system_ram" | "both";
 }
 
 export interface PlayerTrainingResourcePlan {
   trainingRamGb: number;
+  trainingSystemRamGb: number;
   trainingAllocationShare: number;
   jobs: Record<string, TrainingResourceAllocation>;
   safetyCampaign?: TrainingResourceAllocation;
@@ -263,6 +267,31 @@ export function trainingRamBudgetGb(
   return snap.trainingRamGb ?? snap.vramGb * trainingAllocationShare(state);
 }
 
+/** A distributed job must fit wholly in one low-latency execution domain. */
+function trainingMemoryDomainFit(
+  state: SimState,
+  snap: ComputeSnapshot,
+  hbmRequiredGb: number,
+  systemRamRequiredGb: number,
+): { hbmReady: boolean; systemRamReady: boolean; ready: boolean } {
+  const share = trainingAllocationShare(state);
+  const localHbm = snap.localVramGb * share;
+  const remoteHbm = snap.remoteVramGb * share;
+  const localSystemRam = snap.localSystemRamGb * share;
+  const remoteSystemRam = snap.remoteSystemRamGb * share;
+  const localHbmReady = localHbm + 1e-9 >= hbmRequiredGb;
+  const remoteHbmReady = remoteHbm + 1e-9 >= hbmRequiredGb;
+  const localSystemReady = localSystemRam + 1e-9 >= systemRamRequiredGb;
+  const remoteSystemReady = remoteSystemRam + 1e-9 >= systemRamRequiredGb;
+  return {
+    hbmReady: localHbmReady || remoteHbmReady,
+    systemRamReady: localSystemReady || remoteSystemReady,
+    ready:
+      (localHbmReady && localSystemReady) ||
+      (remoteHbmReady && remoteSystemReady),
+  };
+}
+
 function jobTrainingRamGb(state: SimState, job: TrainingJob): number {
   return modelTrainVramGb(
     job.targetParamsB,
@@ -273,6 +302,28 @@ function jobTrainingRamGb(state: SimState, job: TrainingJob): number {
   );
 }
 
+function trainingMemoryForModel(
+  state: SimState,
+  model: { paramsB: number; activeParamsB?: number; family?: string; trainingNumerics?: TrainingNumerics },
+) {
+  return estimateTrainingMemoryGb({
+    paramsB: model.paramsB,
+    activeParamsB: model.activeParamsB,
+    family: model.family,
+    numerics: model.trainingNumerics ?? LEGACY_TRAINING_NUMERICS,
+    activationCheckpointing: state.player.researchUnlocked.includes("opt_checkpoint"),
+  });
+}
+
+function jobTrainingSystemRamGb(state: SimState, job: TrainingJob): number {
+  return trainingMemoryForModel(state, {
+    paramsB: job.targetParamsB,
+    activeParamsB: job.activeParamsB,
+    family: job.family,
+    trainingNumerics: job.trainingNumerics ?? job.numerics,
+  }).requiredSystemRamGb;
+}
+
 export interface ProspectiveTrainingRamFit {
   ready: boolean;
   trainingRamGb: number;
@@ -281,6 +332,9 @@ export interface ProspectiveTrainingRamFit {
   blockerName?: string;
   blockerAllocatedGb?: number;
   blockerRequiredGb?: number;
+  candidateSystemRamAllocatedGb: number;
+  candidateSystemRamRequiredGb: number;
+  blockerResource?: "HBM" | "system RAM";
 }
 
 /** Check the post-launch priority split so a new run cannot evict another run. */
@@ -289,6 +343,7 @@ export function trainingRamFitForNewJob(
   candidateRequiredGb: number,
   candidatePriority: number,
   snap = computeSnapshot(state),
+  candidateSystemRamRequiredGb = Math.max(16, candidateRequiredGb * 0.15),
 ): ProspectiveTrainingRamFit {
   const safetyModel = state.player.safetyCampaign
     ? state.player.models.find(
@@ -303,6 +358,7 @@ export function trainingRamFitForNewJob(
         name: job.name,
         weight: job.computePriority ?? 50,
         requiredGb: jobTrainingRamGb(state, job),
+        systemRamRequiredGb: jobTrainingSystemRamGb(state, job),
       })),
     ...(safetyModel
       ? [
@@ -317,6 +373,7 @@ export function trainingRamFitForNewJob(
               safetyModel.trainingNumerics ?? LEGACY_TRAINING_NUMERICS,
               state.player.researchUnlocked.includes("opt_checkpoint"),
             ),
+            systemRamRequiredGb: trainingMemoryForModel(state, safetyModel).requiredSystemRamGb,
           },
         ]
       : []),
@@ -325,16 +382,41 @@ export function trainingRamFitForNewJob(
       name: "New run",
       weight: Math.max(0, candidatePriority),
       requiredGb: Math.max(0, candidateRequiredGb),
+      systemRamRequiredGb: Math.max(0, candidateSystemRamRequiredGb),
     },
   ];
   const trainingRamGb = trainingRamBudgetGb(state, snap);
   const allocations = allocateWeightedTrainingCompute(trainingRamGb, requests);
-  const blocker = requests.find(
+  const systemRamGb = snap.systemRamGb * trainingAllocationShare(state);
+  const systemAllocations = allocateWeightedTrainingCompute(systemRamGb, requests);
+  const hbmBlocker = requests.find(
     (request) =>
       (allocations[request.id]?.rawPf ?? 0) + 1e-9 < request.requiredGb,
   );
+  const systemBlocker = requests.find(
+    (request) =>
+      (systemAllocations[request.id]?.rawPf ?? 0) + 1e-9 < request.systemRamRequiredGb,
+  );
+  const domainBlocker = requests.find(
+    (request) =>
+      !trainingMemoryDomainFit(
+        state,
+        snap,
+        request.requiredGb,
+        request.systemRamRequiredGb,
+      ).ready,
+  );
+  const blocker = hbmBlocker ?? systemBlocker ?? domainBlocker;
+  const domainFit = domainBlocker
+    ? trainingMemoryDomainFit(
+        state,
+        snap,
+        domainBlocker.requiredGb,
+        domainBlocker.systemRamRequiredGb,
+      )
+    : undefined;
   return {
-    ready: !blocker,
+    ready: !hbmBlocker && !systemBlocker && !domainBlocker,
     trainingRamGb,
     candidateAllocatedGb: allocations.__candidate__?.rawPf ?? 0,
     candidateRequiredGb,
@@ -342,7 +424,23 @@ export function trainingRamFitForNewJob(
     blockerAllocatedGb: blocker
       ? (allocations[blocker.id]?.rawPf ?? 0)
       : undefined,
-    blockerRequiredGb: blocker?.requiredGb,
+    blockerRequiredGb:
+      hbmBlocker?.requiredGb ??
+      systemBlocker?.systemRamRequiredGb ??
+      (domainFit?.hbmReady
+        ? domainBlocker?.systemRamRequiredGb
+        : domainBlocker?.requiredGb),
+    candidateSystemRamAllocatedGb: systemAllocations.__candidate__?.rawPf ?? 0,
+    candidateSystemRamRequiredGb,
+    blockerResource: hbmBlocker
+      ? "HBM"
+      : systemBlocker
+        ? "system RAM"
+        : domainBlocker
+          ? domainFit?.hbmReady
+            ? "system RAM"
+            : "HBM"
+          : undefined,
   };
 }
 
@@ -368,6 +466,7 @@ export function playerTrainingResourcePlan(
       numerics:
         job.trainingNumerics ?? job.numerics ?? LEGACY_TRAINING_NUMERICS,
       ramRequiredGb: jobTrainingRamGb(state, job),
+      systemRamRequiredGb: jobTrainingSystemRamGb(state, job),
     })),
     ...(safetyModel
       ? [
@@ -383,6 +482,7 @@ export function playerTrainingResourcePlan(
               safetyModel.trainingNumerics ?? LEGACY_TRAINING_NUMERICS,
               state.player.researchUnlocked.includes("opt_checkpoint"),
             ),
+            systemRamRequiredGb: trainingMemoryForModel(state, safetyModel).requiredSystemRamGb,
           },
         ]
       : []),
@@ -392,12 +492,36 @@ export function playerTrainingResourcePlan(
     trainingRamGb,
     requests,
   );
+  const domainFits = Object.fromEntries(
+    requests.map((request) => [
+      request.id,
+      trainingMemoryDomainFit(
+        state,
+        snap,
+        request.ramRequiredGb,
+        request.systemRamRequiredGb,
+      ),
+    ]),
+  ) as Record<string, ReturnType<typeof trainingMemoryDomainFit>>;
   const ramReady = Object.fromEntries(
     requests.map((request) => [
       request.id,
       request.eligible !== false &&
+        domainFits[request.id]!.hbmReady &&
+        domainFits[request.id]!.ready &&
         (ramAllocations[request.id]?.rawPf ?? 0) + 1e-9 >=
           request.ramRequiredGb,
+    ]),
+  ) as Record<string, boolean>;
+  const trainingSystemRamGb = snap.systemRamGb * trainingAllocationShare(state);
+  const systemRamAllocations = allocateWeightedTrainingCompute(trainingSystemRamGb, requests);
+  const systemRamReady = Object.fromEntries(
+    requests.map((request) => [
+      request.id,
+      request.eligible !== false &&
+        domainFits[request.id]!.systemRamReady &&
+        domainFits[request.id]!.ready &&
+        (systemRamAllocations[request.id]?.rawPf ?? 0) + 1e-9 >= request.systemRamRequiredGb,
     ]),
   ) as Record<string, boolean>;
   const computeAllocations = allocateTrainingHardwarePools(
@@ -405,16 +529,20 @@ export function playerTrainingResourcePlan(
     requests.map((request) => ({
       id: request.id,
       weight: request.weight,
-      eligible: request.eligible !== false && ramReady[request.id],
+      eligible: request.eligible !== false && ramReady[request.id] && systemRamReady[request.id],
       numerics: request.numerics,
     })),
   );
   const allocationFor = (
     id: string,
     ramRequiredGb: number,
+    systemRamRequiredGb: number,
   ): TrainingResourceAllocation => {
     const compute = computeAllocations[id];
     const ram = ramAllocations[id];
+    const systemRam = systemRamAllocations[id];
+    const hbmOk = ramReady[id] ?? false;
+    const hostOk = systemRamReady[id] ?? false;
     return {
       rawPf: compute?.rawPf ?? 0,
       effectivePf: compute?.effectivePf ?? 0,
@@ -422,6 +550,10 @@ export function playerTrainingResourcePlan(
       ramAllocatedGb: ram?.rawPf ?? 0,
       ramRequiredGb,
       ramReady: ramReady[id] ?? false,
+      systemRamAllocatedGb: systemRam?.rawPf ?? 0,
+      systemRamRequiredGb,
+      systemRamReady: hostOk,
+      bottleneck: hbmOk ? (hostOk ? "none" : "system_ram") : (hostOk ? "hbm" : "both"),
     };
   };
   const safetyRequest = requests.find(
@@ -430,14 +562,15 @@ export function playerTrainingResourcePlan(
 
   return {
     trainingRamGb,
+    trainingSystemRamGb,
     trainingAllocationShare: trainingAllocationShare(state),
     jobs: Object.fromEntries(
       jobs.map((job) => {
-        return [job.id, allocationFor(job.id, jobTrainingRamGb(state, job))];
+        return [job.id, allocationFor(job.id, jobTrainingRamGb(state, job), jobTrainingSystemRamGb(state, job))];
       }),
     ),
     safetyCampaign: safetyRequest
-      ? allocationFor(safetyRequest.id, safetyRequest.ramRequiredGb)
+      ? allocationFor(safetyRequest.id, safetyRequest.ramRequiredGb, safetyRequest.systemRamRequiredGb)
       : undefined,
   };
 }
@@ -459,15 +592,25 @@ function postTrainTarget(stage: PostTrainStage): number {
 
 type TrainableStage = "base" | Exclude<PostTrainStage, "none">;
 
-/** One deterministic 5% failure roll per base/post-training stage. */
+/**
+ * Rare unrecoverable recipe failures. Routine hardware interruptions are
+ * already absorbed by achieved utilization/checkpoint overhead and should not
+ * destroy an otherwise healthy run.
+ */
 export function trainingStageFailurePlan(
-  job: Pick<TrainingJob, "id" | "outcomeSeed">,
+  job: Pick<TrainingJob, "id" | "outcomeSeed" | "outcomeRisk">,
   stage: TrainableStage,
 ): { willFail: boolean; atFraction: number } {
   const rng = createRng(
     hashSeed(job.outcomeSeed ?? 0, job.id, stage, "stage-failure-v1"),
   );
-  const willFail = rng.next() < 0.05;
+  const baseRisk =
+    job.outcomeRisk === "high"
+      ? 0.1
+      : job.outcomeRisk === "medium"
+        ? 0.04
+        : 0.015;
+  const willFail = rng.next() < baseRisk * (stage === "base" ? 1 : 0.65);
   return { willFail, atFraction: 0.18 + rng.next() * 0.7 };
 }
 
@@ -546,12 +689,34 @@ export function observedLoss(job: TrainingJob): number | null {
   return history[history.length - 1]!.loss;
 }
 
-export function canReleaseTrainingJob(job: TrainingJob): {
+export function trainingMinimumStatus(job: TrainingJob): {
   ok: boolean;
   reason?: string;
 } {
   if (job.failed)
     return { ok: false, reason: "This run failed and cannot be released." };
+  if (job.progressPfDays + 1e-9 < job.targetPfDays) {
+    return { ok: false, reason: "Complete the training compute target first." };
+  }
+  const calendarRemaining = Math.max(
+    0,
+    (job.minCalendarDays ?? 0) - (job.daysElapsed ?? 0),
+  );
+  if (calendarRemaining > 0) {
+    return {
+      ok: false,
+      reason: `${calendarRemaining} funded active calendar day${calendarRemaining === 1 ? "" : "s"} remain for integration and validation.`,
+    };
+  }
+  return { ok: true };
+}
+
+export function canReleaseTrainingJob(job: TrainingJob): {
+  ok: boolean;
+  reason?: string;
+} {
+  const minimum = trainingMinimumStatus(job);
+  if (!minimum.ok) return minimum;
   const loss = observedLoss(job);
   if (loss == null) return { ok: false, reason: "No observed loss yet." };
   if (loss > RELEASE_LOSS_GATE) {
@@ -665,7 +830,7 @@ export function estimateTrainingCost(
   state: SimState,
   opts: Pick<
     StartTrainingOpts,
-    "paramsB" | "family" | "activeParamsB" | "mode" | "teacherId"
+    "paramsB" | "family" | "backbone" | "activeParamsB" | "mode" | "teacherId"
   >,
 ): number {
   const teacher = opts.teacherId
@@ -675,6 +840,7 @@ export function estimateTrainingCost(
   return trainCostPfDays({
     paramsB: opts.paramsB,
     family: opts.family,
+    backbone: opts.backbone,
     trainEfficiency: state.player.trainEfficiency,
     activeParamsB: opts.activeParamsB,
     mode,
@@ -783,7 +949,7 @@ export function startTraining(
   // Dense is free at game start; other families need research unlocks
   // Family unlocks only (not size tiers) — size is free, limited by compute/time
   if (
-    family === "moe" &&
+    backbone === "moe" &&
     !state.player.researchUnlocked.includes("moe_basics")
   ) {
     return withAlert(
@@ -799,7 +965,7 @@ export function startTraining(
     // Should not happen — dense_basics is starter unlock; allow train anyway
   }
 
-  if (family === "moe" && mode !== "continue") {
+  if (backbone === "moe" && mode !== "continue") {
     if (activeParamsB == null || activeParamsB <= 0) {
       return withAlert(
         state,
@@ -821,7 +987,7 @@ export function startTraining(
         "Active fraction too small (<2%). Raise active params.",
       );
     }
-  } else if (family !== "moe") {
+  } else if (backbone !== "moe") {
     activeParamsB = undefined;
   }
 
@@ -845,22 +1011,7 @@ export function startTraining(
     distillTeacherShare = clampDistillTeacherShare(opts.distillTeacherShare);
   }
 
-  let target = estimateTrainingCost(state, {
-    paramsB,
-    family,
-    activeParamsB,
-    mode: mode === "continue" ? "pretrain" : mode,
-    teacherId,
-  });
-  if (mode === "continue") {
-    target = Math.max(4, target * 0.22);
-  }
-  // More own-corpus distill → slightly more PF (you actually train on packs);
-  // teacher-heavy distill stays cheap.
-  if (mode === "distill") {
-    const selfShare = 1 - distillTeacherShare;
-    target *= 0.82 + selfShare * 0.45;
-  }
+  let target = 0;
 
   // Consume processed corpus according to player's domain mix + volume.
   // Distill: only the *own-corpus* share is drawn from stocks; teacher signal is free.
@@ -986,34 +1137,39 @@ export function startTraining(
   // Formula v2 charges the actual train tokens at C≈6ND. Held-out verification
   // is forward-only (≈2ND), so data quality changes outcomes rather than making
   // physical work disappear. The earlier estimate only exists for preflight UI.
-  target = trainCostPfDays({
+  const trainingEconomics = estimateTrainingEconomics({
     paramsB,
     family,
+    backbone,
     trainEfficiency: state.player.trainEfficiency,
     activeParamsB,
-    mode: mode === "distill" ? "distill" : "pretrain",
+    mode,
     teacherParamsB: teacherId
       ? state.player.models.find((model) => model.id === teacherId)?.paramsB
       : undefined,
+    distillTeacherShare,
     trainingTokensMTok: consume.trainMTok,
     verificationTokensMTok: consume.verifyMTok,
     modalityComputeMult: dataAnalysis.modalityComputeMult,
-    formulaVersion: 2,
+    trainCostMult: stackModifiers.trainCostMult,
+    dataCost: consume.cashCost,
   });
-  if (mode === "continue") target = Math.max(4, target * 0.22);
-  if (mode === "distill") {
-    const selfShare = 1 - distillTeacherShare;
-    target *= 0.82 + selfShare * 0.45;
-  }
-  target *= stackModifiers.trainCostMult;
+  target = trainingEconomics.targetPfDays;
 
   const needVram = modelTrainVramGb(
     paramsB,
     activeParamsB,
-    family,
+    backbone === "moe" ? "moe" : family,
     numerics,
     state.player.researchUnlocked.includes("opt_checkpoint"),
   );
+  const requiredSystemRam = estimateTrainingMemoryGb({
+    paramsB,
+    activeParamsB,
+    family: backbone === "moe" ? "moe" : family,
+    numerics,
+    activationCheckpointing: state.player.researchUnlocked.includes("opt_checkpoint"),
+  }).requiredSystemRamGb;
   const placement = computeSnapshot(state);
   const haveVram = placement.vramGb;
   const trainingRam = trainingRamBudgetGb(state, placement);
@@ -1026,42 +1182,22 @@ export function startTraining(
     needVram,
     computePriority,
     placement,
+    requiredSystemRam,
   );
   if (!ramFit.ready) {
     return withAlert(
       state,
       "warn",
-      `Training RAM is a hard limit: ${ramFit.blockerName ?? "New run"} needs ${(ramFit.blockerRequiredGb ?? needVram).toFixed(0)} GB but would receive ${(ramFit.blockerAllocatedGb ?? ramFit.candidateAllocatedGb).toFixed(0)} GB after splitting the ${Math.round(trainingAllocationShare(state) * 100)}% Training allocation. Raise Training allocation, add memory, pause another run, or change priorities.`,
+      `Training RAM is a hard limit (${ramFit.blockerResource ?? "memory"}): ${ramFit.blockerName ?? "New run"} needs ${(ramFit.blockerRequiredGb ?? needVram).toFixed(0)} GB after splitting the ${Math.round(trainingAllocationShare(state) * 100)}% Training allocation. Add memory, raise Training allocation, pause another run, or change priorities.`,
     );
   }
 
   const reservedPf = Math.max(0, opts.reservedPf ?? 0);
-  const dailyThroughput = estimateJobDailyThroughput(state, {
-    numerics,
-    computePriority,
-    reservedPf,
-    concurrentJobs:
-      existingJobs.filter((job) => !job.paused && !job.failed).length + 1,
-  });
-  // Floor calendar duration at 30 days by scaling PF-day work at creation so
-  // ETA / progress forecasts remain honest under the allocated throughput.
-  target = enforceMinTrainingDuration(target, dailyThroughput);
 
   // Even tiny runs incur cluster setup, checkpointing, orchestration and eval
   // overhead. Preserve physical PF scaling while preventing zero-cost jobs.
-  const setupCost = Math.max(
-    1_000,
-    Math.floor(target * ECONOMY.trainUpfrontPerPfDay),
-  );
-  const dataCost = Math.floor(consume.cashCost);
-  const cashSunk = setupCost + dataCost;
-  const cashBurnPerDay = Math.floor(
-    ECONOMY.trainCashBurnPerPfDay *
-      Math.sqrt(Math.max(1, paramsB)) *
-      (1 +
-        Math.log10(Math.max(10, consume.trainMTok + consume.verifyMTok)) *
-          0.08),
-  );
+  const { setupCost, dataCost, cashBurnPerDay, upfrontCash: cashSunk } =
+    trainingEconomics;
   if (state.player.cash < cashSunk) {
     return withAlert(
       state,
@@ -1098,6 +1234,8 @@ export function startTraining(
     activeParamsB,
     targetPfDays: target,
     progressPfDays: 0,
+    minCalendarDays: trainingEconomics.minCalendarDays,
+    daysElapsed: 0,
     postTrain: "none",
     postTrainProgress: 0,
     postTrainTarget: 0,
@@ -1187,7 +1325,7 @@ export function startTraining(
   void baseContinueCap;
 
   const sizeLabel =
-    family === "moe"
+    backbone === "moe"
       ? `${formatParams(paramsB)} total / ${formatParams(activeParamsB ?? 0)} active`
       : formatParams(paramsB);
 
@@ -1263,7 +1401,7 @@ export function advancePostTrain(state: SimState, jobId?: string): SimState {
   if (!job) return state;
   const idx = POST_TRAIN_ORDER.indexOf(job.postTrain);
   if (idx < 0 || idx >= POST_TRAIN_ORDER.length - 1) return state;
-  if (job.progressPfDays < job.targetPfDays) return state;
+  if (!trainingMinimumStatus(job).ok) return state;
   if (job.postTrain !== "none" && job.postTrainProgress < job.postTrainTarget)
     return state;
 
@@ -1300,7 +1438,7 @@ export function selectPostTrain(
 ): SimState {
   const jobs = playerTrainingJobs(state);
   const job = jobs.find((candidate) => candidate.id === jobId);
-  if (!job || job.failed || job.progressPfDays < job.targetPfDays) return state;
+  if (!job || !trainingMinimumStatus(job).ok) return state;
   if (job.postTrain !== "none" && job.postTrainProgress < job.postTrainTarget) {
     return withAlert(
       state,
@@ -1376,6 +1514,7 @@ export function completeTrainingJobsNow(state: SimState): SimState {
       : {
           ...job,
           progressPfDays: Math.max(job.progressPfDays, job.targetPfDays, job.recommendedPfDays ?? 0),
+          daysElapsed: Math.max(job.daysElapsed ?? 0, job.minCalendarDays ?? 0),
           postTrainProgress: Math.max(job.postTrainProgress, job.postTrainTarget),
           awaitingDecision: true,
           paused: false,
@@ -1459,6 +1598,10 @@ function finalizeJob(
     ? jobs.find((candidate) => candidate.id === jobId)
     : jobs[0];
   if (!job || job.failed) return state;
+  const completionGate = trainingMinimumStatus(job);
+  if (!completionGate.ok) {
+    return withAlert(state, "warn", completionGate.reason ?? "Training is not complete.");
+  }
   const recommended = job.recommendedPfDays ?? job.targetPfDays;
   const atOrPastRecommended = job.progressPfDays + 1e-9 >= recommended;
   // Keep-internal / recommended milestone always allowed once base target reached.
@@ -1797,10 +1940,11 @@ function buildModelFromJob(
 ): Model {
   const effects = aggregateEffects(state.player.researchUnlocked);
   const family = job.family;
+  const backbone = job.backbone ?? backboneFromFamily(family);
   const stackModifiers = modelStackModifiers(job.modelStack ?? [], family);
   const paramsB = job.targetParamsB;
   const activeParamsB =
-    family === "moe" ? (job.activeParamsB ?? paramsB * 0.1) : undefined;
+    backbone === "moe" ? (job.activeParamsB ?? paramsB * 0.1) : undefined;
   const teacher = job.teacherId
     ? state.player.models.find((m) => m.id === job.teacherId)
     : undefined;
@@ -1856,7 +2000,7 @@ function buildModelFromJob(
   const researchMult =
     1 +
     Math.min(0.12, (effects.capabilityBonus ?? 0) * 0.015) +
-    (family === "moe" && state.player.researchUnlocked.includes("moe_hier")
+    ((family === "moe" || job.backbone === "moe") && state.player.researchUnlocked.includes("moe_hier")
       ? 0.04
       : 0);
   const trainComplete = Math.min(
@@ -1868,11 +2012,12 @@ function buildModelFromJob(
     paramsB,
     activeParamsB,
     family,
+    backbone,
     dataCoverage: coverage,
     dataQuality: dataQualityNorm,
     mixWeights: weights,
     researchMult:
-      family === "moe" && !state.player.researchUnlocked.includes("moe_routing")
+      (family === "moe" || job.backbone === "moe") && !state.player.researchUnlocked.includes("moe_routing")
         ? researchMult * 0.55
         : researchMult,
     trainComplete,
@@ -2012,12 +2157,13 @@ function buildModelFromJob(
 
   let inferCostMult = 1;
   let tokPerSecMult = 0.7;
-  if (family === "moe") {
+  const sparseBackbone = backbone === "moe";
+  if (sparseBackbone) {
     inferCostMult = (effects.moeInferMult as number | undefined) ?? 1.1;
     // active size drives serve cost
     const active = activeParamsB ?? paramsB * 0.1;
     inferCostMult *= Math.pow(active / Math.max(paramsB * 0.08, 0.1), 0.3);
-    tokPerSecMult = 0.85 * Math.pow(7 / Math.max(active, 0.5), 0.15);
+    tokPerSecMult = (family === "omni" ? 0.35 : 0.85) * Math.pow(7 / Math.max(active, 0.5), 0.15);
     if (!state.player.researchUnlocked.includes("moe_serve")) {
       tokPerSecMult *= 0.55;
     }
@@ -2030,10 +2176,13 @@ function buildModelFromJob(
   } else if (family === "diffusion") {
     inferCostMult = 1.4;
     tokPerSecMult = 0.4;
+  } else if (family === "omni") {
+    inferCostMult = 1;
+    tokPerSecMult = 0.35;
   }
 
   // Large dense models slower / costlier to serve
-  if (family !== "moe" && paramsB > 70) {
+  if (!sparseBackbone && paramsB > 70) {
     inferCostMult *= 1 + Math.log10(paramsB / 70) * 0.35;
     tokPerSecMult *= 1 / (1 + Math.log10(paramsB / 70) * 0.4);
   }
@@ -2115,11 +2264,12 @@ function buildModelFromJob(
     paramsB,
     activeParamsB,
     family,
+    backbone,
     dataCoverage: coverage,
     dataQuality: dataQualityNorm,
     mixWeights: weights,
     researchMult:
-      family === "moe" && !state.player.researchUnlocked.includes("moe_routing")
+      (family === "moe" || job.backbone === "moe") && !state.player.researchUnlocked.includes("moe_routing")
         ? researchMult * 0.55
         : researchMult,
     trainComplete,
@@ -2359,6 +2509,7 @@ function buildModelFromJob(
     paramsB,
     activeParamsB,
     family,
+    backbone,
     tokPerSecMult,
     capability,
   });
@@ -2383,7 +2534,7 @@ function buildModelFromJob(
     family,
     paramsB,
     activeParamsB,
-    backbone: job.backbone ?? backboneFromFamily(family),
+    backbone,
     productPreset,
     io: job.io
       ? {
@@ -2485,8 +2636,15 @@ export function tickTraining(state: SimState): SimState {
 
   const snap = computeSnapshot(state);
   const resources = playerTrainingResourcePlan(state, snap);
+  const isActive = (job: TrainingJob) =>
+    !job.failed &&
+    !job.paused &&
+    !job.awaitingDecision &&
+    (job.progressPfDays + 1e-9 < job.targetPfDays ||
+      (job.daysElapsed ?? 0) < (job.minCalendarDays ?? 0) ||
+      (job.postTrain !== "none" && job.postTrainProgress < job.postTrainTarget));
   const totalBurn = jobs.reduce(
-    (sum, job) => sum + (job.failed ? 0 : (job.cashBurnPerDay ?? 0)),
+    (sum, job) => sum + (isActive(job) ? (job.cashBurnPerDay ?? 0) : 0),
     0,
   );
   let cash = state.player.cash - totalBurn;
@@ -2510,6 +2668,8 @@ export function tickTraining(state: SimState): SimState {
 
   const nextJobs = jobs.map((job) => {
     if (job.failed) return job;
+    const active = isActive(job);
+    const daysElapsed = (job.daysElapsed ?? 0) + (active ? 1 : 0);
     const resource = resources.jobs[job.id];
     const trainPool = resource?.effectivePf ?? 0;
     const recommended = job.recommendedPfDays ?? job.targetPfDays;
@@ -2518,20 +2678,21 @@ export function tickTraining(state: SimState): SimState {
       dataCost: job.economics?.dataCost ?? 0,
       trainingCostAccrued:
         (job.economics?.trainingCostAccrued ?? 0) +
-        (job.failed ? 0 : (job.cashBurnPerDay ?? 0)),
+        (active ? (job.cashBurnPerDay ?? 0) : 0),
     };
     // Pause for decision when recommended compute is first reached.
     if (
       !job.awaitingDecision &&
       !job.paused &&
-      job.progressPfDays + 1e-9 < recommended &&
       job.progressPfDays + Math.max(0, trainPool) + 1e-9 >= recommended &&
+      daysElapsed >= (job.minCalendarDays ?? 0) &&
       (job.extensionDays ?? 0) === 0
     ) {
       const nextProgress = Math.min(job.targetPfDays, recommended);
       return {
         ...job,
         economics,
+        daysElapsed,
         progressPfDays: nextProgress,
         awaitingDecision: true,
         paused: true,
@@ -2554,12 +2715,13 @@ export function tickTraining(state: SimState): SimState {
           ? "No compatible training hardware is available."
           : null;
     if (job.paused || job.awaitingDecision) {
-      return { ...job, economics, stallReason };
+      return { ...job, economics, daysElapsed, stallReason };
     }
     if (resource && !resource.ramReady) {
       return {
         ...job,
         economics,
+        daysElapsed,
         stallReason: `Training RAM blocked: ${resource.ramRequiredGb.toFixed(0)} GB needed, ${resource.ramAllocatedGb.toFixed(0)} GB assigned from the ${Math.round(resources.trainingAllocationShare * 100)}% Training allocation. Raise Training allocation, add memory, or pause another run.`,
       };
     }
@@ -2581,6 +2743,7 @@ export function tickTraining(state: SimState): SimState {
           {
             ...job,
             economics,
+            daysElapsed,
             progressPfDays: nextProgress,
             lossHistory: appendLossPoint(
               job,
@@ -2596,6 +2759,7 @@ export function tickTraining(state: SimState): SimState {
       return {
         ...job,
         economics,
+        daysElapsed,
         stallReason,
         progressPfDays: nextProgress,
         lossHistory: appendLossPoint(
@@ -2629,6 +2793,7 @@ export function tickTraining(state: SimState): SimState {
         return failTrainingJob(
           {
             ...job,
+            daysElapsed,
             postTrainProgress: nextProgress,
             lossHistory: appendLossPoint(
               job,
@@ -2643,6 +2808,7 @@ export function tickTraining(state: SimState): SimState {
       }
       return {
         ...job,
+        daysElapsed,
         postTrainProgress: nextProgress,
         lossHistory: appendLossPoint(
           job,
@@ -2652,7 +2818,7 @@ export function tickTraining(state: SimState): SimState {
         ),
       };
     }
-    return job;
+    return { ...job, economics, daysElapsed, stallReason };
   });
   const next = withTrainingJobs(state, nextJobs);
   const newlyFailed = nextJobs.filter(
@@ -2674,4 +2840,3 @@ export function tickTraining(state: SimState): SimState {
 }
 
 export { formatParams, trainCostPfDays };
-export { enforceMinTrainingDuration, MIN_TRAINING_DAYS };
