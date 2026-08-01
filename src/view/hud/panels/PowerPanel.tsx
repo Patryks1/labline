@@ -22,6 +22,7 @@ import {
   gridScarcity,
   resolvePlayerPowerMw,
 } from "../../../sim/systems/map";
+import { fleetStats } from "../../../sim/systems/racks";
 import { useGameStore } from "../../../store/gameStore";
 import {
   EMPTY_NEGOTIATION,
@@ -31,11 +32,10 @@ import {
   useUiStore,
 } from "../../../store/uiStore";
 import { computeSnapshot } from "../../../sim/tick";
-import { money, mw } from "../format";
+import { money, mw, num, pct, pf } from "../format";
 import {
   EmptyState,
   HudButton,
-  MetricTile,
   PanelScaffold,
   StatusChip,
 } from "../ui/HudPrimitives";
@@ -62,6 +62,13 @@ type NegotiationState = {
 };
 
 type PowerTab = "status" | "contracts" | "desk";
+
+export type PowerMixSlice = {
+  id: string;
+  label: string;
+  mw: number;
+  color: string;
+};
 
 export function PowerPanel() {
   const state = useGameStore((store) => store.state);
@@ -113,6 +120,39 @@ export function PowerPanel() {
       ? Math.min(1, (balance.demandMw - short) / balance.demandMw)
       : 1;
 
+  // Power mix: generated MW feed demand first (split by source), contracts and
+  // spot cover the rest, and any surplus leaves as export or curtailment.
+  const contractCapMw = importContracts.reduce(
+    (sum, contract) => sum + Math.max(0, contract.mw),
+    0,
+  );
+  const genUsedShare =
+    balance.genMw > 1e-6 ? balance.generationUsedMw / balance.genMw : 0;
+  const mixSlices: PowerMixSlice[] = [];
+  const pushSlice = (id: string, label: string, sliceMw: number, color: string) => {
+    if (sliceMw > 1e-4) mixSlices.push({ id, label, mw: sliceMw, color });
+  };
+  pushSlice("solar", "Solar", balance.genBySourceMw.solarMw * genUsedShare, "#ffd166");
+  pushSlice("gas", "Gas", balance.genBySourceMw.gasMw * genUsedShare, "#e8ad56");
+  pushSlice("nuclear", "Nuclear", balance.genBySourceMw.nuclearMw * genUsedShare, "#a58be0");
+  pushSlice("other-gen", "Other on-site", balance.genBySourceMw.otherMw * genUsedShare, "#56e1dc");
+  importContracts.forEach((contract, index) => {
+    const deliveredMw =
+      contractCapMw > 1e-6
+        ? (bill.contractMw * Math.max(0, contract.mw)) / contractCapMw
+        : 0;
+    pushSlice(
+      `city-${contract.id}`,
+      `${contract.cityName} contract`,
+      deliveredMw,
+      `rgba(95,167,232,${Math.max(0.45, 1 - index * 0.18)})`,
+    );
+  });
+  pushSlice("ppa", "PPA import", bill.energyContractMw, "#7aa2ff");
+  pushSlice("spot", "Spot import", bill.spotMw, "#8babb1");
+  pushSlice("export", "Export (sold)", balance.exportMw, "#48d7d1");
+  pushSlice("curtailed", "Curtailed", balance.curtailedMw, "rgba(139,171,181,.45)");
+
   return (
     <PanelScaffold
       eyebrow="Infrastructure"
@@ -120,30 +160,54 @@ export function PowerPanel() {
       description="Grid MW, utility contracts, and surplus export."
     >
       <div className="space-y-3">
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <MetricTile
-            label="Demand"
-            value={mw(balance.demandMw)}
-            tone="warning"
-          />
-          <MetricTile
-            label="On-site"
-            value={mw(balance.genMw)}
-            tone="positive"
-          />
-          <MetricTile
-            label="Short"
-            value={mw(short)}
-            tone={short > 0.05 ? "danger" : "positive"}
-            detail={short > 0.05 ? "Tight" : "Covered"}
-          />
-          <MetricTile
-            label="Available"
-            value={mw(resolved.mwAvailable)}
-            tone={short > 0.05 ? "danger" : "positive"}
-            detail={`${money(wholesale)}/MWh spot`}
-          />
-        </div>
+        <GameCard
+          eyebrow="Power mix"
+          title="Where the MW come from"
+          tone={short > 0.05 ? "danger" : "mint"}
+          actions={
+            short > 0.05 ? (
+              <StatusChip tone="danger">Short {mw(short)}</StatusChip>
+            ) : (
+              <StatusChip tone="positive">Covered</StatusChip>
+            )
+          }
+        >
+          <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3">
+            <PowerMixDonut
+              slices={mixSlices}
+              coveredPct={supplyRatio}
+              demandMw={balance.demandMw}
+            />
+            <div className="min-w-0 space-y-0.5">
+              {mixSlices.length === 0 ? (
+                <p className="text-[0.8125rem] text-muted">
+                  No supply yet — build generation or buy grid power.
+                </p>
+              ) : (
+                mixSlices.map((slice) => (
+                  <div
+                    key={slice.id}
+                    className="flex min-w-0 items-baseline justify-between gap-3 py-0.5"
+                  >
+                    <span className="flex min-w-0 items-center gap-1.5 text-[0.8125rem] text-muted">
+                      <span
+                        className="h-2 w-2 shrink-0 rounded-full"
+                        style={{ background: slice.color }}
+                      />
+                      <span className="truncate">{slice.label}</span>
+                    </span>
+                    <span className="shrink-0 font-mono text-[0.8125rem] tabular-nums text-bone">
+                      {mw(slice.mw)}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+          <div className="mt-2 border-t border-line/50 pt-1">
+            <StatRow label="Spot price" value={`${money(wholesale)}/MWh`} />
+          </div>
+        </GameCard>
 
         <GameCard
           eyebrow="Supply vs demand"
@@ -212,6 +276,8 @@ export function PowerPanel() {
             />
           </div>
         </GameCard>
+
+        <PowerEfficiencyCard state={state} />
 
         <SegmentedTabs
           ariaLabel="Power sections"
@@ -438,6 +504,15 @@ function ContractDesk({
   const selectedCity = cities.find(
     ({ city }) => city.id === negotiation.cityId,
   );
+  // Only list cities that can deliver in the current mode (quote rule).
+  const deskCities = cities.filter((row) =>
+    negotiation.mode === "import"
+      ? row.connectorAvailableMw > 0
+      : row.genInZone > 0,
+  );
+  const selectionOutOfZone =
+    selectedCity != null &&
+    !deskCities.some((row) => row.city.id === selectedCity.city.id);
   const defaultOffer = Math.round(
     importQuote
       ? importQuote.askPricePerMWh * 0.94
@@ -573,15 +648,21 @@ function ContractDesk({
   const providerCopy =
     conversation.status === "signed"
       ? "The agreement is active. Power and settlement start immediately."
-      : importQuote
-        ? canNegotiate
-          ? `We can reserve up to ${mw(importQuote.contractMw)} at ${money(importQuote.askPricePerMWh)}/MWh.`
-          : `Commission a grid connector inside ${importQuote.cityName} before buying power here.`
-        : exportQuote
+      : contactLocked
+        ? `Our traders are tied up — reach us again on day ${contactAgainDay}.`
+        : importQuote
           ? canNegotiate
-            ? `We can buy up to ${mw(exportQuote.contractMw)} of your surplus at ${money(exportQuote.utilityOfferPerMWh)}/MWh.`
-            : `Build generation inside ${exportQuote.cityName} before offering surplus power.`
-          : "Select a city utility to open a negotiation.";
+            ? `We can reserve up to ${mw(importQuote.contractMw)} at ${money(importQuote.askPricePerMWh)}/MWh.`
+            : `No commissioned grid interconnect inside ${importQuote.cityName}'s power zone${
+                selectedCity
+                  ? ` (needs one within ~${selectedCity.city.powerRadius} tiles of the city core)`
+                  : ""
+              }. Place one from the build tray's Power tab on the map.`
+          : exportQuote
+            ? canNegotiate
+              ? `We can buy up to ${mw(exportQuote.contractMw)} of your surplus at ${money(exportQuote.utilityOfferPerMWh)}/MWh.`
+              : `Build generation inside ${exportQuote.cityName} before offering surplus power.`
+            : "Select a city utility to open a negotiation.";
 
   const blockers = !canNegotiate
     ? [{ text: providerCopy, tone: "warning" as const }]
@@ -613,11 +694,24 @@ function ContractDesk({
             className="min-w-0 flex-1 bg-transparent text-right text-[0.8125rem] font-medium text-bone outline-none"
             aria-label="City utility"
           >
-            {cities.map(({ city }) => (
+            {deskCities.map(({ city }) => (
               <option key={city.id} value={city.id} className="bg-void">
                 {city.name} Utility
               </option>
             ))}
+            {selectedCity && selectionOutOfZone ? (
+              <option
+                value={selectedCity.city.id}
+                disabled
+                className="bg-void"
+              >
+                {selectedCity.city.name} Utility — no{" "}
+                {negotiation.mode === "import"
+                  ? "interconnect"
+                  : "generation"}{" "}
+                in zone
+              </option>
+            ) : null}
           </select>
         </label>
 
@@ -787,6 +881,177 @@ function ContractDesk({
           </HudButton>
         )}
       </div>
+    </GameCard>
+  );
+}
+
+export function PowerMixDonut({
+  slices,
+  coveredPct,
+  demandMw,
+}: {
+  slices: PowerMixSlice[];
+  coveredPct: number;
+  demandMw: number;
+}) {
+  const r = 34;
+  const c = 2 * Math.PI * r;
+  const total = slices.reduce((sum, slice) => sum + Math.max(0, slice.mw), 0);
+  let offset = 0;
+  const arcs = slices
+    .filter((slice) => slice.mw > 1e-4)
+    .map((slice) => {
+      const len = total > 0 ? (Math.max(0, slice.mw) / total) * c : 0;
+      const start = offset;
+      offset += len;
+      return { ...slice, len, start };
+    });
+  return (
+    <div className="relative h-24 w-24 shrink-0">
+      <svg
+        viewBox="0 0 88 88"
+        className="h-24 w-24"
+        role="img"
+        aria-label="Power supply mix"
+      >
+        <circle
+          cx="44"
+          cy="44"
+          r={r}
+          fill="none"
+          stroke="rgba(139,171,181,.22)"
+          strokeWidth="10"
+        />
+        {arcs.map((arc) => (
+          <circle
+            key={arc.id}
+            cx="44"
+            cy="44"
+            r={r}
+            fill="none"
+            stroke={arc.color}
+            strokeWidth="10"
+            strokeDasharray={`${arc.len} ${c - arc.len}`}
+            strokeDashoffset={c * 0.25 - arc.start}
+            strokeLinecap="butt"
+          />
+        ))}
+      </svg>
+      <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+        <strong className="font-mono text-sm font-semibold tabular-nums text-bone">
+          {pct(coveredPct)}
+        </strong>
+        <span className="text-[0.625rem] uppercase tracking-[0.12em] text-muted">
+          of {mw(demandMw)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+export function PowerEfficiencyCard({ state }: { state: SimState }) {
+  const snap = computeSnapshot(state);
+  const fleet = fleetStats(state);
+  const hasCompute = snap.rawFlopsPf > 1e-6;
+  const pfPerMw = snap.mwDemand > 1e-6 ? snap.rawFlopsPf / snap.mwDemand : 0;
+  const conversionLoss = hasCompute
+    ? Math.max(0, 1 - snap.effectiveFlopsPf / snap.rawFlopsPf)
+    : 0;
+  const pueOverhead = 1 - 1 / Math.max(1.0001, snap.pue);
+  const fleetMwPerPf = fleet.flopsPf > 1e-6 ? fleet.mw / fleet.flopsPf : 0;
+  const history = state.player.powerEfficiencyHistory ?? [];
+  const first = history[0];
+  const last = history[history.length - 1];
+  const trendDelta =
+    first && last && first.pfPerMw > 1e-9
+      ? (last.pfPerMw - first.pfPerMw) / first.pfPerMw
+      : 0;
+  const historyMax = history.length
+    ? Math.max(...history.map((sample) => sample.pfPerMw))
+    : 1;
+  const historyMin = history.length
+    ? Math.min(...history.map((sample) => sample.pfPerMw))
+    : 0;
+  const historyRange = Math.max(1e-9, historyMax - historyMin);
+  const sparkPoints = history
+    .map((sample, index) => {
+      const x = history.length > 1 ? (index / (history.length - 1)) * 96 : 48;
+      const y = 19 - ((sample.pfPerMw - historyMin) / historyRange) * 17;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+
+  return (
+    <GameCard eyebrow="Power → compute" title="Compute efficiency" tone="mint">
+      <div className="flex flex-wrap items-baseline gap-x-1.5 text-[0.8125rem]">
+        <span className="font-mono tabular-nums text-bone">
+          {mw(snap.mwDemand)}
+        </span>
+        <span className="text-muted">→</span>
+        <span className="font-mono tabular-nums text-bone">
+          {pf(snap.rawFlopsPf)} raw
+        </span>
+        <span className="text-muted">→</span>
+        <span className="font-mono tabular-nums text-mint">
+          {pf(snap.effectiveFlopsPf)} effective
+        </span>
+      </div>
+      <div className="mt-2 space-y-2">
+        <MeterBar
+          label="Draw → IT power"
+          value={1 - pueOverhead}
+          detail={`PUE ${snap.pue.toFixed(2)} · ${pct(pueOverhead)} overhead`}
+          tone={pueOverhead > 0.3 ? "warning" : "positive"}
+        />
+        <MeterBar
+          label="Raw → effective compute"
+          value={hasCompute ? 1 - conversionLoss : 0}
+          detail={
+            hasCompute
+              ? `${pct(conversionLoss)} lost to throttling & allocation`
+              : "No compute online"
+          }
+          tone={conversionLoss > 0.25 ? "warning" : "positive"}
+        />
+      </div>
+      <div className="mt-2 space-y-0.5">
+        <StatRow label="PF per MW" value={num(pfPerMw)} strong />
+        <StatRow
+          label="Fleet draw"
+          value={
+            fleetMwPerPf > 0 ? `${fleetMwPerPf.toFixed(3)} MW/PF` : "—"
+          }
+        />
+      </div>
+      {history.length >= 2 ? (
+        <div className="mt-2 flex items-center gap-2">
+          <svg
+            viewBox="0 0 96 20"
+            className="h-5 w-24 shrink-0"
+            role="img"
+            aria-label="PF per MW trend"
+          >
+            <polyline
+              points={sparkPoints}
+              fill="none"
+              stroke="#56e1dc"
+              strokeWidth="1.5"
+            />
+          </svg>
+          <span className="text-[0.6875rem] text-muted">
+            PF/MW {trendDelta >= 0 ? "up" : "down"} {pct(Math.abs(trendDelta), 1)}{" "}
+            over {history.length}d
+          </span>
+        </div>
+      ) : (
+        <p className="mt-2 text-[0.6875rem] text-muted">
+          Trend builds over the next few days.
+        </p>
+      )}
+      <p className="mt-2 text-[0.6875rem] leading-snug text-muted">
+        Efficiency rises with better chips (lower fleet MW/PF) and optimization
+        research.
+      </p>
     </GameCard>
   );
 }

@@ -21,6 +21,7 @@ import {
   money,
   mwToPf,
   pct,
+  pf,
   pfToMw,
   pricePerMwDayFromPf,
 } from "../format";
@@ -306,11 +307,11 @@ export function ComputeMarketPanel() {
             <div className="min-w-0 space-y-1.5">
               <StatRow
                 label="Owned"
-                value={computeMw(pfToMw(ownedPf))}
+                value={pf(ownedPf)}
                 tone="positive"
                 strong
               />
-              <StatRow label="Rented" value={computeMw(pfToMw(rentedPf))} tone="serve" />
+              <StatRow label="Rented" value={pf(rentedPf)} tone="serve" />
               <StatRow
                 label="Rented RAM"
                 value={gb(remoteAcceleratorRamGb(rentedPf))}
@@ -855,7 +856,7 @@ function OwnedRentedDonut({
         viewBox="0 0 88 88"
         className="h-24 w-24"
         role="img"
-        aria-label="Owned versus rented compute"
+        aria-label={`Owned ${pf(owned)} versus rented ${pf(rented)} compute`}
       >
         <circle
           cx="44"
@@ -890,10 +891,10 @@ function OwnedRentedDonut({
       </svg>
       <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
         <strong className="font-mono text-sm font-semibold tabular-nums text-bone">
-          {computeMw(pfToMw(total))}
+          {pf(total)}
         </strong>
         <span className="text-[0.625rem] uppercase tracking-[0.12em] text-muted">
-          total
+          ≈ {computeMw(pfToMw(total))} electrical
         </span>
       </div>
     </div>

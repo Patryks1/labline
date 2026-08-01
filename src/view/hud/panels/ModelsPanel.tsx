@@ -77,7 +77,11 @@ import { safetyCampaignEstimate } from "../../../sim/systems/safetyCampaigns";
 import { playerStaff } from "../../../sim/systems/staff";
 import { RadarChart } from "../ui/RadarChart";
 import { TrainingDataRadar } from "../ui/TrainingDataRadar";
-import { syntheticTrainingProfile } from "../../../sim/balance/syntheticTraining";
+import {
+  syntheticExpansionUnlocked,
+  syntheticTrainingProfile,
+  teacherSyntheticHeadroomMTok,
+} from "../../../sim/balance/syntheticTraining";
 import { PanelScaffold, HudButton, MetricTile } from "../ui/HudPrimitives";
 import {
   BlockerList,
@@ -304,11 +308,19 @@ export function ModelsPanel() {
   }, [unlocked]);
   const mixUnlocked = unlocked.includes("data_mix");
   const synthUnlocked = unlocked.includes("data_synth");
-  const effectiveSyntheticMultiplier =
-    allowSynthetic && synthUnlocked ? syntheticMultiplier : 0;
-  const dataMTok = realDataMTok * (1 + effectiveSyntheticMultiplier);
-
   const teachers = state.player.models;
+  const distillTeacher =
+    mode === "distill"
+      ? teachers.find((model) => model.id === teacherId)
+      : undefined;
+  const synthExpansionUnlocked = syntheticExpansionUnlocked({
+    synthResearchUnlocked: synthUnlocked,
+    mode,
+    hasDistillTeacher: !!distillTeacher,
+  });
+  const effectiveSyntheticMultiplier =
+    allowSynthetic && synthExpansionUnlocked ? syntheticMultiplier : 0;
+  const dataMTok = realDataMTok * (1 + effectiveSyntheticMultiplier);
   const modelIteration = useMemo(
     () => resolveModelIteration(teachers, name),
     [teachers, name],
@@ -365,7 +377,7 @@ export function ModelsPanel() {
       totalMTok: dataMTok,
       trainShare,
       weights,
-      allowSynthetic: allowSynthetic && synthUnlocked,
+      allowSynthetic: allowSynthetic && synthExpansionUnlocked,
       includeSynthHQ: includeSynthHQ && allowSynthetic && synthUnlocked,
       includeSynthLQ: includeSynthLQ && allowSynthetic && synthUnlocked,
       syntheticTeacherIds,
@@ -377,6 +389,7 @@ export function ModelsPanel() {
       weights,
       allowSynthetic,
       synthUnlocked,
+      synthExpansionUnlocked,
       includeSynthHQ,
       includeSynthLQ,
       syntheticTeacherIds,
@@ -714,6 +727,18 @@ export function ModelsPanel() {
     computePfDays: Math.max(0, trainingForecast.targetPfDays),
     seed: `${state.seed}:${family}:${Math.round(realDataMTok)}:${effectiveSyntheticMultiplier.toFixed(1)}`,
   });
+  // Distill: the teacher is the synthetic generator — per-domain headroom comes
+  // from its training corpus, gated by teacher tier (weak teachers pass less).
+  const distillSyntheticHeadroom = useMemo(
+    () =>
+      distillTeacher
+        ? teacherSyntheticHeadroomMTok({
+            teacher: distillTeacher,
+            frontierCapability: syntheticFrontierCapability,
+          })
+        : null,
+    [distillTeacher, syntheticFrontierCapability],
+  );
   const evaluatedActive = useMemo(
     () => (active ? normalizeModelEvaluations(active) : null),
     [active],
@@ -1367,7 +1392,7 @@ export function ModelsPanel() {
                       <span className="text-mint">
                         {formatTokens(syntheticProfile.realMTok)} real
                       </span>
-                      {synthUnlocked ? (
+                      {synthExpansionUnlocked ? (
                         <>
                           <span className="mx-1 text-muted">+</span>
                           <span className="text-research">
@@ -1399,7 +1424,7 @@ export function ModelsPanel() {
                       </>
                     )}
                   </p>
-                  {synthUnlocked ? (
+                  {synthExpansionUnlocked ? (
                     <label className="mt-2 block text-[0.8125rem] text-muted">
                       Real corpus ·{" "}
                       {formatTokens(Math.min(realDataMTok, processedAvail))}
@@ -1437,7 +1462,7 @@ export function ModelsPanel() {
                       max={7}
                       step={0.1}
                       value={effectiveSyntheticMultiplier}
-                      disabled={!synthUnlocked || !strongestTeacher}
+                      disabled={!synthExpansionUnlocked || !strongestTeacher}
                       onChange={(event) => {
                         const value = Number(event.target.value);
                         setSyntheticMultiplier(value);
@@ -1447,6 +1472,13 @@ export function ModelsPanel() {
                       className="mt-1 w-full"
                     />
                   </label>
+                  {!synthUnlocked && distillTeacher ? (
+                    <p className="mt-1 text-[0.625rem] leading-snug text-muted">
+                      {distillTeacher.name} is the generator — synthetic tokens
+                      past your owned corpus come from the teacher for this
+                      distill run.
+                    </p>
+                  ) : null}
                   <label className="mt-2 block text-[0.8125rem] text-muted">
                     Train {Math.round(trainShare * 100)}% / Verify{" "}
                     {Math.round((1 - trainShare) * 100)}%
@@ -1485,6 +1517,10 @@ export function ModelsPanel() {
                   autoBalanceDisabled={!mixUnlocked}
                   syntheticUnlocked={synthUnlocked}
                   syntheticMultiplier={effectiveSyntheticMultiplier}
+                  syntheticHeadroomMTok={
+                    distillSyntheticHeadroom ?? undefined
+                  }
+                  syntheticSource={distillTeacher ? "teacher" : "lab"}
                   teachers={teachers}
                   syntheticTeacherIds={syntheticTeacherIds}
                   includeSynthHQ={includeSynthHQ && synthUnlocked}

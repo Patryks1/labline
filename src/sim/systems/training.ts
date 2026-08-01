@@ -57,11 +57,11 @@ export const TRAINING_EXTENSION_DAYS = 10;
 export const TRAINING_BENCHMARK_MIN_PROGRESS = 0.1;
 export const TRAINING_BENCHMARK_COOLDOWN_DAYS = 7;
 import { suggestApiInOut } from "../balance/pricing";
-import { DATA_DOMAIN_META, DATA_DOMAINS } from "../balance/data";
+import { DATA_DOMAIN_META, DATA_DOMAINS, normalizeDomainStock } from "../balance/data";
 import { modelTrainVramGb } from "../balance/racks";
 import { fleetStats, resolveRackSku } from "./racks";
 import { modelCanCurateDataDomain } from "./modelEligibility";
-import type { DataMix, TrainingDataPlan } from "../types";
+import type { DataDomain, DataMix, LabData, SyntheticFillRecord, TrainingDataPlan } from "../types";
 import {
   consumeForTraining,
   ensureLabData,
@@ -73,11 +73,15 @@ import {
   specialistDomainBoost,
   totalProcessed,
 } from "./data";
+import type { ConsumeResult } from "./data";
 import { lqSynthCapabilityMult, normalizeWeights } from "../balance/data";
 import { createDataManifest } from "./dataAssets";
 import { modelStackModifiers, sanitizeModelStack } from "../balance/modelStack";
 import { normalizeModelEvaluations } from "../balance/evaluationSuites";
-import { syntheticTrainingProfile } from "../balance/syntheticTraining";
+import {
+  syntheticTrainingProfile,
+  teacherSyntheticHeadroomMTok,
+} from "../balance/syntheticTraining";
 import {
   completedPostTrainStages,
   postTrainEffectProfile,
@@ -1069,6 +1073,143 @@ function failTrainingJob(
   };
 }
 
+/**
+ * Hard per-domain cap (MTok) for training-data radar drags. Without synthetic
+ * expansion the drag stops at the owned real corpus; with expansion the recipe
+ * may oversubscribe real stock with generated tokens, hard-capped at 8× the
+ * domain's real + synthetic (e.g. distill teacher) base.
+ */
+export function trainingDataDomainCapMTok(
+  realAvailableMTok: number,
+  syntheticAvailableMTok: number,
+  syntheticMultiplier: number,
+): number {
+  const real = Math.max(0, realAvailableMTok);
+  if (!(syntheticMultiplier > 0)) return real;
+  const base = real + Math.max(0, syntheticAvailableMTok);
+  return Math.min(base * (1 + syntheticMultiplier), base * 8);
+}
+
+/**
+ * Distill: the selected teacher doubles as the synthetic generator, so the
+ * recipe may oversubscribe the owned corpus even without Synthetic Generators
+ * research. Top up per-domain shortfalls with teacher-generated tokens (bounded
+ * by the shared radar cap against the teacher's corpus headroom) and record
+ * provenance so finalize's syntheticTrainingProfile math keys off the teacher.
+ */
+function fillDistillTeacherSynthetic(
+  consume: ConsumeResult,
+  opts: {
+    teacher: Model;
+    labData: LabData;
+    weights: Record<DataDomain, number>;
+    requestedTotalMTok: number;
+    syntheticMultiplier: number;
+    frontierCapability: number;
+    paramsB: number;
+  },
+): ConsumeResult {
+  const { teacher } = opts;
+  const multiplier = Math.max(0, opts.syntheticMultiplier);
+  if (multiplier <= 0) return consume;
+  const headroom = teacherSyntheticHeadroomMTok({
+    teacher,
+    frontierCapability: opts.frontierCapability,
+  });
+  const quality = Math.min(92, 48 + teacher.capability * 0.55);
+  const qualityTier = quality >= 58 ? ("hq" as const) : ("lq" as const);
+  const consumed = { ...consume.consumed };
+  const domainQuality = { ...consume.domainQuality };
+  const lowQualityShareByDomain = { ...consume.lowQualityShareByDomain };
+  const provenance: SyntheticFillRecord[] = [];
+  for (const domain of DATA_DOMAINS) {
+    const want = Math.max(0, opts.requestedTotalMTok * opts.weights[domain]);
+    const prior = consumed[domain] ?? 0;
+    const short = want - prior;
+    if (short <= 0.01) continue;
+    const stock = normalizeDomainStock(opts.labData.stocks[domain]);
+    const realAvailable = Math.max(
+      0,
+      stock.processed - stock.fromSynthHQ - stock.fromSynthLQ,
+    );
+    const cap = trainingDataDomainCapMTok(
+      realAvailable,
+      headroom[domain],
+      multiplier,
+    );
+    const fill = Math.min(short, Math.max(0, cap - prior));
+    if (fill <= 0.01) continue;
+    consumed[domain] = prior + fill;
+    domainQuality[domain] =
+      ((domainQuality[domain] ?? consume.qualityUsed) * prior +
+        quality * fill) /
+      Math.max(0.01, prior + fill);
+    lowQualityShareByDomain[domain] =
+      qualityTier === "lq" ? fill / Math.max(0.01, prior + fill) : 0;
+    provenance.push({
+      domain,
+      teacherModelId: teacher.id,
+      teacherName: teacher.name,
+      volumeMTok: fill,
+      quality,
+      qualityTier,
+    });
+  }
+  if (!provenance.length) return consume;
+  const actualVolume = Object.values(consumed).reduce(
+    (sum, value) => sum + (value ?? 0),
+    0,
+  );
+  let qualityAcc = 0;
+  for (const domain of DATA_DOMAINS) {
+    const volume = consumed[domain] ?? 0;
+    if (volume > 0) {
+      qualityAcc += (domainQuality[domain] ?? consume.qualityUsed) * volume;
+    }
+  }
+  const trainShare = consume.plan.trainShare;
+  const teacherSynthMTok = provenance.reduce(
+    (sum, record) => sum + record.volumeMTok,
+    0,
+  );
+  const synthHqUnits =
+    (consume.synthHqUnits ?? 0) +
+    (qualityTier === "hq" ? teacherSynthMTok : 0);
+  const synthLqUnits =
+    (consume.synthLqUnits ?? 0) +
+    (qualityTier === "lq" ? teacherSynthMTok : 0);
+  const syntheticProvenance = [
+    ...(consume.syntheticProvenance ?? []),
+    ...provenance,
+  ];
+  return {
+    ...consume,
+    plan: {
+      ...consume.plan,
+      totalMTok: actualVolume,
+      totalUnits: actualVolume,
+      syntheticProvenance,
+    },
+    consumed,
+    coverage: Math.min(
+      30,
+      actualVolume / Math.max(1, minDataMTokForParams(opts.paramsB)),
+    ),
+    qualityUsed:
+      actualVolume > 0 ? qualityAcc / actualVolume : consume.qualityUsed,
+    syntheticUnits: consume.syntheticUnits + teacherSynthMTok,
+    synthHqUnits,
+    synthLqUnits,
+    synthLqShare: actualVolume > 0 ? synthLqUnits / actualVolume : 0,
+    cashCost: consume.cashCost + teacherSynthMTok * 250,
+    trainMTok: actualVolume * trainShare,
+    verifyMTok: actualVolume * (1 - trainShare),
+    domainQuality,
+    lowQualityShareByDomain,
+    syntheticProvenance,
+  };
+}
+
 export function estimateTrainingCost(
   state: SimState,
   opts: Pick<
@@ -1296,13 +1437,15 @@ export function startTraining(
     allowSynthetic: opts.dataPlan?.allowSynthetic ?? true,
     includeSynthHQ: opts.dataPlan?.includeSynthHQ ?? true,
     includeSynthLQ: opts.dataPlan?.includeSynthLQ ?? false,
+    syntheticTeacherIds: opts.dataPlan?.syntheticTeacherIds,
+    syntheticMultiplier: opts.dataPlan?.syntheticMultiplier,
     domainModels: specialistsUnlocked ? opts.dataPlan?.domainModels : undefined,
     syntheticTeacherIds: opts.dataPlan?.syntheticTeacherIds
       ? { ...opts.dataPlan.syntheticTeacherIds }
       : undefined,
     syntheticMultiplier: opts.dataPlan?.syntheticMultiplier,
   };
-  const consume = consumeForTraining(
+  let consume = consumeForTraining(
     state,
     dataPlan,
     paramsB,
@@ -1327,6 +1470,30 @@ export function startTraining(
   }
 
   const planWeights = normalizeWeights(consume.plan.weights);
+  if (mode === "distill" && teacherId && dataPlan.allowSynthetic) {
+    const teacher = state.player.models.find((m) => m.id === teacherId);
+    if (teacher) {
+      consume = fillDistillTeacherSynthetic(consume, {
+        teacher,
+        labData: ensureLabData(state),
+        weights: planWeights,
+        requestedTotalMTok: volumeMTok,
+        syntheticMultiplier: dataPlan.syntheticMultiplier ?? 0,
+        frontierCapability: Math.max(
+          teacher.capability,
+          ...state.player.models
+            .filter((model) => model.release === "released" || model.shipped)
+            .map((model) => model.capability),
+          ...state.rivals.flatMap((rival) =>
+            rival.models
+              .filter((model) => model.release === "released" || model.shipped)
+              .map((model) => model.capability),
+          ),
+        ),
+        paramsB,
+      });
+    }
+  }
   // Multimodal families need matching data
   if (family === "diffusion" && planWeights.image < 0.15) {
     return withAlert(
@@ -1524,6 +1691,7 @@ export function startTraining(
     dataPlan: {
       ...consume.plan,
       weights: planWeights,
+      syntheticMultiplier: dataPlan.syntheticMultiplier,
       uniqueMTok: dataAnalysis.uniqueMTok,
       repeatedMTok: dataAnalysis.repeatedMTok,
     },

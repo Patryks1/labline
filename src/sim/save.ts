@@ -10,6 +10,7 @@ import type {
   MapRegion,
   MapTile,
   Model,
+  PowerEfficiencySample,
   RackDesign,
   RackInstall,
   RivalTrainJob,
@@ -731,6 +732,19 @@ function restoreState(stateRaw: unknown, snapshot: DynamicWorldSnapshotV2 | null
   restored.player.researchUnlocked = ensureArray(restored.player.researchUnlocked)
   restored.player.researchQueue = ensureArray(restored.player.researchQueue)
   restored.player.chips = ensureArray(restored.player.chips)
+  // Keep the Power panel trend inside its 30-day window and drop corrupt samples.
+  restored.player.powerEfficiencyHistory = ensureArray<PowerEfficiencySample>(
+    restored.player.powerEfficiencyHistory,
+  )
+    .filter(
+      (sample) =>
+        sample && Number.isFinite(sample.day) && Number.isFinite(sample.pfPerMw),
+    )
+    .map((sample) => ({
+      day: Math.floor(sample.day),
+      pfPerMw: Math.max(0, sample.pfPerMw),
+    }))
+    .slice(-30)
   restored.rivals = (ensureArray(restored.rivals) as SimState['rivals']).map((rival) => {
     const canonicalJobs = ensureArray<TrainingJob>(rival.trainingJobs).map(normalizeTrainingJob)
     if (canonicalJobs.length === 0 && rival.trainingJob) {

@@ -1053,6 +1053,8 @@ export interface TrainingDataPlan {
   /** V3: unique/repeated exposure used for saturation and memorization risk. */
   uniqueMTok?: number;
   repeatedMTok?: number;
+  /** Synthetic fill provenance for this recipe (teacher-generated in distill). */
+  syntheticProvenance?: SyntheticFillRecord[];
 }
 
 export interface Model {
@@ -2743,6 +2745,8 @@ export interface PlayerState {
   /** Active bank loans / credit lines */
   loans: ActiveLoan[];
   capital?: CapitalStack;
+  /** Daily raw-PF-per-drawn-MW samples for the Power panel trend (newest last). */
+  powerEfficiencyHistory?: PowerEfficiencySample[];
 }
 
 export interface WorldEvent {
@@ -3161,4 +3165,10 @@ export interface SimState {
 export interface TickResult {
   state: SimState;
   events: string[];
+}
+
+/** One daily power→compute efficiency sample (raw PF per drawn MW). */
+export interface PowerEfficiencySample {
+  day: number;
+  pfPerMw: number;
 }

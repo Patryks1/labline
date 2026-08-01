@@ -1,13 +1,13 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { CaretDown, CaretUp } from '@phosphor-icons/react'
-import { gridScarcity } from '../../sim/systems/map'
+import { gridScarcity, resolvePlayerPowerMw } from '../../sim/systems/map'
 import {
   buildComputeBreakdown,
   type PoolBreakdown,
 } from '../../sim/systems/computeBreakdown'
 import { useGameStore } from '../../store/gameStore'
 import { computeSnapshot, inferenceTokensPerDay } from '../../sim/tick'
-import { mw, num, pct, pf } from './format'
+import { mw, num, pct, pf, pfLong } from './format'
 import { SliderField } from './ui/SliderField'
 
 /**
@@ -46,6 +46,7 @@ export function BottomBar() {
     : 1
   const racksTight = snap.rackCap > 0 && snap.racksUsed / snap.rackCap >= 0.95
   const powerTight = snap.mwAvailable > 0 && snap.mwDemand / snap.mwAvailable >= 0.9
+  const resolved = resolvePlayerPowerMw(state, snap.mwDemand)
 
   return (
     <footer
@@ -56,9 +57,10 @@ export function BottomBar() {
         <div className="relative z-10 mb-1.5 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap font-mono text-[0.75rem]">
           <Stat
             label="Compute"
-            value={pf(snap.rawFlopsPf)}
+            value={pf(snap.effectiveFlopsPf)}
+            sub={snap.effectiveFlopsPf >= 1000 ? `· ${pfLong(snap.effectiveFlopsPf)}` : undefined}
             className="hidden sm:inline-flex"
-            title={`Raw capacity ${pf(snap.rawFlopsPf)} · effective compute ${pf(snap.effectiveFlopsPf)} · yield ${pct(breakdown.fleetYield, 0)}`}
+            title={`Effective compute ${pf(snap.effectiveFlopsPf)} of ${pf(snap.rawFlopsPf)} raw · yield ${pct(breakdown.fleetYield, 0)} · PF = petaFLOPS, 1 EF = 1,000 PF of compute capacity`}
           />
           <Stat
             label="Power"
@@ -66,6 +68,7 @@ export function BottomBar() {
             sub={`/ ${mw(snap.mwAvailable)}`}
             danger={snap.throttled || powerTight}
             className="hidden md:inline-flex"
+            title={`Fleet draw ${mw(snap.mwDemand)} of ${mw(resolved.mwGeneration + resolved.mwInterconnect)} available (${mw(resolved.mwGeneration)} on-site + ${mw(resolved.mwInterconnect)} interconnect) — you only draw what the fleet consumes; contract headroom isn't usage. Rented compute is powered by the provider.`}
           />
           <Stat
             label="Demand served"

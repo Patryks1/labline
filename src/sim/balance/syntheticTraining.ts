@@ -1,3 +1,6 @@
+import { DATA_DOMAINS, defaultDataWeights, normalizeWeights } from './data'
+import type { DataDomain, Model, TrainMode } from '../types'
+
 export interface SyntheticTrainingProfile {
   realMTok: number
   syntheticMTok: number
@@ -116,4 +119,64 @@ export function syntheticTrainingProfile(input: {
     conditionalBeyond2,
     seededVariation,
   }
+}
+
+/**
+ * Synthetic expansion past the owned corpus is available in every training mode
+ * once the lab unlocks Synthetic Generators. In distill the selected teacher is
+ * the generator, so expansion works there even without the lab unlock.
+ */
+export function syntheticExpansionUnlocked(input: {
+  synthResearchUnlocked: boolean
+  mode: TrainMode
+  hasDistillTeacher: boolean
+}): boolean {
+  return (
+    input.synthResearchUnlocked ||
+    (input.mode === 'distill' && input.hasDistillTeacher)
+  )
+}
+
+/**
+ * Per-domain synthetic headroom (MTok) a distill teacher can generate on top of
+ * the player's owned corpus. Sourced from the teacher's own training corpus —
+ * persisted per-domain consumption when available, else lifetime trained tokens
+ * spread over the teacher's recipe mix, else a capability-scaled estimate — then
+ * gated by teacher tier: a SOTA teacher transfers its full corpus, weaker
+ * teachers proportionally less (same idealMultiplier ladder as the profile).
+ */
+export function teacherSyntheticHeadroomMTok(input: {
+  teacher: Pick<
+    Model,
+    'capability' | 'family' | 'dataConsumed' | 'dataTokensUsedMTok' | 'dataPlan'
+  >
+  frontierCapability: number
+}): Record<DataDomain, number> {
+  const { teacher } = input
+  const profile = syntheticTrainingProfile({
+    realMTok: 1,
+    syntheticMTok: 0,
+    teacherCapability: teacher.capability,
+    frontierCapability: input.frontierCapability,
+  })
+  const tierShare = profile.idealMultiplier / 3
+  const consumed = teacher.dataConsumed ?? {}
+  const hasPersisted = DATA_DOMAINS.some(
+    (domain) => (consumed[domain] ?? 0) > 0,
+  )
+  const mix =
+    teacher.dataPlan?.weights &&
+    Object.keys(teacher.dataPlan.weights).length > 0
+      ? normalizeWeights(teacher.dataPlan.weights)
+      : defaultDataWeights(teacher.family)
+  const lifetime = Math.max(0, teacher.dataTokensUsedMTok ?? 0)
+  const estimatedTotal = lifetime > 0 ? lifetime : Math.max(0, teacher.capability) * 100
+  const out = {} as Record<DataDomain, number>
+  for (const domain of DATA_DOMAINS) {
+    const corpus = hasPersisted
+      ? Math.max(0, consumed[domain] ?? 0)
+      : estimatedTotal * mix[domain]
+    out[domain] = corpus * tierShare
+  }
+  return out
 }

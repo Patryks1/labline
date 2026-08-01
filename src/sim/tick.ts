@@ -14,6 +14,7 @@ import { tickRackDeliveries } from './systems/dcRacks'
 import { tickMap } from './systems/map'
 import {
   maybeListRivalHalls,
+  recordPowerEfficiencyDay,
   tickCityPowerContracts,
   tickPowerExportContracts,
 } from './systems/facilities'
@@ -148,6 +149,8 @@ export function tickDay(state: SimState): SimState {
   s = refreshPublicEstimates(s)
   s = tickVictory(s)
   s = tickProgression(s)
+  // Daily power→compute efficiency sample for the Power panel trend.
+  s = recordPowerEfficiencyDay(s)
 
   if (s.player.models.some((m) => m.shipped) && s.onboardingStep < 2) {
     s = { ...s, onboardingStep: 2 }

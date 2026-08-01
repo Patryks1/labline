@@ -9,6 +9,7 @@ import {
 import {
   rebalanceTrainingDataDomain,
   trainingDataDomainCapMTok,
+  trainingDataDomainFill,
 } from "./trainingDataRadarMath";
 
 const SIZE = 380;
@@ -39,6 +40,8 @@ export function TrainingDataRadar({
   autoBalanceDisabled,
   syntheticUnlocked = false,
   syntheticMultiplier = 0,
+  syntheticHeadroomMTok,
+  syntheticSource = "lab",
   teachers,
   syntheticTeacherIds,
   includeSynthHQ,
@@ -57,7 +60,12 @@ export function TrainingDataRadar({
   data: LabData;
   autoBalanceDisabled?: boolean;
   syntheticUnlocked?: boolean;
+  /** Effective generated-token expansion (0 = drag blocked at owned corpus). */
   syntheticMultiplier?: number;
+  /** Per-domain generated headroom (distill teacher corpus); 0 elsewhere. */
+  syntheticHeadroomMTok?: Partial<Record<DataDomain, number>>;
+  /** Labels the excess segment: teacher-generated in distill, lab-made otherwise. */
+  syntheticSource?: "teacher" | "lab";
   teachers: Model[];
   syntheticTeacherIds: Partial<Record<DataDomain, string>>;
   includeSynthHQ: boolean;
@@ -77,9 +85,10 @@ export function TrainingDataRadar({
   const [dragging, setDragging] = useState<DataDomain | null>(null);
   const normalized = useMemo(() => normalizeWeights(weights), [weights]);
   const allocations = useMemo(
-    () => Object.fromEntries(
-      DATA_DOMAINS.map((domain) => [domain, totalMTok * normalized[domain]]),
-    ) as Record<DataDomain, number>,
+    () =>
+      Object.fromEntries(
+        DATA_DOMAINS.map((domain) => [domain, totalMTok * normalized[domain]]),
+      ) as Record<DataDomain, number>,
     [normalized, totalMTok],
   );
   const axisMaxMTok = Math.max(
@@ -88,31 +97,63 @@ export function TrainingDataRadar({
     ...DATA_DOMAINS.map((domain) => allocations[domain] * 1.25),
   );
   const target = DATA_DOMAINS.map((domain) => allocations[domain] / axisMaxMTok);
+  const expansionEnabled = syntheticMultiplier > 0;
   const layers = useMemo(() => {
     const real: number[] = [];
     const hq: number[] = [];
     const lq: number[] = [];
+    const synth: number[] = [];
     for (const domain of DATA_DOMAINS) {
       const stock = data.stocks[domain];
       const need = Math.max(0.01, allocations[domain]);
       const targetRadius = allocations[domain] / axisMaxMTok;
-      const realAvailable = Math.max(
-        0,
-        stock.processed - stock.fromSynthHQ - stock.fromSynthLQ,
+      const fill = trainingDataDomainFill({
+        needMTok: need,
+        realAvailableMTok: Math.max(
+          0,
+          stock.processed - stock.fromSynthHQ - stock.fromSynthLQ,
+        ),
+        synthHQStockMTok: stock.fromSynthHQ,
+        synthLQStockMTok: stock.fromSynthLQ,
+        includeSynthHQ,
+        includeSynthLQ,
+        syntheticMultiplier,
+        syntheticHeadroomMTok: syntheticHeadroomMTok?.[domain],
+      });
+      real.push((targetRadius * fill.realTake) / need);
+      hq.push((targetRadius * (fill.realTake + fill.hqTake)) / need);
+      lq.push(
+        (targetRadius * (fill.realTake + fill.hqTake + fill.lqTake)) / need,
       );
-      const realTake = Math.min(need, realAvailable);
-      const hqTake = includeSynthHQ
-        ? Math.min(Math.max(0, need - realTake), stock.fromSynthHQ)
-        : 0;
-      const lqTake = includeSynthLQ
-        ? Math.min(Math.max(0, need - realTake - hqTake), stock.fromSynthLQ)
-        : 0;
-      real.push((targetRadius * realTake) / need);
-      hq.push((targetRadius * (realTake + hqTake)) / need);
-      lq.push((targetRadius * (realTake + hqTake + lqTake)) / need);
+      synth.push(
+        (targetRadius *
+          (fill.realTake + fill.hqTake + fill.lqTake + fill.synthTake)) /
+          need,
+      );
     }
-    return { real, hq, lq };
-  }, [allocations, axisMaxMTok, data, includeSynthHQ, includeSynthLQ]);
+    return { real, hq, lq, synth };
+  }, [
+    allocations,
+    axisMaxMTok,
+    data,
+    includeSynthHQ,
+    includeSynthLQ,
+    syntheticHeadroomMTok,
+    syntheticMultiplier,
+  ]);
+
+  const domainCapMTok = (domain: DataDomain) => {
+    const stock = data.stocks[domain];
+    const realAvailable = Math.max(
+      0,
+      stock.processed - stock.fromSynthHQ - stock.fromSynthLQ,
+    );
+    return trainingDataDomainCapMTok(
+      realAvailable,
+      syntheticHeadroomMTok?.[domain] ?? 0,
+      syntheticMultiplier,
+    );
+  };
 
   const updateFromPointer = (
     domain: DataDomain,
@@ -126,23 +167,16 @@ export function TrainingDataRadar({
     const index = DATA_DOMAINS.indexOf(domain);
     const angle = -Math.PI / 2 + (index / DATA_DOMAINS.length) * Math.PI * 2;
     const projected = (x * Math.cos(angle) + y * Math.sin(angle)) / RADIUS;
-    const stock = data.stocks[domain];
-    const realAvailable = Math.max(0, stock.processed - stock.fromSynthHQ - stock.fromSynthLQ);
-    const includedSynthetic =
-      (includeSynthHQ ? stock.fromSynthHQ : 0) +
-      (includeSynthLQ ? stock.fromSynthLQ : 0);
-    const capMTok = trainingDataDomainCapMTok(
-      realAvailable,
-      includedSynthetic,
-      syntheticUnlocked ? syntheticMultiplier : 0,
-    );
     const next = rebalanceTrainingDataDomain(
       allocations,
       domain,
       Math.max(0, projected * axisMaxMTok),
-      capMTok,
+      domainCapMTok(domain),
     );
-    const nextTotal = DATA_DOMAINS.reduce((sum, candidate) => sum + next[candidate], 0);
+    const nextTotal = DATA_DOMAINS.reduce(
+      (sum, candidate) => sum + next[candidate],
+      0,
+    );
     if (nextTotal > 0) onChange(normalizeWeights(next), nextTotal);
   };
 
@@ -154,34 +188,44 @@ export function TrainingDataRadar({
       selectedStock.fromSynthHQ -
       selectedStock.fromSynthLQ,
   );
-  const selectedShortfall = Math.max(
-    0,
-    selectedNeed -
-      selectedReal -
-      (includeSynthHQ ? selectedStock.fromSynthHQ : 0) -
-      (includeSynthLQ ? selectedStock.fromSynthLQ : 0),
-  );
-  const selectedHq = includeSynthHQ
-    ? Math.min(Math.max(0, selectedNeed - selectedReal), selectedStock.fromSynthHQ)
-    : 0;
-  const selectedLq = includeSynthLQ
-    ? Math.min(Math.max(0, selectedNeed - selectedReal - selectedHq), selectedStock.fromSynthLQ)
-    : 0;
+  const selectedFill = trainingDataDomainFill({
+    needMTok: selectedNeed,
+    realAvailableMTok: selectedReal,
+    synthHQStockMTok: selectedStock.fromSynthHQ,
+    synthLQStockMTok: selectedStock.fromSynthLQ,
+    includeSynthHQ,
+    includeSynthLQ,
+    syntheticMultiplier,
+    syntheticHeadroomMTok: syntheticHeadroomMTok?.[selected],
+  });
+  const selectedShortfall = selectedFill.shortfall;
+  const selectedDiminishing =
+    expansionEnabled &&
+    selectedFill.synthTake > 2 * Math.max(1, selectedFill.realTake);
   const sourceTotals = DATA_DOMAINS.reduce(
     (totals, domain) => {
       const stock = data.stocks[domain];
-      const need = allocations[domain];
-      const realAvailable = Math.max(0, stock.processed - stock.fromSynthHQ - stock.fromSynthLQ);
-      const real = Math.min(need, realAvailable);
-      const hq = includeSynthHQ ? Math.min(Math.max(0, need - real), stock.fromSynthHQ) : 0;
-      const lq = includeSynthLQ ? Math.min(Math.max(0, need - real - hq), stock.fromSynthLQ) : 0;
-      totals.real += real;
-      totals.hq += hq;
-      totals.lq += lq;
-      totals.shortfall += Math.max(0, need - real - hq - lq);
+      const fill = trainingDataDomainFill({
+        needMTok: allocations[domain],
+        realAvailableMTok: Math.max(
+          0,
+          stock.processed - stock.fromSynthHQ - stock.fromSynthLQ,
+        ),
+        synthHQStockMTok: stock.fromSynthHQ,
+        synthLQStockMTok: stock.fromSynthLQ,
+        includeSynthHQ,
+        includeSynthLQ,
+        syntheticMultiplier,
+        syntheticHeadroomMTok: syntheticHeadroomMTok?.[domain],
+      });
+      totals.real += fill.realTake;
+      totals.hq += fill.hqTake;
+      totals.lq += fill.lqTake;
+      totals.synth += fill.synthTake;
+      totals.shortfall += fill.shortfall;
       return totals;
     },
-    { real: 0, hq: 0, lq: 0, shortfall: 0 },
+    { real: 0, hq: 0, lq: 0, synth: 0, shortfall: 0 },
   );
   const selectedTeacher = teachers.find(
     (teacher) => teacher.id === syntheticTeacherIds[selected],
@@ -206,12 +250,17 @@ export function TrainingDataRadar({
             Training data mix
           </h3>
           <p className="text-[0.6875rem] text-muted">
-            {syntheticUnlocked
+            {syntheticUnlocked || expansionEnabled
               ? "Drag a point to change the recipe. Source rings show where real data ends and synthetic data begins."
               : "Drag a point to change the recipe. Available real data determines coverage."}
           </p>
           <p className="mt-0.5 font-mono text-[0.625rem] text-muted">
-            {formatTokens(totalMTok)} total · {formatTokens(sourceTotals.real)} real · {formatTokens(sourceTotals.hq + sourceTotals.lq)} synthetic · {formatTokens(sourceTotals.shortfall)} short
+            {formatTokens(totalMTok)} total · {formatTokens(sourceTotals.real)}{" "}
+            real ·{" "}
+            {formatTokens(
+              sourceTotals.hq + sourceTotals.lq + sourceTotals.synth,
+            )}{" "}
+            synthetic · {formatTokens(sourceTotals.shortfall)} short
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -327,6 +376,14 @@ export function TrainingDataRadar({
               strokeDasharray="4 4"
               strokeWidth="1.5"
             />
+            {expansionEnabled ? (
+              <polygon
+                points={polygon(layers.synth)}
+                fill="rgba(255,209,102,.14)"
+                stroke="#ffd166"
+                strokeWidth="1"
+              />
+            ) : null}
             {syntheticUnlocked ? (
               <polygon
                 points={polygon(layers.lq)}
@@ -406,18 +463,14 @@ export function TrainingDataRadar({
                         allocations,
                         domain,
                         allocations[domain] + delta,
-                        (() => {
-                          const stock = data.stocks[domain];
-                          const real = Math.max(0, stock.processed - stock.fromSynthHQ - stock.fromSynthLQ);
-                          return trainingDataDomainCapMTok(
-                            real,
-                            stock.fromSynthHQ + stock.fromSynthLQ,
-                            syntheticUnlocked ? syntheticMultiplier : 0,
-                          );
-                        })(),
+                        domainCapMTok(domain),
                       );
-                      const nextTotal = DATA_DOMAINS.reduce((sum, candidate) => sum + next[candidate], 0);
-                      if (nextTotal > 0) onChange(normalizeWeights(next), nextTotal);
+                      const nextTotal = DATA_DOMAINS.reduce(
+                        (sum, candidate) => sum + next[candidate],
+                        0,
+                      );
+                      if (nextTotal > 0)
+                        onChange(normalizeWeights(next), nextTotal);
                     }}
                   />
                   <circle
@@ -448,6 +501,14 @@ export function TrainingDataRadar({
               <span>
                 <i className="mr-1 inline-block h-2 w-2 rounded-sm bg-research" />
                 LQ synthetic
+              </span>
+            ) : null}
+            {expansionEnabled ? (
+              <span>
+                <i className="mr-1 inline-block h-2 w-2 rounded-sm bg-gold" />
+                {syntheticSource === "teacher"
+                  ? "Teacher synthetic"
+                  : "Synthetic"}
               </span>
             ) : null}
             <span>
@@ -485,14 +546,50 @@ export function TrainingDataRadar({
             <SourceRow label="Needed" value={formatTokens(selectedNeed)} />
             <SourceRow
               label="Real data"
-              value={formatTokens(Math.min(selectedNeed, selectedReal))}
+              value={formatTokens(selectedFill.realTake)}
               tone="text-mint"
             />
-            <SourceRow label="HQ synthetic" value={formatTokens(selectedHq)} tone="text-sky" />
-            <SourceRow label="LQ synthetic" value={formatTokens(selectedLq)} tone="text-research" />
-            <SourceRow label="Shortfall" value={formatTokens(selectedShortfall)} tone={selectedShortfall > 0.05 ? "text-amber" : "text-muted"} />
-            <SourceRow label="Mix share" value={`${Math.round(normalized[selected] * 100)}%`} />
+            {selectedFill.hqTake > 0.05 ? (
+              <SourceRow
+                label="HQ synthetic"
+                value={formatTokens(selectedFill.hqTake)}
+                tone="text-sky"
+              />
+            ) : null}
+            {selectedFill.lqTake > 0.05 ? (
+              <SourceRow
+                label="LQ synthetic"
+                value={formatTokens(selectedFill.lqTake)}
+                tone="text-research"
+              />
+            ) : null}
+            {expansionEnabled && selectedFill.synthTake > 0.05 ? (
+              <SourceRow
+                label={
+                  syntheticSource === "teacher"
+                    ? "Teacher synthetic"
+                    : "Synthetic"
+                }
+                value={formatTokens(selectedFill.synthTake)}
+                tone="text-gold"
+              />
+            ) : null}
+            <SourceRow
+              label="Shortfall"
+              value={formatTokens(selectedShortfall)}
+              tone={selectedShortfall > 0.05 ? "text-amber" : "text-muted"}
+            />
+            <SourceRow
+              label="Mix share"
+              value={`${Math.round(normalized[selected] * 100)}%`}
+            />
           </div>
+          {selectedDiminishing ? (
+            <p className="mt-2 text-[0.625rem] leading-snug text-amber">
+              Past ~2× real data, extra synthetic tokens hit diminishing returns
+              and inflate benchmark-overfit risk.
+            </p>
+          ) : null}
           {syntheticUnlocked ? (
             <label className="mt-3 block text-[0.6875rem] text-muted">
               Synthetic teacher

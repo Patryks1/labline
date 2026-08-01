@@ -13,6 +13,7 @@ import {
   signCityPowerContract,
   signPowerExportContract,
   tickPowerExportContracts,
+  tileDist,
 } from './facilities'
 
 describe('power contracts', () => {
@@ -150,6 +151,57 @@ describe('power contracts', () => {
       },
     }
     const result = signCityPowerContract(withoutConnectors, city.id, 5, 60)
+    expect(result.cityPowerContracts).toHaveLength(0)
+    expect(result.alerts[0]?.message).toContain('grid interconnect')
+  })
+
+  it('ignores a commissioned connector outside the city power zone', () => {
+    const created = createGame(91_206)
+    const city = created.map.cities?.[0]
+    if (!city) throw new Error('Expected a generated city')
+    const world = created.map.world
+    if (!world) throw new Error('Expected a compact world')
+    const scanRadius = city.powerRadius + 2
+    let remoteSite: ReturnType<typeof tileId> | null = null
+    for (let y = city.cy - scanRadius; y <= city.cy + scanRadius && !remoteSite; y += 1) {
+      for (let x = city.cx - scanRadius; x <= city.cx + scanRadius; x += 1) {
+        if (x < 0 || y < 0 || x >= created.map.width || y >= created.map.height) continue
+        if (tileDist(x, y, city.cx, city.cy) <= city.powerRadius) continue
+        const id = tileId(x, y, created.map.width, created.map.height)
+        if (!world.getFacilityAt(id)) {
+          remoteSite = id
+          break
+        }
+      }
+    }
+    if (!remoteSite) throw new Error('Expected a free tile outside the power zone')
+    world.beginBatch()
+      .addFacility({
+        id: 'test-remote-connector',
+        kind: 'substation',
+        ownerId: 'player',
+        anchor: remoteSite,
+        footprint: [remoteSite],
+        level: 1,
+        constructionProgress: 1,
+        constructionTarget: 1,
+        stats: { mwCapacity: 6 },
+      })
+      .commit()
+    const state = {
+      ...created,
+      player: { ...created.player, cash: 1_000_000_000 },
+      map: { ...created.map, worldRevision: world.revision },
+    }
+
+    const connector = cityGridConnectorCapacity(state, city.id)
+    expect(connector.connectorCount).toBe(0)
+    expect(connector.availableMw).toBe(0)
+
+    const quote = powerImportNegotiationQuote(state, city.id, 8, 60)
+    expect(quote?.contractMw).toBe(0)
+
+    const result = signCityPowerContract(state, city.id, 8, 60)
     expect(result.cityPowerContracts).toHaveLength(0)
     expect(result.alerts[0]?.message).toContain('grid interconnect')
   })

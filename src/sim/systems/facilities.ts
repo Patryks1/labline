@@ -163,6 +163,8 @@ export function playerLiveHalls(state: SimState): MapTile[] {
 export function powerBalance(state: SimState): {
   demandMw: number
   genMw: number
+  /** Completed on-site generation split by facility kind. */
+  genBySourceMw: { solarMw: number; gasMw: number; nuclearMw: number; otherMw: number }
   surplusMw: number
   deficitMw: number
   gridImportMw: number
@@ -191,9 +193,14 @@ export function powerBalance(state: SimState): {
   let cityMult = 0.75
   let cityMwCap = 0
   let n = 0
+  const genBySourceMw = { solarMw: 0, gasMw: 0, nuclearMw: 0, otherMw: 0 }
   for (const t of facilityAnchorTiles(state, { ownerId: 'player' })) {
     if (t.buildingProgress < t.buildingTarget) continue
     if (t.mwGeneration <= 0) continue
+    if (t.kind === 'solar') genBySourceMw.solarMw += t.mwGeneration
+    else if (t.kind === 'gas') genBySourceMw.gasMw += t.mwGeneration
+    else if (t.kind === 'nuclear') genBySourceMw.nuclearMw += t.mwGeneration
+    else genBySourceMw.otherMw += t.mwGeneration
     const city = tileInCityPowerZone(state, t.x, t.y)
     if (city) {
       cityMult += city.powerBuyPriceMult
@@ -221,6 +228,7 @@ export function powerBalance(state: SimState): {
   return {
     demandMw,
     genMw: power.mwGeneration,
+    genBySourceMw,
     surplusMw,
     deficitMw,
     gridImportMw: power.mwGridImport,
@@ -232,6 +240,32 @@ export function powerBalance(state: SimState): {
     cityBuyPerMWh: cityPrice,
     generationUsedMw,
     generationCostDay,
+  }
+}
+
+/** Daily window of power→compute efficiency samples kept on the player. */
+export const POWER_EFFICIENCY_HISTORY_DAYS = 30
+
+/**
+ * Append today's raw-PF-per-drawn-MW sample for the Power panel trend.
+ * Generated power feeds raw compute; the ratio rises with better chips and PUE.
+ */
+export function recordPowerEfficiencyDay(state: SimState): SimState {
+  const snap = computeSnapshot(state)
+  const pfPerMw = snap.mwDemand > 1e-6 ? snap.rawFlopsPf / snap.mwDemand : 0
+  const history = state.player.powerEfficiencyHistory ?? []
+  const last = history[history.length - 1]
+  const sample = { day: state.day, pfPerMw }
+  const next =
+    last && last.day === state.day
+      ? [...history.slice(0, -1), sample]
+      : [...history, sample]
+  return {
+    ...state,
+    player: {
+      ...state.player,
+      powerEfficiencyHistory: next.slice(-POWER_EFFICIENCY_HISTORY_DAYS),
+    },
   }
 }
 
