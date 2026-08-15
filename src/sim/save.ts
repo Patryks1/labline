@@ -12,6 +12,7 @@ import type {
   MapRegion,
   MapTile,
   Model,
+  ModelFinanceRow,
   PowerEfficiencySample,
   PrivateEvaluationJob,
   RackDesign,
@@ -1484,10 +1485,8 @@ function restoreState(
         0,
         restored.lastMarket.apiDayAllocatedOps ?? 0,
       ),
-      modelFinance: (
-        ensureArray(
-          restored.lastMarket.modelFinance,
-        ) as import("./types").ModelFinanceRow[]
+      modelFinance: ensureArray<ModelFinanceRow>(
+        restored.lastMarket.modelFinance,
       ).map((row) => {
         const direct = Math.max(0, row.dayApiDirectCogs ?? row.dayApiCogs ?? 0);
         return {
