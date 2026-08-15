@@ -702,10 +702,21 @@ export function tickMarket(state: SimState): SimState {
   const audienceScale = candidateAudience > WORLD_POPULATION
     ? WORLD_POPULATION / candidateAudience
     : 1
-  const grownSegments = audienceCandidates.map((segment) => ({
+  const scaledSegments = audienceCandidates.map((segment) => ({
     ...segment,
     size: segment.size * audienceScale,
   }))
+  // Multiplying every segment by the same cap ratio can leave the summed
+  // audience a few micro-users below WORLD_POPULATION. Reconcile that rounding
+  // residue onto one segment so the documented population cap is exact.
+  const scaledAudience = scaledSegments.reduce((sum, segment) => sum + segment.size, 0)
+  const populationRemainder =
+    audienceScale < 1 ? WORLD_POPULATION - scaledAudience : 0
+  const grownSegments = scaledSegments.map((segment, index) =>
+    index === scaledSegments.length - 1 && populationRemainder !== 0
+      ? { ...segment, size: segment.size + populationRemainder }
+      : segment,
+  )
   const switchingBySegment = new Map(
     deriveDemandSegments(state).map((segment) => [segment.id, segment.switchingFriction]),
   )
@@ -1295,6 +1306,17 @@ export function tickMarket(state: SimState): SimState {
       ? attributedServeOps * Math.max(0, pf) / totalAllocatedInferPf
       : 0
   const apiCogs = fixedCostForPf(apiInferPf) + apiServed * ECONOMY.bandwidthPerMTok
+  const normalizedDirectApiCostPerMTok =
+    attributedServeOps / Math.max(capacityMTok, 0.0001) + ECONOMY.bandwidthPerMTok
+  const apiDirectCogs = Math.min(
+    apiCogs,
+    apiServed * normalizedDirectApiCostPerMTok,
+  )
+  const apiAllocatedOps = Math.max(0, apiCogs - apiDirectCogs)
+  const apiCapacityUtilization = Math.max(
+    0,
+    Math.min(1, apiServed / Math.max(capacityMTok, 0.0001)),
+  )
   const apiModelUsage = apiModelSettlement.map((item) => {
     const modelCost =
       fixedCostForPf(item.dayInferPf) + item.dayMTok * ECONOMY.bandwidthPerMTok
@@ -1692,6 +1714,9 @@ export function tickMarket(state: SimState): SimState {
       const modelApiRevenue = apiSettlement?.dayRevenue ?? 0
       const modelApiCogs = (apiUsage?.dayMTok ?? 0) * (apiUsage?.costPerMTok ?? 0)
       const modelApiMTok = apiUsage?.dayMTok ?? 0
+      const directCostShare = apiCogs > 0 ? apiDirectCogs / apiCogs : 0
+      const modelApiDirectCogs = modelApiCogs * directCostShare
+      const modelApiAllocatedOps = Math.max(0, modelApiCogs - modelApiDirectCogs)
       return {
         modelId: m.id,
         name: m.name,
@@ -1702,8 +1727,12 @@ export function tickMarket(state: SimState): SimState {
         capability: m.capability,
         apiPricePerMTok: price,
         dayApiRevenue: modelApiRevenue,
+        dayApiDirectCogs: modelApiDirectCogs,
+        dayApiAllocatedOps: modelApiAllocatedOps,
         dayApiCogs: modelApiCogs,
         dayApiMTok: modelApiMTok,
+        dayApiContribution: modelApiRevenue - modelApiDirectCogs,
+        apiCapacityUtilization,
         daySubRevenue: subscription.revenue,
         daySubCogs: subscription.cogs,
         dayEnterpriseShare: m.id === activeId ? enterpriseRevenue : 0,
@@ -1729,8 +1758,12 @@ export function tickMarket(state: SimState): SimState {
       capability: m.capability,
       apiPricePerMTok: price,
       dayApiRevenue: 0,
+      dayApiDirectCogs: 0,
+      dayApiAllocatedOps: 0,
       dayApiCogs: 0,
       dayApiMTok: 0,
+      dayApiContribution: 0,
+      apiCapacityUtilization: 0,
       daySubRevenue: 0,
       daySubCogs: 0,
       dayEnterpriseShare: 0,
@@ -1911,6 +1944,8 @@ export function tickMarket(state: SimState): SimState {
       apiDemandMTok: playerApiMTok,
       apiDayMTok: apiServed,
       apiDayRevenue: apiRevenue,
+      apiDayDirectCogs: apiDirectCogs,
+      apiDayAllocatedOps: apiAllocatedOps,
       apiDayCogs: apiCogs,
       apiModelUsage,
       capacityMTok,

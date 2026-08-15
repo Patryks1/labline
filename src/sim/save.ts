@@ -5,7 +5,15 @@
  * dynamic snapshot. Static typed layers, indexes, metrics, journals, and any
  * renderer state are regenerated after load.
  */
-import type { MapCity, MapRegion, MapTile, Model, RackDesign, SimState } from './types'
+import type {
+  MapCity,
+  MapRegion,
+  MapTile,
+  Model,
+  ModelFinanceRow,
+  RackDesign,
+  SimState,
+} from './types'
 import { calendarForDay, formatCampaignDate } from './campaign'
 import { DEMAND_MODEL_VERSION, ECONOMY, WORLD_POPULATION } from './balance/economy'
 import { normalizeModelEvaluations } from './balance/evaluationSuites'
@@ -506,7 +514,7 @@ function restoreState(stateRaw: unknown, snapshot: DynamicWorldSnapshotV2 | null
         restored.lastMarket.apiDayDirectCogs ?? legacyDirect,
       ),
       apiDayAllocatedOps: Math.max(0, restored.lastMarket.apiDayAllocatedOps ?? 0),
-      modelFinance: ensureArray(restored.lastMarket.modelFinance).map((row) => {
+      modelFinance: ensureArray<ModelFinanceRow>(restored.lastMarket.modelFinance).map((row) => {
         const direct = Math.max(0, row.dayApiDirectCogs ?? row.dayApiCogs ?? 0)
         return {
           ...row,

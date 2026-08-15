@@ -38,14 +38,12 @@ export function fullyLoadedApiCostFloor(input: {
     (input.dayCogs ?? 0) > 0 &&
     (input.dayMTok ?? 0) > 0.001
   const live = hasLiveCost ? (input.dayCogs ?? 0) / Math.max(0.001, input.dayMTok ?? 0) : 0
-  // Compatibility helper only. Live allocated cost is diagnostic and must not
-  // become a price floor: traffic-dependent overhead creates a feedback loop.
-  const blended = marginal
+  const blended = hasLiveCost ? live : marginal
   return {
     blended,
     costIn: blended * 0.65,
     costOut: blended * 1.15,
-    source: 'marginal',
+    source: hasLiveCost ? 'live' : 'marginal',
   }
 }
 
