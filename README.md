@@ -2,7 +2,7 @@
 
 **Labline is an AI-lab tycoon game inspired by Capitalism Lab and Software Inc.** Build models, compete for compute and customers, ship subscriptions and APIs, and turn a cloud-funded startup into an industry leader.
 
-[Play Labline](https://lablline.patryks.me/)
+[Play Labline](https://labline.patryks.me/)
 
 ## Overview
 
