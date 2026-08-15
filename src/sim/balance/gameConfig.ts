@@ -4,6 +4,7 @@
  */
 
 export type DifficultyId = 'easy' | 'normal' | 'hard'
+export type DrivingSide = 'left' | 'right'
 export type CompanyMarkId =
   | 'orbit'
   | 'delta'
@@ -24,7 +25,7 @@ export interface GameConfig {
   /** Map dimensions in tiles */
   mapWidth: number
   mapHeight: number
-  /** Target number of metro cores (clamped 2–24) */
+  /** Target number of metro cores (clamped 2–24); v3 derives smaller settlements. */
   cityCount: number
   rivalCount: number
   /** Multiplier on BUILD_DEFS cash & upgrades */
@@ -37,10 +38,12 @@ export interface GameConfig {
   landValueBase: number
   /** Extra land $ peak at city center */
   landValueCityPeak: number
+  /** Traffic lane convention for this sandbox. */
+  drivingSide?: DrivingSide
   campaignRules?: CampaignRules
 }
 
-/** Legacy map was 15×12 = 180 tiles. The 150×150 frontier default is 125× that. */
+/** Legacy map was 15×12 = 180 tiles. The 300×300 frontier default is 500× that. */
 export const LEGACY_TILE_COUNT = 15 * 12
 export const MIN_MAP_DIMENSION = 20
 export const MAX_MAP_DIMENSION = 1000
@@ -52,19 +55,20 @@ export const DIFFICULTY_PRESETS: Record<
   Omit<GameConfig, 'labName' | 'seed' | 'difficulty' | 'campaignRules'>
 > = {
   easy: {
-    mapWidth: 150,
-    mapHeight: 150,
+    mapWidth: 300,
+    mapHeight: 300,
     cityCount: 4,
-    rivalCount: 5,
-    economyMult: 1,
-    researchCostMult: 1,
-    startingCashMult: 1,
+    rivalCount: 4,
+    economyMult: 0.85,
+    researchCostMult: 0.85,
+    startingCashMult: 1.4,
     landValueBase: 2_500_000,
     landValueCityPeak: 28_000_000,
+    drivingSide: 'left',
   },
   normal: {
-    mapWidth: 150,
-    mapHeight: 150,
+    mapWidth: 300,
+    mapHeight: 300,
     cityCount: 4,
     rivalCount: 5,
     economyMult: 1,
@@ -72,17 +76,19 @@ export const DIFFICULTY_PRESETS: Record<
     startingCashMult: 1,
     landValueBase: 2_500_000,
     landValueCityPeak: 28_000_000,
+    drivingSide: 'left',
   },
   hard: {
-    mapWidth: 150,
-    mapHeight: 150,
+    mapWidth: 300,
+    mapHeight: 300,
     cityCount: 4,
     rivalCount: 5,
-    economyMult: 1,
-    researchCostMult: 1,
-    startingCashMult: 1,
+    economyMult: 1.15,
+    researchCostMult: 1.2,
+    startingCashMult: 0.75,
     landValueBase: 2_500_000,
     landValueCityPeak: 28_000_000,
+    drivingSide: 'left',
   },
 }
 
@@ -135,6 +141,7 @@ export function buildGameConfig(opts: {
     startingCashMult: Math.max(0.3, Math.min(3, adv.startingCashMult ?? preset.startingCashMult)),
     landValueBase: Math.max(100_000, adv.landValueBase ?? preset.landValueBase),
     landValueCityPeak: Math.max(1_000_000, adv.landValueCityPeak ?? preset.landValueCityPeak),
+    drivingSide: adv.drivingSide === 'right' ? 'right' : 'left',
     campaignRules: defaultCampaignRules(opts.campaignRules ?? adv.campaignRules),
   }
 }

@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "assets:world": "node scripts/generate-world-models.mjs",
     "dev": "vite",
+    "stop": "systemctl --user stop labline-dev.service 2>/dev/null || true; fuser -k 5173/tcp 2>/dev/null || true",
+    "dev:stop": "bun run stop",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",

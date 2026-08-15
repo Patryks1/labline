@@ -1,10 +1,13 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Brain,
   ChartDonut,
+  ChartLine,
   ClipboardText,
   Cloud,
+  Crosshair,
   Database,
+  DotsThree,
   Flask,
   Gauge,
   Bulldozer,
@@ -19,6 +22,7 @@ import {
   X,
 } from '@phosphor-icons/react'
 import { useGameStore } from '../../store/gameStore'
+import { useUiStore } from '../../store/uiStore'
 import type { PanelId } from '../../sim/types'
 import { facilityAnchorTiles } from '../../sim/systems/worldAccess'
 import { AllocatePanel } from './panels/AllocatePanel'
@@ -38,6 +42,11 @@ import { ComputeMarketPanel } from './panels/ComputeMarketPanel'
 import { FleetBuildingsPanel } from './panels/FleetBuildingsPanel'
 import { BuildPanel } from './BuildTray'
 import { NAV_GROUPS, groupForPanel, type NavGroupId } from './navConfig'
+import {
+  MOBILE_MORE_SECTIONS,
+  MOBILE_MORE_UTILITIES,
+  MOBILE_PRIMARY_TABS,
+} from './mobileShellContracts'
 
 /**
  * Floating workspace drawer over the full-bleed map.
@@ -67,7 +76,9 @@ const RAIL_SECTIONS: { group: NavGroupId; tabs: RailTab[] }[] = NAV_GROUPS.filte
 
 function panelIcon(id: PanelId) {
   const Icon =
-    id === 'stats'
+    id === 'build'
+      ? Hammer
+      : id === 'stats'
       ? Gauge
       : id === 'rivals'
         ? UsersThree
@@ -105,7 +116,11 @@ export function LeftRail() {
   const mapTool = useGameStore((s) => s.mapTool)
   const setMapTool = useGameStore((s) => s.setMapTool)
   const setBuildMode = useGameStore((s) => s.setBuildMode)
+  const setCommandDockOpen = useGameStore((s) => s.setCommandDockOpen)
   const state = useGameStore((s) => s.state)
+  const setObjectivesOpen = useUiStore((s) => s.setObjectivesOpen)
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false)
+  const mobileMoreCloseRef = useRef<HTMLButtonElement>(null)
 
   const group = useMemo(() => groupForPanel(active), [active])
   const activeItem = useMemo(
@@ -141,6 +156,8 @@ export function LeftRail() {
   }, [state])
 
   const handleTab = (id: PanelId) => {
+    setMobileMoreOpen(false)
+    setObjectivesOpen(false)
     if (active === id && open) {
       setOpen(false)
       return
@@ -159,11 +176,53 @@ export function LeftRail() {
     setOpen(true)
   }
 
+  useEffect(() => {
+    if (!mobileMoreOpen) return
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const focusFrame = window.requestAnimationFrame(() => mobileMoreCloseRef.current?.focus())
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileMoreOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.cancelAnimationFrame(focusFrame)
+      window.removeEventListener('keydown', onKeyDown)
+      previous?.focus()
+    }
+  }, [mobileMoreOpen])
+
+  const toggleDestroy = () => {
+    setMobileMoreOpen(false)
+    setObjectivesOpen(false)
+    if (mapTool === 'destroy') {
+      setMapTool('select')
+      return
+    }
+    setBuildMode(null)
+    setMapTool('destroy')
+    setOpen(false)
+    setCommandDockOpen(false)
+  }
+
+  const openMobileMore = () => {
+    const next = !mobileMoreOpen
+    setMobileMoreOpen(next)
+    if (next) {
+      setOpen(false)
+      setCommandDockOpen(false)
+      setObjectivesOpen(false)
+    }
+  }
+
+  const mobileMoreActive =
+    mobileMoreOpen ||
+    (open && !MOBILE_PRIMARY_TABS.some((tab) => tab.id === active))
+
   return (
     <div className="workspace-shell pointer-events-none">
       {/* Icon rail: Build action pinned on top, then every panel as its own tab */}
       <nav
-        className="hud-surface pointer-events-auto relative col-start-1 m-1.5 mr-1 flex min-h-0 flex-col items-stretch gap-0.5 overflow-y-auto rounded-lg p-1 panel-scroll"
+        className="desktop-workspace-rail hud-surface pointer-events-auto relative col-start-1 m-1.5 mr-1 flex min-h-0 flex-col items-stretch gap-0.5 overflow-y-auto rounded-lg p-1 panel-scroll"
         aria-label="Workspaces"
       >
         <button
@@ -196,13 +255,7 @@ export function LeftRail() {
           title="Destroy — sell owned facilities or cancel construction"
           aria-pressed={mapTool === 'destroy'}
           onClick={() => {
-            if (mapTool === 'destroy') {
-              setMapTool('select')
-              return
-            }
-            setBuildMode(null)
-            setMapTool('destroy')
-            setOpen(false)
+            toggleDestroy()
           }}
           className={`group relative flex min-h-12 w-full flex-col items-center justify-center gap-1 rounded-lg border px-1 py-1.5 transition ${
             mapTool === 'destroy'
@@ -262,13 +315,13 @@ export function LeftRail() {
 
       {/* Content drawer: stable header + animated panel swap */}
       <div
-        className={`hud-surface pointer-events-auto relative col-start-2 m-2 ml-1 flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg transition-opacity duration-200 ease-out ${
+        className={`workspace-drawer hud-surface pointer-events-auto relative col-start-2 m-2 ml-1 flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg transition-opacity duration-200 ease-out ${
           open ? 'opacity-100' : 'pointer-events-none opacity-0'
         }`}
       >
         {open && (
           <>
-            <header className="relative z-10 flex h-14 shrink-0 items-center justify-between gap-2 border-b border-line/60 px-4">
+            <header className="workspace-drawer__header relative z-10 flex h-14 shrink-0 items-center justify-between gap-2 border-b border-line/60 px-4">
               <div className="flex min-w-0 items-baseline gap-2">
                 <p className="shrink-0 text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-mint/80">
                   {group.label}
@@ -282,16 +335,17 @@ export function LeftRail() {
               </div>
               <button
                 type="button"
+                aria-label="Close workspace"
                 title="Collapse ([)"
                 onClick={() => setOpen(false)}
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-panel-2 hover:text-bone"
+                className="workspace-drawer__close flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-panel-2 hover:text-bone"
               >
                 <X size="0.9rem" />
               </button>
             </header>
 
             <div
-              className={`panel-scroll relative z-10 min-h-0 flex-1 p-4 ${
+              className={`workspace-drawer__body panel-scroll relative z-10 min-h-0 flex-1 p-4 ${
                 active === 'research'
                   ? 'flex flex-col overflow-y-auto xl:overflow-hidden'
                   : 'overflow-y-auto'
@@ -309,6 +363,130 @@ export function LeftRail() {
           </>
         )}
       </div>
+
+      <nav className="mobile-command-nav hud-surface pointer-events-auto" aria-label="Primary workspaces">
+        {MOBILE_PRIMARY_TABS.map((tab) => {
+          const Icon = panelIcon(tab.id)
+          const selected =
+            active === tab.id && (open || (tab.id === 'build' && mapTool === 'build'))
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              aria-label={tab.label}
+              aria-current={selected ? 'page' : undefined}
+              onClick={() => handleTab(tab.id)}
+              className={selected ? 'is-active' : ''}
+            >
+              <span className="relative">
+                <Icon size="1.25rem" weight="duotone" aria-hidden />
+                {badges[tab.id] ? <span className="mobile-nav-badge" /> : null}
+              </span>
+              <span>{tab.label}</span>
+            </button>
+          )
+        })}
+        <button
+          type="button"
+          aria-label="More workspaces"
+          aria-expanded={mobileMoreOpen}
+          className={mobileMoreActive ? 'is-active' : ''}
+          onClick={openMobileMore}
+        >
+          <DotsThree size="1.35rem" weight="bold" aria-hidden />
+          <span>More</span>
+        </button>
+      </nav>
+
+      {mobileMoreOpen ? (
+        <div className="mobile-more-layer pointer-events-auto">
+          <button
+            type="button"
+            aria-label="Close workspace menu"
+            className="mobile-more-backdrop"
+            onClick={() => setMobileMoreOpen(false)}
+          />
+          <section
+            className="mobile-more-sheet hud-surface"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mobile-more-title"
+          >
+            <header>
+              <div>
+                <p className="hud-eyebrow">Navigate</p>
+                <h2 id="mobile-more-title">All workspaces</h2>
+              </div>
+              <button
+                ref={mobileMoreCloseRef}
+                type="button"
+                aria-label="Close workspace menu"
+                onClick={() => setMobileMoreOpen(false)}
+              >
+                <X size="1rem" />
+              </button>
+            </header>
+
+            <div className="mobile-more-scroll panel-scroll">
+              <section className="mobile-more-utilities" aria-label="Quick tools">
+                {MOBILE_MORE_UTILITIES.map((utility) => {
+                  const Icon = utility.id === 'intel'
+                    ? ChartLine
+                    : utility.id === 'objectives'
+                      ? Crosshair
+                      : Bulldozer
+                  return (
+                    <button
+                      key={utility.id}
+                      type="button"
+                      aria-pressed={utility.id === 'destroy' ? mapTool === 'destroy' : undefined}
+                      onClick={() => {
+                        if (utility.id === 'destroy') {
+                          toggleDestroy()
+                          return
+                        }
+                        setMobileMoreOpen(false)
+                        if (utility.id === 'intel') setCommandDockOpen(true)
+                        else setObjectivesOpen(true)
+                      }}
+                    >
+                      <Icon size="1.1rem" weight="duotone" />
+                      <span><strong>{utility.label}</strong><small>{utility.hint}</small></span>
+                    </button>
+                  )
+                })}
+              </section>
+
+              {MOBILE_MORE_SECTIONS.map((section) => {
+                return (
+                  <section key={section.group} className="mobile-more-group">
+                    <h3>{section.label}</h3>
+                    <div>
+                      {section.tabs.map((tab) => {
+                        const Icon = panelIcon(tab.id)
+                        const selected = active === tab.id && open
+                        return (
+                          <button
+                            key={tab.id}
+                            type="button"
+                            aria-current={selected ? 'page' : undefined}
+                            onClick={() => handleTab(tab.id)}
+                            className={selected ? 'is-active' : ''}
+                          >
+                            <Icon size="1.1rem" weight="duotone" />
+                            <span><strong>{tab.label}</strong><small>{tab.hint}</small></span>
+                            {badges[tab.id] ? <span className="mobile-more-alert" /> : null}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </section>
+                )
+              })}
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   )
 }

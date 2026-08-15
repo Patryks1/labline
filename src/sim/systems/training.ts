@@ -1,31 +1,58 @@
 import { aggregateEffects } from "./research";
 import type {
   BenchmarkScores,
+  BenchmarkSuiteId,
   Model,
+  PostTrainRiskPlan,
   PostTrainStage,
   QualityAxes,
   SimState,
   StartTrainingOpts,
+  TrainMode,
+  TrainingBenchmarkRequest,
+  TrainingBenchmarkPending,
+  TrainingBenchmarkSnapshot,
+  TrainingBenchmarkSuiteResult,
+  TrainingCheckpointBranchDirection,
+  TrainingCheckpointCandidate,
   TrainingComputeFormat,
+  TrainingFailureRecord,
   TrainingJob,
+  TrainingNumerics,
 } from "../types";
+import { chargeExpense } from "./financeLedger";
+import {
+  checkpointTouchesModel,
+  reconcileCheckpointOwnership,
+} from "./checkpointOwnership";
 import { computeSnapshot } from "./compute";
+import type { ComputeSnapshot } from "./compute";
+import { mwPerPf } from "./computeMarket";
 import {
   normalizeDataQuality,
-  postTrainStrength,
+  bentCapabilityCeiling,
   scaleIntelligence,
   scoresFromScale,
 } from "../balance/modelScaling";
 import { getResearchNode } from "../balance/research";
 import { attachModelToEmptyPlans } from "./plans";
 import { scheduleReleaseEvaluations } from "./evaluations";
-import { deriveModelCapabilities } from "../balance/modelCapabilities";
+import {
+  deriveModelCapabilities,
+  matureModelIo,
+  modalityExperienceCounts,
+  modalityMaturity,
+  type GenerativeModality,
+} from "../balance/modelCapabilities";
 import {
   DATA_MIX_DEFS,
   clampDistillTeacherShare,
   distillFromTeacher,
+  distillRetentionFor,
   DISTILL_RETENTION,
+  estimateTrainingEconomics,
   formatParams,
+  fundedTrainingMaturity,
   sizeGate,
   suggestedApiPricePerMTok,
   trainCostPfDays,
@@ -34,7 +61,10 @@ import {
   allocateTrainingHardwarePools,
   allocateWeightedTrainingCompute,
   DEFAULT_TRAINING_NUMERICS,
+  estimateTrainingMemoryGb,
   LEGACY_TRAINING_NUMERICS,
+  nativeWeightPrecisionForNumerics,
+  trainingNumericsEconomicsProfile,
   validateTrainingNumerics,
 } from "../balance/trainingPrecision";
 import type { TrainingHardwarePool } from "../balance/trainingPrecision";
@@ -42,27 +72,176 @@ import {
   analyzeTrainingData,
   backboneFromFamily,
   ioForPreset,
+  migrateLegacyProductPreset,
   presetFromFamily,
   rollTrainingOutcome,
   serviceProfileForModel,
+  trainingDataModalityRequirements,
 } from "../balance/trainingV3";
 import { createRng, hashSeed, seededId } from "../rng";
 import {
-  enforceMinTrainingDuration,
-  MIN_TRAINING_DAYS,
-} from "./trainingDuration";
+  applyTrainingCampaignChoice,
+  boundedVerifiedRecursiveCapabilityBonus,
+  createTrainingCampaignEvent,
+  crossedTrainingCampaignMilestone,
+  recommendedTrainingCampaignChoice,
+  TRAINING_CAMPAIGN_MILESTONES,
+} from "../balance/trainingCampaign";
 
-export const RELEASE_LOSS_GATE = 2;
+/** @deprecated Fixed PF targets replace calendar extensions. */
 export const TRAINING_EXTENSION_DAYS = 10;
 export const TRAINING_BENCHMARK_MIN_PROGRESS = 0.1;
-export const TRAINING_BENCHMARK_COOLDOWN_DAYS = 7;
-import { suggestApiInOut } from "../balance/pricing";
-import { DATA_DOMAIN_META, DATA_DOMAINS } from "../balance/data";
-import { ECONOMY } from "../balance/economy";
+/** @deprecated The unified scheduler allows concurrent private evaluation work. */
+export const TRAINING_BENCHMARK_COOLDOWN_DAYS = 0;
+export const TRAINING_BENCHMARK_MIN_SPEND = 50_000;
+export const TRAINING_BENCHMARK_MAX_SPEND = 150_000;
+
+export interface TrainingBenchmarkSuiteOption {
+  id: BenchmarkSuiteId;
+  label: string;
+  description: string;
+  minSpend: number;
+  referenceSpend: number;
+  maxSpend: number;
+}
+
+const TRAINING_BENCHMARK_SUITE_OPTIONS: Record<
+  BenchmarkSuiteId,
+  TrainingBenchmarkSuiteOption
+> = {
+  language: {
+    id: "language",
+    label: "Language & reasoning",
+    description: "Knowledge, coding, reasoning, tools, and safety evaluations.",
+    minSpend: TRAINING_BENCHMARK_MIN_SPEND,
+    referenceSpend: 100_000,
+    maxSpend: TRAINING_BENCHMARK_MAX_SPEND,
+  },
+  image_generation: {
+    id: "image_generation",
+    label: "Image generation",
+    description: "Prompt alignment, visual quality, control, and image safety.",
+    minSpend: TRAINING_BENCHMARK_MIN_SPEND,
+    referenceSpend: 110_000,
+    maxSpend: TRAINING_BENCHMARK_MAX_SPEND,
+  },
+  video_generation: {
+    id: "video_generation",
+    label: "Video generation",
+    description:
+      "Temporal coherence, motion, control, quality, and video safety.",
+    minSpend: TRAINING_BENCHMARK_MIN_SPEND,
+    referenceSpend: 140_000,
+    maxSpend: TRAINING_BENCHMARK_MAX_SPEND,
+  },
+  audio_generation: {
+    id: "audio_generation",
+    label: "Audio generation",
+    description:
+      "Intelligibility, naturalness, consistency, realtime, and safety.",
+    minSpend: TRAINING_BENCHMARK_MIN_SPEND,
+    referenceSpend: 110_000,
+    maxSpend: TRAINING_BENCHMARK_MAX_SPEND,
+  },
+  omni_overview: {
+    id: "omni_overview",
+    label: "Omni integration",
+    description:
+      "Cross-modal language, tools, image, video, audio, and safety.",
+    minSpend: TRAINING_BENCHMARK_MIN_SPEND,
+    referenceSpend: 150_000,
+    maxSpend: TRAINING_BENCHMARK_MAX_SPEND,
+  },
+};
+
+/** Product-aware private suites. Generation-only checkpoints never get text evals. */
+export function eligibleTrainingBenchmarkSuites(
+  job: Pick<TrainingJob, "family" | "productPreset" | "io">,
+): TrainingBenchmarkSuiteOption[] {
+  const preset = job.productPreset ?? presetFromFamily(job.family);
+  const io = job.io ?? ioForPreset(preset);
+  const outputEnabled = (modality: keyof typeof io.outputs) =>
+    (io.outputs[modality] ?? 0) > 0;
+  const ids: BenchmarkSuiteId[] = [];
+  const add = (id: BenchmarkSuiteId) => {
+    if (!ids.includes(id)) ids.push(id);
+  };
+
+  // Put the native product suite first so legacy one-click calls remain useful.
+  if (preset === "omni" || job.family === "omni") add("omni_overview");
+  else if (
+    outputEnabled("video") ||
+    preset === "video_generation" ||
+    job.family === "video"
+  )
+    add("video_generation");
+  else if (
+    outputEnabled("image") ||
+    preset === "image_generation" ||
+    job.family === "diffusion"
+  )
+    add("image_generation");
+  else if (outputEnabled("audio") || preset === "audio")
+    add("audio_generation");
+  else if (outputEnabled("text")) add("language");
+
+  if (outputEnabled("text")) add("language");
+  if (outputEnabled("image")) add("image_generation");
+  if (outputEnabled("video")) add("video_generation");
+  if (outputEnabled("audio")) add("audio_generation");
+  if (preset === "omni" || job.family === "omni") add("omni_overview");
+  return ids.map((id) => TRAINING_BENCHMARK_SUITE_OPTIONS[id]);
+}
+
+/** Displayable measurement quality for the paid sample size. */
+export function trainingBenchmarkAccuracyForSpend(spend: number): {
+  accuracy: number;
+  confidence: number;
+  inaccuracy: number;
+} {
+  const normalized = Math.max(
+    0,
+    Math.min(
+      1,
+      (spend - TRAINING_BENCHMARK_MIN_SPEND) /
+        (TRAINING_BENCHMARK_MAX_SPEND - TRAINING_BENCHMARK_MIN_SPEND),
+    ),
+  );
+  const accuracy = 0.65 + normalized * 0.25;
+  return {
+    accuracy,
+    confidence: 0.72 + normalized * 0.24,
+    inaccuracy: 1 - accuracy,
+  };
+}
+import {
+  apiUnitCostPerMTok,
+  boundedApiListCostPerMTok,
+  birthApiUnitCostPerMTok,
+  blendApiPrice,
+  splitInOutCost,
+  splitBlendedApiPrice,
+  suggestApiInOut,
+} from "../balance/pricing";
+import {
+  DATA_DOMAIN_META,
+  DATA_DOMAINS,
+  defaultDataWeights,
+  lqSynthCapabilityMult,
+  normalizeDomainStock,
+  normalizeWeights,
+  recommendedTrainingDataMTok,
+} from "../balance/data";
 import { modelTrainVramGb } from "../balance/racks";
 import { fleetStats, resolveRackSku } from "./racks";
 import { modelCanCurateDataDomain } from "./modelEligibility";
-import type { DataMix, TrainingDataPlan } from "../types";
+import type {
+  DataDomain,
+  DataMix,
+  LabData,
+  SyntheticFillRecord,
+  TrainingDataPlan,
+} from "../types";
 import {
   consumeForTraining,
   ensureLabData,
@@ -70,15 +249,30 @@ import {
   formatTokens,
   minDataMTokForParams,
   newDataSinceModel,
-  recommendedDataMTok,
   specialistDomainBoost,
   totalProcessed,
 } from "./data";
-import { lqSynthCapabilityMult, normalizeWeights } from "../balance/data";
-import { createDataManifest } from "./dataAssets";
+import type { ConsumeResult } from "./data";
+import {
+  createDataManifest,
+  manifestDomainExposureMTok,
+  trainingDataEvidenceFromManifest,
+} from "./dataAssets";
 import { modelStackModifiers, sanitizeModelStack } from "../balance/modelStack";
 import { normalizeModelEvaluations } from "../balance/evaluationSuites";
-import { syntheticTrainingProfile } from "../balance/syntheticTraining";
+import {
+  syntheticTrainingProfile,
+  teacherSyntheticHeadroomMTok,
+} from "../balance/syntheticTraining";
+import {
+  completedPostTrainStages,
+  mergePostTrainStageEffectiveness,
+  postTrainFailureRisk,
+  postTrainEffectProfile,
+  resolvedPostTrainStageEffectiveness,
+  postTrainStageEffectiveness,
+  postTrainTargetPfDays,
+} from "../balance/postTraining";
 
 const POST_TRAIN_ORDER: PostTrainStage[] = [
   "none",
@@ -87,6 +281,133 @@ const POST_TRAIN_ORDER: PostTrainStage[] = [
   "process",
   "tools",
 ];
+
+type TrainingFamily = StartTrainingOpts["family"];
+type TrainingBackbone = NonNullable<StartTrainingOpts["backbone"]>;
+type TrainingProductPreset = NonNullable<StartTrainingOpts["productPreset"]>;
+
+export interface TrainingUnlockEligibility {
+  ok: boolean;
+  reason?: string;
+  researchNodeId?: string;
+}
+
+export interface TrainingArchitectureValidation {
+  ok: boolean;
+  reason?: string;
+}
+
+/** Shared UI/backend validation for architecture fields that cannot be advisory. */
+export function trainingArchitectureValidation(opts: {
+  backbone: TrainingBackbone;
+  paramsB: number;
+  activeParamsB?: number;
+  mode?: TrainMode;
+}): TrainingArchitectureValidation {
+  if (opts.backbone !== "moe" || opts.mode === "continue") return { ok: true };
+  const active = opts.activeParamsB;
+  if (active == null || !Number.isFinite(active) || active <= 0) {
+    return {
+      ok: false,
+      reason: "MoE needs active parameters (e.g. 8B active of 120B total).",
+    };
+  }
+  if (active > opts.paramsB) {
+    return { ok: false, reason: "Active params cannot exceed total MoE size." };
+  }
+  return { ok: true };
+}
+
+/**
+ * One unlock policy for the UI and the authoritative training action. Product
+ * research gates the native product; sparse topology is an independent gate.
+ */
+export function trainingUnlockEligibility(opts: {
+  family: TrainingFamily;
+  backbone: TrainingBackbone;
+  productPreset: TrainingProductPreset;
+  researchUnlocked: readonly string[];
+}): TrainingUnlockEligibility {
+  const unlocked = new Set(opts.researchUnlocked);
+  if (opts.backbone === "moe" && !unlocked.has("moe_basics")) {
+    return {
+      ok: false,
+      reason: "Unlock Sparse Basics before MoE training.",
+      researchNodeId: "moe_basics",
+    };
+  }
+
+  const requiredProductResearch =
+    opts.productPreset === "omni" || opts.family === "omni"
+      ? (["mm_omni", "Omni Stack"] as const)
+      : opts.productPreset === "video_generation" || opts.family === "video"
+        ? (["mm_video", "Video Temporal Models"] as const)
+        : opts.productPreset === "image_generation" ||
+            opts.family === "diffusion" ||
+            opts.backbone === "diffusion"
+          ? (["mm_diff", "Latent Diffusion"] as const)
+          : opts.productPreset === "audio" ||
+              opts.productPreset === "vision_language"
+            ? (["mm_vision", "Vision Encoders"] as const)
+            : null;
+  if (requiredProductResearch && !unlocked.has(requiredProductResearch[0])) {
+    return {
+      ok: false,
+      reason: `Unlock ${requiredProductResearch[1]} first.`,
+      researchNodeId: requiredProductResearch[0],
+    };
+  }
+  return { ok: true };
+}
+
+function applyDomainFloor(
+  weights: Record<DataDomain, number>,
+  domain: DataDomain,
+  floor: number,
+): Record<DataDomain, number> {
+  const normalized = normalizeWeights(weights);
+  if (normalized[domain] + 1e-9 >= floor) return normalized;
+  const otherTotal = Math.max(1e-9, 1 - normalized[domain]);
+  const scale = (1 - floor) / otherTotal;
+  return Object.fromEntries(
+    DATA_DOMAINS.map((candidate) => [
+      candidate,
+      candidate === domain ? floor : normalized[candidate] * scale,
+    ]),
+  ) as Record<DataDomain, number>;
+}
+
+/** Product-aware recipe used whenever custom mixture engineering is locked. */
+export function defaultTrainingDataWeights(
+  family: TrainingFamily,
+  productPreset: TrainingProductPreset,
+): Record<DataDomain, number> {
+  let weights = defaultDataWeights(family);
+  for (const [domain, floor] of Object.entries(
+    trainingDataModalityRequirements(family, productPreset),
+  ) as [DataDomain, number][]) {
+    weights = applyDomainFloor(weights, domain, floor);
+  }
+  return weights;
+}
+
+function actualConsumedDomainWeights(
+  consumed: Partial<Record<DataDomain, number>>,
+): { totalMTok: number; weights: Record<DataDomain, number> } {
+  const totalMTok = DATA_DOMAINS.reduce(
+    (sum, domain) => sum + Math.max(0, consumed[domain] ?? 0),
+    0,
+  );
+  return {
+    totalMTok,
+    weights: Object.fromEntries(
+      DATA_DOMAINS.map((domain) => [
+        domain,
+        totalMTok > 0 ? Math.max(0, consumed[domain] ?? 0) / totalMTok : 0,
+      ]),
+    ) as Record<DataDomain, number>,
+  };
+}
 
 /** Read concurrent jobs while honoring direct legacy `trainingJob` mutations in old saves/tests. */
 export function playerTrainingJobs(state: SimState): TrainingJob[] {
@@ -237,13 +558,64 @@ export interface TrainingResourceAllocation {
   ramAllocatedGb: number;
   ramRequiredGb: number;
   ramReady: boolean;
+  systemRamAllocatedGb: number;
+  systemRamRequiredGb: number;
+  systemRamReady: boolean;
+  bottleneck: "none" | "hbm" | "system_ram" | "both";
 }
 
 export interface PlayerTrainingResourcePlan {
   trainingRamGb: number;
+  trainingSystemRamGb: number;
   trainingAllocationShare: number;
   jobs: Record<string, TrainingResourceAllocation>;
   safetyCampaign?: TrainingResourceAllocation;
+}
+
+function liveTrainingDaysRemaining(
+  job: TrainingJob,
+  effectivePf: number,
+  progressPfDays = job.progressPfDays,
+  _daysElapsed = job.daysElapsed ?? 0,
+): number {
+  const remainingPfDays = Math.max(0, job.targetPfDays - progressPfDays);
+  const computeDays =
+    remainingPfDays <= 1e-9
+      ? 0
+      : effectivePf > 1e-9
+        ? remainingPfDays / effectivePf
+        : Number.POSITIVE_INFINITY;
+  return computeDays;
+}
+
+function trainingStallReason(
+  state: SimState,
+  snap: ComputeSnapshot,
+  resources: PlayerTrainingResourcePlan,
+  resource: TrainingResourceAllocation | undefined,
+): string {
+  if (resource && resource.bottleneck !== "none") {
+    if (resource.bottleneck === "system_ram") {
+      return `Training system RAM blocked: ${resource.systemRamRequiredGb.toFixed(0)} GB needed, ${resource.systemRamAllocatedGb.toFixed(0)} GB assigned from the ${Math.round(resources.trainingAllocationShare * 100)}% Training allocation.`;
+    }
+    if (resource.bottleneck === "both") {
+      return `Training memory blocked: ${resource.ramRequiredGb.toFixed(0)} GB HBM and ${resource.systemRamRequiredGb.toFixed(0)} GB system RAM needed; ${resource.ramAllocatedGb.toFixed(0)} GB HBM and ${resource.systemRamAllocatedGb.toFixed(0)} GB system RAM assigned.`;
+    }
+    return `Training HBM blocked: ${resource.ramRequiredGb.toFixed(0)} GB needed, ${resource.ramAllocatedGb.toFixed(0)} GB assigned from the ${Math.round(resources.trainingAllocationShare * 100)}% Training allocation.`;
+  }
+  if (state.player.allocation.training <= 1e-9) {
+    return "Training compute blocked: zero PF is allocated to Training.";
+  }
+  if (snap.mwAvailable <= 1e-9 || snap.powerDerate <= 1e-9) {
+    return "Training compute power-blocked: no powered PF is available.";
+  }
+  if (snap.pools.training <= 1e-9) {
+    return "Training compute blocked: the Training pool has zero effective PF.";
+  }
+  if (resource && resource.rawPf <= 1e-9) {
+    return "Training format blocked: no allocated accelerator supports this training format.";
+  }
+  return "Training compute blocked: zero effective PF was allocated to this run.";
 }
 
 /** The configured Training slice owns the same share of accelerator RAM as PF. */
@@ -263,6 +635,31 @@ export function trainingRamBudgetGb(
   return snap.trainingRamGb ?? snap.vramGb * trainingAllocationShare(state);
 }
 
+/** A distributed job must fit wholly in one low-latency execution domain. */
+function trainingMemoryDomainFit(
+  state: SimState,
+  snap: ComputeSnapshot,
+  hbmRequiredGb: number,
+  systemRamRequiredGb: number,
+): { hbmReady: boolean; systemRamReady: boolean; ready: boolean } {
+  const share = trainingAllocationShare(state);
+  const localHbm = snap.localVramGb * share;
+  const remoteHbm = snap.remoteVramGb * share;
+  const localSystemRam = snap.localSystemRamGb * share;
+  const remoteSystemRam = snap.remoteSystemRamGb * share;
+  const localHbmReady = localHbm + 1e-9 >= hbmRequiredGb;
+  const remoteHbmReady = remoteHbm + 1e-9 >= hbmRequiredGb;
+  const localSystemReady = localSystemRam + 1e-9 >= systemRamRequiredGb;
+  const remoteSystemReady = remoteSystemRam + 1e-9 >= systemRamRequiredGb;
+  return {
+    hbmReady: localHbmReady || remoteHbmReady,
+    systemRamReady: localSystemReady || remoteSystemReady,
+    ready:
+      (localHbmReady && localSystemReady) ||
+      (remoteHbmReady && remoteSystemReady),
+  };
+}
+
 function jobTrainingRamGb(state: SimState, job: TrainingJob): number {
   return modelTrainVramGb(
     job.targetParamsB,
@@ -273,6 +670,34 @@ function jobTrainingRamGb(state: SimState, job: TrainingJob): number {
   );
 }
 
+function trainingMemoryForModel(
+  state: SimState,
+  model: {
+    paramsB: number;
+    activeParamsB?: number;
+    family?: string;
+    trainingNumerics?: TrainingNumerics;
+  },
+) {
+  return estimateTrainingMemoryGb({
+    paramsB: model.paramsB,
+    activeParamsB: model.activeParamsB,
+    family: model.family,
+    numerics: model.trainingNumerics ?? LEGACY_TRAINING_NUMERICS,
+    activationCheckpointing:
+      state.player.researchUnlocked.includes("opt_checkpoint"),
+  });
+}
+
+function jobTrainingSystemRamGb(state: SimState, job: TrainingJob): number {
+  return trainingMemoryForModel(state, {
+    paramsB: job.targetParamsB,
+    activeParamsB: job.activeParamsB,
+    family: job.family,
+    trainingNumerics: job.trainingNumerics ?? job.numerics,
+  }).requiredSystemRamGb;
+}
+
 export interface ProspectiveTrainingRamFit {
   ready: boolean;
   trainingRamGb: number;
@@ -281,6 +706,9 @@ export interface ProspectiveTrainingRamFit {
   blockerName?: string;
   blockerAllocatedGb?: number;
   blockerRequiredGb?: number;
+  candidateSystemRamAllocatedGb: number;
+  candidateSystemRamRequiredGb: number;
+  blockerResource?: "HBM" | "system RAM";
 }
 
 /** Check the post-launch priority split so a new run cannot evict another run. */
@@ -289,6 +717,7 @@ export function trainingRamFitForNewJob(
   candidateRequiredGb: number,
   candidatePriority: number,
   snap = computeSnapshot(state),
+  candidateSystemRamRequiredGb = Math.max(16, candidateRequiredGb * 0.15),
 ): ProspectiveTrainingRamFit {
   const safetyModel = state.player.safetyCampaign
     ? state.player.models.find(
@@ -297,12 +726,19 @@ export function trainingRamFitForNewJob(
     : undefined;
   const requests = [
     ...playerTrainingJobs(state)
-      .filter((job) => !job.paused && !job.failed)
+      .filter(
+        (job) =>
+          !job.paused &&
+          !job.failed &&
+          (job.computePriority ?? 50) > 0 &&
+          !job.pendingCampaignEvent,
+      )
       .map((job) => ({
         id: job.id,
         name: job.name,
         weight: job.computePriority ?? 50,
         requiredGb: jobTrainingRamGb(state, job),
+        systemRamRequiredGb: jobTrainingSystemRamGb(state, job),
       })),
     ...(safetyModel
       ? [
@@ -317,6 +753,8 @@ export function trainingRamFitForNewJob(
               safetyModel.trainingNumerics ?? LEGACY_TRAINING_NUMERICS,
               state.player.researchUnlocked.includes("opt_checkpoint"),
             ),
+            systemRamRequiredGb: trainingMemoryForModel(state, safetyModel)
+              .requiredSystemRamGb,
           },
         ]
       : []),
@@ -325,16 +763,45 @@ export function trainingRamFitForNewJob(
       name: "New run",
       weight: Math.max(0, candidatePriority),
       requiredGb: Math.max(0, candidateRequiredGb),
+      systemRamRequiredGb: Math.max(0, candidateSystemRamRequiredGb),
     },
   ];
   const trainingRamGb = trainingRamBudgetGb(state, snap);
   const allocations = allocateWeightedTrainingCompute(trainingRamGb, requests);
-  const blocker = requests.find(
+  const systemRamGb = snap.systemRamGb * trainingAllocationShare(state);
+  const systemAllocations = allocateWeightedTrainingCompute(
+    systemRamGb,
+    requests,
+  );
+  const hbmBlocker = requests.find(
     (request) =>
       (allocations[request.id]?.rawPf ?? 0) + 1e-9 < request.requiredGb,
   );
+  const systemBlocker = requests.find(
+    (request) =>
+      (systemAllocations[request.id]?.rawPf ?? 0) + 1e-9 <
+      request.systemRamRequiredGb,
+  );
+  const domainBlocker = requests.find(
+    (request) =>
+      !trainingMemoryDomainFit(
+        state,
+        snap,
+        request.requiredGb,
+        request.systemRamRequiredGb,
+      ).ready,
+  );
+  const blocker = hbmBlocker ?? systemBlocker ?? domainBlocker;
+  const domainFit = domainBlocker
+    ? trainingMemoryDomainFit(
+        state,
+        snap,
+        domainBlocker.requiredGb,
+        domainBlocker.systemRamRequiredGb,
+      )
+    : undefined;
   return {
-    ready: !blocker,
+    ready: !hbmBlocker && !systemBlocker && !domainBlocker,
     trainingRamGb,
     candidateAllocatedGb: allocations.__candidate__?.rawPf ?? 0,
     candidateRequiredGb,
@@ -342,7 +809,23 @@ export function trainingRamFitForNewJob(
     blockerAllocatedGb: blocker
       ? (allocations[blocker.id]?.rawPf ?? 0)
       : undefined,
-    blockerRequiredGb: blocker?.requiredGb,
+    blockerRequiredGb:
+      hbmBlocker?.requiredGb ??
+      systemBlocker?.systemRamRequiredGb ??
+      (domainFit?.hbmReady
+        ? domainBlocker?.systemRamRequiredGb
+        : domainBlocker?.requiredGb),
+    candidateSystemRamAllocatedGb: systemAllocations.__candidate__?.rawPf ?? 0,
+    candidateSystemRamRequiredGb,
+    blockerResource: hbmBlocker
+      ? "HBM"
+      : systemBlocker
+        ? "system RAM"
+        : domainBlocker
+          ? domainFit?.hbmReady
+            ? "system RAM"
+            : "HBM"
+          : undefined,
   };
 }
 
@@ -364,10 +847,11 @@ export function playerTrainingResourcePlan(
     ...jobs.map((job) => ({
       id: job.id,
       weight: job.computePriority ?? 50,
-      eligible: !job.paused && !job.failed,
+      eligible: !job.paused && !job.failed && !job.pendingCampaignEvent,
       numerics:
         job.trainingNumerics ?? job.numerics ?? LEGACY_TRAINING_NUMERICS,
       ramRequiredGb: jobTrainingRamGb(state, job),
+      systemRamRequiredGb: jobTrainingSystemRamGb(state, job),
     })),
     ...(safetyModel
       ? [
@@ -383,6 +867,8 @@ export function playerTrainingResourcePlan(
               safetyModel.trainingNumerics ?? LEGACY_TRAINING_NUMERICS,
               state.player.researchUnlocked.includes("opt_checkpoint"),
             ),
+            systemRamRequiredGb: trainingMemoryForModel(state, safetyModel)
+              .requiredSystemRamGb,
           },
         ]
       : []),
@@ -392,12 +878,40 @@ export function playerTrainingResourcePlan(
     trainingRamGb,
     requests,
   );
+  const domainFits = Object.fromEntries(
+    requests.map((request) => [
+      request.id,
+      trainingMemoryDomainFit(
+        state,
+        snap,
+        request.ramRequiredGb,
+        request.systemRamRequiredGb,
+      ),
+    ]),
+  ) as Record<string, ReturnType<typeof trainingMemoryDomainFit>>;
   const ramReady = Object.fromEntries(
     requests.map((request) => [
       request.id,
       request.eligible !== false &&
+        domainFits[request.id]!.hbmReady &&
+        domainFits[request.id]!.ready &&
         (ramAllocations[request.id]?.rawPf ?? 0) + 1e-9 >=
           request.ramRequiredGb,
+    ]),
+  ) as Record<string, boolean>;
+  const trainingSystemRamGb = snap.systemRamGb * trainingAllocationShare(state);
+  const systemRamAllocations = allocateWeightedTrainingCompute(
+    trainingSystemRamGb,
+    requests,
+  );
+  const systemRamReady = Object.fromEntries(
+    requests.map((request) => [
+      request.id,
+      request.eligible !== false &&
+        domainFits[request.id]!.systemRamReady &&
+        domainFits[request.id]!.ready &&
+        (systemRamAllocations[request.id]?.rawPf ?? 0) + 1e-9 >=
+          request.systemRamRequiredGb,
     ]),
   ) as Record<string, boolean>;
   const computeAllocations = allocateTrainingHardwarePools(
@@ -405,16 +919,23 @@ export function playerTrainingResourcePlan(
     requests.map((request) => ({
       id: request.id,
       weight: request.weight,
-      eligible: request.eligible !== false && ramReady[request.id],
+      eligible:
+        request.eligible !== false &&
+        ramReady[request.id] &&
+        systemRamReady[request.id],
       numerics: request.numerics,
     })),
   );
   const allocationFor = (
     id: string,
     ramRequiredGb: number,
+    systemRamRequiredGb: number,
   ): TrainingResourceAllocation => {
     const compute = computeAllocations[id];
     const ram = ramAllocations[id];
+    const systemRam = systemRamAllocations[id];
+    const hbmOk = ramReady[id] ?? false;
+    const hostOk = systemRamReady[id] ?? false;
     return {
       rawPf: compute?.rawPf ?? 0,
       effectivePf: compute?.effectivePf ?? 0,
@@ -422,6 +943,16 @@ export function playerTrainingResourcePlan(
       ramAllocatedGb: ram?.rawPf ?? 0,
       ramRequiredGb,
       ramReady: ramReady[id] ?? false,
+      systemRamAllocatedGb: systemRam?.rawPf ?? 0,
+      systemRamRequiredGb,
+      systemRamReady: hostOk,
+      bottleneck: hbmOk
+        ? hostOk
+          ? "none"
+          : "system_ram"
+        : hostOk
+          ? "hbm"
+          : "both",
     };
   };
   const safetyRequest = requests.find(
@@ -430,45 +961,139 @@ export function playerTrainingResourcePlan(
 
   return {
     trainingRamGb,
+    trainingSystemRamGb,
     trainingAllocationShare: trainingAllocationShare(state),
     jobs: Object.fromEntries(
       jobs.map((job) => {
-        return [job.id, allocationFor(job.id, jobTrainingRamGb(state, job))];
+        return [
+          job.id,
+          allocationFor(
+            job.id,
+            jobTrainingRamGb(state, job),
+            jobTrainingSystemRamGb(state, job),
+          ),
+        ];
       }),
     ),
     safetyCampaign: safetyRequest
-      ? allocationFor(safetyRequest.id, safetyRequest.ramRequiredGb)
+      ? allocationFor(
+          safetyRequest.id,
+          safetyRequest.ramRequiredGb,
+          safetyRequest.systemRamRequiredGb,
+        )
       : undefined,
   };
 }
 
-function postTrainTarget(stage: PostTrainStage): number {
-  switch (stage) {
-    case "sft":
-      return 4;
-    case "rlhf":
-      return 8;
-    case "process":
-      return 10;
-    case "tools":
-      return 6;
-    default:
-      return 0;
-  }
-}
-
 type TrainableStage = "base" | Exclude<PostTrainStage, "none">;
 
-/** One deterministic 5% failure roll per base/post-training stage. */
+/**
+ * Rare unrecoverable recipe failures. Routine hardware interruptions are
+ * already absorbed by achieved utilization/checkpoint overhead and should not
+ * destroy an otherwise healthy run.
+ */
 export function trainingStageFailurePlan(
-  job: Pick<TrainingJob, "id" | "outcomeSeed">,
+  job: Pick<TrainingJob, "id" | "outcomeSeed" | "outcomeRisk"> &
+    Partial<TrainingJob>,
   stage: TrainableStage,
-): { willFail: boolean; atFraction: number } {
+  context?: {
+    researchUnlocked?: readonly string[];
+    models?: readonly Model[];
+    day?: number;
+  },
+): { willFail: boolean; atFraction: number; probability: number } {
+  if (stage !== "base") {
+    const frozen = job.postTrainRiskPlan;
+    if (frozen?.stage === stage) {
+      return {
+        willFail: frozen.willFail,
+        atFraction: frozen.atFraction,
+        probability: frozen.probability,
+      };
+    }
+    const plan = createPostTrainRiskPlan(
+      job as TrainingJob,
+      stage,
+      context?.researchUnlocked ?? [],
+      context?.models ?? [],
+      context?.day ?? 0,
+    );
+    return {
+      willFail: plan.willFail,
+      atFraction: plan.atFraction,
+      probability: plan.probability,
+    };
+  }
   const rng = createRng(
     hashSeed(job.outcomeSeed ?? 0, job.id, stage, "stage-failure-v1"),
   );
-  const willFail = rng.next() < 0.05;
-  return { willFail, atFraction: 0.18 + rng.next() * 0.7 };
+  const baseRisk =
+    job.outcomeRisk === "high"
+      ? 0.1
+      : job.outcomeRisk === "medium"
+        ? 0.04
+        : 0.015;
+  const willFail = rng.next() < baseRisk * (stage === "base" ? 1 : 0.65);
+  return {
+    willFail,
+    atFraction: 0.18 + rng.next() * 0.7,
+    probability: baseRisk,
+  };
+}
+
+/** Freeze one explainable hidden roll when a post-training stage begins. */
+export function createPostTrainRiskPlan(
+  job: TrainingJob,
+  stage: Exclude<PostTrainStage, "none">,
+  researchUnlocked: readonly string[],
+  models: readonly Model[],
+  day: number,
+  startFraction = 0,
+): PostTrainRiskPlan {
+  const assessment = postTrainFailureRisk({
+    job,
+    stage,
+    researchUnlocked,
+    models,
+  });
+  const rng = createRng(
+    hashSeed(
+      job.outcomeSeed ?? 0,
+      job.id,
+      stage,
+      job.postTrainRecoveryAttempt ?? 0,
+      job.postTrainStageRuns?.[stage] ?? 0,
+      "posttrain-stage-failure-v2",
+    ),
+  );
+  const survivedFraction = Math.max(0, Math.min(0.98, startFraction));
+  const probability = Math.max(
+    0.008,
+    assessment.probability * (1 - survivedFraction * 0.55),
+  );
+  const band: PostTrainRiskPlan["band"] =
+    probability < 0.055
+      ? "low"
+      : probability < 0.12
+        ? "guarded"
+        : probability < 0.22
+          ? "high"
+          : "critical";
+  return {
+    stage,
+    probability,
+    band,
+    willFail: rng.next() < probability,
+    atFraction:
+      survivedFraction + (1 - survivedFraction) * (0.2 + rng.next() * 0.65),
+    startFraction: survivedFraction || undefined,
+    factors: [
+      ...assessment.factors,
+      ...(survivedFraction > 0 ? ["checkpoint recovery attempt"] : []),
+    ],
+    createdDay: day,
+    seedVersion: 2,
+  };
 }
 
 function estimateJobDailyThroughput(
@@ -501,42 +1126,166 @@ function estimateJobDailyThroughput(
 }
 
 /**
- * Observed training loss: exponential decay toward a floor (fast early, slow
- * late) plus mean-reverting noise with occasional 2–6% upward spikes.
+ * Observed training loss. The signal is intentionally less tidy than the
+ * underlying learning curve: seeded jitter, two-sided spikes and short
+ * divergence/recovery episodes sit on top of a long-run improving trend.
  * Deterministic per (job, stage, day) via seeded RNG — never Math.random.
  */
 export function trainingLoss(
-  job: Pick<TrainingJob, "id" | "outcomeSeed" | "targetParamsB">,
+  job: Pick<TrainingJob, "id" | "outcomeSeed" | "targetParamsB"> &
+    Partial<
+      Pick<
+        TrainingJob,
+        | "trainingNumerics"
+        | "numerics"
+        | "dataPlan"
+        | "dataQualityUsed"
+        | "integratedMethods"
+        | "outcomeRisk"
+        | "effectiveDataRatio"
+        | "repeatedDataEpochs"
+      >
+    >,
   stage: TrainableStage,
   progress: number,
   day: number,
   previousObservedLoss?: number,
 ): number {
-  const p = Math.max(0, Math.min(1, progress));
-  const stageFloor = stage === "base" ? 1.15 : 0.72;
-  const stageStart =
-    stage === "base"
-      ? 8.4 + Math.log10(Math.max(1, job.targetParamsB)) * 0.4
-      : 2.1;
-  // Steeper early drop, then hard diminishing returns into the floor.
+  const precision = trainingNumericsEconomicsProfile(
+    job.trainingNumerics ?? job.numerics ?? DEFAULT_TRAINING_NUMERICS,
+  );
+  const rawProgress = Math.max(0, progress);
+  // Beyond the recommended target, optimization can continue but its visible
+  // loss improvement must flatten quickly. This mirrors the bounded maturity
+  // curve used for finalized capability instead of drawing an artificial flat
+  // line while the player is still spending compute.
+  const p =
+    rawProgress <= 1
+      ? rawProgress
+      : 1 + 0.18 * (1 - Math.exp(-(rawProgress - 1) / 0.75));
+
+  const weights = Object.values(job.dataPlan?.weights ?? {}).filter(
+    (weight): weight is number => Number.isFinite(weight) && weight > 0,
+  );
+  const weightTotal = weights.reduce((sum, weight) => sum + weight, 0);
+  const diversity =
+    weights.length <= 1 || weightTotal <= 0
+      ? weights.length === 1
+        ? 0
+        : 0.65
+      : -weights.reduce((entropy, weight) => {
+          const share = weight / weightTotal;
+          return entropy + share * Math.log(share);
+        }, 0) / Math.log(weights.length);
+  const quality = Math.max(0, Math.min(1, (job.dataQualityUsed ?? 70) / 100));
+  const repeatPressure = Math.max(0, (job.repeatedDataEpochs ?? 1) - 1);
+  const dataRatio = job.effectiveDataRatio;
+  const dataRatioRisk =
+    dataRatio == null
+      ? 0
+      : Math.min(0.22, Math.max(0, 1 - dataRatio) * 0.18) +
+        Math.min(0.18, Math.max(0, dataRatio - 8) * 0.018);
+  const qualityGap = 0.7 - quality;
+  const diversityGap = 0.65 - diversity;
+
+  // This terminal band is derived from scale and the data recipe. Typical
+  // jobs settle visibly in the high-threes/low-fours without a magic target.
+  const baseBand =
+    3.45 +
+    Math.log10(Math.max(1, job.targetParamsB)) * 0.18 +
+    qualityGap * 1.2 +
+    diversityGap * 0.55 +
+    Math.min(0.45, repeatPressure * 0.09);
+  const baseStart =
+    baseBand + 5.15 + Math.log10(Math.max(1, job.targetParamsB)) * 0.28;
+  const postStageAdjustment =
+    stage === "rlhf" || stage === "process"
+      ? -0.18
+      : stage === "tools"
+        ? 0.08
+        : -0.08;
   const trend =
-    stageFloor + (stageStart - stageFloor) * Math.exp(-3.1 * p - 1.4 * p * p);
+    stage === "base"
+      ? baseBand +
+        (baseStart - baseBand) * Math.exp(-3.7 * p - 0.8 * p * p) -
+        0.12 * p
+      : baseBand +
+        postStageAdjustment -
+        0.1 * p +
+        (0.72 + baseBand * 0.08) * Math.exp(-7.5 * p);
+
+  const stableOptimizationMethods = new Set([
+    "opt_mixed",
+    "opt_te_fp8",
+    "opt_overlap_comm",
+    "opt_grad_accum",
+    "data_eval",
+  ]);
+  const stabilityResearch = (job.integratedMethods ?? []).filter((method) =>
+    stableOptimizationMethods.has(method),
+  ).length;
+  const outcomeRisk =
+    job.outcomeRisk === "high" ? 0.28 : job.outcomeRisk === "medium" ? 0.12 : 0;
+  const volatility = Math.max(
+    0.45,
+    precision.lossVolatilityMultiplier *
+      (1 +
+        Math.max(0, qualityGap) * 0.55 +
+        Math.max(0, 0.65 - diversity) * 0.45 +
+        Math.max(0, diversity - 0.65) *
+          0.55 *
+          Math.pow(Math.max(0, 1 - p), 1.5) +
+        Math.min(0.35, repeatPressure * 0.07) +
+        dataRatioRisk +
+        Math.max(0, precision.stabilityRisk) +
+        outcomeRisk) *
+      Math.max(0.72, 1 - stabilityResearch * 0.055),
+  );
 
   const rng = createRng(
-    hashSeed(job.outcomeSeed ?? 0, job.id, stage, day, "loss-v2"),
+    hashSeed(job.outcomeSeed ?? 0, job.id, stage, day, "loss-v3"),
   );
   const prev =
     previousObservedLoss == null || !Number.isFinite(previousObservedLoss)
       ? trend
       : previousObservedLoss;
   // Mean-revert toward today's trend; residual carries day-to-day wobble.
-  const residual = (prev - trend) * 0.62 + rng.range(-0.045, 0.045);
+  const residual =
+    (prev - trend) * 0.56 + rng.range(-0.032, 0.032) * volatility;
   let observed = trend + residual;
-  // Occasional upward spike (~12% of days) of roughly 2–6%.
-  if (rng.next() < 0.12) {
-    observed *= 1 + rng.range(0.02, 0.06);
+
+  // A block seed makes instability persist for several samples: the curve
+  // first diverges, then recovers and can briefly undershoot its trend.
+  const episodeLength = 9;
+  const episodeIndex = Math.floor(day / episodeLength);
+  const episodePhase = ((day % episodeLength) + episodeLength) % episodeLength;
+  const episodeRng = createRng(
+    hashSeed(
+      job.outcomeSeed ?? 0,
+      job.id,
+      stage,
+      episodeIndex,
+      "loss-divergence-v1",
+    ),
+  );
+  if (episodeRng.next() < Math.min(0.34, 0.1 * volatility)) {
+    const amplitude = episodeRng.range(0.055, 0.14) * volatility;
+    const episodeShape =
+      episodePhase <= 3
+        ? episodePhase / 3
+        : episodePhase <= 6
+          ? (6 - episodePhase) / 3
+          : -(episodePhase - 6) / 6;
+    observed *= 1 + amplitude * episodeShape;
   }
-  const floor = stageFloor * 0.92;
+
+  // Optimizer shocks go both ways; negative spikes model lucky batches or a
+  // recovered learning-rate step rather than forcing every wobble upward.
+  if (rng.next() < Math.min(0.32, 0.16 * volatility)) {
+    const direction = rng.next() < 0.58 ? 1 : -1;
+    observed *= 1 + direction * rng.range(0.015, 0.055) * volatility;
+  }
+  const floor = baseBand * 0.82;
   return Math.max(floor, Math.round(observed * 1000) / 1000);
 }
 
@@ -546,64 +1295,189 @@ export function observedLoss(job: TrainingJob): number | null {
   return history[history.length - 1]!.loss;
 }
 
+export const LOSS_PLATEAU_WINDOW = 6;
+export const LOSS_PLATEAU_TOLERANCE = 0.04;
+
+/**
+ * Detect a flat recent loss curve without relying on wall-clock randomness.
+ * A plateau needs a full same-stage window, little end-to-end improvement,
+ * and no large excursion hidden inside that window.
+ */
+export function detectLossPlateau(
+  job: Pick<TrainingJob, "lossHistory">,
+  tolerance: number = LOSS_PLATEAU_TOLERANCE,
+): boolean {
+  const history = job.lossHistory ?? [];
+  const stage = history.at(-1)?.stage;
+  if (!stage) return false;
+  const recent = history
+    .filter((point) => point.stage === stage && Number.isFinite(point.loss))
+    .slice(-LOSS_PLATEAU_WINDOW);
+  if (recent.length < LOSS_PLATEAU_WINDOW) return false;
+  const losses = recent.map((point) => point.loss);
+  const improvement = losses[0]! - losses.at(-1)!;
+  const excursion = Math.max(...losses) - Math.min(...losses);
+  const allowed = Math.max(0, tolerance);
+  return Math.abs(improvement) <= allowed && excursion <= allowed * 2.5;
+}
+
+/** Minimum compute fraction before Launch now / keep-internal is available. */
+export const MIN_LAUNCH_PROGRESS_FRAC = 0.05;
+
+export function trainingMinimumStatus(job: TrainingJob): {
+  ok: boolean;
+  reason?: string;
+  computeReady: boolean;
+  calendarReady: boolean;
+  completeReady: boolean;
+  plateaued: boolean;
+  earlyReleaseReady: boolean;
+  launchReady: boolean;
+  calendarRemaining: number;
+} {
+  if (job.failed)
+    return {
+      ok: false,
+      reason: "This run failed and cannot be released.",
+      computeReady: false,
+      calendarReady: false,
+      completeReady: false,
+      plateaued: false,
+      earlyReleaseReady: false,
+      launchReady: false,
+      calendarRemaining: 0,
+    };
+  const progressFrac = job.progressPfDays / Math.max(job.targetPfDays, 1e-9);
+  const computeReady = job.progressPfDays + 1e-9 >= job.targetPfDays;
+  // PF is authoritative. Legacy calendar fields are telemetry only.
+  const calendarRemaining = 0;
+  const calendarReady = true;
+  const plateaued = detectLossPlateau(job);
+  const completeReady = computeReady;
+  const launchReady =
+    job.progressPfDays > 0 && progressFrac + 1e-12 >= MIN_LAUNCH_PROGRESS_FRAC;
+  // Anytime launch: plateau is informational; maturity penalties handle quality.
+  const earlyReleaseReady = launchReady && !completeReady;
+  if (!launchReady) {
+    return {
+      ok: false,
+      reason: `Train at least ${Math.round(MIN_LAUNCH_PROGRESS_FRAC * 100)}% of the compute target before launching.`,
+      computeReady,
+      calendarReady,
+      completeReady,
+      plateaued,
+      earlyReleaseReady,
+      launchReady,
+      calendarRemaining,
+    };
+  }
+  if (!completeReady) {
+    return {
+      ok: false,
+      reason: plateaued
+        ? "Loss has plateaued; launch now ships a degraded checkpoint."
+        : "Launch now available — capability and benchmarks scale with completed compute.",
+      computeReady,
+      calendarReady,
+      completeReady,
+      plateaued,
+      earlyReleaseReady,
+      launchReady,
+      calendarRemaining,
+    };
+  }
+  return {
+    ok: true,
+    computeReady,
+    calendarReady,
+    completeReady,
+    plateaued,
+    earlyReleaseReady,
+    launchReady,
+    calendarRemaining,
+  };
+}
+
 export function canReleaseTrainingJob(job: TrainingJob): {
   ok: boolean;
   reason?: string;
+  releaseKind?: "complete" | "early";
 } {
-  if (job.failed)
-    return { ok: false, reason: "This run failed and cannot be released." };
-  const loss = observedLoss(job);
-  if (loss == null) return { ok: false, reason: "No observed loss yet." };
-  if (loss > RELEASE_LOSS_GATE) {
+  if (job.pendingCampaignEvent) {
     return {
       ok: false,
-      reason: `Release needs observed loss ≤ ${RELEASE_LOSS_GATE} (currently ${loss.toFixed(3)}).`,
+      reason: `Resolve the ${job.pendingCampaignEvent.title} training decision first.`,
     };
   }
-  return { ok: true };
+  if (
+    job.postTrain !== "none" &&
+    job.postTrainProgress + 1e-9 < job.postTrainTarget
+  ) {
+    return {
+      ok: false,
+      reason: `Finish ${job.postTrain.toUpperCase()} compute before finalizing this checkpoint.`,
+    };
+  }
+  const status = trainingMinimumStatus(job);
+  if (status.completeReady) return { ok: true, releaseKind: "complete" };
+  if (status.launchReady || status.earlyReleaseReady) {
+    return { ok: true, releaseKind: "early" };
+  }
+  return { ok: false, reason: status.reason };
+}
+
+/**
+ * Continuous maturity haircut for anytime launch.
+ * Capability / benchmarks / reliability track √(progress/target), with a light
+ * additional factor when funded calendar days are still below the recommendation.
+ */
+export function earlyReleasePenalty(
+  job: Pick<
+    TrainingJob,
+    | "progressPfDays"
+    | "targetPfDays"
+    | "recommendedPfDays"
+    | "daysElapsed"
+    | "minCalendarDays"
+  >,
+): {
+  progress: number;
+  calendarProgress: number;
+  capabilityMultiplier: number;
+  benchmarkMultiplier: number;
+  reliabilityMultiplier: number;
+} {
+  const progress = Math.max(
+    0,
+    Math.min(
+      1,
+      job.progressPfDays /
+        Math.max(job.recommendedPfDays ?? job.targetPfDays, 1e-9),
+    ),
+  );
+  const calendarProgress = 1;
+  const maturity = Math.sqrt(progress);
+  return {
+    progress,
+    calendarProgress,
+    capabilityMultiplier: 0.45 + maturity * 0.55,
+    benchmarkMultiplier: 0.35 + maturity * 0.65,
+    reliabilityMultiplier: 0.3 + maturity * 0.7,
+  };
 }
 
 export function extendTraining(
   state: SimState,
   jobId: string,
-  days: number = TRAINING_EXTENSION_DAYS,
+  _days: number = TRAINING_EXTENSION_DAYS,
 ): SimState {
   const jobs = playerTrainingJobs(state);
   const job = jobs.find((candidate) => candidate.id === jobId);
   if (!job || job.failed) return state;
-  const recommended = job.recommendedPfDays ?? job.targetPfDays;
-  if (job.progressPfDays + 1e-9 < recommended && !job.awaitingDecision) {
-    return withAlert(
-      state,
-      "warn",
-      "Reach the recommended compute target before extending.",
-    );
-  }
-  const daily = estimateJobDailyThroughput(state, {
-    numerics: job.trainingNumerics ?? job.numerics ?? DEFAULT_TRAINING_NUMERICS,
-    computePriority: job.computePriority ?? 50,
-    reservedPf: job.reservedPf ?? 0,
-    concurrentJobs: Math.max(
-      1,
-      jobs.filter((candidate) => !candidate.paused && !candidate.failed).length,
-    ),
-  });
-  const addPf = Math.max(daily, 1e-6) * Math.max(1, days);
-  const updated: TrainingJob = {
-    ...job,
-    targetPfDays: Math.max(job.targetPfDays, recommended) + addPf,
-    extensionDays: (job.extensionDays ?? 0) + Math.max(1, days),
-    awaitingDecision: false,
-    paused: false,
-    stallReason: null,
-  };
   return withAlert(
-    withTrainingJobs(
-      state,
-      jobs.map((candidate) => (candidate.id === job.id ? updated : candidate)),
-    ),
-    "info",
-    `${job.name} extended by ${Math.max(1, days)} days (+${addPf.toFixed(2)} PF-days).`,
+    state,
+    "warn",
+    `${job.name} has a fixed PF target. Finish it or start a versioned continuation from a checkpoint.`,
   );
 }
 
@@ -629,24 +1503,94 @@ export function appendLossPoint(
   return next.slice(-64);
 }
 
-function failedAtCrossing(
+function postTrainRecoveryCheckpoint(
+  state: SimState,
   job: TrainingJob,
-  stage: TrainableStage,
-  previous: number,
-  next: number,
-  target: number,
-): boolean {
-  if (job.failed || target <= 0) return false;
-  const plan = trainingStageFailurePlan(job, stage);
-  const failureAt = target * plan.atFraction;
-  return plan.willFail && previous < failureAt && next >= failureAt;
+  stage: Exclude<PostTrainStage, "none">,
+  failureFraction: number,
+): TrainingCheckpointCandidate | undefined {
+  const failedStageIndex = POST_TRAIN_ORDER.indexOf(stage);
+  const checkpointStageIndex = (candidate: TrainingCheckpointCandidate) =>
+    candidate.stage === "base" ? 0 : POST_TRAIN_ORDER.indexOf(candidate.stage);
+  return [...(state.player.trainingCheckpoints ?? [])]
+    .filter((checkpoint) => {
+      if (
+        checkpoint.sourceJobId !== job.id ||
+        checkpoint.status === "discarded"
+      )
+        return false;
+      const stageIndex = checkpointStageIndex(checkpoint);
+      if (stageIndex < 0 || stageIndex > failedStageIndex) return false;
+      if (checkpoint.stage === "base") {
+        return checkpoint.telemetry.progress + 1e-9 >= 1;
+      }
+      if (stageIndex < failedStageIndex) return true;
+      return checkpoint.telemetry.stageProgress + 1e-9 < failureFraction;
+    })
+    .sort((a, b) => {
+      const stageDelta = checkpointStageIndex(b) - checkpointStageIndex(a);
+      if (stageDelta !== 0) return stageDelta;
+      const progressDelta =
+        b.telemetry.stageProgress - a.telemetry.stageProgress;
+      if (Math.abs(progressDelta) > 1e-9) return progressDelta;
+      return b.capturedDay - a.capturedDay || b.id.localeCompare(a.id);
+    })[0];
+}
+
+/** The exact snapshot accepted by the one-click failed-run recovery action. */
+export function eligiblePostTrainRecoveryCheckpoint(
+  state: SimState,
+  jobId: string,
+): TrainingCheckpointCandidate | undefined {
+  const job = playerTrainingJobs(state).find(
+    (candidate) => candidate.id === jobId,
+  );
+  const checkpointId =
+    job?.failureRecord?.recoveryCheckpointId ??
+    job?.failureRecoveryCheckpointId;
+  if (!job?.failed || job.failureStage === "base" || !checkpointId)
+    return undefined;
+  return (state.player.trainingCheckpoints ?? []).find(
+    (checkpoint) =>
+      checkpoint.id === checkpointId &&
+      checkpoint.sourceJobId === job.id &&
+      checkpoint.status !== "discarded",
+  );
 }
 
 function failTrainingJob(
   job: TrainingJob,
   stage: TrainableStage,
   day: number,
+  failureFraction: number,
+  recoveryCheckpoint?: TrainingCheckpointCandidate,
 ): TrainingJob {
+  const risk =
+    stage === "base" || job.postTrainRiskPlan?.stage !== stage
+      ? undefined
+      : job.postTrainRiskPlan;
+  const failureKind: TrainingFailureRecord["kind"] =
+    stage === "base"
+      ? "numerical_divergence"
+      : stage === "sft"
+        ? "supervision_collapse"
+        : stage === "rlhf"
+          ? "preference_collapse"
+          : stage === "process"
+            ? "reward_model_collapse"
+            : "tool_policy_collapse";
+  const probability =
+    risk?.probability ?? trainingStageFailurePlan(job, stage).probability;
+  const riskBand: TrainingFailureRecord["riskBand"] =
+    risk?.band ??
+    (probability < 0.025
+      ? "low"
+      : probability < 0.065
+        ? "guarded"
+        : probability < 0.12
+          ? "high"
+          : "critical");
+  const stageProgress = Math.max(0, Math.min(1, failureFraction));
   return {
     ...job,
     failed: true,
@@ -655,9 +1599,180 @@ function failTrainingJob(
     failureReason:
       stage === "base"
         ? "Loss diverged during base training. This checkpoint is unrecoverable."
-        : `The ${stage.toUpperCase()} stage destabilized the checkpoint. This run is unrecoverable.`,
+        : recoveryCheckpoint
+          ? `The ${stage.toUpperCase()} stage destabilized at ${Math.round((risk?.atFraction ?? 0) * 100)}%. Recover by branching from immutable checkpoint ${recoveryCheckpoint.model.name}; spent compute is not refunded.`
+          : `The ${stage.toUpperCase()} stage destabilized. No eligible pre-failure checkpoint exists, so this run cannot be recovered.`,
+    failureRecord: {
+      kind: failureKind,
+      stage,
+      day,
+      progressPfDays: job.progressPfDays,
+      stageProgress,
+      probability,
+      riskBand,
+      factors: [...(risk?.factors ?? ["recipe-level optimizer variance"])],
+      recoveryCheckpointId: recoveryCheckpoint?.id,
+    },
+    failureRecoveryCheckpointId: recoveryCheckpoint?.id,
     paused: true,
-    stallReason: "Training failed — delete this run.",
+    stallReason: recoveryCheckpoint
+      ? "Post-training failed — recover from the saved checkpoint or delete this run."
+      : "Training failed — no recovery checkpoint; delete this run.",
+  };
+}
+
+/**
+ * Hard per-domain cap (MTok) for training-data radar drags. Without synthetic
+ * expansion the drag stops at the owned real corpus; with expansion the recipe
+ * may oversubscribe real stock with generated tokens, hard-capped at 8× the
+ * domain's real + synthetic (e.g. distill teacher) base.
+ */
+export function trainingDataDomainCapMTok(
+  realAvailableMTok: number,
+  syntheticAvailableMTok: number,
+  syntheticMultiplier: number,
+): number {
+  const real = Math.max(0, realAvailableMTok);
+  if (!(syntheticMultiplier > 0)) return real;
+  const base = real + Math.max(0, syntheticAvailableMTok);
+  return Math.min(base * (1 + syntheticMultiplier), base * 8);
+}
+
+/**
+ * Corpus volume attributed to live training jobs, per domain. Pretrain data
+ * attribution is read-only, so this is the authoritative reservation input
+ * for recipe planning: a new run should not plan on tokens another active job
+ * already claimed. Failed jobs release their attribution.
+ */
+export function trainingDataReservedMTokByDomain(
+  state: SimState,
+): Partial<Record<DataDomain, number>> {
+  const reserved: Partial<Record<DataDomain, number>> = {};
+  for (const job of playerTrainingJobs(state)) {
+    if (job.failed) continue;
+    for (const [domain, volume] of Object.entries(job.dataConsumed ?? {})) {
+      const key = domain as DataDomain;
+      reserved[key] = (reserved[key] ?? 0) + Math.max(0, volume ?? 0);
+    }
+  }
+  return reserved;
+}
+
+/**
+ * Distill: the selected teacher doubles as the synthetic generator, so the
+ * recipe may oversubscribe the owned corpus even without Synthetic Generators
+ * research. Top up per-domain shortfalls with teacher-generated tokens (bounded
+ * by the shared radar cap against the teacher's corpus headroom) and record
+ * provenance so finalize's syntheticTrainingProfile math keys off the teacher.
+ */
+function fillDistillTeacherSynthetic(
+  consume: ConsumeResult,
+  opts: {
+    teacher: Model;
+    labData: LabData;
+    weights: Record<DataDomain, number>;
+    requestedTotalMTok: number;
+    syntheticMultiplier: number;
+    frontierCapability: number;
+    paramsB: number;
+  },
+): ConsumeResult {
+  const { teacher } = opts;
+  const multiplier = Math.max(0, opts.syntheticMultiplier);
+  if (multiplier <= 0) return consume;
+  const headroom = teacherSyntheticHeadroomMTok({
+    teacher,
+    frontierCapability: opts.frontierCapability,
+  });
+  const quality = Math.min(92, 48 + teacher.capability * 0.55);
+  const qualityTier = quality >= 58 ? ("hq" as const) : ("lq" as const);
+  const consumed = { ...consume.consumed };
+  const domainQuality = { ...consume.domainQuality };
+  const lowQualityShareByDomain = { ...consume.lowQualityShareByDomain };
+  const provenance: SyntheticFillRecord[] = [];
+  for (const domain of DATA_DOMAINS) {
+    const want = Math.max(0, opts.requestedTotalMTok * opts.weights[domain]);
+    const prior = consumed[domain] ?? 0;
+    const short = want - prior;
+    if (short <= 0.01) continue;
+    const stock = normalizeDomainStock(opts.labData.stocks[domain]);
+    const realAvailable = Math.max(
+      0,
+      stock.processed - stock.fromSynthHQ - stock.fromSynthLQ,
+    );
+    const cap = trainingDataDomainCapMTok(
+      realAvailable,
+      headroom[domain],
+      multiplier,
+    );
+    const fill = Math.min(short, Math.max(0, cap - prior));
+    if (fill <= 0.01) continue;
+    consumed[domain] = prior + fill;
+    domainQuality[domain] =
+      ((domainQuality[domain] ?? consume.qualityUsed) * prior +
+        quality * fill) /
+      Math.max(0.01, prior + fill);
+    lowQualityShareByDomain[domain] =
+      qualityTier === "lq" ? fill / Math.max(0.01, prior + fill) : 0;
+    provenance.push({
+      domain,
+      teacherModelId: teacher.id,
+      teacherName: teacher.name,
+      volumeMTok: fill,
+      quality,
+      qualityTier,
+    });
+  }
+  if (!provenance.length) return consume;
+  const actualVolume = Object.values(consumed).reduce(
+    (sum, value) => sum + (value ?? 0),
+    0,
+  );
+  let qualityAcc = 0;
+  for (const domain of DATA_DOMAINS) {
+    const volume = consumed[domain] ?? 0;
+    if (volume > 0) {
+      qualityAcc += (domainQuality[domain] ?? consume.qualityUsed) * volume;
+    }
+  }
+  const trainShare = consume.plan.trainShare;
+  const teacherSynthMTok = provenance.reduce(
+    (sum, record) => sum + record.volumeMTok,
+    0,
+  );
+  const synthHqUnits =
+    (consume.synthHqUnits ?? 0) + (qualityTier === "hq" ? teacherSynthMTok : 0);
+  const synthLqUnits =
+    (consume.synthLqUnits ?? 0) + (qualityTier === "lq" ? teacherSynthMTok : 0);
+  const syntheticProvenance = [
+    ...(consume.syntheticProvenance ?? []),
+    ...provenance,
+  ];
+  return {
+    ...consume,
+    plan: {
+      ...consume.plan,
+      totalMTok: actualVolume,
+      totalUnits: actualVolume,
+      syntheticProvenance,
+    },
+    consumed,
+    coverage: Math.min(
+      30,
+      actualVolume / Math.max(1, minDataMTokForParams(opts.paramsB)),
+    ),
+    qualityUsed:
+      actualVolume > 0 ? qualityAcc / actualVolume : consume.qualityUsed,
+    syntheticUnits: consume.syntheticUnits + teacherSynthMTok,
+    synthHqUnits,
+    synthLqUnits,
+    synthLqShare: actualVolume > 0 ? synthLqUnits / actualVolume : 0,
+    cashCost: consume.cashCost + teacherSynthMTok * 250,
+    trainMTok: actualVolume * trainShare,
+    verifyMTok: actualVolume * (1 - trainShare),
+    domainQuality,
+    lowQualityShareByDomain,
+    syntheticProvenance,
   };
 }
 
@@ -665,7 +1780,7 @@ export function estimateTrainingCost(
   state: SimState,
   opts: Pick<
     StartTrainingOpts,
-    "paramsB" | "family" | "activeParamsB" | "mode" | "teacherId"
+    "paramsB" | "family" | "backbone" | "activeParamsB" | "mode" | "teacherId"
   >,
 ): number {
   const teacher = opts.teacherId
@@ -675,6 +1790,7 @@ export function estimateTrainingCost(
   return trainCostPfDays({
     paramsB: opts.paramsB,
     family: opts.family,
+    backbone: opts.backbone,
     trainEfficiency: state.player.trainEfficiency,
     activeParamsB: opts.activeParamsB,
     mode,
@@ -698,32 +1814,72 @@ export function startTraining(
   let paramsB = opts.paramsB;
   let activeParamsB = opts.activeParamsB;
   let continueFromId: string | undefined;
+  let continueLineageId: string | undefined;
+  let continuationBase: Model | undefined;
   let baseContinueCap = 0;
 
   if (mode === "continue") {
     if (!opts.continueFromId) {
       return withAlert(state, "warn", "Pick a model to continue training.");
     }
-    const base = state.player.models.find((m) => m.id === opts.continueFromId);
+    const privateCheckpoint = opts.continueFromCheckpointId
+      ? (state.player.trainingCheckpoints ?? []).find(
+          (candidate) =>
+            candidate.id === opts.continueFromCheckpointId &&
+            candidate.status !== "discarded",
+        )
+      : undefined;
+    const base = privateCheckpoint
+      ? privateCheckpoint.model
+      : state.player.models.find((m) => m.id === opts.continueFromId);
     if (!base) return withAlert(state, "warn", "Base model not found.");
+    continuationBase = base;
     family = base.family;
     backbone = base.backbone ?? backboneFromFamily(base.family);
-    productPreset = base.productPreset ?? presetFromFamily(base.family);
+    productPreset = migrateLegacyProductPreset(
+      base.productPreset ?? presetFromFamily(base.family),
+      base.io,
+    );
     io = base.io ?? ioForPreset(productPreset, base.capability);
     paramsB = base.paramsB;
     activeParamsB = base.activeParamsB;
     continueFromId = base.id;
-    numerics =
-      opts.trainingNumerics ??
-      base.trainingNumerics ??
-      DEFAULT_TRAINING_NUMERICS;
+    continueLineageId = base.lineageId ?? base.id;
+    // A continuation refines weights and data; it cannot silently swap the
+    // checkpoint's architecture, stack, topology, or numerical recipe.
+    numerics = base.trainingNumerics ?? DEFAULT_TRAINING_NUMERICS;
     if (
-      existingJobs.some((candidate) => candidate.continueFromId === base.id)
+      !privateCheckpoint &&
+      existingJobs.some((candidate) => {
+        if (candidate.failed || !candidate.continueFromId) return false;
+        const candidateSource = state.player.models.find(
+          (model) => model.id === candidate.continueFromId,
+        );
+        const candidateLineage =
+          candidate.continueLineageId ??
+          candidateSource?.lineageId ??
+          candidate.continueFromId;
+        return candidateLineage === continueLineageId;
+      })
     ) {
       return withAlert(
         state,
         "warn",
         `${base.name} already has a continuation run in progress.`,
+      );
+    }
+    if (
+      privateCheckpoint &&
+      existingJobs.some(
+        (candidate) =>
+          candidate.parentCheckpointId === privateCheckpoint.id &&
+          candidate.branchDirection === (opts.branchDirection ?? "general"),
+      )
+    ) {
+      return withAlert(
+        state,
+        "warn",
+        "That checkpoint already has this branch direction in progress.",
       );
     }
     baseContinueCap = base.capability;
@@ -741,36 +1897,27 @@ export function startTraining(
   });
   if (!numericsCheck.ok) return withAlert(state, "warn", numericsCheck.reason);
 
-  const modelStack = sanitizeModelStack(
-    opts.modelStack ?? [],
-    state.player.researchUnlocked,
-    family,
-  );
+  const modelStack =
+    mode === "continue"
+      ? [...(continuationBase?.modelStack ?? [])]
+      : sanitizeModelStack(
+          opts.modelStack ?? [],
+          state.player.researchUnlocked,
+          family,
+        );
   const stackModifiers = modelStackModifiers(modelStack, family);
 
-  if (
-    family === "diffusion" &&
-    !state.player.researchUnlocked.includes("mm_diff")
-  ) {
-    return withAlert(state, "warn", "Unlock Latent Diffusion first.");
-  }
-  if (
-    family === "video" &&
-    !state.player.researchUnlocked.includes("mm_video")
-  ) {
-    return withAlert(state, "warn", "Unlock Video Temporal Models first.");
-  }
-  if (family === "omni" && !state.player.researchUnlocked.includes("mm_omni")) {
-    return withAlert(state, "warn", "Unlock Omni Stack first.");
-  }
-  if (
-    (productPreset === "vision_language" || productPreset === "audio") &&
-    !state.player.researchUnlocked.includes("mm_vision")
-  ) {
+  const unlockEligibility = trainingUnlockEligibility({
+    family,
+    backbone,
+    productPreset,
+    researchUnlocked: state.player.researchUnlocked,
+  });
+  if (!unlockEligibility.ok) {
     return withAlert(
       state,
       "warn",
-      "Unlock Vision Encoders before adding image or audio I/O.",
+      unlockEligibility.reason ?? "Research the selected model product first.",
     );
   }
 
@@ -783,45 +1930,26 @@ export function startTraining(
   // Dense is free at game start; other families need research unlocks
   // Family unlocks only (not size tiers) — size is free, limited by compute/time
   if (
-    family === "moe" &&
-    !state.player.researchUnlocked.includes("moe_basics")
-  ) {
-    return withAlert(
-      state,
-      "warn",
-      "Unlock Sparse Basics before MoE training.",
-    );
-  }
-  if (
     family === "dense" &&
     !state.player.researchUnlocked.includes("dense_basics")
   ) {
     // Should not happen — dense_basics is starter unlock; allow train anyway
   }
 
-  if (family === "moe" && mode !== "continue") {
-    if (activeParamsB == null || activeParamsB <= 0) {
-      return withAlert(
-        state,
-        "warn",
-        "MoE needs active parameters (e.g. 8B active of 120B total).",
-      );
-    }
-    if (activeParamsB > paramsB) {
-      return withAlert(
-        state,
-        "warn",
-        "Active params cannot exceed total MoE size.",
-      );
-    }
-    if (activeParamsB < paramsB * 0.02) {
-      return withAlert(
-        state,
-        "warn",
-        "Active fraction too small (<2%). Raise active params.",
-      );
-    }
-  } else if (family !== "moe") {
+  const architectureValidation = trainingArchitectureValidation({
+    backbone,
+    paramsB,
+    activeParamsB,
+    mode,
+  });
+  if (!architectureValidation.ok) {
+    return withAlert(
+      state,
+      "warn",
+      architectureValidation.reason ?? "Invalid training architecture.",
+    );
+  }
+  if (backbone !== "moe") {
     activeParamsB = undefined;
   }
 
@@ -845,35 +1973,19 @@ export function startTraining(
     distillTeacherShare = clampDistillTeacherShare(opts.distillTeacherShare);
   }
 
-  let target = estimateTrainingCost(state, {
-    paramsB,
-    family,
-    activeParamsB,
-    mode: mode === "continue" ? "pretrain" : mode,
-    teacherId,
-  });
-  if (mode === "continue") {
-    target = Math.max(4, target * 0.22);
-  }
-  // More own-corpus distill → slightly more PF (you actually train on packs);
-  // teacher-heavy distill stays cheap.
-  if (mode === "distill") {
-    const selfShare = 1 - distillTeacherShare;
-    target *= 0.82 + selfShare * 0.45;
-  }
+  let target = 0;
 
   // Consume processed corpus according to player's domain mix + volume.
   // Distill: only the *own-corpus* share is drawn from stocks; teacher signal is free.
   const selfDataShare = mode === "distill" ? 1 - distillTeacherShare : 1;
-  const mixUnlocked = state.player.researchUnlocked.includes("data_mix");
+  const mixUnlocked =
+    state.player.researchUnlocked.includes("data_mix") ||
+    Boolean(opts.continueFromCheckpointId);
   const specialistsUnlocked =
     state.player.researchUnlocked.includes("data_specialists") ||
     !!aggregateEffects(state.player.researchUnlocked).unlockCorpusSpecialists;
   const minMTok = minDataMTokForParams(paramsB);
-  const continueBaseModel =
-    mode === "continue" && continueFromId
-      ? state.player.models.find((m) => m.id === continueFromId)
-      : undefined;
+  const continueBaseModel = mode === "continue" ? continuationBase : undefined;
   const priorDataMTok = continueBaseModel?.dataTokensUsedMTok ?? 0;
   const priorWatermark =
     continueBaseModel?.dataWatermarkMTok ?? priorDataMTok ?? 0;
@@ -884,7 +1996,13 @@ export function startTraining(
     opts.dataPlan?.totalUnits ??
     (mode === "continue"
       ? Math.max(1, newSince) // continue defaults to new data only
-      : recommendedDataMTok(paramsB, family));
+      : recommendedTrainingDataMTok({
+          paramsB,
+          activeParamsB,
+          family,
+          backbone,
+          trainShare: opts.dataPlan?.trainShare,
+        }));
 
   // Volume is player-chosen (MTok). Pretrain reuses full corpus; continue uses new delta.
   const volumeMTok = Math.max(
@@ -898,28 +2016,27 @@ export function startTraining(
     totalMTok: volumeMTok,
     trainShare:
       opts.dataPlan?.trainShare ?? (mode === "continue" ? 0.88 : 0.82),
-    weights: mixUnlocked ? (opts.dataPlan?.weights ?? {}) : {},
+    weights: mixUnlocked
+      ? (opts.dataPlan?.weights ?? {})
+      : defaultTrainingDataWeights(family, productPreset),
     allowSynthetic: opts.dataPlan?.allowSynthetic ?? true,
     includeSynthHQ: opts.dataPlan?.includeSynthHQ ?? true,
     includeSynthLQ: opts.dataPlan?.includeSynthLQ ?? false,
     domainModels: specialistsUnlocked ? opts.dataPlan?.domainModels : undefined,
+    syntheticTeacherIds: opts.dataPlan?.syntheticTeacherIds
+      ? { ...opts.dataPlan.syntheticTeacherIds }
+      : undefined,
+    syntheticMultiplier: opts.dataPlan?.syntheticMultiplier,
   };
-  const consume = consumeForTraining(
-    state,
-    dataPlan,
-    paramsB,
-    family,
-    dataMix,
-    {
-      mode:
-        mode === "continue"
-          ? "continue"
-          : mode === "distill"
-            ? "distill"
-            : "pretrain",
-      priorWatermarkMTok: mode === "continue" ? priorWatermark : undefined,
-    },
-  );
+  let consume = consumeForTraining(state, dataPlan, paramsB, family, dataMix, {
+    mode:
+      mode === "continue"
+        ? "continue"
+        : mode === "distill"
+          ? "distill"
+          : "pretrain",
+    priorWatermarkMTok: mode === "continue" ? priorWatermark : undefined,
+  });
   if (!consume.ok) {
     return withAlert(
       state,
@@ -929,50 +2046,93 @@ export function startTraining(
   }
 
   const planWeights = normalizeWeights(consume.plan.weights);
-  // Multimodal families need matching data
-  if (family === "diffusion" && planWeights.image < 0.15) {
-    return withAlert(
-      state,
-      "warn",
-      "Diffusion trains need ≥15% image data in the mix.",
-    );
+  if (mode === "distill" && teacherId && dataPlan.allowSynthetic) {
+    const teacher = state.player.models.find((m) => m.id === teacherId);
+    if (teacher) {
+      consume = fillDistillTeacherSynthetic(consume, {
+        teacher,
+        labData: ensureLabData(state),
+        weights: planWeights,
+        requestedTotalMTok: volumeMTok,
+        syntheticMultiplier: dataPlan.syntheticMultiplier ?? 0,
+        frontierCapability: Math.max(
+          teacher.capability,
+          ...state.player.models
+            .filter((model) => model.release === "released" || model.shipped)
+            .map((model) => model.capability),
+          ...state.rivals.flatMap((rival) =>
+            rival.models
+              .filter((model) => model.release === "released" || model.shipped)
+              .map((model) => model.capability),
+          ),
+        ),
+        paramsB,
+      });
+    }
   }
-  if (family === "video" && planWeights.video < 0.2) {
-    return withAlert(
-      state,
-      "warn",
-      "Video models need ≥20% video data in the mix.",
+  // Concurrent runs can share a name, family and start day. Give each recipe
+  // an independently addressable deterministic ID, then probe past any live
+  // or retained run identity (including canceled campaigns with checkpoints).
+  // This avoids the old same-day collision without adding a save migration.
+  const occupiedRunIds = new Set([
+    ...existingJobs.map((candidate) => candidate.id),
+    ...(state.player.trainingCheckpoints ?? []).map(
+      (candidate) => candidate.sourceJobId,
+    ),
+    ...state.player.models
+      .map((model) => model.sourceTrainingJobId)
+      .filter((id): id is string => Boolean(id)),
+  ]);
+  let runOrdinal = existingJobs.length;
+  let jobId: string;
+  do {
+    jobId = seededId(
+      "job",
+      state.seed,
+      state.day,
+      state.player.models.length,
+      runOrdinal,
+      opts.name,
+      family,
+      backbone,
+      productPreset,
+      paramsB,
+      activeParamsB ?? 0,
+      mode,
     );
+    runOrdinal += 1;
+  } while (occupiedRunIds.has(jobId));
+  const manifestSnapshot = createDataManifest({
+    data: consume.nextData,
+    consumed: consume.consumed,
+    totalMTok: consume.trainMTok + consume.verifyMTok,
+    day: state.day,
+    seed: state.seed,
+    runId: jobId,
+  });
+  const attributedConsumed = manifestDomainExposureMTok(
+    manifestSnapshot.manifest,
+  );
+  // The authoritative gate measures the mix backed by selected assets, after
+  // stock shortages and synthetic fill. Requested sliders and legacy stock
+  // summaries cannot make a media model valid without matching provenance.
+  const actualData = actualConsumedDomainWeights(attributedConsumed);
+  for (const [domain, floor] of Object.entries(
+    trainingDataModalityRequirements(family, productPreset),
+  ) as [DataDomain, number][]) {
+    const actualShare = actualData.weights[domain];
+    if (actualShare + 1e-9 < floor) {
+      const actualPct = Math.round(actualShare * 1000) / 10;
+      return withAlert(
+        state,
+        "warn",
+        `${DATA_DOMAIN_META[domain].label} models need at least ${Math.round(floor * 100)}% actual ${domain} data; this run could attribute ${actualPct}% (${(attributedConsumed[domain] ?? 0).toFixed(1)} MTok).`,
+      );
+    }
   }
-  if (productPreset === "vision_language" && planWeights.image < 0.1) {
-    return withAlert(
-      state,
-      "warn",
-      "Vision-language models need ≥10% image data in the mix.",
-    );
-  }
-  if (productPreset === "audio" && planWeights.audio < 0.1) {
-    return withAlert(
-      state,
-      "warn",
-      "Audio models need ≥10% audio data in the mix.",
-    );
-  }
-  if (
-    productPreset === "omni" &&
-    (planWeights.image < 0.08 ||
-      planWeights.audio < 0.08 ||
-      planWeights.video < 0.08)
-  ) {
-    return withAlert(
-      state,
-      "warn",
-      "Omni training needs at least 8% each of image, audio, and video data.",
-    );
-  }
-
   const dataAnalysis = analyzeTrainingData({
     paramsB,
+    activeParamsB,
     family,
     backbone,
     productPreset,
@@ -982,43 +2142,51 @@ export function startTraining(
     actualMTok: consume.trainMTok + consume.verifyMTok,
     quality: consume.qualityUsed,
     lqShare: consume.synthLqShare,
+    manifest: manifestSnapshot.manifest,
   });
   // Formula v2 charges the actual train tokens at C≈6ND. Held-out verification
   // is forward-only (≈2ND), so data quality changes outcomes rather than making
   // physical work disappear. The earlier estimate only exists for preflight UI.
-  target = trainCostPfDays({
+  const trainingEconomics = estimateTrainingEconomics({
     paramsB,
     family,
+    backbone,
     trainEfficiency: state.player.trainEfficiency,
     activeParamsB,
-    mode: mode === "distill" ? "distill" : "pretrain",
+    mode,
     teacherParamsB: teacherId
       ? state.player.models.find((model) => model.id === teacherId)?.paramsB
       : undefined,
+    distillTeacherShare,
     trainingTokensMTok: consume.trainMTok,
     verificationTokensMTok: consume.verifyMTok,
     modalityComputeMult: dataAnalysis.modalityComputeMult,
-    formulaVersion: 2,
+    trainCostMult: stackModifiers.trainCostMult,
+    dataCost: consume.cashCost,
+    numerics,
   });
-  if (mode === "continue") target = Math.max(4, target * 0.22);
-  if (mode === "distill") {
-    const selfShare = 1 - distillTeacherShare;
-    target *= 0.82 + selfShare * 0.45;
-  }
-  target *= stackModifiers.trainCostMult;
+  target = trainingEconomics.targetPfDays;
 
   const needVram = modelTrainVramGb(
     paramsB,
     activeParamsB,
-    family,
+    backbone === "moe" ? "moe" : family,
     numerics,
     state.player.researchUnlocked.includes("opt_checkpoint"),
   );
+  const requiredSystemRam = estimateTrainingMemoryGb({
+    paramsB,
+    activeParamsB,
+    family: backbone === "moe" ? "moe" : family,
+    numerics,
+    activationCheckpointing:
+      state.player.researchUnlocked.includes("opt_checkpoint"),
+  }).requiredSystemRamGb;
   const placement = computeSnapshot(state);
   const haveVram = placement.vramGb;
   const trainingRam = trainingRamBudgetGb(state, placement);
   const computePriority = Math.max(
-    10,
+    0,
     Math.min(100, opts.computePriority ?? 50),
   );
   const ramFit = trainingRamFitForNewJob(
@@ -1026,42 +2194,37 @@ export function startTraining(
     needVram,
     computePriority,
     placement,
+    requiredSystemRam,
   );
-  if (!ramFit.ready) {
+  // Priority zero is an intentionally dormant queued run. It reserves no PF
+  // or RAM until the player raises its priority, so lack of a live placement
+  // must not prevent creating it.
+  if (computePriority > 0 && !ramFit.ready) {
     return withAlert(
       state,
       "warn",
-      `Training RAM is a hard limit: ${ramFit.blockerName ?? "New run"} needs ${(ramFit.blockerRequiredGb ?? needVram).toFixed(0)} GB but would receive ${(ramFit.blockerAllocatedGb ?? ramFit.candidateAllocatedGb).toFixed(0)} GB after splitting the ${Math.round(trainingAllocationShare(state) * 100)}% Training allocation. Raise Training allocation, add memory, pause another run, or change priorities.`,
+      `Training RAM is a hard limit (${ramFit.blockerResource ?? "memory"}): ${ramFit.blockerName ?? "New run"} needs ${(ramFit.blockerRequiredGb ?? needVram).toFixed(0)} GB after splitting the ${Math.round(trainingAllocationShare(state) * 100)}% Training allocation. Add memory, raise Training allocation, pause another run, or change priorities.`,
     );
   }
 
   const reservedPf = Math.max(0, opts.reservedPf ?? 0);
-  const dailyThroughput = estimateJobDailyThroughput(state, {
+  const initialEffectivePf = estimateJobDailyThroughput(state, {
     numerics,
     computePriority,
     reservedPf,
     concurrentJobs:
-      existingJobs.filter((job) => !job.paused && !job.failed).length + 1,
+      existingJobs.filter((candidate) => !candidate.paused && !candidate.failed)
+        .length + 1,
   });
-  // Floor calendar duration at 30 days by scaling PF-day work at creation so
-  // ETA / progress forecasts remain honest under the allocated throughput.
-  target = enforceMinTrainingDuration(target, dailyThroughput);
 
   // Even tiny runs incur cluster setup, checkpointing, orchestration and eval
   // overhead. Preserve physical PF scaling while preventing zero-cost jobs.
-  const setupCost = Math.max(
-    1_000,
-    Math.floor(target * ECONOMY.trainUpfrontPerPfDay),
-  );
-  const dataCost = Math.floor(consume.cashCost);
-  const cashSunk = setupCost + dataCost;
-  const cashBurnPerDay = Math.floor(
-    ECONOMY.trainCashBurnPerPfDay *
-      Math.sqrt(Math.max(1, paramsB)) *
-      (1 +
-        Math.log10(Math.max(10, consume.trainMTok + consume.verifyMTok)) *
-          0.08),
-  );
+  const {
+    setupCost,
+    dataCost,
+    cashBurnPerDay,
+    upfrontCash: cashSunk,
+  } = trainingEconomics;
   if (state.player.cash < cashSunk) {
     return withAlert(
       state,
@@ -1071,22 +2234,6 @@ export function startTraining(
   }
   const recommendedPfDays = target;
 
-  const jobId = seededId(
-    "job",
-    state.seed,
-    state.day,
-    state.player.models.length,
-    opts.name,
-    family,
-  );
-  const manifestSnapshot = createDataManifest({
-    data: consume.nextData,
-    consumed: consume.consumed,
-    totalMTok: consume.trainMTok + consume.verifyMTok,
-    day: state.day,
-    seed: state.seed,
-    runId: jobId,
-  });
   const job: TrainingJob = {
     id: jobId,
     name: opts.name,
@@ -1098,21 +2245,53 @@ export function startTraining(
     activeParamsB,
     targetPfDays: target,
     progressPfDays: 0,
+    energyMwDays: 0,
+    energyMWh: 0,
+    daysRemaining:
+      initialEffectivePf > 1e-9
+        ? target / initialEffectivePf
+        : Number.POSITIVE_INFINITY,
+    minCalendarDays: 0,
+    daysElapsed: 0,
     postTrain: "none",
     postTrainProgress: 0,
     postTrainTarget: 0,
+    completedPostTrainStages: continueFromId
+      ? [...(continuationBase?.completedPostTrainStages ?? [])]
+      : [],
+    postTrainStageEffectiveness: continueFromId
+      ? { ...(continuationBase?.postTrainStageEffectiveness ?? {}) }
+      : {},
+    postTrainStageRuns: continueFromId
+      ? {
+          ...(continuationBase?.postTrainStageRuns ??
+            Object.fromEntries(
+              (continuationBase?.completedPostTrainStages ?? []).map(
+                (stage) => [stage, 1],
+              ),
+            )),
+        }
+      : {},
+    postTrainStagesCompletedThisRun: [],
+    postTrainDaysElapsed: 0,
     mode,
     teacherId,
     distillTeacherShare: mode === "distill" ? distillTeacherShare : undefined,
     continueFromId,
+    continueLineageId,
+    parentCheckpointId: opts.continueFromCheckpointId,
+    branchDirection: opts.branchDirection,
+    lineageId:
+      continueLineageId ?? seededId("lineage", state.seed, jobId, opts.name),
     dataMix,
     dataPlan: {
       ...consume.plan,
-      weights: planWeights,
+      weights: actualData.weights,
+      syntheticMultiplier: dataPlan.syntheticMultiplier,
       uniqueMTok: dataAnalysis.uniqueMTok,
       repeatedMTok: dataAnalysis.repeatedMTok,
     },
-    dataConsumed: consume.consumed,
+    dataConsumed: attributedConsumed,
     dataCoverage: consume.coverage,
     dataQualityUsed: consume.qualityUsed,
     syntheticUnits: consume.syntheticUnits,
@@ -1142,14 +2321,45 @@ export function startTraining(
       "train-outcome",
     ),
     outcomeRisk: dataAnalysis.risk,
+    campaignMilestonesReached: [],
+    campaignEventHistory: [],
+    campaignModifiers: {
+      capabilityDelta: 0,
+      reliabilityDelta: 0,
+      safetyDelta: 0,
+      breakthroughBias: 0,
+      stumbleRisk: 0,
+      dataQualityDelta: 0,
+      verifiedRecursiveCapabilityBonus: boundedVerifiedRecursiveCapabilityBonus(
+        family,
+        continuationBase?.verifiedRecursiveCapabilityBonus,
+      ),
+    },
     effectiveDataRatio: dataAnalysis.effectiveDataRatio,
     repeatedDataEpochs: dataAnalysis.repeatedEpochs,
     modalityComputeMult: dataAnalysis.modalityComputeMult,
     dataManifestId: manifestSnapshot.manifest.id,
-    integratedMethods: [...state.player.researchUnlocked].sort(),
+    dataEvidence: trainingDataEvidenceFromManifest(manifestSnapshot.manifest),
+    integratedMethods:
+      mode === "continue"
+        ? [
+            ...new Set([
+              ...(continuationBase?.integratedMethods ?? []),
+              ...state.player.researchUnlocked,
+            ]),
+          ].sort()
+        : [...state.player.researchUnlocked].sort(),
     modelStack,
-    dataQualityByDomain: consume.domainQuality,
-    lowQualityShareByDomain: consume.lowQualityShareByDomain,
+    dataQualityByDomain: Object.fromEntries(
+      Object.entries(consume.domainQuality ?? {}).filter(
+        ([domain]) => (actualData.weights[domain as DataDomain] ?? 0) > 0,
+      ),
+    ),
+    lowQualityShareByDomain: Object.fromEntries(
+      Object.entries(consume.lowQualityShareByDomain ?? {}).filter(
+        ([domain]) => (actualData.weights[domain as DataDomain] ?? 0) > 0,
+      ),
+    ),
     syntheticProvenance: consume.syntheticProvenance,
     trainingFormulaVersion: 2,
     trainingNumerics: numerics,
@@ -1175,6 +2385,7 @@ export function startTraining(
               "train-outcome",
             ),
             targetParamsB: paramsB,
+            trainingNumerics: numerics,
           },
           "base",
           0,
@@ -1187,7 +2398,7 @@ export function startTraining(
   void baseContinueCap;
 
   const sizeLabel =
-    family === "moe"
+    backbone === "moe"
       ? `${formatParams(paramsB)} total / ${formatParams(activeParamsB ?? 0)} active`
       : formatParams(paramsB);
 
@@ -1208,14 +2419,19 @@ export function startTraining(
   const dataNote = ` · ${formatTokens(consume.trainMTok + consume.verifyMTok)} data (train ${Math.round(consume.plan.trainShare * 100)}%/verify ${Math.round((1 - consume.plan.trainShare) * 100)}%)`;
 
   return {
-    ...state,
-    player: {
-      ...state.player,
-      cash: state.player.cash - cashSunk,
-      data: manifestSnapshot.data,
-      trainingJobs: [...existingJobs, job],
-      trainingJob: existingJobs[0] ?? job,
-    },
+    ...chargeExpense(
+      {
+        ...state,
+        player: {
+          ...state.player,
+          data: manifestSnapshot.data,
+          trainingJobs: [...existingJobs, job],
+          trainingJob: existingJobs[0] ?? job,
+        },
+      },
+      cashSunk,
+      "training",
+    ),
     alerts: [
       {
         id: `train-start-${job.id}`,
@@ -1255,6 +2471,55 @@ function withAlert(
   };
 }
 
+/** Resolve an explainable in-run incident or discovery. */
+export function resolveTrainingCampaignEvent(
+  state: SimState,
+  jobId: string,
+  choiceId: string,
+): SimState {
+  const jobs = playerTrainingJobs(state);
+  const job = jobs.find((candidate) => candidate.id === jobId);
+  const event = job?.pendingCampaignEvent;
+  const selected = event?.choices.find((choice) => choice.id === choiceId);
+  if (!job || !event || !selected) {
+    return withAlert(
+      state,
+      "warn",
+      "Training campaign decision is no longer available.",
+    );
+  }
+  const researchersRequired = Math.max(0, selected.effects.minResearchers ?? 0);
+  const researchers = state.player.staff?.researcher ?? 0;
+  if (researchers < researchersRequired) {
+    return withAlert(
+      state,
+      "warn",
+      `${selected.label} needs ${researchersRequired} researchers; ${researchers} are staffed.`,
+    );
+  }
+  const cost = Math.max(0, selected.effects.cashCost ?? 0);
+  if (state.player.cash + 1e-9 < cost) {
+    return withAlert(
+      state,
+      "warn",
+      `Need $${cost.toLocaleString("en-US")} for ${selected.label}.`,
+    );
+  }
+  const resolved = applyTrainingCampaignChoice(job, choiceId, state.day);
+  if (!resolved) return state;
+  const next = withTrainingJobs(
+    cost > 0 ? chargeExpense(state, cost, "training") : state,
+    jobs.map((candidate) => (candidate.id === job.id ? resolved : candidate)),
+  );
+  return withAlert(
+    next,
+    selected.effects.stumbleRisk && selected.effects.stumbleRisk > 0
+      ? "warn"
+      : "info",
+    `${job.name}: ${selected.label}. ${selected.description}`,
+  );
+}
+
 export function advancePostTrain(state: SimState, jobId?: string): SimState {
   const jobs = playerTrainingJobs(state);
   const job = jobId
@@ -1263,7 +2528,7 @@ export function advancePostTrain(state: SimState, jobId?: string): SimState {
   if (!job) return state;
   const idx = POST_TRAIN_ORDER.indexOf(job.postTrain);
   if (idx < 0 || idx >= POST_TRAIN_ORDER.length - 1) return state;
-  if (job.progressPfDays < job.targetPfDays) return state;
+  if (!trainingMinimumStatus(job).ok) return state;
   if (job.postTrain !== "none" && job.postTrainProgress < job.postTrainTarget)
     return state;
 
@@ -1300,12 +2565,24 @@ export function selectPostTrain(
 ): SimState {
   const jobs = playerTrainingJobs(state);
   const job = jobs.find((candidate) => candidate.id === jobId);
-  if (!job || job.failed || job.progressPfDays < job.targetPfDays) return state;
+  if (!job || !trainingMinimumStatus(job).ok) return state;
+  const completedInThisRun = job.postTrainStagesCompletedThisRun ?? [];
+  if (
+    completedInThisRun.includes(nextStage) ||
+    (job.mode !== "continue" &&
+      completedPostTrainStages(job).includes(nextStage))
+  ) {
+    return withAlert(
+      state,
+      "warn",
+      `${nextStage.toUpperCase()} has already been applied in this model version. Continue-train a new version to refresh it with diminishing returns.`,
+    );
+  }
   if (job.postTrain !== "none" && job.postTrainProgress < job.postTrainTarget) {
     return withAlert(
       state,
       "warn",
-      "Finish or cancel the current post-training stage first.",
+      "Finish the current post-training compute first.",
     );
   }
   if (
@@ -1324,13 +2601,27 @@ export function selectPostTrain(
   ) {
     return withAlert(state, "warn", "Unlock Process Reward Models first.");
   }
-  const updated: TrainingJob = {
+  const staged: TrainingJob = {
     ...job,
     postTrain: nextStage,
     postTrainProgress: 0,
-    postTrainTarget: postTrainTarget(nextStage),
+    postTrainTarget: postTrainTargetPfDays(job, nextStage, job.targetParamsB),
+    postTrainDaysElapsed: 0,
+    awaitingDecision: false,
     paused: false,
     stallReason: null,
+    postTrainRiskPlan: undefined,
+    failureRecoveryCheckpointId: undefined,
+  };
+  const updated: TrainingJob = {
+    ...staged,
+    postTrainRiskPlan: createPostTrainRiskPlan(
+      staged,
+      nextStage,
+      state.player.researchUnlocked,
+      state.player.models,
+      state.day,
+    ),
   };
   return withTrainingJobs(
     state,
@@ -1338,20 +2629,92 @@ export function selectPostTrain(
   );
 }
 
+function recordCompletedPostTrainPass(
+  job: TrainingJob,
+  stage: Exclude<PostTrainStage, "none">,
+  earnedEffectiveness: number,
+): Pick<
+  TrainingJob,
+  | "completedPostTrainStages"
+  | "postTrainStageEffectiveness"
+  | "postTrainStageRuns"
+  | "postTrainStagesCompletedThisRun"
+> {
+  const priorRuns =
+    job.postTrainStageRuns?.[stage] ??
+    (job.postTrainStageEffectiveness?.[stage] != null ? 1 : 0);
+  return {
+    completedPostTrainStages: [
+      ...new Set([...(job.completedPostTrainStages ?? []), stage]),
+    ],
+    postTrainStageEffectiveness: {
+      ...(job.postTrainStageEffectiveness ?? {}),
+      [stage]: mergePostTrainStageEffectiveness(
+        job.postTrainStageEffectiveness?.[stage],
+        earnedEffectiveness,
+        priorRuns,
+      ),
+    },
+    postTrainStageRuns: {
+      ...(job.postTrainStageRuns ?? {}),
+      [stage]: priorRuns + 1,
+    },
+    postTrainStagesCompletedThisRun: [
+      ...new Set([...(job.postTrainStagesCompletedThisRun ?? []), stage]),
+    ],
+  };
+}
+
 /** Cancel an unfinished or failed run. Upfront costs and consumed data remain spent. */
 export function cancelTraining(state: SimState, jobId: string): SimState {
   const jobs = playerTrainingJobs(state);
   const job = jobs.find((candidate) => candidate.id === jobId);
   if (!job) return state;
+  const remainingJobs = jobs.filter((candidate) => candidate.id !== jobId);
+  const queueWithoutJobBenchmarks = (
+    state.player.privateEvaluationJobs ?? []
+  ).filter(
+    (evaluation) =>
+      !(
+        evaluation.kind === "training_benchmark" &&
+        evaluation.subjectId === jobId
+      ),
+  );
+  const affectedCheckpointIds = new Set(
+    (state.player.trainingCheckpoints ?? [])
+      .filter(
+        (checkpoint) =>
+          checkpoint.sourceJobId === jobId ||
+          checkpoint.id === job.parentCheckpointId,
+      )
+      .map((checkpoint) => checkpoint.id),
+  );
+  const ownership = reconcileCheckpointOwnership({
+    checkpoints: state.player.trainingCheckpoints ?? [],
+    privateEvaluationJobs: queueWithoutJobBenchmarks,
+    models: state.player.models,
+    jobs: remainingJobs,
+    affectedCheckpointIds,
+  });
+  const withoutJob = withTrainingJobs(state, remainingJobs);
+  const cascaded: SimState = {
+    ...withoutJob,
+    player: {
+      ...withoutJob.player,
+      trainingCheckpoints: ownership.checkpoints,
+      privateEvaluationJobs: ownership.privateEvaluationJobs,
+    },
+  };
+  const cascadeNote =
+    ownership.removedCheckpointIds.length > 0
+      ? ` Removed ${ownership.removedCheckpointIds.length} unowned checkpoint${ownership.removedCheckpointIds.length === 1 ? "" : "s"} and cancelled their private studies without refund.`
+      : "";
   return withAlert(
-    withTrainingJobs(
-      state,
-      jobs.filter((candidate) => candidate.id !== jobId),
-    ),
+    cascaded,
     job.failed ? "info" : "warn",
     job.failed
-      ? `Deleted failed ${job.name} run.`
-      : `Cancelled ${job.name}. Consumed data and $${(job.cashSunk / 1e6).toFixed(2)}M upfront cost were not recovered.`,
+      ? `Deleted failed ${job.name} run.${cascadeNote}`
+      : `Cancelled ${job.name}. Consumed data and $${(job.cashSunk / 1e6).toFixed(2)}M upfront cost were not recovered.${cascadeNote}`,
   );
 }
 
@@ -1362,61 +2725,1141 @@ export function keepInternal(state: SimState, jobId?: string): SimState {
 
 /** Finish job and release publicly (plans/API eligible). */
 export function releaseFromJob(state: SimState, jobId?: string): SimState {
-  return finalizeJob(state, "released", jobId);
+  return finalizeJob(state, "released", jobId, true);
 }
 
-/** Materialize a private checkpoint and queue a non-public benchmark run. */
-export function benchmarkTrainingJob(state: SimState, jobId: string): SimState {
+/** Stop a plateaued run after its calendar gate and release its current checkpoint. */
+export function releaseTrainingEarly(state: SimState, jobId: string): SimState {
+  return finalizeJob(state, "released", jobId, true);
+}
+
+/** Cheat surface: finish compute and post-training while preserving the release decision. */
+export function completeTrainingJobsNow(state: SimState): SimState {
+  const jobs = playerTrainingJobs(state);
+  const active = jobs.filter((job) => !job.failed);
+  if (active.length === 0) return state;
+  const completed = jobs.map((job) => {
+    if (job.failed) return job;
+    const completedJob: TrainingJob = {
+      ...job,
+      progressPfDays: Math.max(
+        job.progressPfDays,
+        job.targetPfDays,
+        job.recommendedPfDays ?? 0,
+      ),
+      daysElapsed: job.daysElapsed ?? 0,
+      postTrainProgress: Math.max(job.postTrainProgress, job.postTrainTarget),
+      postTrainDaysElapsed: job.postTrainDaysElapsed,
+      awaitingDecision: false,
+      paused: false,
+      stallReason: null,
+    };
+    const pass =
+      completedJob.postTrain === "none" || completedJob.postTrainTarget <= 0
+        ? null
+        : recordCompletedPostTrainPass(
+            job,
+            completedJob.postTrain,
+            postTrainStageEffectiveness({
+              job: completedJob,
+              stage: completedJob.postTrain,
+              researchUnlocked: state.player.researchUnlocked,
+              models: state.player.models,
+              progress: completedJob.postTrainProgress,
+              daysElapsed: completedJob.postTrainDaysElapsed,
+            }),
+          );
+    const accountedJob = pass ? { ...completedJob, ...pass } : completedJob;
+    const completedStages = completedPostTrainStages(accountedJob);
+    return {
+      ...accountedJob,
+      completedPostTrainStages: completedStages,
+      postTrainStageEffectiveness: resolvedPostTrainStageEffectiveness(
+        accountedJob,
+        state.player.researchUnlocked,
+        state.player.models,
+      ),
+    };
+  });
+  return withAlert(
+    withTrainingJobs(state, completed),
+    "info",
+    `${active.length} training run${active.length === 1 ? "" : "s"} completed — choose release or keep internal.`,
+  );
+}
+
+function benchmarkSuiteLatentScore(
+  job: TrainingJob,
+  suiteId: BenchmarkSuiteId,
+  capability: number,
+  safety: number,
+): number {
+  const preset = job.productPreset ?? presetFromFamily(job.family);
+  const io = job.io ?? ioForPreset(preset, capability);
+  const dataQuality = Math.max(1, Math.min(100, job.dataQualityUsed ?? 50));
+  const output = (modality: keyof typeof io.outputs) =>
+    Math.max(0, Math.min(100, io.outputs[modality] ?? 0));
+  switch (suiteId) {
+    case "image_generation":
+      return (
+        capability * 0.32 +
+        output("image") * 0.3 +
+        dataQuality * 0.28 +
+        safety * 0.1
+      );
+    case "video_generation":
+      return (
+        capability * 0.28 +
+        output("video") * 0.34 +
+        dataQuality * 0.28 +
+        safety * 0.1
+      );
+    case "audio_generation":
+      return (
+        capability * 0.3 +
+        output("audio") * 0.32 +
+        dataQuality * 0.28 +
+        safety * 0.1
+      );
+    case "omni_overview": {
+      const enabledOutputs = (["text", "image", "video", "audio"] as const)
+        .map(output)
+        .filter((score) => score > 0);
+      const outputAverage =
+        enabledOutputs.reduce((sum, score) => sum + score, 0) /
+        Math.max(1, enabledOutputs.length);
+      return (
+        capability * 0.32 +
+        outputAverage * 0.3 +
+        dataQuality * 0.23 +
+        safety * 0.15
+      );
+    }
+    case "language":
+    default:
+      return capability * 0.72 + dataQuality * 0.18 + safety * 0.1;
+  }
+}
+
+function paidBenchmarkSuiteResult(
+  job: TrainingJob,
+  suiteId: BenchmarkSuiteId,
+  spend: number,
+  progress: number,
+  stage: TrainableStage,
+  latentCapability: number,
+  latentSafety: number,
+): TrainingBenchmarkSuiteResult {
+  const measurement = trainingBenchmarkAccuracyForSpend(spend);
+  const latent = benchmarkSuiteLatentScore(
+    job,
+    suiteId,
+    latentCapability,
+    latentSafety,
+  );
+  // Spend is intentionally excluded from the seed. Buying a larger sample
+  // shrinks the same deterministic measurement error instead of rerolling it.
+  const rng = createRng(
+    hashSeed(
+      job.outcomeSeed ?? 0,
+      job.id,
+      Math.round(progress * 1_000_000),
+      stage,
+      suiteId,
+      "paid-benchmark-v1",
+    ),
+  );
+  const signedError = rng.range(-1, 1) * measurement.inaccuracy;
+  const score = Math.max(1, Math.min(100, latent * (1 + signedError)));
+  const halfWidth = score * measurement.inaccuracy;
+  return {
+    suiteId,
+    spend,
+    score,
+    accuracy: measurement.accuracy,
+    confidence: measurement.confidence,
+    inaccuracy: measurement.inaccuracy,
+    low: Math.max(0, score - halfWidth),
+    high: Math.min(100, score + halfWidth),
+  };
+}
+
+/**
+ * Deterministic progress-scaled noisy checkpoint evaluation. Mid-run
+ * benchmarks are directional, not an oracle for final quality. Paid sample
+ * size improves measurement accuracy and narrows the displayed interval.
+ */
+export function resolveTrainingBenchmarkEvaluation(
+  state: SimState,
+  job: TrainingJob,
+  progressFrac: number,
+  stage: TrainableStage,
+  pending: NonNullable<TrainingJob["pendingBenchmark"]>,
+): TrainingBenchmarkSnapshot {
+  const loss = pending.capturedLoss ?? observedLoss(job) ?? 8.4;
+  const precision = trainingNumericsEconomicsProfile(
+    job.trainingNumerics ?? job.numerics ?? DEFAULT_TRAINING_NUMERICS,
+  );
+  const latentCapability = Math.max(
+    1,
+    Math.min(
+      100,
+      (100 - loss * 8) *
+        Math.min(1, 0.35 + progressFrac * 0.75) *
+        precision.qualityCeilingMultiplier,
+    ),
+  );
+  const latentSafety = Math.max(
+    1,
+    Math.min(100, latentCapability * 0.85 + progressFrac * 8),
+  );
+  const eligible = eligibleTrainingBenchmarkSuites(job);
+  const fallbackSuite = eligible[0]?.id ?? "language";
+  const suiteIds =
+    pending.suiteIds && pending.suiteIds.length > 0
+      ? [...pending.suiteIds]
+      : [fallbackSuite];
+  const fallbackSpend =
+    eligible.find((option) => option.id === suiteIds[0])?.referenceSpend ??
+    100_000;
+  const spendPerSuite = pending.spendPerSuite ?? fallbackSpend;
+  const measurement = trainingBenchmarkAccuracyForSpend(spendPerSuite);
+  const benchmarkRng = createRng(
+    hashSeed(
+      job.outcomeSeed ?? 0,
+      job.id,
+      Math.round(pending.progress * 1_000_000),
+      `benchmark-v3-${stage}`,
+    ),
+  );
+  const inaccuracy = measurement.inaccuracy;
+  const noisyScore = (latent: number, preferredSign: -1 | 1): number => {
+    const error = inaccuracy * (0.55 + benchmarkRng.next() * 0.45);
+    const positiveFits = latent * (1 + error) <= 100;
+    const negativeFits = latent * (1 - error) >= 1;
+    const sign =
+      preferredSign > 0 ? (positiveFits ? 1 : -1) : negativeFits ? -1 : 1;
+    return latent * (1 + sign * error);
+  };
+  const capability = noisyScore(
+    latentCapability,
+    benchmarkRng.next() < 0.5 ? -1 : 1,
+  );
+  const safety = noisyScore(latentSafety, benchmarkRng.next() < 0.5 ? -1 : 1);
+  const suiteResults: Partial<
+    Record<BenchmarkSuiteId, TrainingBenchmarkSuiteResult>
+  > = {};
+  for (const suiteId of suiteIds) {
+    suiteResults[suiteId] = paidBenchmarkSuiteResult(
+      job,
+      suiteId,
+      spendPerSuite,
+      pending.progress,
+      stage,
+      latentCapability,
+      latentSafety,
+    );
+  }
+  const resultValues = Object.values(suiteResults).filter(
+    (result): result is TrainingBenchmarkSuiteResult => result != null,
+  );
+  const suiteScore =
+    resultValues.reduce((sum, result) => sum + result.score, 0) /
+    Math.max(1, resultValues.length);
+  const confidence = measurement.confidence;
+  const interval = inaccuracy;
+  return {
+    day: state.day,
+    progress: progressFrac,
+    capability,
+    safety,
+    suite: Math.round(suiteScore * 10) / 10,
+    confidence,
+    inaccuracy: interval,
+    capabilityLow: capability * (1 - interval),
+    capabilityHigh: capability * (1 + interval),
+    safetyLow: safety * (1 - interval),
+    safetyHigh: safety * (1 + interval),
+    suiteIds,
+    spendPerSuite,
+    totalCost: pending.totalCost ?? spendPerSuite * suiteIds.length,
+    accuracy: measurement.accuracy,
+    suiteResults,
+  };
+}
+
+/** Queue a private checkpoint benchmark in the unified concurrent scheduler. */
+export function benchmarkTrainingJob(
+  state: SimState,
+  jobId: string,
+  request?: TrainingBenchmarkRequest,
+): SimState {
   const jobs = playerTrainingJobs(state);
   const job = jobs.find((candidate) => candidate.id === jobId);
   if (!job || job.failed) return state;
   const recommended = Math.max(1e-9, job.recommendedPfDays ?? job.targetPfDays);
   const progressFrac = job.progressPfDays / recommended;
-  if (progressFrac < 0.1) {
+  if (progressFrac < TRAINING_BENCHMARK_MIN_PROGRESS) {
     return withAlert(
       state,
       "warn",
       "Benchmarks unlock after 10% of recommended training.",
     );
   }
-  const last = job.lastBenchmarkDay;
-  if (last != null && state.day - last < 7) {
+  const eligible = eligibleTrainingBenchmarkSuites(job);
+  const eligibleById = new Map(eligible.map((option) => [option.id, option]));
+  const primary = eligible[0];
+  if (!primary) {
     return withAlert(
       state,
       "warn",
-      `Next benchmark available in ${7 - (state.day - last)}d.`,
+      `${job.name} has no eligible benchmark suites.`,
     );
   }
-  const loss = observedLoss(job) ?? 8.4;
-  const capability = Math.max(
-    1,
-    Math.min(100, (100 - loss * 8) * Math.min(1, 0.35 + progressFrac * 0.75)),
+  const suiteIds = request?.suiteIds ? [...request.suiteIds] : [primary.id];
+  const spendPerSuite = request?.spendPerSuite ?? primary.referenceSpend;
+  if (suiteIds.length === 0) {
+    return withAlert(state, "warn", "Select at least one benchmark suite.");
+  }
+  if (new Set(suiteIds).size !== suiteIds.length) {
+    return withAlert(
+      state,
+      "warn",
+      "Each benchmark suite can only be selected once.",
+    );
+  }
+  const unknown = suiteIds.find(
+    (suiteId) => !Object.hasOwn(TRAINING_BENCHMARK_SUITE_OPTIONS, suiteId),
   );
-  const safety = Math.max(
-    1,
-    Math.min(100, capability * 0.85 + progressFrac * 8),
+  if (unknown) {
+    return withAlert(
+      state,
+      "warn",
+      `Unknown benchmark suite: ${String(unknown)}.`,
+    );
+  }
+  const irrelevant = suiteIds.find((suiteId) => !eligibleById.has(suiteId));
+  if (irrelevant) {
+    return withAlert(
+      state,
+      "warn",
+      `${TRAINING_BENCHMARK_SUITE_OPTIONS[irrelevant].label} is not relevant to ${job.name}.`,
+    );
+  }
+  if (!Number.isFinite(spendPerSuite)) {
+    return withAlert(state, "warn", "Benchmark spend must be a finite amount.");
+  }
+  const outsideSpendBounds = suiteIds.find((suiteId) => {
+    const option = eligibleById.get(suiteId)!;
+    return spendPerSuite < option.minSpend || spendPerSuite > option.maxSpend;
+  });
+  if (outsideSpendBounds) {
+    const option = eligibleById.get(outsideSpendBounds)!;
+    return withAlert(
+      state,
+      "warn",
+      `${option.label} spend must be $${option.minSpend.toLocaleString("en-US")}–$${option.maxSpend.toLocaleString("en-US")}.`,
+    );
+  }
+  const totalCost = spendPerSuite * suiteIds.length;
+  if (state.player.cash + 1e-9 < totalCost) {
+    return withAlert(
+      state,
+      "warn",
+      `Need $${totalCost.toLocaleString("en-US")} to run ${suiteIds.length} benchmark suite${suiteIds.length === 1 ? "" : "s"}.`,
+    );
+  }
+  const measurement = trainingBenchmarkAccuracyForSpend(spendPerSuite);
+  const stage: TrainableStage =
+    job.postTrain === "none" ? "base" : job.postTrain;
+  const sequence = Math.max(
+    0,
+    job.benchmarkSequence ?? job.benchmarkSnapshots?.length ?? 0,
   );
-  const snapshot = {
-    day: state.day,
+  const pending: TrainingBenchmarkPending = {
+    id: seededId(
+      "training-benchmark",
+      state.seed,
+      job.id,
+      sequence,
+      state.day,
+      suiteIds.join(","),
+    ),
+    startedDay: state.day,
+    readyDay: state.day + 2,
     progress: progressFrac,
-    capability,
-    safety,
-    suite: Math.round((capability * 0.7 + safety * 0.3) * 10) / 10,
+    stage,
+    suiteIds,
+    spendPerSuite,
+    totalCost,
+    accuracy: measurement.accuracy,
+    confidence: measurement.confidence,
+    capturedLoss: observedLoss(job) ?? undefined,
   };
   const updated: TrainingJob = {
     ...job,
-    benchmarkSnapshots: [...(job.benchmarkSnapshots ?? []), snapshot].slice(
-      -32,
-    ),
+    // Legacy mirror for older UI/save consumers. The queue is authoritative.
+    pendingBenchmark: job.pendingBenchmark ?? pending,
+    benchmarkSequence: sequence + 1,
     lastBenchmarkDay: state.day,
   };
+  const charged = chargeExpense(state, totalCost, "training");
+  const withUpdatedJob = withTrainingJobs(
+    charged,
+    jobs.map((candidate) => (candidate.id === job.id ? updated : candidate)),
+  );
   return withAlert(
-    withTrainingJobs(
-      state,
-      jobs.map((candidate) => (candidate.id === job.id ? updated : candidate)),
-    ),
+    {
+      ...withUpdatedJob,
+      player: {
+        ...withUpdatedJob.player,
+        privateEvaluationJobs: [
+          ...(withUpdatedJob.player.privateEvaluationJobs ?? []),
+          {
+            id: pending.id,
+            kind: "training_benchmark" as const,
+            subjectId: job.id,
+            scheduledDay: state.day,
+            readyDay: pending.readyDay,
+            pending,
+          },
+        ],
+      },
+    },
     "info",
-    `${job.name} checkpoint benchmark @ ${(progressFrac * 100).toFixed(0)}%: loss ${loss.toFixed(3)}, est. cap ${capability.toFixed(1)}.`,
+    `Benchmark started for ${job.name}: ${suiteIds.length} suite${suiteIds.length === 1 ? "" : "s"}, $${totalCost.toLocaleString("en-US")}, ${Math.round(measurement.accuracy * 100)}% measurement accuracy — results in 2 days.`,
+  );
+}
+
+function checkpointCandidateAtMilestone(
+  state: SimState,
+  job: TrainingJob,
+  milestone: number,
+  options?: {
+    id?: string;
+    modelId?: string;
+    kind?: "milestone" | "manual";
+    customLabel?: string;
+    branchDirection?: TrainingCheckpointBranchDirection;
+    parentCheckpointId?: string;
+    ordinal?: number;
+    captureCurrent?: boolean;
+  },
+): TrainingCheckpointCandidate {
+  const ordinal =
+    options?.ordinal ??
+    Math.max(
+      1,
+      TRAINING_CAMPAIGN_MILESTONES.findIndex(
+        (candidate) => Math.abs(candidate - milestone) < 1e-9,
+      ) + 1,
+    );
+  const id =
+    options?.id ??
+    seededId("training-checkpoint", state.seed, job.id, milestone);
+  const modelId =
+    options?.modelId ??
+    seededId("checkpoint-model", state.seed, job.id, milestone);
+  const lineageId =
+    job.lineageId ??
+    job.continueLineageId ??
+    seededId("lineage", state.seed, job.id, job.name);
+  // Normally the tick captures exactly at the milestone. For legacy/in-flight
+  // saves that recorded reached milestones before candidates existed, manual
+  // capture reconstructs the missing earlier progress point from the persisted
+  // curve instead of mislabelling today's later weights as that checkpoint.
+  const capturedProgressPfDays = options?.captureCurrent
+    ? job.progressPfDays
+    : Math.min(job.progressPfDays, job.targetPfDays * milestone);
+  const elapsedRatio =
+    job.progressPfDays > 1e-9 ? capturedProgressPfDays / job.progressPfDays : 0;
+  const snapshotJob: TrainingJob = options?.captureCurrent
+    ? { ...job }
+    : {
+        ...job,
+        progressPfDays: capturedProgressPfDays,
+        daysElapsed: Math.min(
+          job.daysElapsed ?? 0,
+          Math.max(0, Math.round((job.daysElapsed ?? 0) * elapsedRatio)),
+        ),
+        energyMWh: Math.max(
+          0,
+          (job.energyMWh ?? (job.energyMwDays ?? 0) * 24) * elapsedRatio,
+        ),
+        energyMwDays: Math.max(0, (job.energyMwDays ?? 0) * elapsedRatio),
+        lossHistory: (job.lossHistory ?? []).filter(
+          (point) =>
+            point.stage !== "base" || point.progress <= milestone + 1e-9,
+        ),
+      };
+  const progress = Math.max(
+    0,
+    Math.min(
+      1,
+      snapshotJob.progressPfDays / Math.max(1e-9, snapshotJob.targetPfDays),
+    ),
+  );
+  const built = buildModelFromJob(state, snapshotJob, "internal");
+  const milestoneLabel = Math.round(milestone * 100);
+  const stage: TrainingCheckpointCandidate["stage"] =
+    options?.captureCurrent && snapshotJob.postTrain !== "none"
+      ? snapshotJob.postTrain
+      : "base";
+  const stageProgress =
+    stage === "base"
+      ? progress
+      : Math.max(
+          0,
+          Math.min(
+            1,
+            snapshotJob.postTrainProgress /
+              Math.max(1e-9, snapshotJob.postTrainTarget),
+          ),
+        );
+  const model: Model = {
+    ...built,
+    id: modelId,
+    lineageId,
+    parentModelId: job.continueFromId,
+    checkpointCandidateId: id,
+    sourceTrainingJobId: job.id,
+    checkpointProgress: progress,
+    name: options?.customLabel?.trim() || `${built.name} · C${milestoneLabel}`,
+    release: "internal",
+    shipped: false,
+    releaseDay: state.day,
+    trainingLossHistory: [...(built.trainingLossHistory ?? [])],
+    trainingBenchmarkSnapshots: [...(built.trainingBenchmarkSnapshots ?? [])],
+  };
+  return {
+    id,
+    sourceJobId: job.id,
+    lineageId,
+    sourceModelId: job.continueFromId,
+    ordinal,
+    kind: options?.kind ?? "milestone",
+    customLabel: options?.customLabel?.trim() || undefined,
+    branchDirection:
+      options?.branchDirection ?? job.branchDirection ?? "general",
+    parentCheckpointId: options?.parentCheckpointId ?? job.parentCheckpointId,
+    milestone,
+    capturedDay: state.day,
+    stage,
+    status: "stealth",
+    model,
+    telemetry: {
+      progressPfDays: snapshotJob.progressPfDays,
+      targetPfDays: snapshotJob.targetPfDays,
+      progress,
+      daysElapsed: snapshotJob.daysElapsed ?? 0,
+      stage,
+      stageProgress,
+      loss: observedLoss(snapshotJob),
+      energyMWh: Math.max(
+        0,
+        snapshotJob.energyMWh ?? (snapshotJob.energyMwDays ?? 0) * 24,
+      ),
+      trainingNumerics: snapshotJob.trainingNumerics ?? snapshotJob.numerics,
+    },
+  };
+}
+
+function appendTrainingCheckpoint(
+  state: SimState,
+  job: TrainingJob,
+  milestone: number,
+): { state: SimState; candidate?: TrainingCheckpointCandidate } {
+  const existing = state.player.trainingCheckpoints ?? [];
+  const id = seededId("training-checkpoint", state.seed, job.id, milestone);
+  if (existing.some((candidate) => candidate.id === id)) return { state };
+  const candidate = checkpointCandidateAtMilestone(state, job, milestone);
+  return {
+    candidate,
+    state: {
+      ...state,
+      player: {
+        ...state.player,
+        trainingCheckpoints: [...existing, candidate],
+      },
+    },
+  };
+}
+
+/**
+ * Write the latest earned campaign checkpoint into the stealth registry.
+ * This does not pause/finalize the source job or expose the weights to any
+ * ordinary model-fleet consumer.
+ */
+export function captureTrainingCheckpoint(
+  state: SimState,
+  jobId: string,
+): SimState {
+  const job = playerTrainingJobs(state).find(
+    (candidate) => candidate.id === jobId,
+  );
+  if (!job || job.failed) {
+    return withAlert(state, "warn", "Active training campaign not found.");
+  }
+  const progress = job.progressPfDays / Math.max(1e-9, job.targetPfDays);
+  const reached = new Set(job.campaignMilestonesReached ?? []);
+  const existingCheckpointIds = new Set(
+    (state.player.trainingCheckpoints ?? []).map((candidate) => candidate.id),
+  );
+  const milestone = [...TRAINING_CAMPAIGN_MILESTONES]
+    .reverse()
+    .find(
+      (candidate) =>
+        reached.has(candidate) &&
+        candidate <= progress + 1e-9 &&
+        !existingCheckpointIds.has(
+          seededId("training-checkpoint", state.seed, job.id, candidate),
+        ),
+    );
+  if (milestone == null) {
+    const reachedAny = TRAINING_CAMPAIGN_MILESTONES.some(
+      (candidate) => reached.has(candidate) && candidate <= progress + 1e-9,
+    );
+    return withAlert(
+      state,
+      "warn",
+      reachedAny
+        ? `${job.name}'s earned checkpoints are already in stealth review.`
+        : `A stealth checkpoint becomes available at ${Math.round(TRAINING_CAMPAIGN_MILESTONES[0] * 100)}% training.`,
+    );
+  }
+  const result = appendTrainingCheckpoint(state, job, milestone);
+  if (!result.candidate) {
+    return withAlert(
+      state,
+      "warn",
+      `${job.name}'s ${Math.round(milestone * 100)}% checkpoint is already in stealth review.`,
+    );
+  }
+  return withAlert(
+    result.state,
+    "info",
+    `${job.name}'s ${Math.round(milestone * 100)}% checkpoint entered stealth review. Training continues.`,
+  );
+}
+
+export interface CreateManualTrainingCheckpointRequest {
+  sourceJobId: string;
+  label?: string;
+  branchDirection?: TrainingCheckpointBranchDirection;
+}
+
+/** Stable identity for the exact current weights, shared by direct run actions. */
+export function currentManualTrainingCheckpointId(
+  state: SimState,
+  jobId: string,
+): string | undefined {
+  const job = playerTrainingJobs(state).find(
+    (candidate) => candidate.id === jobId,
+  );
+  if (
+    !job ||
+    job.failed ||
+    (job.progressPfDays <= 1e-9 && job.postTrainProgress <= 1e-9)
+  ) {
+    return undefined;
+  }
+  const stage: TrainableStage =
+    job.postTrain === "none" ? "base" : job.postTrain;
+  return seededId(
+    "training-checkpoint-manual",
+    state.seed,
+    job.id,
+    stage,
+    Math.round(job.progressPfDays * 1_000_000),
+    Math.round(job.postTrainProgress * 1_000_000),
+  );
+}
+
+/** Capture the exact current weights; repeated clicks at unchanged weights dedupe. */
+export function createManualTrainingCheckpoint(
+  state: SimState,
+  request: CreateManualTrainingCheckpointRequest,
+): SimState {
+  const job = playerTrainingJobs(state).find(
+    (candidate) => candidate.id === request.sourceJobId,
+  );
+  if (!job || job.failed)
+    return withAlert(state, "warn", "Active training campaign not found.");
+  if (job.progressPfDays <= 1e-9 && job.postTrainProgress <= 1e-9) {
+    return withAlert(
+      state,
+      "warn",
+      "Allocate compute before capturing a manual checkpoint.",
+    );
+  }
+  const id = currentManualTrainingCheckpointId(state, job.id)!;
+  const existing = state.player.trainingCheckpoints ?? [];
+  if (existing.some((candidate) => candidate.id === id)) {
+    return withAlert(
+      state,
+      "warn",
+      "These exact weights are already in the checkpoint archive.",
+    );
+  }
+  const baseProgress = Math.max(
+    0,
+    Math.min(1, job.progressPfDays / Math.max(1e-9, job.targetPfDays)),
+  );
+  const ordinal =
+    existing.filter((candidate) => candidate.sourceJobId === job.id).length + 1;
+  const candidate = checkpointCandidateAtMilestone(state, job, baseProgress, {
+    id,
+    modelId: seededId("checkpoint-model-manual", state.seed, id),
+    kind: "manual",
+    customLabel: request.label,
+    branchDirection: request.branchDirection ?? job.branchDirection,
+    parentCheckpointId: job.parentCheckpointId,
+    ordinal,
+    captureCurrent: true,
+  });
+  return withAlert(
+    {
+      ...state,
+      player: {
+        ...state.player,
+        trainingCheckpoints: [...existing, candidate],
+      },
+    },
+    "info",
+    `${candidate.model.name} captured from the current weights. Training continues.`,
+  );
+}
+
+export interface ForkTrainingCheckpointRequest {
+  checkpointId: string;
+  direction: TrainingCheckpointBranchDirection;
+  label?: string;
+}
+
+function branchDataWeights(
+  candidate: TrainingCheckpointCandidate,
+  direction: TrainingCheckpointBranchDirection,
+): Record<DataDomain, number> {
+  const source = normalizeWeights(
+    candidate.model.dataPlan?.weights ??
+      defaultTrainingDataWeights(
+        candidate.model.family,
+        candidate.model.productPreset ??
+          presetFromFamily(candidate.model.family),
+      ),
+  );
+  const boost = (domains: readonly DataDomain[], multiplier: number) => {
+    for (const domain of domains) source[domain] *= multiplier;
+  };
+  if (direction === "chat") boost(["chat"], 2.4);
+  if (direction === "code") boost(["code", "math"], 2.1);
+  if (direction === "agents") boost(["code", "chat"], 1.8);
+  if (direction === "reasoning") boost(["math", "science"], 2.2);
+  if (direction === "safety") boost(["law", "health", "chat"], 1.8);
+  return normalizeWeights(source);
+}
+
+/** Start a normal, data-consuming continuation from explicit private weights. */
+export function forkTrainingCheckpoint(
+  state: SimState,
+  request: ForkTrainingCheckpointRequest,
+): SimState {
+  const checkpoint = (state.player.trainingCheckpoints ?? []).find(
+    (candidate) => candidate.id === request.checkpointId,
+  );
+  if (!checkpoint || checkpoint.status === "discarded") {
+    return withAlert(state, "warn", "Usable checkpoint not found.");
+  }
+  const source = checkpoint.model;
+  return startTraining(state, {
+    name: request.label?.trim() || source.name,
+    family: source.family,
+    backbone: source.backbone,
+    productPreset: source.productPreset,
+    io: source.io,
+    paramsB: source.paramsB,
+    activeParamsB: source.activeParamsB,
+    mode: "continue",
+    continueFromId: source.id,
+    continueFromCheckpointId: checkpoint.id,
+    branchDirection: request.direction,
+    dataPlan: {
+      totalUnits: Math.max(1, newDataSinceModel(state, source)),
+      totalMTok: Math.max(1, newDataSinceModel(state, source)),
+      trainShare: 0.88,
+      weights: branchDataWeights(checkpoint, request.direction),
+      allowSynthetic: false,
+    },
+  });
+}
+
+export interface RollbackTrainingJobToCheckpointRequest {
+  jobId: string;
+  checkpointId: string;
+}
+
+export interface RecoverFailedPostTrainRequest {
+  jobId: string;
+  checkpointId: string;
+}
+
+/**
+ * Recover a destructive post-training failure as a distinct immutable branch.
+ * The failed job, spent PF/data/cash and evidence stay in history; the child
+ * reuses the saved weights and recipe snapshot, then reruns only the failed
+ * stage with a fresh, frozen recovery-attempt risk plan.
+ */
+export function recoverFailedPostTrainFromCheckpoint(
+  state: SimState,
+  request: RecoverFailedPostTrainRequest,
+): SimState {
+  const jobs = playerTrainingJobs(state);
+  const failedJob = jobs.find((job) => job.id === request.jobId);
+  const checkpoint = (state.player.trainingCheckpoints ?? []).find(
+    (candidate) => candidate.id === request.checkpointId,
+  );
+  if (
+    !failedJob?.failed ||
+    failedJob.failureStage == null ||
+    failedJob.failureStage === "base"
+  ) {
+    return withAlert(
+      state,
+      "warn",
+      "Only a failed post-training run can be recovered.",
+    );
+  }
+  if (
+    !checkpoint ||
+    checkpoint.status === "discarded" ||
+    checkpoint.sourceJobId !== failedJob.id ||
+    failedJob.failureRecoveryCheckpointId !== checkpoint.id
+  ) {
+    return withAlert(
+      state,
+      "warn",
+      "Recovery requires the eligible immutable pre-failure checkpoint.",
+    );
+  }
+  if (
+    failedJob.recoveryChildJobId ||
+    jobs.some((job) => job.recoveredFromJobId === failedJob.id)
+  ) {
+    return withAlert(
+      state,
+      "warn",
+      "This failed run already has a recovery branch.",
+    );
+  }
+  const attempt = Math.max(1, (failedJob.postTrainRecoveryAttempt ?? 0) + 1);
+  const recoveryId = seededId(
+    "posttrain-recovery",
+    state.seed,
+    failedJob.id,
+    checkpoint.id,
+    attempt,
+  );
+  if (jobs.some((job) => job.id === recoveryId)) {
+    return withAlert(state, "warn", "This recovery attempt already exists.");
+  }
+  const recoveryStage = failedJob.failureStage;
+  const resumeFraction =
+    checkpoint.stage === recoveryStage
+      ? Math.max(0, Math.min(0.98, checkpoint.telemetry.stageProgress))
+      : 0;
+  const checkpointCompleted = (
+    checkpoint.model.completedPostTrainStages ?? []
+  ).filter((stage) => stage !== recoveryStage);
+  const checkpointCompletedSet = new Set(checkpointCompleted);
+  const completedThisRun = (
+    failedJob.postTrainStagesCompletedThisRun ?? []
+  ).filter((stage) => checkpointCompletedSet.has(stage));
+  const checkpointStageIndex =
+    checkpoint.stage === "base"
+      ? 0
+      : POST_TRAIN_ORDER.indexOf(checkpoint.stage);
+  const restoredLossHistory = (failedJob.lossHistory ?? []).filter((point) => {
+    if (point.stage === "base") return true;
+    const pointStageIndex = POST_TRAIN_ORDER.indexOf(point.stage);
+    if (pointStageIndex < checkpointStageIndex) return true;
+    return (
+      pointStageIndex === checkpointStageIndex &&
+      point.progress <= checkpoint.telemetry.stageProgress + 1e-9
+    );
+  });
+  const postTrainTarget = Math.max(
+    1e-9,
+    failedJob.postTrainTarget ||
+      postTrainTargetPfDays(failedJob, recoveryStage, failedJob.targetParamsB),
+  );
+  const stagedChild: TrainingJob = {
+    ...failedJob,
+    id: recoveryId,
+    name: `${failedJob.name} recovery ${attempt}`,
+    progressPfDays: failedJob.targetPfDays,
+    energyMwDays: 0,
+    energyMWh: 0,
+    daysRemaining: undefined,
+    daysElapsed: 0,
+    completedPostTrainStages: checkpointCompleted,
+    postTrainStageEffectiveness: {
+      ...(checkpoint.model.postTrainStageEffectiveness ?? {}),
+    },
+    postTrainStageRuns: { ...(checkpoint.model.postTrainStageRuns ?? {}) },
+    postTrainStagesCompletedThisRun: completedThisRun,
+    postTrain: recoveryStage,
+    postTrainProgress: postTrainTarget * resumeFraction,
+    postTrainTarget,
+    postTrainDaysElapsed: 0,
+    postTrainRiskPlan: undefined,
+    postTrainRecoveryAttempt: attempt,
+    recoveredFromJobId: failedJob.id,
+    recoveryCheckpointId: checkpoint.id,
+    recoveryChildJobId: undefined,
+    parentCheckpointId: checkpoint.id,
+    benchmarkSnapshots: [],
+    pendingBenchmark: undefined,
+    benchmarkSequence: 0,
+    lastBenchmarkDay: undefined,
+    pendingCampaignEvent: undefined,
+    failed: false,
+    failureStage: undefined,
+    failureDay: undefined,
+    failureReason: undefined,
+    failureRecord: undefined,
+    failureRecoveryCheckpointId: undefined,
+    paused: false,
+    stallReason: null,
+    cashSunk: 0,
+    economics: {
+      setupCost: 0,
+      dataCost: 0,
+      trainingCostAccrued: 0,
+    },
+    lossHistory: restoredLossHistory,
+  };
+  stagedChild.postTrainRiskPlan = createPostTrainRiskPlan(
+    stagedChild,
+    recoveryStage,
+    state.player.researchUnlocked,
+    state.player.models,
+    state.day,
+    resumeFraction,
+  );
+  const nextJobs = jobs.map((job) =>
+    job.id === failedJob.id
+      ? { ...job, recoveryChildJobId: stagedChild.id }
+      : job,
+  );
+  return withAlert(
+    withTrainingJobs(state, [...nextJobs, stagedChild]),
+    "warn",
+    `${failedJob.name}: recovery branch started from ${checkpoint.model.name}. Prior compute, data and cash remain spent; ${recoveryStage.toUpperCase()} resumes from ${Math.round(resumeFraction * 100)}% without consuming the corpus twice.`,
+  );
+}
+
+/**
+ * Safe rollback semantics: branch from immutable weights, never rewind spent
+ * optimizer state or refund compute/data. The source run pauses only if the
+ * child launch succeeds.
+ */
+export function rollbackTrainingJobToCheckpoint(
+  state: SimState,
+  request: RollbackTrainingJobToCheckpointRequest,
+): SimState {
+  const sourceJob = playerTrainingJobs(state).find(
+    (job) => job.id === request.jobId,
+  );
+  const checkpoint = (state.player.trainingCheckpoints ?? []).find(
+    (candidate) => candidate.id === request.checkpointId,
+  );
+  if (sourceJob?.failed && sourceJob.failureStage !== "base") {
+    return recoverFailedPostTrainFromCheckpoint(state, request);
+  }
+  if (
+    !sourceJob ||
+    !checkpoint ||
+    checkpoint.status === "discarded" ||
+    checkpoint.sourceJobId !== sourceJob.id
+  ) {
+    return withAlert(
+      state,
+      "warn",
+      "Rollback requires an immutable checkpoint from this active run.",
+    );
+  }
+  const beforeIds = new Set(playerTrainingJobs(state).map((job) => job.id));
+  const branched = forkTrainingCheckpoint(state, {
+    checkpointId: checkpoint.id,
+    direction: checkpoint.branchDirection ?? "general",
+    label: checkpoint.customLabel,
+  });
+  const launched = playerTrainingJobs(branched).some(
+    (job) => !beforeIds.has(job.id),
+  );
+  if (!launched) return branched;
+  return withTrainingJobs(
+    branched,
+    playerTrainingJobs(branched).map((job) =>
+      job.id === sourceJob.id
+        ? {
+            ...job,
+            paused: true,
+            stallReason: "Paused after checkpoint branch.",
+          }
+        : job,
+    ),
+  );
+}
+
+/** Retain stealth weights as an internal model without ending their source run. */
+export function promoteTrainingCheckpoint(
+  state: SimState,
+  checkpointId: string,
+): SimState {
+  const checkpoints = state.player.trainingCheckpoints ?? [];
+  const checkpoint = checkpoints.find(
+    (candidate) => candidate.id === checkpointId,
+  );
+  if (!checkpoint) return withAlert(state, "warn", "Checkpoint not found.");
+  if (checkpoint.status === "discarded") {
+    return withAlert(
+      state,
+      "warn",
+      "Discarded checkpoint weights cannot be retained.",
+    );
+  }
+  const pendingEvaluation = (state.player.privateEvaluationJobs ?? []).find(
+    (job) =>
+      job.kind === "checkpoint_evaluation" && job.subjectId === checkpoint.id,
+  );
+  if (pendingEvaluation) {
+    return withAlert(
+      state,
+      "warn",
+      `Stealth evaluation is still running until day ${pendingEvaluation.readyDay}.`,
+    );
+  }
+  if (
+    checkpoint.status === "promoted" ||
+    state.player.models.some((model) => model.id === checkpoint.model.id)
+  ) {
+    return withAlert(
+      state,
+      "warn",
+      "Checkpoint is already retained internally.",
+    );
+  }
+  const retained: Model = {
+    ...checkpoint.model,
+    release: "internal",
+    shipped: false,
+    trainingLossHistory: [...(checkpoint.model.trainingLossHistory ?? [])],
+    trainingBenchmarkSnapshots: [
+      ...(checkpoint.model.trainingBenchmarkSnapshots ?? []),
+    ],
+    checkpointEvaluations: [...(checkpoint.evaluations ?? [])],
+  };
+  return withAlert(
+    {
+      ...state,
+      player: {
+        ...state.player,
+        models: [...state.player.models, retained],
+        trainingCheckpoints: checkpoints.map((candidate) =>
+          candidate.id === checkpointId
+            ? {
+                ...candidate,
+                status: "promoted" as const,
+                promotedModelId: retained.id,
+                promotedDay: state.day,
+              }
+            : candidate,
+        ),
+      },
+    },
+    "info",
+    `${checkpoint.model.name} retained as an internal checkpoint. Its source campaign continues.`,
+  );
+}
+
+/** Permanently delete an unpromoted stealth candidate and its private evidence. */
+export function discardTrainingCheckpoint(
+  state: SimState,
+  checkpointId: string,
+): SimState {
+  const checkpoints = state.player.trainingCheckpoints ?? [];
+  const checkpoint = checkpoints.find(
+    (candidate) => candidate.id === checkpointId,
+  );
+  if (!checkpoint) return withAlert(state, "warn", "Checkpoint not found.");
+  if (
+    checkpoint.status === "promoted" ||
+    state.player.models.some(
+      (model) =>
+        model.id === checkpoint.model.id ||
+        model.id === checkpoint.promotedModelId,
+    )
+  ) {
+    return withAlert(
+      state,
+      "warn",
+      "Retained checkpoints must be managed from the model fleet.",
+    );
+  }
+  if (checkpoint.status === "discarded") {
+    return withAlert(state, "warn", "Checkpoint is already discarded.");
+  }
+  const hasActiveChild = playerTrainingJobs(state).some(
+    (job) => job.parentCheckpointId === checkpoint.id,
+  );
+  const hasArchivedChild = checkpoints.some(
+    (candidate) =>
+      candidate.id !== checkpoint.id &&
+      candidate.parentCheckpointId === checkpoint.id &&
+      candidate.status !== "discarded",
+  );
+  const hasFinalizedChild = state.player.models.some(
+    (model) => model.parentModelId === checkpoint.model.id,
+  );
+  if (hasActiveChild || hasArchivedChild || hasFinalizedChild) {
+    return withAlert(
+      state,
+      "warn",
+      "Cannot discard checkpoint weights while a child branch or version depends on them.",
+    );
+  }
+  const ownership = reconcileCheckpointOwnership({
+    checkpoints: checkpoints.map((candidate) =>
+      candidate.id === checkpoint.id
+        ? {
+            ...candidate,
+            status: "discarded" as const,
+            discardedDay: state.day,
+          }
+        : candidate,
+    ),
+    privateEvaluationJobs: state.player.privateEvaluationJobs ?? [],
+    models: state.player.models,
+    jobs: playerTrainingJobs(state),
+    affectedCheckpointIds: new Set([checkpoint.id]),
+  });
+  const cancelled = ownership.cancelledEvaluationJobIds.length;
+  return withAlert(
+    {
+      ...state,
+      player: {
+        ...state.player,
+        trainingCheckpoints: ownership.checkpoints,
+        privateEvaluationJobs: ownership.privateEvaluationJobs,
+      },
+    },
+    "info",
+    `${checkpoint.model.name} checkpoint deleted with its private reports and reviews.${
+      cancelled > 0
+        ? ` Cancelled ${cancelled} queued private stud${cancelled === 1 ? "y" : "ies"} without refund.`
+        : ""
+    }`,
   );
 }
 
@@ -1429,69 +3872,50 @@ function finalizeJob(
   state: SimState,
   release: "internal" | "released",
   jobId?: string,
+  _allowEarlyRelease: boolean = false,
 ): SimState {
   const jobs = playerTrainingJobs(state);
   const job = jobId
     ? jobs.find((candidate) => candidate.id === jobId)
     : jobs[0];
   if (!job || job.failed) return state;
-  const recommended = job.recommendedPfDays ?? job.targetPfDays;
-  const atOrPastRecommended = job.progressPfDays + 1e-9 >= recommended;
-  // Keep-internal / recommended milestone always allowed once base target reached.
-  // Early public release requires loss ≤ RELEASE_LOSS_GATE.
-  if (release === "released" && !atOrPastRecommended) {
-    const gate = canReleaseTrainingJob(job);
-    if (!gate.ok)
-      return withAlert(state, "warn", gate.reason ?? "Cannot release yet.");
-  } else if (
-    job.progressPfDays + 1e-9 < Math.min(job.targetPfDays, recommended) &&
-    !atOrPastRecommended
-  ) {
-    // Still below recommended and not loss-gated early release: require progress.
-    if (
-      job.progressPfDays + 1e-9 < job.targetPfDays &&
-      release === "internal" &&
-      !job.awaitingDecision
-    ) {
-      return state;
-    }
+  const pendingPrivateBenchmarks = (
+    state.player.privateEvaluationJobs ?? []
+  ).filter(
+    (evaluation) =>
+      evaluation.kind === "training_benchmark" &&
+      evaluation.subjectId === job.id,
+  );
+  if (pendingPrivateBenchmarks.length > 0) {
+    const readyDay = Math.max(
+      ...pendingPrivateBenchmarks.map((evaluation) => evaluation.readyDay),
+    );
+    return withAlert(
+      state,
+      "warn",
+      `${job.name} has ${pendingPrivateBenchmarks.length} private benchmark run${pendingPrivateBenchmarks.length === 1 ? "" : "s"} in flight (latest result day ${readyDay}).`,
+    );
   }
-  if (
-    job.progressPfDays + 1e-9 < job.targetPfDays &&
-    release === "internal" &&
-    !(job.awaitingDecision || atOrPastRecommended)
-  ) {
-    return state;
+  const releaseGate = canReleaseTrainingJob(job);
+  const isEarlyRelease = releaseGate.releaseKind === "early";
+  // Anytime launch: public and internal ship once min progress is met.
+  // Calendar / plateau are recommendations enforced only via maturity haircuts.
+  if (!releaseGate.ok) {
+    return withAlert(
+      state,
+      "warn",
+      releaseGate.reason ??
+        (release === "released"
+          ? "Cannot release yet."
+          : "Training has not reached the minimum launch progress."),
+    );
   }
-  if (job.postTrain !== "none" && job.postTrainProgress < job.postTrainTarget) {
-    // allow finish mid post-train with partial quality
-  }
-
   const model = buildModelFromJob(state, job, release);
-  let models = [...state.player.models];
+  // A continuation is a new immutable checkpoint/version. Keep the source in
+  // the fleet so plans, API customers, teachers, and historical economics do
+  // not silently move to different weights.
+  const models = [...state.player.models, model];
   let pricing = { ...state.player.pricing };
-
-  // Continue-train replaces the base model in-place (keep per-model API list)
-  if (job.mode === "continue" && job.continueFromId) {
-    const idx = models.findIndex((m) => m.id === job.continueFromId);
-    if (idx >= 0) {
-      const prev = models[idx]!;
-      models[idx] = {
-        ...model,
-        id: prev.id,
-        release: release === "released" ? "released" : prev.release,
-        shipped: release === "released" ? true : prev.shipped,
-        releaseDay: prev.releaseDay,
-        apiPricePerMTok: prev.apiPricePerMTok ?? model.apiPricePerMTok,
-        apiPriceInPerMTok: prev.apiPriceInPerMTok ?? model.apiPriceInPerMTok,
-        apiPriceOutPerMTok: prev.apiPriceOutPerMTok ?? model.apiPriceOutPerMTok,
-      };
-    } else {
-      models = [...models, model];
-    }
-  } else {
-    models = [...models, model];
-  }
 
   let brand = state.player.brandTrust;
   if (release === "released") {
@@ -1499,7 +3923,9 @@ function finalizeJob(
       ...pricing,
       activeModelId: pricing.activeModelId ?? model.id,
     };
-    if (model.quality.reliability < 35 || model.capability < 25) {
+    // Capability floor tracks the early millions-era band (~5–10). Only
+    // under-trained / broken releases take the flop brand hit.
+    if (model.quality.reliability < 35 || model.capability < 5) {
       brand = Math.max(10, brand - 8);
     } else if (model.quality.reliability > 60 && model.capability > 40) {
       brand = Math.min(100, brand + 4);
@@ -1523,6 +3949,13 @@ function finalizeJob(
       trainingJobs: jobs.filter((candidate) => candidate.id !== job.id),
       trainingJob: jobs.find((candidate) => candidate.id !== job.id) ?? null,
       models,
+      trainingCheckpoints: (state.player.trainingCheckpoints ?? []).map(
+        (checkpoint) =>
+          checkpoint.sourceJobId === job.id &&
+          checkpoint.sourceOwnershipRevoked !== true
+            ? { ...checkpoint, ownerModelId: model.id }
+            : checkpoint,
+      ),
       pricing,
       brandTrust: brand,
     },
@@ -1546,9 +3979,11 @@ function finalizeJob(
             ? `${model.name} continue-train complete (cap ${model.capability.toFixed(0)}).`
             : release === "internal"
               ? `${model.name} kept internal. Use as distillation teacher or release later.`
-              : model.quality.reliability < 40
-                ? `Released ${model.name} — rough quality. Expect churn.`
-                : `Released ${model.name}. ${outcomeLine} Set API price and assign to Plans.`,
+              : isEarlyRelease
+                ? `Released ${model.name} early at ${Math.round((job.progressPfDays / Math.max(job.targetPfDays, 1e-9)) * 100)}% compute — capability and benchmarks are degraded.`
+                : model.quality.reliability < 40
+                  ? `Released ${model.name} — rough quality. Expect churn.`
+                  : `Released ${model.name}. ${outcomeLine} Set API price and assign to Plans.`,
       },
       ...state.alerts,
     ].slice(0, 40),
@@ -1558,7 +3993,7 @@ function finalizeJob(
     ),
   };
 
-  if (release === "released" && job.mode !== "continue") {
+  if (release === "released") {
     next = attachModelToEmptyPlans(next, model.id);
     next = scheduleReleaseEvaluations(next, model.id);
   }
@@ -1580,7 +4015,7 @@ export function releaseModel(state: SimState, modelId: string): SimState {
   if (listIn == null || listOut == null) {
     listIn = m.suggestedApiPriceIn ?? m.costApiPriceIn;
     listOut = m.suggestedApiPriceOut ?? m.costApiPriceOut;
-    listBlend = Math.round((listIn * 0.3 + listOut * 0.7) * 1000) / 1000;
+    listBlend = Math.round(blendApiPrice(listIn, listOut) * 1000) / 1000;
   }
 
   const models = state.player.models.slice();
@@ -1635,7 +4070,9 @@ export function deleteModel(state: SimState, modelId: string): SimState {
   if (!m) return withAlert(state, "warn", "Model not found.");
   const inUse = playerTrainingJobs(state).some(
     (job) =>
-      job.continueFromId === modelId ||
+      // A private branch owns its immutable parent snapshot independently of
+      // the fleet row. Ordinary fleet continuations still block deletion.
+      (job.continueFromId === modelId && job.parentCheckpointId == null) ||
       job.teacherId === modelId ||
       (job.dataPlan?.domainModels &&
         Object.values(job.dataPlan.domainModels).includes(modelId)) ||
@@ -1651,6 +4088,29 @@ export function deleteModel(state: SimState, modelId: string): SimState {
   }
 
   const models = state.player.models.filter((x) => x.id !== modelId);
+  const jobs = playerTrainingJobs(state);
+  const affectedCheckpointIds = new Set(
+    (state.player.trainingCheckpoints ?? [])
+      .filter((checkpoint) => checkpointTouchesModel(checkpoint, m))
+      .map((checkpoint) => checkpoint.id),
+  );
+  const checkpointsForDeletion = (state.player.trainingCheckpoints ?? []).map(
+    (checkpoint) =>
+      checkpoint.model.id === modelId || checkpoint.promotedModelId === modelId
+        ? {
+            ...checkpoint,
+            ownerModelId: undefined,
+            sourceOwnershipRevoked: true,
+          }
+        : checkpoint,
+  );
+  const ownership = reconcileCheckpointOwnership({
+    checkpoints: checkpointsForDeletion,
+    privateEvaluationJobs: state.player.privateEvaluationJobs ?? [],
+    models,
+    jobs,
+    affectedCheckpointIds,
+  });
   let pricing = { ...state.player.pricing };
   if (pricing.activeModelId === modelId) {
     const nextActive =
@@ -1680,14 +4140,30 @@ export function deleteModel(state: SimState, modelId: string): SimState {
     player: {
       ...state.player,
       models,
+      trainingCheckpoints: ownership.checkpoints,
+      privateEvaluationJobs: ownership.privateEvaluationJobs,
       pricing,
     },
+    // Unpublished runs cannot produce evidence after their weights are gone.
+    // Published evaluation/review history remains part of the market record.
+    evaluations: state.evaluations.filter(
+      (evaluation) =>
+        evaluation.published ||
+        evaluation.modelId !== modelId ||
+        (evaluation.labId ?? state.playerLabId) !== state.playerLabId,
+    ),
     alerts: [
       {
         id: `del-model-${modelId}-${state.day}`,
         day: state.day,
         severity: "info" as const,
-        message: `Deleted model ${m.name}.`,
+        message: `Deleted model ${m.name}.${
+          ownership.removedCheckpointIds.length > 0
+            ? ` Removed ${ownership.removedCheckpointIds.length} unowned checkpoint${ownership.removedCheckpointIds.length === 1 ? "" : "s"} and cancelled their private studies without refund.`
+            : ownership.downgradedCheckpointIds.length > 0
+              ? ` ${ownership.downgradedCheckpointIds.length} checkpoint${ownership.downgradedCheckpointIds.length === 1 ? "" : "s"} returned to stealth because another concrete owner remains.`
+              : ""
+        }`,
       },
       ...state.alerts,
     ].slice(0, 40),
@@ -1711,11 +4187,12 @@ export function setModelApiPrice(
       };
     }
     const p = Math.max(0, price);
+    const split = splitBlendedApiPrice(p);
     return {
       ...m,
       apiPricePerMTok: p,
-      apiPriceInPerMTok: Math.round(p * 0.35 * 1000) / 1000,
-      apiPriceOutPerMTok: Math.round(p * 1.25 * 1000) / 1000,
+      apiPriceInPerMTok: split.priceIn,
+      apiPriceOutPerMTok: split.priceOut,
     };
   });
   return { ...state, player: { ...state.player, models } };
@@ -1746,13 +4223,13 @@ export function setModelApiInOut(
       ...m,
       apiPriceInPerMTok: pin,
       apiPriceOutPerMTok: pout,
-      apiPricePerMTok: Math.round((pin * 0.3 + pout * 0.7) * 1000) / 1000,
+      apiPricePerMTok: blendApiPrice(pin, pout),
     };
   });
   return { ...state, player: { ...state.player, models } };
 }
 
-/** Apply markup % to model cost floors → list prices. */
+/** Apply markup % to current canonical unit cost → list prices. */
 export function applyModelApiMarkup(
   state: SimState,
   modelId: string,
@@ -1760,10 +4237,39 @@ export function applyModelApiMarkup(
 ): SimState {
   const m = state.player.models.find((x) => x.id === modelId);
   if (!m) return state;
-  const mult = 1 + Math.max(0, markupPct) / 100;
-  const pin = Math.round(m.costApiPriceIn * mult * 1000) / 1000;
-  const pout = Math.round(m.costApiPriceOut * mult * 1000) / 1000;
-  return setModelApiInOut(state, modelId, pin, pout);
+  const unit = apiUnitCostPerMTok(state, computeSnapshot(state), m);
+  const listCostBasis = boundedApiListCostPerMTok(m, unit.blended);
+  const sug = suggestApiInOut({
+    costPerMTokBase: listCostBasis,
+    paramsB: m.paramsB,
+    activeParamsB: m.activeParamsB,
+    family: m.family,
+    inferCostMult: m.inferCostMult,
+    capability: m.capability,
+    markupPct,
+  });
+  const realizedCost = splitInOutCost(unit.blended);
+  // Refresh stored cost basis so UI markup % stays honest next render.
+  // Realized COGS remains uncapped even when the automatic market quote is
+  // guarded; an under-provisioned endpoint therefore still shows a loss.
+  const models = state.player.models.map((model) =>
+    model.id === modelId
+      ? {
+          ...model,
+          costApiPriceIn: realizedCost.costIn,
+          costApiPriceOut: realizedCost.costOut,
+          suggestedApiPriceIn: sug.priceIn,
+          suggestedApiPriceOut: sug.priceOut,
+          suggestedApiPrice: sug.blendedPrice,
+        }
+      : model,
+  );
+  return setModelApiInOut(
+    { ...state, player: { ...state.player, models } },
+    modelId,
+    sug.priceIn,
+    sug.priceOut,
+  );
 }
 
 function buildModelFromJob(
@@ -1771,18 +4277,74 @@ function buildModelFromJob(
   job: TrainingJob,
   release: "internal" | "released",
 ): Model {
-  const effects = aggregateEffects(state.player.researchUnlocked);
+  const modelResearchUnlocked =
+    job.integratedMethods ?? state.player.researchUnlocked;
+  const effects = aggregateEffects(modelResearchUnlocked);
   const family = job.family;
+  const backbone = job.backbone ?? backboneFromFamily(family);
   const stackModifiers = modelStackModifiers(job.modelStack ?? [], family);
+  const precision = trainingNumericsEconomicsProfile(
+    job.trainingNumerics ?? job.numerics ?? DEFAULT_TRAINING_NUMERICS,
+  );
   const paramsB = job.targetParamsB;
   const activeParamsB =
-    family === "moe" ? (job.activeParamsB ?? paramsB * 0.1) : undefined;
+    backbone === "moe" ? (job.activeParamsB ?? paramsB * 0.1) : undefined;
   const teacher = job.teacherId
     ? state.player.models.find((m) => m.id === job.teacherId)
     : undefined;
-  const continueBase = job.continueFromId
-    ? state.player.models.find((m) => m.id === job.continueFromId)
+  // Private candidates are resolvable only by an explicit branch reference;
+  // they never enter ordinary fleet, teacher, serving, or revenue selectors.
+  const privateContinueBase = job.parentCheckpointId
+    ? (state.player.trainingCheckpoints ?? []).find(
+        (candidate) =>
+          candidate.id === job.parentCheckpointId &&
+          candidate.model.id === job.continueFromId,
+      )?.model
     : undefined;
+  const continueBase =
+    privateContinueBase ??
+    (job.continueFromId
+      ? state.player.models.find((model) => model.id === job.continueFromId)
+      : undefined);
+  const verifiedRecursiveCapabilityBonus =
+    boundedVerifiedRecursiveCapabilityBonus(
+      family,
+      job.campaignModifiers?.verifiedRecursiveCapabilityBonus ??
+        continueBase?.verifiedRecursiveCapabilityBonus,
+    );
+  const modelContext =
+    continueBase &&
+    !state.player.models.some((model) => model.id === continueBase.id)
+      ? [...state.player.models, continueBase]
+      : state.player.models;
+  const postProfile = postTrainEffectProfile(
+    job,
+    state.player.researchUnlocked,
+    modelContext,
+  );
+  const investmentMaturity = fundedTrainingMaturity(job);
+  const completedPostStages = completedPostTrainStages(job);
+  const resolvedStageEffectiveness = resolvedPostTrainStageEffectiveness(
+    job,
+    state.player.researchUnlocked,
+    modelContext,
+  );
+  const hasCompletedPostStage = (stage: Exclude<PostTrainStage, "none">) =>
+    completedPostStages.includes(stage) &&
+    postProfile.stageEffectiveness[stage] > 0;
+  const effectivePostTrainStage: PostTrainStage = hasCompletedPostStage("tools")
+    ? "tools"
+    : hasCompletedPostStage("process")
+      ? "process"
+      : hasCompletedPostStage("rlhf")
+        ? "rlhf"
+        : hasCompletedPostStage("sft")
+          ? "sft"
+          : "none";
+  const reasoningTrained =
+    stackModifiers.reasoningEnabled ||
+    hasCompletedPostStage("process") ||
+    hasCompletedPostStage("tools");
   const legacyMix = DATA_MIX_DEFS[job.dataMix ?? "web"];
   // Domain recipe effects
   const weights = job.dataPlan?.weights ?? {};
@@ -1813,7 +4375,7 @@ function buildModelFromJob(
     domainVideo += m.video * w;
     domainAudio += m.audio * w;
   }
-  const coverage = job.dataCoverage ?? 1;
+  const coverage = job.effectiveDataRatio ?? job.dataCoverage ?? 1;
   const dataQ = (job.dataQualityUsed ?? 50) / 100;
   const mix = {
     capability: domainCap + legacyMix.capability * 0.15,
@@ -1827,34 +4389,48 @@ function buildModelFromJob(
   // ── Shared scale formula: params × data volume × quality × mix ──
   const dataQualityNorm = normalizeDataQuality({
     labDataQuality: state.player.dataQuality,
-    jobQualityUsed: job.dataQualityUsed,
+    jobQualityUsed:
+      (job.dataQualityUsed ?? 50) +
+      (job.campaignModifiers?.dataQualityDelta ?? 0),
   });
   const researchMult =
     1 +
     Math.min(0.12, (effects.capabilityBonus ?? 0) * 0.015) +
-    (family === "moe" && state.player.researchUnlocked.includes("moe_hier")
+    ((family === "moe" || job.backbone === "moe") &&
+    modelResearchUnlocked.includes("moe_hier")
       ? 0.04
       : 0);
-  const trainComplete = Math.min(
-    1,
-    job.progressPfDays / Math.max(1, job.targetPfDays),
+  // √ progress so mid-run launches inherit a soft scale ceiling before the
+  // explicit earlyReleasePenalty haircut compounds capability/benchmarks.
+  const trainComplete = Math.sqrt(
+    Math.min(
+      1,
+      job.progressPfDays /
+        Math.max(1e-9, job.recommendedPfDays ?? job.targetPfDays),
+    ),
   );
 
+  const overtrainCapBonus = effects.overtrainCapBonus ?? 0;
   let scale = scaleIntelligence({
     paramsB,
     activeParamsB,
     family,
+    backbone,
     dataCoverage: coverage,
     dataQuality: dataQualityNorm,
     mixWeights: weights,
     researchMult:
-      family === "moe" && !state.player.researchUnlocked.includes("moe_routing")
+      (family === "moe" || job.backbone === "moe") &&
+      !modelResearchUnlocked.includes("moe_routing")
         ? researchMult * 0.55
         : researchMult,
     trainComplete,
-    postTrainStrength: postTrainStrength(job.postTrain),
-    reasoningEnabled: stackModifiers.reasoningEnabled,
+    postTrainStrength: postProfile.scaleStrength,
+    reasoningEnabled: reasoningTrained,
+    overtrainCapBonus,
+    verifiedRecursiveCapabilityBonus,
     teacherCapability: job.mode === "distill" ? teacher?.capability : undefined,
+    teacherParamsB: job.mode === "distill" ? teacher?.paramsB : undefined,
   });
 
   let capability = scale.capability + mix.capability * 0.35;
@@ -1875,7 +4451,7 @@ function buildModelFromJob(
     );
   }
 
-  const postIdx = POST_TRAIN_ORDER.indexOf(job.postTrain);
+  const postIdx = postProfile.alignmentEquivalent;
   const rlhfMult = 1 + (effects.rlhfQuality ?? 0);
   const safetyBase =
     14 +
@@ -1892,13 +4468,15 @@ function buildModelFromJob(
   let coding = Math.min(
     100,
     capability * 0.9 +
-      (state.player.researchUnlocked.includes("moe_special") ? 4 : 0) +
+      (modelResearchUnlocked.includes("moe_special") ? 4 : 0) +
       mix.coding * 0.7,
   );
   let reasoning = Math.min(
     100,
     capability * 0.95 +
-      (postIdx >= 3 ? 4 : 0) +
+      (reasoningTrained
+        ? 4 * Math.min(1, postProfile.alignmentEquivalent)
+        : 0) +
       mix.math * 0.34 +
       mix.science * 0.18,
   );
@@ -1933,30 +4511,65 @@ function buildModelFromJob(
     quality.video = continueBase.quality.video;
   }
 
-  if (job.postTrain === "none" && job.mode !== "continue") {
-    quality.reliability = Math.min(quality.reliability, 26);
-    quality.safety = Math.min(quality.safety, 20);
-    quality.chat = quality.chat * 0.75;
+  if (job.mode !== "continue") {
+    // Removing the raw-pretrain launch clamps is itself an earned benefit.
+    // Scale the relief continuously from the exact zero-work baseline instead
+    // of letting a stage label remove every clamp immediately.
+    const postMaturity = Math.min(1, postProfile.alignmentEquivalent);
+    quality.reliability = Math.min(
+      quality.reliability,
+      26 + (100 - 26) * postMaturity,
+    );
+    quality.safety = Math.min(quality.safety, 20 + (100 - 20) * postMaturity);
+    quality.chat = quality.chat * (0.75 + 0.25 * postMaturity);
   }
 
   // Distill path: blend your corpus (self scale) with teacher signal.
-  // High teacher share → ~80% of teacher (DISTILL_RETENTION). High own data → more self scale.
+  // Teacher transfer follows the size-gap retention curve (distillRetentionFor):
+  // 1T → 1B keeps ~30–40% of teacher capability, modulated by data and RNG.
   const distillTeacherShare =
     job.mode === "distill"
       ? clampDistillTeacherShare(job.distillTeacherShare)
       : 0;
   const distillSelfShare = 1 - distillTeacherShare;
+  const distillRetention =
+    job.mode === "distill" && teacher
+      ? distillRetentionFor({
+          teacherParamsB: teacher.paramsB,
+          studentParamsB: paramsB,
+          dataFactor: Math.max(
+            0,
+            Math.min(
+              1,
+              ((job.dataQualityUsed ?? 60) / 100) *
+                (1 - (job.synthLqShare ?? 0) * 0.5),
+            ),
+          ),
+          rng01: createRng(
+            hashSeed(
+              job.outcomeSeed ?? 0,
+              job.id,
+              teacher.id,
+              "distill-retention-v2",
+            ),
+          ).next(),
+        })
+      : DISTILL_RETENTION;
   if (job.mode === "distill" && teacher) {
+    const retention = distillRetention;
     const d = distillFromTeacher({
       teacherCapability: teacher.capability,
       teacherBenchmarks: teacher.benchmarks,
       studentScaleCap: Math.max(scale.capability, teacher.capability * 0.75),
-      targetRetention: DISTILL_RETENTION,
+      targetRetention: retention,
     });
     // Self branch: size × your processed data only
     const selfCap = scale.capability + mix.capability * 0.35;
-    // Teacher branch: classic ~80% retention (slightly soft-capped under teacher)
-    const teacherCap = Math.min(teacher.capability * 0.9, d.capability);
+    // Teacher branch: size-gap retention (soft-capped under teacher)
+    const teacherCap = Math.min(
+      teacher.capability * (retention + 0.1),
+      d.capability,
+    );
     capability = clamp(
       selfCap * distillSelfShare + teacherCap * distillTeacherShare,
     );
@@ -1988,13 +4601,16 @@ function buildModelFromJob(
 
   let inferCostMult = 1;
   let tokPerSecMult = 0.7;
-  if (family === "moe") {
+  const sparseBackbone = backbone === "moe";
+  if (sparseBackbone) {
     inferCostMult = (effects.moeInferMult as number | undefined) ?? 1.1;
     // active size drives serve cost
     const active = activeParamsB ?? paramsB * 0.1;
     inferCostMult *= Math.pow(active / Math.max(paramsB * 0.08, 0.1), 0.3);
-    tokPerSecMult = 0.85 * Math.pow(7 / Math.max(active, 0.5), 0.15);
-    if (!state.player.researchUnlocked.includes("moe_serve")) {
+    tokPerSecMult =
+      (family === "omni" ? 0.35 : 0.85) *
+      Math.pow(7 / Math.max(active, 0.5), 0.15);
+    if (!modelResearchUnlocked.includes("moe_serve")) {
       tokPerSecMult *= 0.55;
     }
   } else if (family === "dense") {
@@ -2006,18 +4622,24 @@ function buildModelFromJob(
   } else if (family === "diffusion") {
     inferCostMult = 1.4;
     tokPerSecMult = 0.4;
+  } else if (family === "omni") {
+    inferCostMult = 1;
+    tokPerSecMult = 0.35;
   }
 
   // Large dense models slower / costlier to serve
-  if (family !== "moe" && paramsB > 70) {
+  if (!sparseBackbone && paramsB > 70) {
     inferCostMult *= 1 + Math.log10(paramsB / 70) * 0.35;
     tokPerSecMult *= 1 / (1 + Math.log10(paramsB / 70) * 0.4);
   }
   inferCostMult *= stackModifiers.hostingMult;
   tokPerSecMult *= stackModifiers.speedMult;
 
-  const jobIo =
+  const baseJobIo =
     job.io ?? ioForPreset(job.productPreset ?? presetFromFamily(family));
+  const jobIo = postProfile.toolsEnabled
+    ? { ...baseJobIo, tools: Math.max(1, baseJobIo.tools) }
+    : baseJobIo;
   const modalities: Model["modalities"] = [];
   for (const modality of ["text", "image", "audio", "video"] as const) {
     if (
@@ -2030,9 +4652,23 @@ function buildModelFromJob(
   if (jobIo.tools > 0) modalities.push("tools");
   if (modalities.length === 0) modalities.push("text");
 
+  // Per-lab modality experience: first-generation audio/image/video models
+  // reach only a fraction of their theoretical modality ceiling.
+  const modalityExperience = modalityExperienceCounts(state.player.models);
+  const maturity: Partial<Record<GenerativeModality, number>> = {};
+  for (const modality of ["image", "audio", "video"] as const) {
+    if (modalities.includes(modality)) {
+      maturity[modality] = modalityMaturity(modalityExperience[modality]);
+    }
+  }
+  if (maturity.image != null)
+    quality.image = clamp(quality.image * maturity.image);
+  if (maturity.video != null)
+    quality.video = clamp(quality.video * maturity.video);
+
   // Research extras (small — cannot max small models)
   const extras: Partial<BenchmarkScores> = {};
-  for (const id of state.player.researchUnlocked) {
+  for (const id of modelResearchUnlocked) {
     const b = getResearchNode(id).effects.benchmarkBoost;
     if (!b) continue;
     for (const [k, v] of Object.entries(b) as [
@@ -2091,17 +4727,22 @@ function buildModelFromJob(
     paramsB,
     activeParamsB,
     family,
+    backbone,
     dataCoverage: coverage,
     dataQuality: dataQualityNorm,
     mixWeights: weights,
     researchMult:
-      family === "moe" && !state.player.researchUnlocked.includes("moe_routing")
+      (family === "moe" || job.backbone === "moe") &&
+      !modelResearchUnlocked.includes("moe_routing")
         ? researchMult * 0.55
         : researchMult,
     trainComplete,
-    postTrainStrength: postTrainStrength(job.postTrain),
-    reasoningEnabled: stackModifiers.reasoningEnabled,
+    postTrainStrength: postProfile.scaleStrength,
+    reasoningEnabled: reasoningTrained,
+    overtrainCapBonus,
+    verifiedRecursiveCapabilityBonus,
     teacherCapability: job.mode === "distill" ? teacher?.capability : undefined,
+    teacherParamsB: job.mode === "distill" ? teacher?.paramsB : undefined,
   });
 
   let benchmarks = scoresFromScale({
@@ -2109,10 +4750,10 @@ function buildModelFromJob(
     quality,
     family,
     unlocked: state.player.researchUnlocked,
-    postTrain: job.postTrain,
+    postTrain: effectivePostTrainStage,
     extras,
-    reasoningEnabled: stackModifiers.reasoningEnabled,
-    toolsEnabled: jobIo.tools > 0,
+    reasoningEnabled: reasoningTrained,
+    toolsEnabled: postProfile.toolsEnabled || jobIo.tools > 0,
     imageDataQualityFactor:
       (job.dataQualityByDomain?.image ?? job.dataQualityUsed ?? 50) / 100,
     healthLowQualityShare:
@@ -2191,16 +4832,20 @@ function buildModelFromJob(
       teacherCapability: teacher.capability,
       teacherBenchmarks: teacher.benchmarks,
       studentScaleCap: Math.max(scale.capability, teacher.capability * 0.75),
-      targetRetention: DISTILL_RETENTION,
+      targetRetention: distillRetention,
     });
     const tShare = distillTeacherShare;
     const sShare = distillSelfShare;
+    const benchTransfer = Math.min(0.88, distillRetention + 0.1);
     for (const k of Object.keys(benchmarks) as (keyof BenchmarkScores)[]) {
       const fromTeacher = d.benchmarks[k];
       const fromSelf = benchmarks[k];
       const teacherV =
         fromTeacher != null
-          ? Math.min((teacher.benchmarks[k] ?? fromTeacher) * 0.88, fromTeacher)
+          ? Math.min(
+              (teacher.benchmarks[k] ?? fromTeacher) * benchTransfer,
+              fromTeacher,
+            )
           : fromSelf;
       // Blend: teacher-heavy → near 80% teacher benches; corpus-heavy → your scale benches
       benchmarks = {
@@ -2212,26 +4857,50 @@ function buildModelFromJob(
 
   const outcome = rollTrainingOutcome({
     seed: job.outcomeSeed ?? hashSeed(state.seed, job.id, "train-outcome"),
-    quality: job.dataQualityUsed,
+    quality:
+      (job.dataQualityUsed ?? 50) +
+      (job.campaignModifiers?.dataQualityDelta ?? 0),
     verifyShare: 1 - (job.trainShare ?? 0.82),
     engineers: state.player.staff?.engineer ?? 0,
     researchCount: state.player.researchUnlocked.length,
     day: state.day,
-    breakthroughBias: effects.trainingBreakthroughBias,
-    stumbleRisk: effects.trainingStumbleRisk,
+    breakthroughBias:
+      (effects.trainingBreakthroughBias ?? 0) +
+      (job.campaignModifiers?.breakthroughBias ?? 0),
+    stumbleRisk:
+      (effects.trainingStumbleRisk ?? 0) +
+      (job.campaignModifiers?.stumbleRisk ?? 0) +
+      Math.max(0, precision.lossVolatilityMultiplier - 1) * 0.08,
   });
-  capability = clamp(capability + outcome.capabilityDelta);
-  capability = Math.min(capability, scale.capabilityCeiling);
-  quality.reliability = clamp(quality.reliability + outcome.reliabilityDelta);
+  capability = clamp(
+    capability +
+      outcome.capabilityDelta +
+      (job.campaignModifiers?.capabilityDelta ?? 0),
+  );
+  capability = Math.min(
+    capability,
+    bentCapabilityCeiling(scale.capabilityCeiling) *
+      precision.qualityCeilingMultiplier,
+  );
+  quality.reliability = clamp(
+    quality.reliability +
+      outcome.reliabilityDelta +
+      (job.campaignModifiers?.reliabilityDelta ?? 0),
+  );
   quality.safety = clamp(
     quality.safety +
       Math.min(2, outcome.reliabilityDelta * 0.25) -
-      (effects.trainingSafetyPenalty ?? 0),
+      (effects.trainingSafetyPenalty ?? 0) +
+      (job.campaignModifiers?.safetyDelta ?? 0),
   );
   for (const key of Object.keys(benchmarks) as (keyof BenchmarkScores)[]) {
     benchmarks = {
       ...benchmarks,
-      [key]: clamp(benchmarks[key]! + outcome.capabilityDelta * 0.45),
+      [key]: clamp(
+        benchmarks[key]! +
+          outcome.capabilityDelta * 0.45 +
+          (job.campaignModifiers?.capabilityDelta ?? 0) * 0.35,
+      ),
     };
   }
 
@@ -2249,15 +4918,20 @@ function buildModelFromJob(
       return source
         ? {
             capability: acc.capability + source.capability * volume,
+            reliability: acc.reliability + source.quality.reliability * volume,
             volume: acc.volume + volume,
           }
         : acc;
     },
-    { capability: 0, volume: 0 },
+    { capability: 0, reliability: 0, volume: 0 },
   );
   const syntheticTeacherCapability =
     weightedTeacher.volume > 0
       ? weightedTeacher.capability / weightedTeacher.volume
+      : 0;
+  const syntheticTeacherReliability =
+    weightedTeacher.volume > 0
+      ? weightedTeacher.reliability / weightedTeacher.volume
       : 0;
   const frontierCapability = Math.max(
     syntheticTeacherCapability,
@@ -2275,18 +4949,65 @@ function buildModelFromJob(
     syntheticMTok: job.syntheticUnits ?? 0,
     teacherCapability: syntheticTeacherCapability,
     frontierCapability,
+    teacherReliability: syntheticTeacherReliability,
+    dataQuality: job.dataQualityUsed ?? state.player.dataQuality,
+    computePfDays: job.progressPfDays,
+    seed: `${job.id}:${state.seed}`,
   });
+  const effectiveSyntheticVolume =
+    syntheticProfile.realMTok + syntheticProfile.effectiveSyntheticMTok;
+  if (
+    syntheticProfile.totalMTok > 0 &&
+    effectiveSyntheticVolume + 1e-9 < syntheticProfile.totalMTok
+  ) {
+    const effectiveCoverage =
+      coverage * (effectiveSyntheticVolume / syntheticProfile.totalMTok);
+    const effectiveScale = scaleIntelligence({
+      paramsB,
+      activeParamsB,
+      family,
+      backbone,
+      dataCoverage: effectiveCoverage,
+      dataQuality: dataQualityNorm,
+      mixWeights: weights,
+      researchMult:
+        (family === "moe" || job.backbone === "moe") &&
+        !modelResearchUnlocked.includes("moe_routing")
+          ? researchMult * 0.55
+          : researchMult,
+      trainComplete,
+      postTrainStrength: postProfile.scaleStrength,
+      reasoningEnabled: reasoningTrained,
+      overtrainCapBonus,
+      verifiedRecursiveCapabilityBonus,
+      teacherCapability:
+        job.mode === "distill" ? teacher?.capability : undefined,
+      teacherParamsB: job.mode === "distill" ? teacher?.paramsB : undefined,
+    });
+    scale = effectiveScale;
+    capability = Math.min(capability, effectiveScale.capability);
+    for (const key of Object.keys(benchmarks) as (keyof BenchmarkScores)[]) {
+      benchmarks = {
+        ...benchmarks,
+        [key]: Math.min(benchmarks[key]!, effectiveScale.benchCeilings[key]),
+      };
+    }
+  }
   if (syntheticTeacherCapability > 0 && syntheticProfile.syntheticShare > 0) {
+    const effectiveSyntheticShare =
+      syntheticProfile.effectiveSyntheticMTok /
+      Math.max(
+        1e-9,
+        syntheticProfile.realMTok + syntheticProfile.effectiveSyntheticMTok,
+      );
     const imitationTarget =
       syntheticTeacherCapability * syntheticProfile.imitationRetention;
     capability = clamp(
       capability +
-        Math.max(0, imitationTarget - capability) *
-          syntheticProfile.syntheticShare,
+        Math.max(0, imitationTarget - capability) * effectiveSyntheticShare,
     );
     const benchmarkLift =
-      syntheticProfile.syntheticShare * 3 +
-      syntheticProfile.benchmarkOverfit * 6;
+      effectiveSyntheticShare * 3 + syntheticProfile.benchmarkOverfit * 6;
     for (const key of Object.keys(benchmarks) as (keyof BenchmarkScores)[]) {
       benchmarks = {
         ...benchmarks,
@@ -2299,8 +5020,117 @@ function buildModelFromJob(
     quality.chat = clamp(quality.chat - syntheticProfile.benchmarkOverfit * 10);
   }
 
+  // Precision cannot invent parameter/data/architecture headroom. Apply this
+  // after all stochastic and synthetic lifts so no later path bypasses it.
+  capability = Math.min(
+    capability,
+    bentCapabilityCeiling(scale.capabilityCeiling) *
+      precision.qualityCeilingMultiplier,
+  );
+  for (const key of Object.keys(benchmarks) as (keyof BenchmarkScores)[]) {
+    benchmarks = {
+      ...benchmarks,
+      [key]: Math.min(
+        benchmarks[key]!,
+        scale.benchCeilings[key] * precision.qualityCeilingMultiplier,
+      ),
+    };
+  }
+
+  // The generic scale ceiling above deliberately cannot price in product
+  // integration. Restore a small, separately bounded agents lift from earned
+  // tool-training evidence after that clamp. This is exactly zero for a merely
+  // selected stage and grows continuously with the frozen stage result.
+  const earnedToolsBenchmarkLift = postProfile.stageEffectiveness.tools * 5;
+  if (earnedToolsBenchmarkLift > 0) {
+    benchmarks.agents = Math.min(
+      100,
+      scale.benchCeilings.agents * precision.qualityCeilingMultiplier + 5,
+      benchmarks.agents + earnedToolsBenchmarkLift,
+    );
+  }
+
+  // Deliberately funding compute past the original recommendation earns a
+  // visible but asymptotic optimization gain inside the same hard architecture
+  // wall. Only distillation or verified omni recursion can move that wall.
+  if (investmentMaturity.extraSignal > 0) {
+    const matureCapabilityCeiling =
+      bentCapabilityCeiling(scale.capabilityCeiling) *
+      precision.qualityCeilingMultiplier;
+    capability = Math.min(
+      matureCapabilityCeiling,
+      clamp(capability + investmentMaturity.capabilityGain),
+    );
+    quality.reliability = clamp(
+      quality.reliability + investmentMaturity.reliabilityGain,
+    );
+    quality.reasoning = clamp(
+      quality.reasoning + investmentMaturity.capabilityGain * 0.55,
+    );
+    quality.coding = clamp(
+      quality.coding + investmentMaturity.capabilityGain * 0.45,
+    );
+    for (const key of Object.keys(benchmarks) as (keyof BenchmarkScores)[]) {
+      benchmarks = {
+        ...benchmarks,
+        [key]: Math.min(
+          100,
+          scale.benchCeilings[key] * precision.qualityCeilingMultiplier +
+            investmentMaturity.ceilingGain,
+          clamp(benchmarks[key]! + investmentMaturity.benchmarkGain),
+        ),
+      };
+    }
+  }
+
+  // Immature modality experience caps the modality-linked benchmark last, so
+  // the achieved score is the theoretical score times lab maturity.
+  if (maturity.image != null && maturity.image < 1) {
+    benchmarks = {
+      ...benchmarks,
+      vision: clamp((benchmarks.vision ?? 0) * maturity.image),
+    };
+  }
+
+  // A plateau permits stopping; it does not manufacture the work that was
+  // skipped. This explicit maturity haircut compounds the scale formula's
+  // progress ceiling and is exactly neutral for a completed run.
+  const releasePenalty = earlyReleasePenalty(job);
+  if (releasePenalty.progress < 1 || releasePenalty.calendarProgress < 1) {
+    capability = clamp(capability * releasePenalty.capabilityMultiplier);
+    for (const key of Object.keys(quality) as (keyof QualityAxes)[]) {
+      quality[key] = clamp(
+        quality[key] *
+          (key === "reliability"
+            ? releasePenalty.reliabilityMultiplier
+            : releasePenalty.capabilityMultiplier),
+      );
+    }
+    for (const key of Object.keys(benchmarks) as (keyof BenchmarkScores)[]) {
+      benchmarks = {
+        ...benchmarks,
+        [key]: clamp(benchmarks[key]! * releasePenalty.benchmarkMultiplier),
+      };
+    }
+  }
+  inferCostMult *= precision.inferenceCostMultiplier;
+
+  // Seed list prices from the canonical capacity-based unit cost (model has
+  // not served yet). Falls back to FALLBACK_COST_PER_MTOK on empty campuses.
+  const birthCostBasis = birthApiUnitCostPerMTok(
+    state,
+    computeSnapshot(state),
+    {
+      id: `birth-${job.id}`,
+      paramsB,
+      activeParamsB,
+      family,
+      inferCostMult,
+      tokPerSecMult,
+    },
+  );
   const apiSug = suggestApiInOut({
-    costPerMTokBase: 0.28,
+    costPerMTokBase: birthCostBasis,
     paramsB,
     activeParamsB,
     family,
@@ -2314,27 +5144,28 @@ function buildModelFromJob(
     family,
     inferCostMult,
     capability,
-    costPerMTokBase: 0.28,
+    costPerMTokBase: birthCostBasis,
   });
 
   const continueCompute =
     (continueBase?.continueCompute ?? 0) +
     (job.mode === "continue" ? job.progressPfDays : 0);
 
-  // Each model owns its own in/out list prices ($/MTok). Continue keeps prior
-  // list; new weights seed from size/capability-based suggestions so models
-  // don't all share the lab-wide default.
-  const listIn = continueBase?.apiPriceInPerMTok ?? apiSug.priceIn;
-  const listOut = continueBase?.apiPriceOutPerMTok ?? apiSug.priceOut;
-  const listBlend =
-    continueBase?.apiPricePerMTok ??
-    Math.round((listIn * 0.3 + listOut * 0.7) * 1000) / 1000;
+  // Every checkpoint version gets a fresh bounded compute-derived launch
+  // price. The source version keeps its own custom list unchanged.
+  const listIn = apiSug.priceIn;
+  const listOut = apiSug.priceOut;
+  const listBlend = Math.round(blendApiPrice(listIn, listOut) * 1000) / 1000;
 
   const productPreset = job.productPreset ?? presetFromFamily(family);
   const serviceProfile = serviceProfileForModel({
     paramsB,
     activeParamsB,
     family,
+    backbone,
+    productPreset,
+    io: jobIo,
+    modalities,
     tokPerSecMult,
     capability,
   });
@@ -2346,44 +5177,94 @@ function buildModelFromJob(
     domainWeights: weights,
     io: jobIo,
     family,
-    postTrain: job.postTrain,
+    postTrain: effectivePostTrainStage,
+    postTrainStrength: postProfile.scaleStrength,
     quality,
+    modalityMaturity: maturity,
   });
 
+  const finalNumerics =
+    job.trainingNumerics ?? job.numerics ?? continueBase?.trainingNumerics;
+  const nativeWeightPrecision = finalNumerics
+    ? nativeWeightPrecisionForNumerics(finalNumerics)
+    : continueBase?.nativeWeightPrecision;
+  const sourceRevision = continueBase?.revision ?? 1;
+  const modelId = `model-${state.day}-${job.id}`;
+  const lineageId =
+    continueBase?.lineageId ??
+    continueBase?.id ??
+    job.lineageId ??
+    seededId("lineage", state.seed, job.id, job.name);
+  const revision = continueBase
+    ? Math.max(
+        sourceRevision,
+        ...state.player.models
+          .filter((model) => (model.lineageId ?? model.id) === lineageId)
+          .map((model) => model.revision ?? 1),
+      ) + 1
+    : 1;
+  const rootName = (continueBase?.name ?? job.name)
+    .replace(/\s+(?:v\d+|0\.\d+)$/i, "")
+    .replace(/\s+·\s+C\d+$/i, "")
+    .trim();
+  const versionLabel = `0.${revision}`;
+  const versionName = continueBase ? `${rootName} ${versionLabel}` : job.name;
+
   return normalizeModelEvaluations({
-    id:
-      job.mode === "continue" && continueBase
-        ? continueBase.id
-        : `model-${state.day}-${job.id}`,
-    name: job.name,
+    id: modelId,
+    lineageId,
+    parentModelId: continueBase?.id,
+    sourceTrainingJobId: job.id,
+    name: versionName,
     family,
     paramsB,
     activeParamsB,
-    backbone: job.backbone ?? backboneFromFamily(family),
+    backbone,
     productPreset,
-    io: job.io
-      ? {
-          inputs: Object.fromEntries(
-            Object.keys(job.io.inputs).map((key) => [key, capability]),
-          ),
-          outputs: Object.fromEntries(
-            Object.keys(job.io.outputs).map((key) => [key, capability]),
-          ),
-          tools: job.io.tools > 0 ? capability * 0.7 : 0,
-        }
-      : ioForPreset(productPreset, capability),
+    io: matureModelIo(
+      {
+        inputs: Object.fromEntries(
+          Object.keys(jobIo.inputs).map((key) => [key, capability]),
+        ),
+        outputs: Object.fromEntries(
+          Object.keys(jobIo.outputs).map((key) => [key, capability]),
+        ),
+        tools: (() => {
+          const baseline = baseJobIo.tools > 0 ? capability * 0.35 : 0;
+          if (!postProfile.toolsEnabled) return baseline;
+          const trainedTarget =
+            capability * (0.45 + postProfile.scaleStrength * 0.4);
+          return (
+            baseline +
+            (trainedTarget - baseline) * postProfile.stageEffectiveness.tools
+          );
+        })(),
+      },
+      maturity,
+    ),
     capability,
+    verifiedRecursiveCapabilityBonus,
     capabilities,
     modalities,
     quality,
     benchmarks,
-    postTrain: job.postTrain,
+    postTrain: effectivePostTrainStage,
+    completedPostTrainStages: completedPostStages,
+    postTrainStageEffectiveness: {
+      ...(continueBase?.postTrainStageEffectiveness ?? {}),
+      ...resolvedStageEffectiveness,
+    },
+    postTrainStageRuns: {
+      ...(continueBase?.postTrainStageRuns ?? {}),
+      ...(job.postTrainStageRuns ?? {}),
+    },
+    trainingLossHistory: [...(job.lossHistory ?? [])],
+    trainingBenchmarkSnapshots: [...(job.benchmarkSnapshots ?? [])],
     trainComputeSpent:
       (continueBase?.trainComputeSpent ?? 0) + job.progressPfDays,
-    releaseDay: continueBase?.releaseDay ?? state.day,
-    shipped: release === "released" || continueBase?.shipped === true,
-    release:
-      release === "released" ? "released" : (continueBase?.release ?? release),
+    releaseDay: state.day,
+    shipped: release === "released",
+    release,
     tokPerSecMult,
     inferCostMult,
     serviceProfile,
@@ -2424,8 +5305,10 @@ function buildModelFromJob(
     integratedMethods:
       job.integratedMethods ?? continueBase?.integratedMethods ?? [],
     modelStack: job.modelStack ?? continueBase?.modelStack ?? [],
-    reasoningEnabled: stackModifiers.reasoningEnabled,
-    revision: continueBase?.revision ?? 1,
+    reasoningEnabled: reasoningTrained,
+    revision,
+    versionLabel,
+    checkpointEvaluations: [],
     safetyTraining: continueBase?.safetyTraining,
     dataQualityByDomain:
       job.dataQualityByDomain ?? continueBase?.dataQualityByDomain,
@@ -2445,8 +5328,8 @@ function buildModelFromJob(
       continueBase?.benchmarkOverfit ?? 0,
       syntheticProfile.benchmarkOverfit,
     ),
-    trainingNumerics:
-      job.trainingNumerics ?? job.numerics ?? continueBase?.trainingNumerics,
+    trainingNumerics: finalNumerics,
+    nativeWeightPrecision,
     trainingFormulaVersion: job.trainingFormulaVersion ?? 2,
   });
 }
@@ -2461,117 +5344,246 @@ export function tickTraining(state: SimState): SimState {
 
   const snap = computeSnapshot(state);
   const resources = playerTrainingResourcePlan(state, snap);
+  const isActive = (job: TrainingJob) => {
+    return (
+      !job.failed &&
+      !job.paused &&
+      !job.pendingCampaignEvent &&
+      (job.computePriority ?? 50) > 0
+    );
+  };
   const totalBurn = jobs.reduce(
-    (sum, job) => sum + (job.failed ? 0 : (job.cashBurnPerDay ?? 0)),
+    (sum, job) => sum + (isActive(job) ? (job.cashBurnPerDay ?? 0) : 0),
     0,
   );
-  let cash = state.player.cash - totalBurn;
-  if (cash < 0) {
-    // Job stalls without cash — no progress, still opex
-    return {
-      ...state,
-      player: { ...state.player, cash: Math.max(-5_000_000, cash) },
-      alerts: [
-        {
-          id: `train-cash-${state.day}`,
-          day: state.day,
-          severity: "danger" as const,
-          message:
-            "Training stalled — payroll/cluster burn exceeded cash. Raise capital or pause job.",
-        },
-        ...state.alerts.filter((a) => !a.id.startsWith("train-cash-")),
-      ].slice(0, 40),
-    };
-  }
+  let nextState =
+    totalBurn > 0 ? chargeExpense(state, totalBurn, "training") : state;
 
-  const nextJobs = jobs.map((job) => {
+  const tickAlerts: Array<{
+    id: string;
+    day: number;
+    severity: "info" | "warn" | "danger";
+    message: string;
+  }> = [];
+  // Campaign decisions are intentionally non-blocking for the simulation.
+  // If the player ignores one for five days, the safest recommended response
+  // is applied automatically (including its real cash cost when affordable).
+  const campaignResolvedJobs = jobs.map((job) => {
+    const event = job.pendingCampaignEvent;
+    if (!event || state.day < event.decisionDeadlineDay) return job;
+    const recommendation = recommendedTrainingCampaignChoice(event);
+    const cost = Math.max(0, recommendation.effects.cashCost ?? 0);
+    const qualified =
+      nextState.player.cash + 1e-9 >= cost &&
+      (nextState.player.staff?.researcher ?? 0) >=
+        (recommendation.effects.minResearchers ?? 0);
+    const selected = qualified
+      ? recommendation
+      : event.choices.find(
+          (choice) =>
+            nextState.player.cash + 1e-9 >=
+              Math.max(0, choice.effects.cashCost ?? 0) &&
+            (nextState.player.staff?.researcher ?? 0) >=
+              (choice.effects.minResearchers ?? 0),
+        );
+    if (!selected) {
+      tickAlerts.push({
+        id: `train-campaign-unfunded-${job.id}-${state.day}`,
+        day: state.day,
+        severity: "warn",
+        message: `${job.name}: ${event.title} closed with no intervention; the planned recipe resumes.`,
+      });
+      return {
+        ...job,
+        pendingCampaignEvent: undefined,
+        campaignEventHistory: [
+          ...(job.campaignEventHistory ?? []),
+          {
+            ...event,
+            selectedChoiceId: "stay-planned",
+            resolvedDay: state.day,
+            autoResolved: true,
+          },
+        ].slice(-16),
+      };
+    }
+    const selectedCost = Math.max(0, selected.effects.cashCost ?? 0);
+    if (selectedCost > 0 && nextState.player.cash + 1e-9 >= selectedCost) {
+      nextState = chargeExpense(nextState, selectedCost, "training");
+    }
+    const resolved = applyTrainingCampaignChoice(
+      job,
+      selected.id,
+      state.day,
+      true,
+    );
+    tickAlerts.push({
+      id: `train-campaign-auto-${job.id}-${state.day}`,
+      day: state.day,
+      severity: "warn",
+      message: `${job.name}: ${event.title} auto-resolved with ${selected.label}.`,
+    });
+    return resolved ?? job;
+  });
+  const nextJobs = campaignResolvedJobs.map((job) => {
     if (job.failed) return job;
+    const active = isActive(job);
+    const daysElapsed = (job.daysElapsed ?? 0) + (active ? 1 : 0);
     const resource = resources.jobs[job.id];
     const trainPool = resource?.effectivePf ?? 0;
-    const recommended = job.recommendedPfDays ?? job.targetPfDays;
+    const allocatedPf = active ? Math.max(0, trainPool) : 0;
+    const telemetry = (
+      progressPfDays = job.progressPfDays,
+      elapsed = daysElapsed,
+      consumedPf = allocatedPf,
+    ) => {
+      const energyMwDays =
+        (job.energyMwDays ?? 0) + Math.max(0, consumedPf) * mwPerPf();
+      return {
+        energyMwDays,
+        energyMWh: energyMwDays * 24,
+        daysRemaining: liveTrainingDaysRemaining(
+          job,
+          allocatedPf,
+          progressPfDays,
+          elapsed,
+        ),
+      };
+    };
     const economics = {
       setupCost: job.economics?.setupCost ?? 0,
       dataCost: job.economics?.dataCost ?? 0,
       trainingCostAccrued:
         (job.economics?.trainingCostAccrued ?? 0) +
-        (job.failed ? 0 : (job.cashBurnPerDay ?? 0)),
+        (active ? (job.cashBurnPerDay ?? 0) : 0),
     };
-    // Pause for decision when recommended compute is first reached.
-    if (
-      !job.awaitingDecision &&
-      !job.paused &&
-      job.progressPfDays + 1e-9 < recommended &&
-      job.progressPfDays + Math.max(0, trainPool) + 1e-9 >= recommended &&
-      (job.extensionDays ?? 0) === 0
-    ) {
-      const nextProgress = Math.min(job.targetPfDays, recommended);
+    const proposedBaseProgress = Math.min(
+      job.targetPfDays,
+      job.progressPfDays + Math.max(0, trainPool),
+    );
+    const imminentCampaignMilestone =
+      job.postTrain === "none" && job.progressPfDays < job.targetPfDays
+        ? crossedTrainingCampaignMilestone(
+            job,
+            job.progressPfDays / Math.max(1e-9, job.targetPfDays),
+            proposedBaseProgress / Math.max(1e-9, job.targetPfDays),
+          )
+        : null;
+    const stallReason = job.paused
+      ? "Paused"
+      : trainPool <= 1e-9
+        ? trainingStallReason(state, snap, resources, resource)
+        : null;
+    if (job.paused) {
       return {
         ...job,
+        ...telemetry(),
         economics,
-        progressPfDays: nextProgress,
-        awaitingDecision: true,
-        paused: true,
-        stallReason:
-          "Recommended compute reached — release, keep internal, or extend 10 days.",
-        lossHistory: appendLossPoint(
-          job,
-          "base",
-          nextProgress / Math.max(1e-9, job.targetPfDays),
-          state.day,
-        ),
+        daysElapsed,
+        stallReason,
       };
     }
-    const stallReason =
-      job.paused || job.awaitingDecision
-        ? job.awaitingDecision
-          ? "Recommended compute reached — release, keep internal, or extend 10 days."
-          : "Paused"
-        : trainPool <= 1e-9
-          ? "No compatible training hardware is available."
-          : null;
-    if (job.paused || job.awaitingDecision) {
-      return { ...job, economics, stallReason };
-    }
-    if (resource && !resource.ramReady) {
+    if (job.pendingCampaignEvent) {
       return {
         ...job,
+        ...telemetry(),
         economics,
-        stallReason: `Training RAM blocked: ${resource.ramRequiredGb.toFixed(0)} GB needed, ${resource.ramAllocatedGb.toFixed(0)} GB assigned from the ${Math.round(resources.trainingAllocationShare * 100)}% Training allocation. Raise Training allocation, add memory, or pause another run.`,
+        daysElapsed,
+        stallReason: `Campaign decision: ${job.pendingCampaignEvent.title}`,
+      };
+    }
+    if (resource && (!resource.ramReady || !resource.systemRamReady)) {
+      return {
+        ...job,
+        ...telemetry(),
+        economics,
+        daysElapsed,
+        stallReason,
       };
     }
     if (job.progressPfDays < job.targetPfDays) {
-      const nextProgress = Math.min(
-        job.targetPfDays,
-        job.progressPfDays + Math.max(0, trainPool),
-      );
-      if (
-        failedAtCrossing(
-          job,
-          "base",
-          job.progressPfDays,
-          nextProgress,
-          job.targetPfDays,
-        )
-      ) {
+      const nextProgress = proposedBaseProgress;
+      const campaignMilestone = imminentCampaignMilestone;
+      const baseFailurePlan = trainingStageFailurePlan(job, "base");
+      const failureProgress = job.targetPfDays * baseFailurePlan.atFraction;
+      const crossesFailure =
+        baseFailurePlan.willFail &&
+        job.progressPfDays < failureProgress &&
+        nextProgress >= failureProgress;
+      const campaignProgress = campaignMilestone
+        ? Math.min(nextProgress, job.targetPfDays * campaignMilestone.milestone)
+        : Number.POSITIVE_INFINITY;
+      // A destructive crossing wins if it occurs before (or exactly at) a
+      // campaign decision. Large daily allocations cannot skip the failure.
+      if (crossesFailure && failureProgress <= campaignProgress + 1e-9) {
+        const consumedPf = Math.max(0, failureProgress - job.progressPfDays);
         return failTrainingJob(
           {
             ...job,
+            ...telemetry(failureProgress, daysElapsed, consumedPf),
             economics,
-            progressPfDays: nextProgress,
+            daysElapsed,
+            progressPfDays: failureProgress,
             lossHistory: appendLossPoint(
               job,
               "base",
-              nextProgress / Math.max(1e-9, job.targetPfDays),
+              baseFailurePlan.atFraction,
               state.day,
             ),
           },
           "base",
           state.day,
+          baseFailurePlan.atFraction,
         );
+      }
+      if (campaignMilestone) {
+        // Stop at the checkpoint even when a small run could cross several
+        // milestones in one daily allocation. This preserves every decision
+        // and only meters the compute consumed before the checkpoint.
+        const checkpointProgress = Math.min(
+          nextProgress,
+          job.targetPfDays * campaignMilestone.milestone,
+        );
+        const checkpointCompute = Math.max(
+          0,
+          checkpointProgress - job.progressPfDays,
+        );
+        const event = createTrainingCampaignEvent(
+          job,
+          campaignMilestone.milestone,
+          campaignMilestone.index,
+          state.day,
+        );
+        tickAlerts.push({
+          id: `train-campaign-${job.id}-${campaignMilestone.index}`,
+          day: state.day,
+          severity: event.severity === "opportunity" ? "info" : "warn",
+          message: `${job.name}: ${event.title}. Choose an intervention within 5 days.`,
+        });
+        return {
+          ...job,
+          ...telemetry(checkpointProgress, daysElapsed, checkpointCompute),
+          economics,
+          daysElapsed,
+          progressPfDays: checkpointProgress,
+          pendingCampaignEvent: event,
+          campaignMilestonesReached: [
+            ...(job.campaignMilestonesReached ?? []),
+            campaignMilestone.milestone,
+          ],
+          lossHistory: appendLossPoint(
+            job,
+            "base",
+            campaignMilestone.milestone,
+            state.day,
+          ),
+        };
       }
       return {
         ...job,
+        ...telemetry(nextProgress),
         economics,
+        daysElapsed,
         stallReason,
         progressPfDays: nextProgress,
         lossHistory: appendLossPoint(
@@ -2584,70 +5596,193 @@ export function tickTraining(state: SimState): SimState {
     }
     if (
       job.postTrain !== "none" &&
-      job.postTrainProgress < job.postTrainTarget
+      job.postTrainProgress + 1e-9 < job.postTrainTarget
     ) {
-      const postPool =
-        (snap.pools.inference * 0.35) / jobs.length + trainPool * 0.25;
-      const scale = 1 + Math.log10(Math.max(1, job.targetParamsB)) * 0.25;
+      const postTrainStage = job.postTrain;
+      // New stage selections persist this plan immediately. Legacy in-flight
+      // saves get one deterministic plan here and keep it on every return.
+      const postTrainRiskPlan =
+        job.postTrainRiskPlan?.stage === postTrainStage
+          ? job.postTrainRiskPlan
+          : createPostTrainRiskPlan(
+              job,
+              postTrainStage,
+              state.player.researchUnlocked,
+              state.player.models,
+              state.day,
+              job.postTrainProgress / Math.max(1e-9, job.postTrainTarget),
+            );
+      const postTrainJob: TrainingJob = { ...job, postTrainRiskPlan };
+      const postTrainDaysElapsed = (postTrainJob.postTrainDaysElapsed ?? 0) + 1;
       const nextProgress = Math.min(
-        job.postTrainTarget,
-        job.postTrainProgress + (postPool * 0.15) / scale,
+        postTrainJob.postTrainTarget,
+        postTrainJob.postTrainProgress + Math.max(0, trainPool),
       );
+      const stageCompleted =
+        nextProgress + 1e-9 >= postTrainJob.postTrainTarget;
+      const effectiveness = stageCompleted
+        ? postTrainStageEffectiveness({
+            job: {
+              ...postTrainJob,
+              postTrainProgress: nextProgress,
+              postTrainDaysElapsed,
+            },
+            stage: postTrainStage,
+            researchUnlocked: state.player.researchUnlocked,
+            models: state.player.models,
+            progress: nextProgress,
+            daysElapsed: postTrainDaysElapsed,
+          })
+        : undefined;
+      const failureProgress =
+        postTrainJob.postTrainTarget * postTrainRiskPlan.atFraction;
       if (
-        failedAtCrossing(
-          job,
-          job.postTrain,
-          job.postTrainProgress,
-          nextProgress,
-          job.postTrainTarget,
-        )
+        postTrainRiskPlan.willFail &&
+        postTrainJob.postTrainProgress < failureProgress &&
+        nextProgress >= failureProgress
       ) {
+        const failureFraction = postTrainRiskPlan.atFraction;
+        const recoveryCheckpoint = postTrainRecoveryCheckpoint(
+          state,
+          postTrainJob,
+          postTrainStage,
+          failureFraction,
+        );
+        const consumedPf = Math.max(
+          0,
+          failureProgress - postTrainJob.postTrainProgress,
+        );
         return failTrainingJob(
           {
-            ...job,
-            postTrainProgress: nextProgress,
+            ...postTrainJob,
+            ...telemetry(job.progressPfDays, daysElapsed, consumedPf),
+            economics,
+            daysElapsed,
+            postTrainProgress: failureProgress,
+            postTrainDaysElapsed,
             lossHistory: appendLossPoint(
-              job,
-              job.postTrain,
-              nextProgress / Math.max(1e-9, job.postTrainTarget),
+              postTrainJob,
+              postTrainStage,
+              failureFraction,
               state.day,
             ),
           },
-          job.postTrain,
+          postTrainStage,
           state.day,
+          failureFraction,
+          recoveryCheckpoint,
         );
       }
+      const completedPass =
+        stageCompleted && effectiveness != null
+          ? recordCompletedPostTrainPass(
+              postTrainJob,
+              postTrainStage,
+              effectiveness,
+            )
+          : null;
+      const finishedStages =
+        completedPass?.completedPostTrainStages ??
+        postTrainJob.completedPostTrainStages;
+      const finishedEffectiveness =
+        completedPass?.postTrainStageEffectiveness ??
+        postTrainJob.postTrainStageEffectiveness;
+      const finishedStageRuns =
+        completedPass?.postTrainStageRuns ?? postTrainJob.postTrainStageRuns;
+      const finishedThisRun =
+        completedPass?.postTrainStagesCompletedThisRun ??
+        postTrainJob.postTrainStagesCompletedThisRun;
       return {
-        ...job,
+        ...postTrainJob,
+        ...telemetry(),
+        economics,
+        daysElapsed,
         postTrainProgress: nextProgress,
+        postTrainDaysElapsed,
+        completedPostTrainStages: finishedStages,
+        postTrainStageEffectiveness: finishedEffectiveness,
+        postTrainStageRuns: finishedStageRuns,
+        postTrainStagesCompletedThisRun: finishedThisRun,
         lossHistory: appendLossPoint(
-          job,
-          job.postTrain,
-          nextProgress / Math.max(1e-9, job.postTrainTarget),
+          postTrainJob,
+          postTrainStage,
+          nextProgress / Math.max(1e-9, postTrainJob.postTrainTarget),
           state.day,
         ),
       };
     }
-    return job;
+    // A completed target is a releasable checkpoint, not an automatic compute
+    // cutoff. If the player leaves priority on this run, keep investing its
+    // allocated PF into the same weights. fundedTrainingMaturity() converts
+    // this cumulative spend into sharply diminishing gains at finalization and
+    // clamps them inside the architecture's hard capability wall.
+    if (active && trainPool > 1e-9) {
+      const nextProgress = job.progressPfDays + Math.max(0, trainPool);
+      return {
+        ...job,
+        ...telemetry(nextProgress),
+        economics,
+        daysElapsed,
+        progressPfDays: nextProgress,
+        stallReason: null,
+        lossHistory: appendLossPoint(
+          job,
+          "base",
+          nextProgress / Math.max(1e-9, job.targetPfDays),
+          state.day,
+        ),
+      };
+    }
+    return {
+      ...job,
+      ...telemetry(),
+      economics,
+      daysElapsed,
+      stallReason,
+    };
   });
-  const next = withTrainingJobs(state, nextJobs);
+  let next = withTrainingJobs(nextState, nextJobs);
+  // Every newly reached campaign milestone writes one immutable candidate.
+  // Candidate generation is derived from the already-frozen job seed and does
+  // not consume or alter simulation RNG state.
+  for (const job of nextJobs) {
+    const before = jobs.find((candidate) => candidate.id === job.id);
+    const beforeReached = new Set(before?.campaignMilestonesReached ?? []);
+    for (const milestone of job.campaignMilestonesReached ?? []) {
+      if (beforeReached.has(milestone)) continue;
+      const captured = appendTrainingCheckpoint(next, job, milestone);
+      next = captured.state;
+      if (captured.candidate) {
+        tickAlerts.push({
+          id: `train-checkpoint-${captured.candidate.id}`,
+          day: state.day,
+          severity: "info",
+          message: `${job.name}: ${Math.round(milestone * 100)}% weights captured for stealth evaluation. Training continues after the campaign decision.`,
+        });
+      }
+    }
+  }
   const newlyFailed = nextJobs.filter(
     (job) => job.failed && !jobs.find((before) => before.id === job.id)?.failed,
   );
+  // Cash was already charged via chargeExpense on nextState.
   return {
     ...next,
-    player: { ...next.player, cash },
     alerts: [
       ...newlyFailed.map((job) => ({
         id: `train-failed-${job.id}-${state.day}`,
         day: state.day,
         severity: "danger" as const,
-        message: `${job.name} failed during ${job.failureStage === "base" ? "base training" : `${job.failureStage?.toUpperCase()} post-training`}. The run is unrecoverable and must be deleted.`,
+        message: `${job.name} failed during ${job.failureStage === "base" ? "base training" : `${job.failureStage?.toUpperCase()} post-training`}.${
+          job.failureRecoveryCheckpointId
+            ? " Recover from its eligible immutable checkpoint; spent work is not refunded."
+            : " No eligible checkpoint exists, so the run must be deleted."
+        }`,
       })),
-      ...state.alerts,
+      ...tickAlerts,
+      ...nextState.alerts,
     ].slice(0, 40),
   };
 }
 
 export { formatParams, trainCostPfDays };
-export { enforceMinTrainingDuration, MIN_TRAINING_DAYS };

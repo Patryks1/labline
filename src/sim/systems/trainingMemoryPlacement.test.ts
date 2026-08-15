@@ -24,7 +24,10 @@ describe('concurrent training memory placement', () => {
     })
     const concurrentPressure = vramPressure(concurrent, 'train')
 
-    expect(soloPressure.needGb).toBeCloseTo(22)
+    // Default training numerics are FP32 (mixed precision is a research
+    // unlock): 16 GB persistent Adam state + 8 GB activation workspace + 2 GB
+    // communication buffers for a 1B dense model.
+    expect(soloPressure.needGb).toBeCloseTo(26)
     expect(concurrentPressure.needGb).toBeCloseTo(soloPressure.needGb * 2)
     expect(concurrentPressure.modelName).toBe('Alpha + 1 more')
     expect(computeSnapshot(concurrent).vramNeedTrain).toBeCloseTo(concurrentPressure.needGb)
@@ -53,17 +56,29 @@ describe('concurrent training memory placement', () => {
   })
 
   it('accounts for FP32 activation workspace without claiming optimizer savings', () => {
-    const fp16 = startTraining(richState(903), {
-      name: 'Mixed', family: 'dense', paramsB: 1,
-    })
+    // FP32 (the default) keeps no master copy but doubles activation memory;
+    // BF16 (research-gated) trades a master copy for half the activations.
+    const bf16Base = richState(903)
+    const bf16 = startTraining(
+      {
+        ...bf16Base,
+        player: {
+          ...bf16Base.player,
+          researchUnlocked: [...bf16Base.player.researchUnlocked, 'opt_mixed'],
+        },
+      },
+      {
+        name: 'Mixed', family: 'dense', paramsB: 1,
+        trainingNumerics: {
+          computeFormat: 'bf16_mixed', nativeWeightFormat: 'float', recipeVersion: 1,
+        },
+      },
+    )
     const fp32 = startTraining(richState(904), {
       name: 'Full', family: 'dense', paramsB: 1,
-      trainingNumerics: {
-        computeFormat: 'fp32', nativeWeightFormat: 'float', recipeVersion: 1,
-      },
     })
     expect(vramPressure(fp32, 'train').needGb).toBeGreaterThan(
-      vramPressure(fp16, 'train').needGb,
+      vramPressure(bf16, 'train').needGb,
     )
   })
 
@@ -119,7 +134,7 @@ describe('concurrent training memory placement', () => {
     const nextBackground = next.player.trainingJobs!.find((job) => job.id === background.id)!
     expect(nextPriority.progressPfDays).toBeGreaterThan(priority.progressPfDays)
     expect(nextBackground.progressPfDays).toBe(background.progressPfDays)
-    expect(nextBackground.stallReason).toContain('Training RAM blocked')
+    expect(nextBackground.stallReason).toContain('Training HBM blocked')
   })
 
   it('shares limited compute across RAM-ready jobs instead of blocking them', () => {
@@ -130,9 +145,17 @@ describe('concurrent training memory placement', () => {
         allocation: { training: 1, inference: 0, research: 0 },
       },
     }
-    const solo = startTraining(base, {
+    const soloStarted = startTraining(base, {
       name: 'Solo', family: 'dense', paramsB: 1, computePriority: 50,
     })
+    const solo = {
+      ...soloStarted,
+      player: {
+        ...soloStarted.player,
+        trainingJob: { ...soloStarted.player.trainingJob!, targetPfDays: 1_000 },
+        trainingJobs: soloStarted.player.trainingJobs!.map((job) => ({ ...job, targetPfDays: 1_000 })),
+      },
+    }
     const soloNext = tickTraining(solo)
     const soloProgress = soloNext.player.trainingJob!.progressPfDays
 
@@ -142,6 +165,14 @@ describe('concurrent training memory placement', () => {
     shared = startTraining(shared, {
       name: 'Two', family: 'dense', paramsB: 1, computePriority: 50,
     })
+    shared = {
+      ...shared,
+      player: {
+        ...shared.player,
+        trainingJob: { ...shared.player.trainingJob!, targetPfDays: 1_000 },
+        trainingJobs: shared.player.trainingJobs!.map((job) => ({ ...job, targetPfDays: 1_000 })),
+      },
+    }
     const sharedNext = tickTraining(shared)
     for (const job of sharedNext.player.trainingJobs ?? []) {
       expect(job.progressPfDays).toBeGreaterThan(0)

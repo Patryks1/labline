@@ -10,6 +10,8 @@ export const GROUNDED_2026_INDUSTRY_PACK: IndustryDataPack = {
   calibratedThroughYear: 2026,
   demand: {
     baselineUsefulTasks: 1,
+    reportYearUserMinMultiplier: 1.5,
+    reportYearUserMaxMultiplier: 3,
     reportYearMinMultiplier: 4,
     reportYearMaxMultiplier: 12,
   },
@@ -59,9 +61,24 @@ export const GROUNDED_2026_COMPUTE_V2_PACK: IndustryDataPack = {
   },
 }
 
+/** Native-workload, separated-adoption and capacity-fulfilled economy pack. */
+export const GROUNDED_2026_ECONOMY_V3_PACK: IndustryDataPack = {
+  ...GROUNDED_2026_COMPUTE_V2_PACK,
+  id: 'grounded-2026-economy-v3',
+  version: 3,
+  demand: {
+    ...GROUNDED_2026_COMPUTE_V2_PACK.demand,
+    reportYearUserMinMultiplier: 1.5,
+    reportYearUserMaxMultiplier: 3,
+    reportYearMinMultiplier: 4,
+    reportYearMaxMultiplier: 12,
+  },
+}
+
 export const INDUSTRY_DATA_PACKS: Readonly<Record<string, IndustryDataPack>> = {
   [GROUNDED_2026_INDUSTRY_PACK.id]: GROUNDED_2026_INDUSTRY_PACK,
   [GROUNDED_2026_COMPUTE_V2_PACK.id]: GROUNDED_2026_COMPUTE_V2_PACK,
+  [GROUNDED_2026_ECONOMY_V3_PACK.id]: GROUNDED_2026_ECONOMY_V3_PACK,
 }
 
 export function getIndustryDataPack(id: string): IndustryDataPack | null {

@@ -1,13 +1,10 @@
-import type {
-  SafetyCampaignIntensity,
-  SimState,
-} from '../types'
+import type { Model, SafetyCampaignIntensity, SimState } from '../types'
 import { normalizeModelEvaluations } from '../balance/evaluationSuites'
 import { computeSnapshot } from './compute'
 import { playerTrainingResourcePlan } from './training'
-import { enforceMinTrainingDuration, MIN_TRAINING_DAYS } from './trainingDuration'
 import { playerStaff } from './staff'
 import { createRng, hashSeed, seededId } from '../rng'
+import { chargeExpense } from './financeLedger'
 
 const INTENSITY_MULT: Record<SafetyCampaignIntensity, number> = {
   targeted: 1,
@@ -56,38 +53,12 @@ export function safetyCampaignEstimate(
       safetyDataQuality: 0,
     }
   }
-  // Safety only on finished internal / unreleased checkpoints.
-  if (model.release === 'released' || model.shipped) {
-    return {
-      ok: false,
-      reason: 'Safety campaigns require an unreleased internal checkpoint.',
-      minimumResearchers: 1,
-      trainingPfDays: 0,
-      researchPfDays: 0,
-      cashBudget: 0,
-      safetyDataMTok: 0,
-      safetyDataQuality: 0,
-    }
-  }
   const mult = INTENSITY_MULT[intensity]
   // Monotonic scale with total params and prior data volume.
   const paramsB = Math.max(0.01, model.paramsB)
   const dataMTok = Math.max(1, model.dataTokensUsedMTok ?? model.dataTrainMTok ?? 1)
   const scale = Math.log10(paramsB + 1) + Math.log10(dataMTok + 10) * 0.35
-  let totalPfDays = (6 + scale * 7) * mult
-  // Safety campaigns are day-based training jobs: scale the training lane so
-  // estimated duration is at least 30 days at current shared training throughput.
-  const snap = computeSnapshot(state)
-  const activeTrainingJobs = state.player.trainingJobs?.length ?? (state.player.trainingJob ? 1 : 0)
-  const sharedTrainingPool = snap.pools.training / Math.max(1, activeTrainingJobs + 1)
-  const dailyTrainingThroughput = sharedTrainingPool * 0.6
-  const trainingShare = 0.6
-  const trainingTarget = enforceMinTrainingDuration(
-    totalPfDays * trainingShare,
-    dailyTrainingThroughput,
-    MIN_TRAINING_DAYS,
-  )
-  totalPfDays = trainingTarget / trainingShare
+  const totalPfDays = (6 + scale * 7) * mult
   const minimumResearchers = Math.max(1, Math.ceil(scale * 5 + paramsB * 0.02))
   const qualityInputs = ['chat', 'law', 'health'] as const
   const qualityValues = qualityInputs.map(
@@ -133,11 +104,11 @@ export function startSafetyCampaign(
     Math.min(availableResearchers, Math.floor(opts.researchers)),
   )
   const id = seededId('safe', state.seed, state.day, model.id, opts.intensity, model.revision ?? 1)
+  const charged = chargeExpense(state, estimate.cashBudget, 'training')
   return {
-    ...state,
+    ...charged,
     player: {
-      ...state.player,
-      cash: state.player.cash - estimate.cashBudget,
+      ...charged.player,
       safetyCampaign: {
         id,
         modelId: model.id,
@@ -163,7 +134,7 @@ export function startSafetyCampaign(
         severity: 'info' as const,
         message: `${opts.intensity} safety campaign started for ${model.name}. The deployed checkpoint remains live.`,
       },
-      ...state.alerts,
+      ...charged.alerts,
     ].slice(0, 40),
   }
 }
@@ -265,12 +236,56 @@ export function tickSafetyCampaign(state: SimState): SimState {
   const capabilities = model.capabilities
     ? { ...model.capabilities, safety: Math.min(ceiling, model.capabilities.safety + gain) }
     : model.capabilities
-  const upgraded = normalizeModelEvaluations({
+  const lineageId = model.lineageId ?? model.id
+  const revision =
+    Math.max(
+      model.revision ?? 1,
+      ...state.player.models
+        .filter((candidate) => (candidate.lineageId ?? candidate.id) === lineageId)
+        .map((candidate) => candidate.revision ?? 1),
+    ) + 1
+  const rootName = model.name
+    .replace(/\s+(?:v\d+|0\.\d+)$/i, '')
+    .replace(/\s+·\s+C\d+$/i, '')
+    .trim()
+  const versionLabel = `0.${revision}`
+  const childId = seededId(
+    'model-safety-child',
+    state.seed,
+    campaign.id,
+    model.id,
+    revision,
+  )
+  const upgraded: Model = normalizeModelEvaluations({
     ...model,
+    id: childId,
+    name: `${rootName} ${versionLabel}`,
+    lineageId,
+    parentModelId: model.id,
+    checkpointCandidateId: undefined,
+    sourceTrainingJobId: campaign.id,
+    release: 'internal',
+    shipped: false,
+    releaseDay: state.day,
     benchmarks,
     quality,
     capabilities,
-    revision: (model.revision ?? 1) + 1,
+    revision,
+    versionLabel,
+    // Reports and public evaluations describe exact weights and must never be
+    // inherited by a new safety-trained child.
+    checkpointEvaluations: [],
+    trainingBenchmarkSnapshots: [],
+    economics: {
+      lifetimeApiRevenue: 0,
+      lifetimeSubRevenue: 0,
+      lifetimeEnterpriseRevenue: 0,
+      lifetimeServingCost: 0,
+      lifetimeNet: 0,
+      trainingInitialCost: nextCampaign.cashSpent,
+      trainingDataCost: 0,
+      trainingDailyCost: 0,
+    },
     safetyTraining: {
       campaigns: previous.campaigns + 1,
       safetyDataMTok: previous.safetyDataMTok + nextCampaign.safetyDataMTok,
@@ -284,17 +299,16 @@ export function tickSafetyCampaign(state: SimState): SimState {
       lastCompletedDay: state.day,
       revisions: [
         ...(previous.revisions ?? []),
-        { revision: (model.revision ?? 1) + 1, day: state.day, safety: benchmarks.safety },
+        { revision, day: state.day, safety: benchmarks.safety },
       ],
     },
   })
-  const models = state.player.models.slice()
-  models[modelIndex] = upgraded
+  const models = [...state.player.models, upgraded]
   return {
     ...state,
     player: { ...state.player, models, safetyCampaign: null },
     news: [
-      `Day ${state.day}: ${model.name} safety revision ${upgraded.revision} completed (${gain >= 0 ? '+' : ''}${gain.toFixed(1)} safety).`,
+      `Day ${state.day}: ${upgraded.name} safety revision completed (${gain >= 0 ? '+' : ''}${gain.toFixed(1)} safety).`,
       ...state.news,
     ].slice(0, 20),
     alerts: [
@@ -302,7 +316,7 @@ export function tickSafetyCampaign(state: SimState): SimState {
         id: `safety-done-${campaign.id}`,
         day: state.day,
         severity: 'info' as const,
-        message: `${model.name} safety campaign complete. Plans now serve revision ${upgraded.revision}.`,
+        message: `${upgraded.name} safety child completed and remains internal. Existing deployments still serve ${model.name}.`,
       },
       ...state.alerts,
     ].slice(0, 40),

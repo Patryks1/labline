@@ -1,14 +1,18 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { CaretDown, CaretUp } from '@phosphor-icons/react'
-import { gridScarcity } from '../../sim/systems/map'
+import { gridScarcity, resolvePlayerPowerMw } from '../../sim/systems/map'
 import {
   buildComputeBreakdown,
   type PoolBreakdown,
 } from '../../sim/systems/computeBreakdown'
 import { useGameStore } from '../../store/gameStore'
 import { computeSnapshot, inferenceTokensPerDay } from '../../sim/tick'
-import { computeMw, mw, num, pct, pfToMw } from './format'
+import { mw, num, pct, pf, pfLong } from './format'
 import { SliderField } from './ui/SliderField'
+import {
+  COMPUTE_ALLOCATION_MIN,
+  rebalanceComputeAllocation,
+} from './mobileShellContracts'
 
 /**
  * Floating ops strip over the full-bleed map — allocation + live capacity.
@@ -29,33 +33,44 @@ export function BottomBar() {
   const breakdown = useMemo(() => buildComputeBreakdown(state), [state])
 
   const setSplit = (key: 'training' | 'inference' | 'research', v: number) => {
-    const next = { ...a, [key]: Math.max(0.05, v) }
-    const sum = next.training + next.inference + next.research
-    setAllocation({
-      training: next.training / sum,
-      inference: next.inference / sum,
-      research: next.research / sum,
-    })
+    setAllocation(rebalanceComputeAllocation(a, key, v))
   }
 
   const poolSub = (p: PoolBreakdown) =>
-    `${computeMw(pfToMw(p.poolPf))} · ${p.utilizationLabel} ${pct(Math.min(1, p.utilization), 0)}`
+    `${pf(p.poolPf)} · ${mw(p.powerMw)} · ${p.utilizationLabel} ${pct(Math.min(1, p.utilization), 0)}`
 
   const servedRatio = state.lastMarket.playerDemandMTok > 0
     ? Math.min(1, state.lastMarket.servedMTok / state.lastMarket.playerDemandMTok)
     : 1
-  const racksTight = snap.rackCap > 0 && snap.racksUsed / snap.rackCap >= 0.95
   const powerTight = snap.mwAvailable > 0 && snap.mwDemand / snap.mwAvailable >= 0.9
+  const resolved = resolvePlayerPowerMw(state, snap.mwDemand)
 
   return (
-    <footer className="operations-shell pointer-events-none">
-      <div className="hud-surface pointer-events-auto absolute inset-x-2 bottom-2 rounded-lg px-3 py-2">
+    <footer
+      className="operations-shell pointer-events-none"
+      data-expanded={expanded ? 'true' : 'false'}
+    >
+      {expanded ? (
+        <button
+          type="button"
+          className="operations-backdrop"
+          aria-label="Close compute allocation"
+          onClick={() => setExpanded(false)}
+        />
+      ) : null}
+      <div className="operations-panel hud-surface pointer-events-auto absolute inset-x-2 bottom-2 rounded-lg px-3 py-2">
         <div className="relative z-10 mb-1.5 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap font-mono text-[0.75rem]">
           <Stat
             label="Compute"
-            value={computeMw(pfToMw(snap.effectiveFlopsPf))}
+            value={pf(snap.effectiveFlopsPf)}
+            sub={
+              snap.effectiveFlopsPf >= 1000
+                ? `· ${pfLong(snap.effectiveFlopsPf)}`
+                : `raw ${pf(snap.rawFlopsPf)}`
+            }
+            danger={snap.effectiveFlopsPf < 0.05 && snap.rawFlopsPf > 0.05}
             className="hidden sm:inline-flex"
-            title={`Effective compute ${computeMw(pfToMw(snap.effectiveFlopsPf))} · yield ${pct(breakdown.fleetYield, 0)}`}
+            title={`Effective ${pf(snap.effectiveFlopsPf)} · raw ${pf(snap.rawFlopsPf)} · train ${pf(snap.pools.training)} · serve ${pf(snap.pools.inference)} · research ${pf(snap.pools.research)} · yield ${pct(breakdown.fleetYield, 0)}${snap.stallMessage ? ` · ${snap.stallMessage}` : ''} · 1 EF = 1,000 PF`}
           />
           <Stat
             label="Power"
@@ -63,6 +78,7 @@ export function BottomBar() {
             sub={`/ ${mw(snap.mwAvailable)}`}
             danger={snap.throttled || powerTight}
             className="hidden md:inline-flex"
+            title={`Fleet draw ${mw(snap.mwDemand)} of ${mw(resolved.mwGeneration + resolved.mwInterconnect)} available (${mw(resolved.mwGeneration)} on-site + ${mw(resolved.mwInterconnect)} interconnect) — you only draw what the fleet consumes; contract headroom isn't usage. Rented compute is powered by the provider.`}
           />
           <Stat
             label="Demand served"
@@ -77,7 +93,6 @@ export function BottomBar() {
           {!snap.throttled && powerTight && (
             <StatusChip tone="warning">Power headroom low</StatusChip>
           )}
-          {racksTight && <StatusChip tone="warning">Racks nearly full</StatusChip>}
           <div className="ml-auto flex items-center gap-1">
             <button
               type="button"
@@ -99,19 +114,20 @@ export function BottomBar() {
               aria-expanded={expanded}
               title={expanded ? 'Collapse operations details' : 'Expand operations details'}
               onClick={() => setExpanded((value) => !value)}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-bone"
+              className="operations-toggle flex min-h-7 min-w-7 items-center justify-center gap-1 rounded-md px-1 text-muted hover:bg-panel-2 hover:text-bone"
             >
+              <span className="operations-toggle-label">{expanded ? 'Done' : 'Allocate'}</span>
               {expanded ? <CaretDown size="0.9rem" /> : <CaretUp size="0.9rem" />}
             </button>
           </div>
         </div>
 
-        <div className="relative z-10 grid grid-cols-3 gap-3">
+        <div className="operations-allocation-grid relative z-10 grid grid-cols-3 gap-3">
           <SliderField
             label="Train"
             value={a.training}
             onChange={(v) => setSplit('training', v)}
-            min={0.05}
+            min={COMPUTE_ALLOCATION_MIN}
             max={0.9}
             colorClass="bg-train"
             accentClass="text-train"
@@ -123,7 +139,7 @@ export function BottomBar() {
             label="Serve"
             value={a.inference}
             onChange={(v) => setSplit('inference', v)}
-            min={0.05}
+            min={COMPUTE_ALLOCATION_MIN}
             max={0.9}
             colorClass="bg-infer"
             accentClass="text-infer"
@@ -135,7 +151,7 @@ export function BottomBar() {
             label="Research"
             value={a.research}
             onChange={(v) => setSplit('research', v)}
-            min={0.05}
+            min={COMPUTE_ALLOCATION_MIN}
             max={0.9}
             colorClass="bg-research"
             accentClass="text-research"
@@ -144,6 +160,12 @@ export function BottomBar() {
             hoverContent={<PoolTooltip pool={breakdown.research} accent="text-research" />}
           />
         </div>
+
+        {(a.training <= 0 || a.inference <= 0 || a.research <= 0) ? (
+          <p className="operations-zero-note relative z-10 mt-2 text-[0.6875rem] leading-snug text-amber">
+            Zero allocation pauses that queue. Restore compute whenever you want work to resume.
+          </p>
+        ) : null}
 
         {expanded ? (
           <div className="relative z-10 mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line/50 pt-2 font-mono text-[0.6875rem] text-muted">
@@ -199,7 +221,11 @@ function PoolTooltip({ pool, accent }: { pool: PoolBreakdown; accent: string }) 
       </div>
       <div className="flex items-baseline justify-between gap-3 font-mono text-[0.75rem]">
         <span className="text-muted">Effective work</span>
-        <span className="text-bone">{computeMw(pfToMw(pool.poolPf))} · {pool.utilizationLabel}</span>
+        <span className="text-bone">{pf(pool.poolPf)} · {pool.utilizationLabel}</span>
+      </div>
+      <div className="flex items-baseline justify-between gap-3 font-mono text-[0.75rem]">
+        <span className="text-muted">Power draw</span>
+        <span className="text-bone">{mw(pool.powerMw)}</span>
       </div>
       {blocker ? (
         <p className="rounded-md border border-amber/30 bg-amber/10 px-2 py-1 text-[0.6875rem] leading-snug text-amber">

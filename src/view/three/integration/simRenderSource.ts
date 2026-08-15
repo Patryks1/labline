@@ -1,26 +1,117 @@
 import type { BuildableKind, MapTile, SimState, TileKind } from '../../../sim/types'
 import {
+  DISTRICT_KIND,
   TERRAIN_KIND,
+  WORLD_GENERATOR_VERSION_V4,
+  WORLD_GENERATOR_VERSION_V5,
+  WORLD_GENERATOR_VERSION_V6,
+  WORLD_GENERATOR_VERSION_V7,
+  TERRAIN_VARIANT_RIVER,
   WORLD_CHANGE_FLAGS,
+  compileRoadNetwork,
   type DynamicWorld,
   type Facility,
+  type MunicipalPowerPlant,
+  type RoadNetworkCompileSource,
+  type RoadNetworkSnapshot,
+  type TileId as WorldTileId,
 } from '../../../sim/world'
 import {
+  ADDITIONAL_RESIDENTIAL_ARCHETYPES,
+  ADDITIONAL_URBAN_ARCHETYPES,
+  AUTHORED_INDUSTRIAL_ARCHETYPES,
+  AUTHORED_RESIDENTIAL_ARCHETYPES,
+  AUTHORED_TERRAIN_ARCHETYPES,
+  AUTHORED_URBAN_ARCHETYPES,
+  AUTHORED_VEGETATION_ARCHETYPES,
+  AuthoredSceneryArchetype,
   FacilityArchetype,
   IntegrationArchetype,
+  RoadPropArchetype,
+  MunicipalPowerArchetype,
   SceneryArchetype,
+  SingleBuildingArchetype,
 } from './artDirectedRegistry'
+import {
+  planUrbanParcels,
+  type UrbanParcel,
+  type UrbanParcelPlan,
+} from './urbanParcelPlanner'
 import {
   DefaultArchetype,
   LodTier,
+  RenderBiome,
+  sitePhase,
   SurfaceFlag,
   SurfaceKind,
   type ChunkId,
+  type RenderBiomeId,
+  type RenderConstructionSite,
   type RenderInstance,
+  type RenderMunicipalPowerPlant,
   type SurfaceTexel,
   type TileId,
   type ViewportRenderSource,
 } from '../v2'
+
+export const RESIDENTIAL_VARIANTS_PER_CHUNK = 8
+export const URBAN_VARIANTS_PER_CHUNK = 8
+export const FOUNDATION_CLEARANCE_EPSILON = 0.001
+// City placement keeps complete authored building parcels within this rise.
+// Guard it here so max-corner support cannot silently create larger air gaps.
+export const MAX_FOUNDATION_SLOPE_GAP = 0.2
+
+export interface BuildingChunkPalette {
+  readonly residential: readonly number[]
+  readonly urban: readonly number[]
+}
+
+/**
+ * Bound building-material batches inside a chunk while rotating through the
+ * complete authored catalog across the world. Consecutive chunk IDs expose
+ * every addition, and selection inside the palette remains seed-stable.
+ */
+export function buildingPaletteForChunk(
+  chunkId: number,
+  chunksWide = 1,
+): BuildingChunkPalette {
+  const safeChunksWide = Math.max(1, Math.trunc(chunksWide))
+  const safeChunkId = Math.trunc(chunkId)
+  const chunkX = ((safeChunkId % safeChunksWide) + safeChunksWide) % safeChunksWide
+  const chunkY = Math.floor(safeChunkId / safeChunksWide)
+  const palette = (family: readonly number[], size: number): number[] => {
+    // Keep both grid axes meaningful. Deriving the offset from a flat chunk ID
+    // alone can make every vertical neighbour identical whenever chunksWide is
+    // a multiple of the family length.
+    const start = (
+      ((chunkX * size + chunkY * (size - 4)) % family.length) + family.length
+    ) % family.length
+    return Array.from({ length: Math.min(size, family.length) }, (_, offset) =>
+      family[(start + offset) % family.length]!,
+    )
+  }
+  return {
+    residential: palette(ADDITIONAL_RESIDENTIAL_ARCHETYPES, RESIDENTIAL_VARIANTS_PER_CHUNK),
+    urban: palette(ADDITIONAL_URBAN_ARCHETYPES, URBAN_VARIANTS_PER_CHUNK),
+  }
+}
+
+/**
+ * Give cardinally neighbouring one-tile parcels different silhouettes while
+ * keeping the choice independent of traversal order. The seed rotates the
+ * cadence rather than hashing every parcel back into occasional local clones.
+ */
+export function buildingVariantIndexForParcel(
+  x: number,
+  y: number,
+  seed: number,
+  variantCount: number,
+): number {
+  const count = Math.max(1, Math.trunc(variantCount))
+  const phase = mix32(seed ^ 0x6a09_e667) % count
+  const cadence = Math.trunc(x) + Math.imul(Math.trunc(y), 3) + phase
+  return ((cadence % count) + count) % count
+}
 
 export const MAP_TILE_SIZE = 1.05
 export const RENDER_CHUNK_SIZE = 32
@@ -81,6 +172,7 @@ export class SimViewportRenderSource implements ViewportRenderSource {
   readonly chunkSize: number
   readonly chunksWide: number
   readonly chunksHigh: number
+  readonly useHeightfieldRoadMeshes: boolean
 
   private state: SimState
   private readonly compactWorld: DynamicWorld | undefined
@@ -97,6 +189,13 @@ export class SimViewportRenderSource implements ViewportRenderSource {
   private rivalColors = new Map<string, number>()
   private rivalColorSignature = ''
   private chunkPreparationMs = 0
+  private constructionSitesCache?: { key: unknown; sites: readonly RenderConstructionSite[] }
+  private roadNetworkRevisionValue = 0
+  private readonly roadRevisionState = { value: 0 }
+  private readonly roadCompileSource?: RoadNetworkCompileSource
+  private roadNetworkSnapshot?: RoadNetworkSnapshot
+  private urbanParcelPlan?: UrbanParcelPlan
+  private urbanParcelsByChunk?: ReadonlyMap<ChunkId, readonly UrbanParcel[]>
 
   constructor(
     state: SimState,
@@ -107,6 +206,11 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     this.width = state.map.width
     this.height = state.map.height
     this.compactWorld = state.map.storage === 'compact' ? state.map.world : undefined
+    this.useHeightfieldRoadMeshes =
+      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V4 ||
+      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
+      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6 ||
+      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7
     this.chunkSize = this.compactWorld?.descriptor.chunkSize ?? RENDER_CHUNK_SIZE
     this.chunksWide = Math.ceil(this.width / this.chunkSize)
     this.chunksHigh = Math.ceil(this.height / this.chunkSize)
@@ -119,6 +223,15 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     this.legacyCampuses = indexLegacyCampuses(this.legacyTilesById)
     this.rebuildRegionIndex()
     this.rebuildRivalColors()
+    if (this.compactWorld) {
+      const revisionState = this.roadRevisionState
+      this.roadCompileSource = {
+        staticWorld: this.compactWorld.staticWorld,
+        get revision() { return revisionState.value },
+        getTransport: (id) => this.compactWorld!.getTransport(id),
+        getTileElevation: (x, y) => this.compactWorld!.getTileElevation(x, y),
+      }
+    }
   }
 
   isCompatible(state: SimState): boolean {
@@ -154,18 +267,36 @@ export class SimViewportRenderSource implements ViewportRenderSource {
       const changes = this.compactWorld.changesSince(this.journalSequence)
       this.journalSequence = changes.nextSequence
       if (changes.kind === 'reset') {
+        this.invalidateUrbanParcelPlan()
         entireSurface = true
         this.invalidateAllChunks(chunkIds)
         this.bumpAllSurfaceRevisions()
+        this.roadNetworkRevisionValue++
+        this.roadRevisionState.value = this.roadNetworkRevisionValue
+        this.roadNetworkSnapshot = undefined
       } else {
         journalBacklog = changes.changes.length
+        if (changes.changes.length > 0) this.invalidateUrbanParcelPlan()
         for (const change of changes.changes) {
-          for (const tileId of change.tileIds) surfaceTileIds.add(tileId as TileId)
+          for (const tileId of change.tileIds) {
+            surfaceTileIds.add(tileId as TileId)
+            // Environment placement reads the complete one-cell halo for hard
+            // clearances. Invalidate every dependent chunk, including the
+            // diagonal chunk at a boundary corner.
+            for (const affectedId of this.tileAndNeighbors(tileId)) {
+              const affectedChunk = this.chunkIdForTile(affectedId)
+              chunkIds.add(affectedChunk)
+              this.invalidateChunk(affectedChunk)
+            }
+          }
           for (const chunkId of change.chunkIds) {
             chunkIds.add(chunkId as ChunkId)
             this.invalidateChunk(chunkId as ChunkId)
             if ((change.flags & WORLD_CHANGE_FLAGS.terrain) !== 0) {
               this.bumpSurfaceRevision(chunkId as ChunkId)
+              this.roadNetworkRevisionValue++
+              this.roadRevisionState.value = this.roadNetworkRevisionValue
+              this.roadNetworkSnapshot = undefined
             }
           }
         }
@@ -229,6 +360,7 @@ export class SimViewportRenderSource implements ViewportRenderSource {
   }
 
   readSurface(tileId: TileId, out: SurfaceTexel): void {
+    out.transport = undefined
     if (tileId < 0 || tileId >= this.width * this.height) {
       out.kind = SurfaceKind.grass
       out.neighborMask = 0
@@ -239,6 +371,13 @@ export class SimViewportRenderSource implements ViewportRenderSource {
 
     if (this.compactWorld) {
       const world = this.compactWorld
+      const tileView = world.getTileView(tileId as never) as ReturnType<DynamicWorld['getTileView']> & {
+        readonly transport?: number
+      }
+      const transportWorld = world as DynamicWorld & {
+        getTransport?(id: Parameters<DynamicWorld['getTileView']>[0]): number
+        staticWorld: DynamicWorld['staticWorld'] & { readonly transport?: Uint16Array }
+      }
       const facilityId = world.occupancy.get(tileId as never)
       const facility = facilityId ? world.facilitiesById.get(facilityId) : undefined
       const override = world.terrainOverrides.get(tileId as never)
@@ -255,6 +394,17 @@ export class SimViewportRenderSource implements ViewportRenderSource {
         ownerId,
         facility,
       )
+      if (world.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7 &&
+          (world.getVariantMask(tileId as never) & TERRAIN_VARIANT_RIVER) !== 0) {
+        out.flags |= SurfaceFlag.river
+      }
+      const transport = transportWorld.getTransport?.(tileId as never)
+        ?? transportWorld.staticWorld.transport?.[tileId]
+        ?? tileView.transport
+      if (transport !== undefined && transport !== 0) {
+        out.transport = transport >>> 0
+        out.neighborMask = transport & 0xff
+      }
       return
     }
 
@@ -314,6 +464,138 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     return this.surfaceRevisions[chunkId] ?? 0
   }
 
+  getRoadNetworkRevision(): number {
+    return this.roadNetworkRevisionValue
+  }
+
+  getRoadNetwork(): RoadNetworkSnapshot | undefined {
+    if (!this.roadCompileSource) return undefined
+    const drivingSide = this.state.config.drivingSide ?? 'left'
+    if (!this.roadNetworkSnapshot || this.roadNetworkSnapshot.revision !== this.roadNetworkRevisionValue ||
+      this.roadNetworkSnapshot.drivingSide !== drivingSide) {
+      this.roadNetworkSnapshot = compileRoadNetwork(this.roadCompileSource, drivingSide)
+    }
+    return this.roadNetworkSnapshot
+  }
+
+  getTransportRuntimeState() {
+    return this.state.transport
+  }
+
+  getMunicipalPowerPlants(): readonly RenderMunicipalPowerPlant[] {
+    if (!this.compactWorld) return []
+    return (this.compactWorld.staticWorld.municipalPowerPlants ?? []).map((plant) => {
+      let elevation = Number.NEGATIVE_INFINITY
+      for (const id of plant.footprint) {
+        elevation = Math.max(elevation, this.getTileElevation(id % this.width, Math.floor(id / this.width)))
+      }
+      const orientation = (plant.layout?.orientationQuarterTurns ?? 0) * Math.PI * 0.5
+      const bounds = this.tileFootprintBounds(plant.footprint)
+      const centerX = (bounds.minX + bounds.maxX) * 0.5
+      const centerY = (bounds.minY + bounds.maxY) * 0.5
+      const panels = (plant.layout?.panelTileIds ?? []).map((tileId) => {
+        const x = tileId % this.width
+        const y = Math.floor(tileId / this.width)
+        return Object.freeze({
+          tileId,
+          x: x * MAP_TILE_SIZE,
+          y: this.getTileElevation(x, y) + 0.015,
+          z: y * MAP_TILE_SIZE,
+          yaw: orientation,
+        })
+      })
+      return Object.freeze({
+        id: stableStringId(plant.id),
+        kind: plant.kind,
+        tileX: centerX,
+        tileY: centerY,
+        x: centerX * MAP_TILE_SIZE,
+        y: (Number.isFinite(elevation) ? elevation : 0) + 0.015,
+        z: centerY * MAP_TILE_SIZE,
+        yaw: orientation,
+        phase: plant.animationPhase * Math.PI * 2,
+        footprintTileIds: plant.footprint,
+        panels: Object.freeze(panels),
+      })
+    })
+  }
+
+  isSimulationPaused(): boolean {
+    return this.state.paused
+  }
+
+  /**
+   * All player/rival facilities with construction state for the
+   * construction-animation layer. Cached on the world journal sequence
+   * (compact) or tile-array identity (legacy) so viewport pans stay cheap.
+   */
+  getConstructionSites(): readonly RenderConstructionSite[] {
+    const key: unknown = this.compactWorld ? this.compactWorld.sequence : this.state.map.tiles
+    const cached = this.constructionSitesCache
+    if (cached && cached.key === key) return cached.sites
+
+    const sites: RenderConstructionSite[] = []
+    if (this.compactWorld) {
+      for (const facility of this.compactWorld.facilitiesById.values()) {
+        const { minX, minY, maxX, maxY } = this.facilityBounds(facility)
+        const id = stableStringId(facility.id)
+        sites.push({
+          id,
+          tileX: Math.round((minX + maxX) * 0.5),
+          tileY: Math.round((minY + maxY) * 0.5),
+          x: ((minX + maxX) * 0.5) * MAP_TILE_SIZE,
+          y: this.foundationElevation(facility.footprint),
+          z: ((minY + maxY) * 0.5) * MAP_TILE_SIZE,
+          widthTiles: Math.max(1, maxX - minX + 1),
+          depthTiles: Math.max(1, maxY - minY + 1),
+          progress: constructionScale(facility.constructionProgress, facility.constructionTarget),
+          heightHint: facilityHeightHint(facility.kind, facility.level),
+          phase: sitePhase(id),
+        })
+      }
+    } else {
+      for (const campus of this.legacyCampuses.values()) {
+        const tile = campus.anchor
+        const id = stableStringId(campus.id)
+        sites.push({
+          id,
+          tileX: Math.round((campus.minX + campus.maxX) * 0.5),
+          tileY: Math.round((campus.minY + campus.maxY) * 0.5),
+          x: ((campus.minX + campus.maxX) * 0.5) * MAP_TILE_SIZE,
+          y: 0,
+          z: ((campus.minY + campus.maxY) * 0.5) * MAP_TILE_SIZE,
+          widthTiles: Math.max(1, campus.maxX - campus.minX + 1),
+          depthTiles: Math.max(1, campus.maxY - campus.minY + 1),
+          progress: constructionScale(tile.buildingProgress, tile.buildingTarget),
+          heightHint: facilityHeightHint(tile.kind, tile.level),
+          phase: sitePhase(id),
+        })
+      }
+      // Single-tile legacy facilities have no campus record.
+      for (let tileId = 0; tileId < this.legacyTilesById.length; tileId++) {
+        const tile = this.legacyTilesById[tileId]
+        if (!tile || tile.campusId || tile.campusRole === 'pad') continue
+        if (!isFacilityKind(tile.kind)) continue
+        const id = stableStringId(`legacy-${tileId}`)
+        sites.push({
+          id,
+          tileX: tile.x,
+          tileY: tile.y,
+          x: tile.x * MAP_TILE_SIZE,
+          y: 0,
+          z: tile.y * MAP_TILE_SIZE,
+          widthTiles: 1,
+          depthTiles: 1,
+          progress: constructionScale(tile.buildingProgress, tile.buildingTarget),
+          heightHint: facilityHeightHint(tile.kind, tile.level),
+          phase: sitePhase(id),
+        })
+      }
+    }
+    this.constructionSitesCache = { key, sites }
+    return sites
+  }
+
   prepareChunk(chunkId: ChunkId, tier: LodTier): void {
     // At most 32x32 logical cells are projected here. The stable cache makes
     // prefetch idempotent and ensures getChunkInstances is allocation-free.
@@ -335,20 +617,72 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     if (this.compactWorld) {
       const facility = this.compactWorld.getFacilityAt(tileId as never)
       if (facility) return true
+      if (this.compactTransport(tileId) !== 0) return false
+      if (this.compactWorld.staticWorld.district?.[tileId] === DISTRICT_KIND.municipalCampus) return true
       const owner = this.compactWorld.getOwner(tileId as never)
-      return owner !== 'neutral' || this.compactWorld.getKind(tileId as never) === TERRAIN_KIND.empty
+      if (owner !== 'neutral') return true
+      const kind = this.compactWorld.getKind(tileId as never)
+      return kind === TERRAIN_KIND.empty || kind === TERRAIN_KIND.forest ||
+        kind === TERRAIN_KIND.park || kind === TERRAIN_KIND.house ||
+        kind === TERRAIN_KIND.city || kind === TERRAIN_KIND.warehouse
     }
     const tile = this.legacyTilesById[tileId]
-    return !!tile && !(isSceneryKind(tile.kind) && tile.owner === 'neutral')
+    return !!tile && tile.kind !== 'road' && tile.kind !== 'lake'
+  }
+
+  getSelectionFootprint(x: number, y: number): readonly { x: number; y: number }[] | undefined {
+    const tileId = idAt(x, y, this.width, this.height)
+    if (tileId === null) return undefined
+    const plant = this.compactWorld?.staticWorld.municipalPowerPlants?.find((candidate) =>
+      candidate.footprint.includes(tileId as WorldTileId),
+    )
+    if (plant) {
+      return plant.footprint.map((id) => ({ x: id % this.width, y: Math.floor(id / this.width) }))
+    }
+    if (!this.usesUrbanParcels()) return undefined
+    const footprint = this.getUrbanParcelPlan().footprintForTile(tileId)
+    if (footprint.length === 0) return undefined
+    return footprint.map((id) => ({ x: id % this.width, y: Math.floor(id / this.width) }))
+  }
+
+  getCornerElevation(x: number, y: number): number {
+    return this.compactWorld?.getCornerElevation(x, y) ?? 0
+  }
+
+  getTileElevation(x: number, y: number): number {
+    return this.compactWorld?.getTileElevation(x, y) ?? 0
+  }
+
+  getWaterElevation(x: number, y: number): number {
+    return this.compactWorld?.getWaterElevation(x, y) ?? 0
+  }
+
+  getBiome(x: number, y: number) {
+    if (this.compactWorld?.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V4 &&
+      this.compactWorld?.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V5 &&
+      this.compactWorld?.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V6 &&
+      this.compactWorld?.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V7) {
+      return RenderBiome.plains
+    }
+    return this.compactWorld.getBiome(x, y)
   }
 
   private buildCompactChunk(chunkId: ChunkId, tier: LodTier): readonly RenderInstance[] {
     const world = this.compactWorld!
     const records: RenderInstance[] = []
     const bounds = this.chunkBounds(chunkId)
+    const roadNetwork = this.getRoadNetwork()
+    for (const plant of world.staticWorld.municipalPowerPlants ?? []) {
+      records.push(...this.municipalPowerInstancesForChunk(plant, chunkId))
+    }
     for (const facility of world.queryFacilities({ chunkId: chunkId as never })) {
       if (this.facilityRenderChunk(facility) === chunkId) {
         records.push(this.facilityInstance(facility))
+      }
+    }
+    if (this.usesUrbanParcels()) {
+      for (const parcel of this.getUrbanParcelsByChunk().get(chunkId) ?? []) {
+        records.push(this.urbanParcelInstance(parcel))
       }
     }
     for (let y = bounds.minY; y < bounds.maxY; y++) {
@@ -356,23 +690,160 @@ export class SimViewportRenderSource implements ViewportRenderSource {
         const tileId = y * this.width + x
         const facility = world.getFacilityAt(tileId as never)
         if (facility) continue
+        if (world.staticWorld.district?.[tileId] === DISTRICT_KIND.municipalCampus ||
+          world.staticWorld.district?.[tileId] === DISTRICT_KIND.greenBuffer) continue
+        // V3 transport overlays can cross populated terrain. The surface owns
+        // the road cell so an underlying house/city prop cannot protrude.
+        if (this.compactTransport(tileId) !== 0) continue
         const terrain = world.getKind(tileId as never)
-        const variantMask =
-          terrain === TERRAIN_KIND.road || terrain === TERRAIN_KIND.lake
-            ? world.getVariantMask(tileId as never) & 0x0f
-            : 0
+        const tileKind = compactTileKind(terrain)
+        if (this.usesUrbanParcels() && this.getUrbanParcelPlan().parcelForTile(tileId)) continue
+        const variantMask = world.getVariantMask(tileId as never)
         const scenery = sceneryInstance(
           tileId,
           x,
           y,
-          compactTileKind(terrain),
+          tileKind,
           tier,
           variantMask,
+          world.staticWorld.feature[tileId] ?? 0,
+          this.getTileElevation(x, y),
+          this.getBiome(x, y),
+          world.descriptor.seed,
+          isBroadEnvironmentKind(tileKind) ? this.hasEnvironmentClearance(x, y) : true,
         )
-        if (scenery) records.push(scenery)
+        if (scenery && !this.decorationOverlapsRoad(scenery, tileId, tileKind, roadNetwork)) {
+          records.push(scenery)
+        }
       }
     }
+    if (roadNetwork) records.push(...roadPropInstancesForChunk(
+      roadNetwork,
+      chunkId,
+      (x, y) => this.getTileElevation(
+        Math.max(0, Math.min(this.width - 1, Math.floor(x))),
+        Math.max(0, Math.min(this.height - 1, Math.floor(y))),
+      ),
+    ))
     return records
+  }
+
+  private usesUrbanParcels(): boolean {
+    return this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
+      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6 ||
+      this.compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7
+  }
+
+  private invalidateUrbanParcelPlan(): void {
+    this.urbanParcelPlan = undefined
+    this.urbanParcelsByChunk = undefined
+  }
+
+  private getUrbanParcelPlan(): UrbanParcelPlan {
+    if (this.urbanParcelPlan) return this.urbanParcelPlan
+    const world = this.compactWorld!
+    this.urbanParcelPlan = planUrbanParcels(world.staticWorld, {
+      excludedTileIds: world.occupancy.keys(),
+      kindAt: (id) => world.getKind(id),
+      transportAt: (id) => this.compactTransport(id),
+      districtAt: (id) => world.staticWorld.district?.[id] ?? 0,
+      featureAt: (id) => world.staticWorld.feature[id] ?? 0,
+    })
+    return this.urbanParcelPlan
+  }
+
+  private getUrbanParcelsByChunk(): ReadonlyMap<ChunkId, readonly UrbanParcel[]> {
+    if (this.urbanParcelsByChunk) return this.urbanParcelsByChunk
+    const mutable = new Map<ChunkId, UrbanParcel[]>()
+    for (const parcel of this.getUrbanParcelPlan().parcels) {
+      const chunkId = this.urbanParcelRenderChunk(parcel)
+      const parcels = mutable.get(chunkId)
+      if (parcels) parcels.push(parcel)
+      else mutable.set(chunkId, [parcel])
+    }
+    this.urbanParcelsByChunk = mutable
+    return mutable
+  }
+
+  private urbanParcelRenderChunk(parcel: UrbanParcel): ChunkId {
+    const anchorX = parcel.anchorTileId % this.width
+    const anchorY = Math.floor(parcel.anchorTileId / this.width)
+    const centerX = anchorX + (parcel.width - 1) * 0.5
+    const centerY = anchorY + (parcel.height - 1) * 0.5
+    return (
+      Math.floor(centerY / this.chunkSize) * this.chunksWide +
+      Math.floor(centerX / this.chunkSize)
+    ) as ChunkId
+  }
+
+  private urbanParcelInstance(parcel: UrbanParcel): RenderInstance {
+    const world = this.compactWorld!
+    const anchorX = parcel.anchorTileId % this.width
+    const anchorY = Math.floor(parcel.anchorTileId / this.width)
+    const random = mix32((parcel.anchorTileId + 1) ^ Math.imul(world.descriptor.seed, 0x9e37_79b1))
+    const palette = buildingPaletteForChunk(
+      this.urbanParcelRenderChunk(parcel),
+      this.chunksWide,
+    )
+    const paletteIndex = (variants: readonly number[]) => buildingVariantIndexForParcel(
+      anchorX,
+      anchorY,
+      world.descriptor.seed,
+      variants.length,
+    )
+    let archetypeId: number
+    if (parcel.class === 'skyscraper') {
+      // Multi-cell cores keep the purpose-built proportional skyscraper. The
+      // ordinary one-cell parcels below distribute the streamed World V4
+      // catalog without increasing instance count or changing parcel layout.
+      archetypeId = parcel.footprintTileIds.length > 1
+        ? SingleBuildingArchetype.skyscraper
+        : palette.urban[paletteIndex(palette.urban)]!
+    } else if (parcel.class === 'small') {
+      archetypeId = palette.residential[paletteIndex(palette.residential)]!
+    } else {
+      archetypeId = palette.urban[paletteIndex(palette.urban)]!
+    }
+    return {
+      entityId: stableStringId(parcel.id),
+      pickTileId: parcel.anchorTileId,
+      archetypeId,
+      x: (anchorX + (parcel.width - 1) * 0.5) * MAP_TILE_SIZE,
+      y: this.foundationElevation(parcel.footprintTileIds) + FOUNDATION_CLEARANCE_EPSILON,
+      z: (anchorY + (parcel.height - 1) * 0.5) * MAP_TILE_SIZE,
+      // Rectangular parcel scaling must stay aligned with its authoritative
+      // footprint; a quarter turn would visually spill a 2x1 tower into its
+      // neighbours. Square lots can use all four cardinal orientations.
+      yaw: parcel.width === parcel.height
+        ? (random & 3) * Math.PI * 0.5
+        : (random & 1) * Math.PI,
+      scaleX: parcel.width * MAP_TILE_SIZE * 0.92,
+      scaleY: 0.94 + ((random >>> 8) & 0x3f) / 640,
+      scaleZ: parcel.height * MAP_TILE_SIZE * 0.92,
+      color: 0xffffff,
+    }
+  }
+
+  /**
+   * A settlement archetype is a complete one-cell kit, not just its central
+   * building. Trees, benches and fences near its edge can therefore cross a
+   * road even when the owning tile is beside (rather than on) that road.
+   * Compare the selected kit's complete footprint with the live road mesh.
+   */
+  private decorationOverlapsRoad(
+    instance: RenderInstance,
+    tileId: number,
+    kind: TileKind,
+    network: RoadNetworkSnapshot | undefined,
+  ): boolean {
+    if (kind === 'road' || kind === 'lake' || !network) return false
+    return decorationOverlapsRoadFootprint(
+      instance,
+      tileId,
+      network,
+      (id) => this.compactWorld!.getKind(id as never),
+      (id) => this.compactTransport(id),
+    )
   }
 
   private buildLegacyChunk(chunkId: ChunkId, tier: LodTier): readonly RenderInstance[] {
@@ -405,7 +876,22 @@ export class SimViewportRenderSource implements ViewportRenderSource {
           tile.kind === 'road' || tile.kind === 'lake'
             ? this.legacyNeighborMask(tileId, tile.kind)
             : 0
-        const scenery = sceneryInstance(tileId, x, y, tile.kind, tier, variantMask)
+        const clearance = isBroadEnvironmentKind(tile.kind)
+          ? this.hasLegacyEnvironmentClearance(x, y)
+          : true
+        const scenery = sceneryInstance(
+          tileId,
+          x,
+          y,
+          tile.kind,
+          tier,
+          variantMask,
+          0,
+          0,
+          RenderBiome.plains,
+          this.state.seed,
+          clearance,
+        )
         if (scenery) records.push(scenery)
       }
     }
@@ -420,9 +906,12 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     const height = Math.max(1, maxY - minY + 1)
     return {
       entityId: stableStringId(facility.id),
-      archetypeId: facilityArchetypeFor(facility.kind, size),
+      pickTileId: facility.anchor,
+      archetypeId: facility.constructionTarget > 0 && facility.constructionProgress < facility.constructionTarget
+        ? AuthoredSceneryArchetype.constructionShell
+        : facilityArchetypeFor(facility.kind, size),
       x: ((minX + maxX) * 0.5) * MAP_TILE_SIZE,
-      y: 0.015,
+      y: this.foundationElevation(facility.footprint) + FOUNDATION_CLEARANCE_EPSILON,
       z: ((minY + maxY) * 0.5) * MAP_TILE_SIZE,
       yaw: 0,
       scaleX: width * MAP_TILE_SIZE * 0.82,
@@ -430,6 +919,100 @@ export class SimViewportRenderSource implements ViewportRenderSource {
       scaleZ: height * MAP_TILE_SIZE * 0.82,
       color: this.ownerColor(facility.ownerId),
     }
+  }
+
+  private municipalPowerInstance(plant: MunicipalPowerPlant): RenderInstance {
+    let elevation = Number.NEGATIVE_INFINITY
+    for (const id of plant.footprint) {
+      elevation = Math.max(elevation, this.getTileElevation(id % this.width, Math.floor(id / this.width)))
+    }
+    const equipmentTileId = plant.layout?.equipmentTileId
+    const equipmentX = equipmentTileId === undefined ? plant.cx + 0.5 : equipmentTileId % this.width
+    const equipmentY = equipmentTileId === undefined ? plant.cy + 0.5 : Math.floor(equipmentTileId / this.width)
+    const bounds = this.tileFootprintBounds(plant.footprint)
+    const centerX = (bounds.minX + bounds.maxX) * 0.5
+    const centerY = (bounds.minY + bounds.maxY) * 0.5
+    const usesPanelArray = plant.kind === 'solar' && (plant.layout?.panelTileIds.length ?? 0) > 0
+    return {
+      entityId: stableStringId(plant.id),
+      pickTileId: usesPanelArray ? equipmentTileId : plant.footprint[0],
+      archetypeId: usesPanelArray
+        ? IntegrationArchetype.grid
+        : MunicipalPowerArchetype[plant.kind],
+      x: (usesPanelArray ? equipmentX : centerX) * MAP_TILE_SIZE,
+      y: (Number.isFinite(elevation) ? elevation : 0) + 0.015,
+      z: (usesPanelArray ? equipmentY : centerY) * MAP_TILE_SIZE,
+      yaw: plant.layout
+        ? plant.layout.orientationQuarterTurns * Math.PI * 0.5
+        : plant.animationPhase * Math.PI * 2,
+      scaleX: MAP_TILE_SIZE,
+      scaleY: MAP_TILE_SIZE,
+      scaleZ: MAP_TILE_SIZE,
+      color: plant.kind === 'coal' ? 0x706b62 : plant.kind === 'wind' ? 0xe7ece9 :
+        plant.kind === 'solar' ? 0x527aa0 : 0xc8d0c9,
+    }
+  }
+
+  private municipalSolarPanelInstance(plant: MunicipalPowerPlant, tileId: TileId): RenderInstance {
+    const x = tileId % this.width
+    const y = Math.floor(tileId / this.width)
+    return {
+      entityId: stableStringId(`${plant.id}:panel:${tileId}`),
+      pickTileId: plant.layout?.equipmentTileId ?? plant.footprint[0],
+      archetypeId: MunicipalPowerArchetype.solar,
+      x: x * MAP_TILE_SIZE,
+      y: this.getTileElevation(x, y) + 0.015,
+      z: y * MAP_TILE_SIZE,
+      yaw: (plant.layout?.orientationQuarterTurns ?? 0) * Math.PI * 0.5,
+      scaleX: 0.82,
+      scaleY: 0.72,
+      scaleZ: 0.82,
+      color: 0x527aa0,
+    }
+  }
+
+  private municipalPowerInstancesForChunk(
+    plant: MunicipalPowerPlant,
+    chunkId: ChunkId,
+  ): readonly RenderInstance[] {
+    const records: RenderInstance[] = []
+    const equipmentTileId = plant.layout?.equipmentTileId
+    const equipmentChunk = equipmentTileId === undefined
+      ? this.municipalPowerRenderChunk(plant)
+      : this.chunkIdForTile(equipmentTileId)
+    if (equipmentChunk === chunkId) records.push(this.municipalPowerInstance(plant))
+    if (plant.kind === 'solar') {
+      for (const tileId of plant.layout?.panelTileIds ?? []) {
+        if (this.chunkIdForTile(tileId) === chunkId) {
+          records.push(this.municipalSolarPanelInstance(plant, tileId))
+        }
+      }
+    }
+    return records
+  }
+
+  private municipalPowerRenderChunk(plant: MunicipalPowerPlant): ChunkId {
+    const bounds = this.tileFootprintBounds(plant.footprint)
+    const centerX = (bounds.minX + bounds.maxX) * 0.5
+    const centerY = (bounds.minY + bounds.maxY) * 0.5
+    return Math.floor(centerY / this.chunkSize) * this.chunksWide +
+      Math.floor(centerX / this.chunkSize)
+  }
+
+  private tileFootprintBounds(footprint: readonly number[]) {
+    let minX = this.width
+    let minY = this.height
+    let maxX = 0
+    let maxY = 0
+    for (const tileId of footprint) {
+      const x = tileId % this.width
+      const y = Math.floor(tileId / this.width)
+      minX = Math.min(minX, x)
+      minY = Math.min(minY, y)
+      maxX = Math.max(maxX, x)
+      maxY = Math.max(maxY, y)
+    }
+    return { minX, minY, maxX, maxY }
   }
 
   /** Own a multi-tile prop from one deterministic centroid chunk only. */
@@ -441,6 +1024,28 @@ export class SimViewportRenderSource implements ViewportRenderSource {
       Math.floor(centerY / this.chunkSize) * this.chunksWide +
       Math.floor(centerX / this.chunkSize)
     )
+  }
+
+  private foundationElevation(footprint: readonly number[]): number {
+    let max = Number.NEGATIVE_INFINITY
+    for (const tileId of footprint) {
+      const x = tileId % this.width
+      const y = Math.floor(tileId / this.width)
+      // Tile-center elevation can be below one or more corners on a slope,
+      // allowing a coplanar ground slice to flicker through a GLB foundation
+      // as the camera moves. Support the complete parcel at its highest true
+      // terrain corner; a one-millimetre presentation lift at the call site
+      // keeps the remaining base face out of the depth-equality band without
+      // visibly increasing the gap over the parcel's lower slope edge.
+      max = Math.max(
+        max,
+        this.getCornerElevation(x, y),
+        this.getCornerElevation(x + 1, y),
+        this.getCornerElevation(x, y + 1),
+        this.getCornerElevation(x + 1, y + 1),
+      )
+    }
+    return Number.isFinite(max) ? max : 0
   }
 
   private facilityBounds(facility: Facility) {
@@ -459,6 +1064,50 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     return { minX, minY, maxX, maxY }
   }
 
+  /**
+   * Broad scenery kits (groves, parks and ground-detail clusters) must retain
+   * a full cell of breathing room around hard surfaces.  This is deliberately
+   * evaluated from authoritative world layers rather than rendered geometry,
+   * so chunk order and LOD can never make a tree appear on a shoulder.
+   */
+  private hasEnvironmentClearance(x: number, y: number): boolean {
+    const world = this.compactWorld!
+    for (let oy = -1; oy <= 1; oy++) {
+      for (let ox = -1; ox <= 1; ox++) {
+        if (ox === 0 && oy === 0) continue
+        const id = idAt(x + ox, y + oy, this.width, this.height)
+        if (id === null) continue
+        if (this.compactTransport(id) !== 0 || world.getFacilityAt(id as never)) return false
+        const kind = world.getKind(id as never)
+        if (
+          kind === TERRAIN_KIND.road ||
+          kind === TERRAIN_KIND.lake ||
+          kind === TERRAIN_KIND.house ||
+          kind === TERRAIN_KIND.city ||
+          kind === TERRAIN_KIND.warehouse
+        ) return false
+      }
+    }
+    return true
+  }
+
+  private hasLegacyEnvironmentClearance(x: number, y: number): boolean {
+    for (let oy = -1; oy <= 1; oy++) {
+      for (let ox = -1; ox <= 1; ox++) {
+        if (ox === 0 && oy === 0) continue
+        const id = idAt(x + ox, y + oy, this.width, this.height)
+        if (id === null) continue
+        const tile = this.legacyTilesById[id]
+        if (!tile) continue
+        if (
+          tile.kind === 'road' || tile.kind === 'lake' || tile.kind === 'house' ||
+          tile.kind === 'city' || tile.kind === 'warehouse' || isFacilityKind(tile.kind)
+        ) return false
+      }
+    }
+    return true
+  }
+
   private legacyFacilityInstance(campus: LegacyCampusProjection): RenderInstance {
     const { anchor: tile } = campus
     const size = facilitySize(tile.kind, { dcSize: tile.dcSize, hqSize: tile.hqSize })
@@ -467,7 +1116,10 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     const height = Math.max(1, campus.maxY - campus.minY + 1)
     return {
       entityId: tile.campusId ? stableStringId(tile.campusId) : campus.anchorId + 0x4000_0000,
-      archetypeId: facilityArchetypeFor(tile.kind, size),
+      pickTileId: campus.anchorId,
+      archetypeId: tile.buildingTarget > 0 && tile.buildingProgress < tile.buildingTarget
+        ? AuthoredSceneryArchetype.constructionShell
+        : facilityArchetypeFor(tile.kind, size),
       x: ((campus.minX + campus.maxX) * 0.5) * MAP_TILE_SIZE,
       y: 0.015,
       z: ((campus.minY + campus.maxY) * 0.5) * MAP_TILE_SIZE,
@@ -530,6 +1182,18 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     }
   }
 
+  private compactTransport(tileId: number): number {
+    const world = this.compactWorld
+    if (!world) return 0
+    const transportWorld = world as DynamicWorld & {
+      getTransport?(id: Parameters<DynamicWorld['getTileView']>[0]): number
+      staticWorld: DynamicWorld['staticWorld'] & { readonly transport?: Uint16Array }
+    }
+    return transportWorld.getTransport?.(tileId as never)
+      ?? transportWorld.staticWorld.transport?.[tileId]
+      ?? 0
+  }
+
   private chunkIdForTile(tileId: number): ChunkId {
     const x = tileId % this.width
     const y = Math.floor(tileId / this.width)
@@ -544,6 +1208,19 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     if (x + 1 < this.width) result.push(tileId + 1)
     if (y + 1 < this.height) result.push(tileId + this.width)
     if (x > 0) result.push(tileId - 1)
+    return result
+  }
+
+  private tileAndNeighbors(tileId: number): number[] {
+    const x = tileId % this.width
+    const y = Math.floor(tileId / this.width)
+    const result: number[] = []
+    for (let oy = -1; oy <= 1; oy++) {
+      for (let ox = -1; ox <= 1; ox++) {
+        const id = idAt(x + ox, y + oy, this.width, this.height)
+        if (id !== null) result.push(id)
+      }
+    }
     return result
   }
 
@@ -597,6 +1274,302 @@ export class SimViewportRenderSource implements ViewportRenderSource {
     this.rivalColors = new Map(this.state.rivals.map((rival) => [rival.id, rival.color]))
     return changed
   }
+}
+
+interface RoadPropLookup {
+  readonly segments: ReadonlyMap<string, RoadNetworkSnapshot['segments'][number]>
+  readonly junctions: ReadonlyMap<string, RoadNetworkSnapshot['junctions'][number]>
+}
+
+const roadPropLookups = new WeakMap<RoadNetworkSnapshot, RoadPropLookup>()
+
+function roadPropLookup(network: RoadNetworkSnapshot): RoadPropLookup {
+  const cached = roadPropLookups.get(network)
+  if (cached) return cached
+  const lookup = {
+    segments: new Map(network.segments.map(segment => [segment.id, segment])),
+    junctions: new Map(network.junctions.map(junction => [junction.id, junction])),
+  }
+  roadPropLookups.set(network, lookup)
+  return lookup
+}
+
+/**
+ * Project canonical road furniture into the same chunk-instancing path as the
+ * rest of the environment. Stable compiler IDs make placement independent of
+ * viewport order, and the compiler's chunk index prevents a world-wide scan.
+ */
+export function roadPropInstancesForChunk(
+  network: RoadNetworkSnapshot,
+  chunkId: ChunkId,
+  elevationAt: (logicalX: number, logicalY: number) => number = () => 0,
+): readonly RenderInstance[] {
+  const chunk = network.chunks.get(chunkId)
+  if (!chunk) return []
+  const lookup = roadPropLookup(network)
+  const result: RenderInstance[] = []
+  const owns = (x: number, y: number) =>
+    Math.floor(y / network.chunkSize) * network.chunksWide + Math.floor(x / network.chunkSize) === chunkId
+  const add = (
+    key: string,
+    archetypeId: number,
+    x: number,
+    y: number,
+    yaw: number,
+    scaleX = 1,
+    scaleY = 1,
+    scaleZ = 1,
+  ) => {
+    if (!owns(x, y)) return
+    result.push({
+      entityId: stableStringId(`road-prop:${key}`),
+      archetypeId,
+      // Compiler points use tile centres (n + 0.5); render-world tile anchors
+      // use integer coordinates. Missing this conversion shifted furniture
+      // half a tile diagonally, frequently back onto the carriageway.
+      x: (x - 0.5) * MAP_TILE_SIZE,
+      y: elevationAt(x, y) + 0.04,
+      z: (y - 0.5) * MAP_TILE_SIZE,
+      yaw,
+      scaleX,
+      scaleY,
+      scaleZ,
+      color: 0xffffff,
+    })
+  }
+
+  for (const junctionId of chunk.junctionIds) {
+    const junction = lookup.junctions.get(junctionId)
+    if (!junction?.signalized) continue
+    const maxHalfWidth = Math.max(
+      0.25,
+      ...junction.segmentIds.map(id => lookup.segments.get(id)?.profile.halfWidth ?? 0),
+    )
+    for (let portIndex = 0; portIndex < junction.ports.length; portIndex++) {
+      const port = junction.ports[portIndex]!
+      const side = network.drivingSide === 'left' ? 1 : -1
+      const normalX = -port.headingY * side
+      const normalY = port.headingX * side
+      const along = maxHalfWidth * 1.58
+      const lateral = maxHalfWidth + 0.16
+      const x = junction.x + port.headingX * along + normalX * lateral
+      const y = junction.y + port.headingY * along + normalY * lateral
+      // Model forward is +X. Signal faces traffic approaching the junction.
+      const yaw = Math.atan2(-port.headingY, -port.headingX)
+      add(`${junction.id}:signal:${portIndex}`, RoadPropArchetype.trafficLight, x, y, yaw, 0.82, 0.82, 0.82)
+    }
+  }
+
+  for (const segmentId of chunk.segmentIds) {
+    const segment = lookup.segments.get(segmentId)
+    if (!segment || segment.points.length < 2) continue
+    const points = segment.points
+    for (let index = 1; index < points.length - 1; index++) {
+      const point = points[index]!
+      const previous = points[index - 1]!
+      const next = points[index + 1]!
+      const dx = next.x - previous.x
+      const dy = next.y - previous.y
+      const length = Math.hypot(dx, dy) || 1
+      const tangentX = dx / length
+      const tangentY = dy / length
+      const normalX = -tangentY
+      const normalY = tangentX
+      const yaw = Math.atan2(tangentY, tangentX)
+      const roadside = segment.profile.halfWidth + segment.profile.shoulderWidth + 0.14
+
+      // Urban lighting is intentionally sparse, alternates verges, and stays
+      // at least two tiles clear of junction furniture and crossing paint.
+      const lampSpacing = segment.roadClass >= 3 ? 12 : 18
+      const lampPhase = stableStringId(segment.id) % lampSpacing
+      if (segment.roadClass >= 2 && segment.roadClass < 4
+        && index >= 2 && index <= points.length - 3
+        && index % lampSpacing === lampPhase) {
+        const side = (Math.floor(index / lampSpacing) & 1) === 0 ? 1 : -1
+        add(`${segment.id}:lamp:${index}`, SceneryArchetype.roadLamp,
+          point.x + normalX * roadside * side, point.y + normalY * roadside * side, yaw)
+      }
+
+      // Gateway signs are kept away from junction polygons and occur at most
+      // twice per high-class segment.
+      if (segment.roadClass >= 3 && (index === 1 || index === points.length - 2)) {
+        const side = network.drivingSide === 'left' ? -1 : 1
+        add(`${segment.id}:sign:${index}`, RoadPropArchetype.roadSign,
+          point.x + normalX * roadside * side, point.y + normalY * roadside * side, yaw, 0.9, 0.9, 0.9)
+      }
+
+      // Long authored sections give highways a continuous silhouette while
+      // remaining a single instanced draw for the archetype and LOD.
+      if (segment.roadClass === 4 && index % 3 === stableStringId(segment.id) % 3) {
+        for (const side of [-1, 1]) add(`${segment.id}:guardrail:${index}:${side}`,
+          RoadPropArchetype.highwayGuardrail,
+          point.x + normalX * roadside * side,
+          point.y + normalY * roadside * side,
+          yaw,
+          Math.min(1.25, Math.max(0.75, length)),
+          1,
+          1,
+        )
+      }
+    }
+  }
+  return result
+}
+
+const roadJunctionsByTile = new WeakMap<RoadNetworkSnapshot, ReadonlyMap<number, RoadNetworkSnapshot['junctions'][number]>>()
+
+/** @internal Footprint rejection shared by projection and focused regressions. */
+export function decorationOverlapsRoadFootprint(
+  instance: Pick<RenderInstance, 'archetypeId' | 'x' | 'z' | 'scaleX' | 'scaleZ'>,
+  anchorTileId: number,
+  network: RoadNetworkSnapshot,
+  terrainKindAt: (tileId: number) => number,
+  transportAt: (tileId: number) => number,
+): boolean {
+  if (anchorTileId < 0 || anchorTileId >= network.width * network.height) return false
+
+  const centerX = instance.x / MAP_TILE_SIZE
+  const centerY = instance.z / MAP_TILE_SIZE
+  const [baseHalfX, baseHalfY] = decorationFootprintHalfExtents(instance.archetypeId)
+  const halfX = baseHalfX * Math.abs(instance.scaleX ?? 1)
+  const halfY = baseHalfY * Math.abs(instance.scaleZ ?? 1)
+  const minX = centerX - halfX
+  const maxX = centerX + halfX
+  const minY = centerY - halfY
+  const maxY = centerY + halfY
+  const segmentIndexes = new Set<number>()
+
+  let junctions = roadJunctionsByTile.get(network)
+  if (!junctions) {
+    junctions = new Map(network.junctions.map(junction => [junction.tileId, junction]))
+    roadJunctionsByTile.set(network, junctions)
+  }
+  const segmentLookup = roadPropLookup(network).segments
+
+  // The compiler's distance/nearest fields cheaply identify the road chain
+  // relevant to a beside-road anchor. The local scan also covers overrides
+  // made after generation and canonical road tiles without V3 transport.
+  if (network.accessDistanceByTile[anchorTileId]! <= 1) {
+    const nearest = network.nearestSegmentByTile[anchorTileId] ?? -1
+    if (nearest >= 0) segmentIndexes.add(nearest)
+  }
+  const scanMinX = Math.max(0, Math.floor(minX) - 1)
+  const scanMaxX = Math.min(network.width - 1, Math.ceil(maxX) + 1)
+  const scanMinY = Math.max(0, Math.floor(minY) - 1)
+  const scanMaxY = Math.min(network.height - 1, Math.ceil(maxY) + 1)
+  for (let y = scanMinY; y <= scanMaxY; y++) {
+    for (let x = scanMinX; x <= scanMaxX; x++) {
+      const tileId = y * network.width + x
+      const transport = transportAt(tileId)
+      const canonicalRoad = terrainKindAt(tileId) === TERRAIN_KIND.road
+      if (transport === 0 && !canonicalRoad) continue
+
+      if (transport !== 0) {
+        const segmentIndex = network.nearestSegmentByTile[tileId] ?? -1
+        if (segmentIndex >= 0 && network.accessDistanceByTile[tileId] === 0) {
+          segmentIndexes.add(segmentIndex)
+        }
+      }
+      // Compatibility/override roads need not have a compiled segment. Their
+      // canonical tile-centre footprint still must reject intersecting kits.
+      if (canonicalRoad && distanceFromPointToAabb(x, y, minX, minY, maxX, maxY) <= 0.255) {
+        return true
+      }
+
+      const junction = junctions.get(tileId)
+      if (junction) {
+        let maxHalfWidth = 0.21
+        for (const id of junction.segmentIds) {
+          const segment = segmentLookup.get(id)
+          if (segment) maxHalfWidth = Math.max(maxHalfWidth, segment.profile.halfWidth)
+        }
+        // The surface layer renders both a 1.18x shoulder and a 1.45x
+        // junction reach. Use that same circumscribed footprint here.
+        const reach = maxHalfWidth * 1.18 * 1.45
+        if (distanceFromPointToAabb(
+          junction.x - 0.5,
+          junction.y - 0.5,
+          minX,
+          minY,
+          maxX,
+          maxY,
+        ) <= reach) return true
+      }
+    }
+  }
+
+  for (const index of segmentIndexes) {
+    const segment = network.segments[index]
+    if (!segment) continue
+    const radius = segment.profile.halfWidth * 1.18
+    for (let pointIndex = 1; pointIndex < segment.points.length; pointIndex++) {
+      const a = segment.points[pointIndex - 1]!
+      const b = segment.points[pointIndex]!
+      if (segmentIntersectsAabb(
+        a.x - 0.5,
+        a.y - 0.5,
+        b.x - 0.5,
+        b.y - 0.5,
+        minX - radius,
+        minY - radius,
+        maxX + radius,
+        maxY + radius,
+      )) return true
+    }
+  }
+  return false
+}
+
+function decorationFootprintHalfExtents(archetypeId: number): readonly [number, number] {
+  // Authored town kits deliberately vary beyond the nominal tile silhouette;
+  // their peripheral trees, benches and fences are part of the same mesh.
+  if (AUTHORED_RESIDENTIAL_ARCHETYPES.includes(archetypeId as never) ||
+    AUTHORED_URBAN_ARCHETYPES.includes(archetypeId as never) ||
+    AUTHORED_INDUSTRIAL_ARCHETYPES.includes(archetypeId as never)) return [0.58, 0.58]
+  return [0.5, 0.5]
+}
+
+function distanceFromPointToAabb(
+  x: number,
+  y: number,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+): number {
+  const dx = Math.max(minX - x, 0, x - maxX)
+  const dy = Math.max(minY - y, 0, y - maxY)
+  return Math.hypot(dx, dy)
+}
+
+function segmentIntersectsAabb(
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+): boolean {
+  let lower = 0
+  let upper = 1
+  const dx = x1 - x0
+  const dy = y1 - y0
+  for (const [p, q] of [
+    [-dx, x0 - minX], [dx, maxX - x0],
+    [-dy, y0 - minY], [dy, maxY - y0],
+  ] as const) {
+    if (p === 0) {
+      if (q < 0) return false
+      continue
+    }
+    const ratio = q / p
+    if (p < 0) lower = Math.max(lower, ratio)
+    else upper = Math.min(upper, ratio)
+    if (lower > upper) return false
+  }
+  return true
 }
 
 function emptyDelta(replaceSource: boolean): RenderSourceDelta {
@@ -746,6 +1719,10 @@ function isFacilityKind(kind: TileKind): boolean {
   return kind !== 'empty' && !isSceneryKind(kind)
 }
 
+function isBroadEnvironmentKind(kind: TileKind): boolean {
+  return kind === 'empty' || kind === 'forest' || kind === 'park'
+}
+
 function sceneryInstance(
   tileId: number,
   x: number,
@@ -753,43 +1730,88 @@ function sceneryInstance(
   kind: TileKind,
   _tier: LodTier,
   neighborMask = 0,
+  settlementDensity = 0,
+  terrainY = 0,
+  biome: RenderBiomeId = RenderBiome.plains,
+  worldSeed = 0,
+  hasEnvironmentClearance = true,
 ): RenderInstance | null {
-  const random = mix32(tileId + 1)
-  const yaw = ((random >>> 29) & 3) * (Math.PI / 2)
+  const random = mix32((tileId + 1) ^ Math.imul(worldSeed, 0x9e37_79b1))
+  const yaw = hashUnit(random ^ 0x7f4a_7c15) * Math.PI * 2
   const base = {
     entityId: tileId + 1,
+    pickTileId: tileId,
     x: x * MAP_TILE_SIZE,
-    y: 0.012,
+    y: terrainY + 0.012,
     z: y * MAP_TILE_SIZE,
     yaw,
   }
   if (kind === 'forest') {
-    const size = 0.94 + ((random >>> 8) & 0xff) / 2_800
-    const variant = random % 3
+    if (!hasEnvironmentClearance || !acceptsNaturalSpacing(worldSeed, x, y)) return null
+    const jitter = naturalJitter(worldSeed, x, y)
+    const size = 0.68 + hashUnit(random ^ 0x1656_67b1) * 0.2
+    const family = vegetationFamilyForBiome(biome)
+    const variant = naturalSpeciesIndex(worldSeed, x, y, biome, family.length)
     return {
       ...base,
-      archetypeId:
-        variant === 0
-          ? DefaultArchetype.tree
-          : variant === 1
-            ? SceneryArchetype.forestBroadleaf
-            : SceneryArchetype.forestMixed,
-      scaleX: size,
-      scaleY: 0.92 + ((random >>> 16) & 0xff) / 1_500,
-      scaleZ: size,
+      archetypeId: family[variant]!,
+      x: (x + jitter.x) * MAP_TILE_SIZE,
+      z: (y + jitter.y) * MAP_TILE_SIZE,
+      scaleX: size * (0.94 + hashUnit(random ^ 0x68bc_21eb) * 0.12),
+      scaleY: 0.74 + hashUnit(random ^ 0x02e5_be93) * 0.3,
+      scaleZ: size * (0.94 + hashUnit(random ^ 0x967a_889b) * 0.12),
       color: SCENERY_COLORS.tree,
     }
   }
+  if (kind === 'empty') {
+    if (!hasEnvironmentClearance) return null
+    const roll = Math.floor(hashUnit(random ^ 0xa511_e9b3) * 1024)
+    const vegetation = vegetationFamilyForBiome(biome)
+    const patchDensity = naturalPatchDensity(worldSeed, x, y, biome)
+    const vegetationThreshold = Math.round(biomeVegetationThreshold(biome) * patchDensity)
+    if (roll < vegetationThreshold && acceptsNaturalSpacing(worldSeed, x, y)) {
+      const jitter = naturalJitter(worldSeed, x, y)
+      const size = 0.62 + hashUnit(random ^ 0x27d4_eb2f) * 0.22
+      return {
+        ...base,
+        x: (x + jitter.x) * MAP_TILE_SIZE,
+        z: (y + jitter.y) * MAP_TILE_SIZE,
+        archetypeId: vegetation[naturalSpeciesIndex(worldSeed, x, y, biome, vegetation.length)]!,
+        scaleX: size,
+        scaleY: 0.7 + hashUnit(random ^ 0x85eb_ca6b) * 0.32,
+        scaleZ: size * (0.92 + hashUnit(random ^ 0xc2b2_ae35) * 0.16),
+        color: SCENERY_COLORS.tree,
+      }
+    }
+    const detailThreshold = biomeDetailThreshold(biome)
+    const detailRoll = Math.floor(hashUnit(random ^ 0xd1b5_4a35) * 1024)
+    const common = {
+      ...base,
+      color: 0xffffff,
+      scaleX: 0.8 + ((random >>> 10) & 0x7f) / 300,
+      scaleY: 0.86 + ((random >>> 17) & 0x7f) / 420,
+      scaleZ: 0.8 + ((random >>> 24) & 0x7f) / 300,
+    }
+    if (detailRoll < detailThreshold && acceptsGroundDetailSpacing(worldSeed, x, y)) {
+      const details = terrainFamilyForBiome(biome)
+      const detail = selectNaturalGroundDetail(details, worldSeed, x, y, biome)
+      const jitter = naturalJitter(worldSeed ^ 0x3c6e_f372, x, y)
+      return {
+        ...common,
+        x: (x + jitter.x) * MAP_TILE_SIZE,
+        z: (y + jitter.y) * MAP_TILE_SIZE,
+        archetypeId: detail,
+        scaleX: isRockDetail(detail) ? common.scaleX * 0.72 : common.scaleX,
+        scaleY: isRockDetail(detail) ? common.scaleY * 0.68 : common.scaleY,
+        scaleZ: isRockDetail(detail) ? common.scaleZ * 0.72 : common.scaleZ,
+      }
+    }
+  }
   if (kind === 'house') {
-    const variant = random % 3
+    const variant = (((neighborMask >>> 4) & 0x0f) + settlementDensity + random) % AUTHORED_RESIDENTIAL_ARCHETYPES.length
     return {
       ...base,
-      archetypeId:
-        variant === 0
-          ? DefaultArchetype.house
-          : variant === 1
-            ? SceneryArchetype.houseDuplex
-            : SceneryArchetype.houseTerrace,
+      archetypeId: AUTHORED_RESIDENTIAL_ARCHETYPES[variant]!,
       scaleX: 0.98,
       scaleY: 0.94 + ((random >>> 12) & 0x7f) / 900,
       scaleZ: 0.98,
@@ -797,18 +1819,11 @@ function sceneryInstance(
     }
   }
   if (kind === 'city') {
-    const district = random % 4
+    const district = (((neighborMask >>> 4) & 0x0f) + settlementDensity + random) % AUTHORED_URBAN_ARCHETYPES.length
     const height = 0.92 + ((random >>> 8) & 0xff) / 720
     return {
       ...base,
-      archetypeId:
-        district === 0
-          ? DefaultArchetype.cityTowerA
-          : district === 1
-            ? DefaultArchetype.cityTowerB
-            : district === 2
-              ? SceneryArchetype.cityDistrictC
-              : SceneryArchetype.cityDistrictD,
+      archetypeId: AUTHORED_URBAN_ARCHETYPES[district]!,
       scaleX: 0.98,
       scaleY: height,
       scaleZ: 0.98,
@@ -816,12 +1831,10 @@ function sceneryInstance(
     }
   }
   if (kind === 'warehouse') {
+    const variant = (((neighborMask >>> 4) & 0x0f) + settlementDensity + random) % AUTHORED_INDUSTRIAL_ARCHETYPES.length
     return {
       ...base,
-      archetypeId:
-        (random & 1) === 0
-          ? DefaultArchetype.warehouse
-          : SceneryArchetype.warehouseContainers,
+      archetypeId: AUTHORED_INDUSTRIAL_ARCHETYPES[variant]!,
       scaleX: 0.98,
       scaleY: 0.96,
       scaleZ: 0.98,
@@ -829,6 +1842,7 @@ function sceneryInstance(
     }
   }
   if (kind === 'park') {
+    if (!hasEnvironmentClearance) return null
     return {
       ...base,
       archetypeId: SceneryArchetype.park,
@@ -868,6 +1882,191 @@ function sceneryInstance(
     }
   }
   return null
+}
+
+const FOREST_VEGETATION = [414, 415, 416, 417, 418, 419, 420, 421, 429, 430, 431] as const
+const ARID_VEGETATION = [424, 425, 426, 428] as const
+const WETLAND_VEGETATION = [418, 419, 422, 423, 427, 429, 431] as const
+const ALPINE_VEGETATION = [414, 415, 416, 424, 428, 430] as const
+const COAST_VEGETATION = [422, 423, 426, 427, 429] as const
+const MEADOW_VEGETATION = [418, 419, 421, 422, 427, 429, 431] as const
+const BOREAL_VEGETATION = [414, 415, 416, 420, 428, 430] as const
+const SCRUBLAND_VEGETATION = [424, 425, 426, 427, 428, 431] as const
+const FOREST_DETAILS = [403, 407, 408, 411, 412, 413] as const
+const ARID_DETAILS = [402, 404, 406, 413] as const
+const WETLAND_DETAILS = [403, 409, 410, 412] as const
+const ALPINE_DETAILS = [404, 405, 407, 413] as const
+const COAST_DETAILS = [401, 404, 409, 410, 412] as const
+const MEADOW_DETAILS = [403, 408, 409, 411, 412] as const
+const BOREAL_DETAILS = [403, 404, 407, 408, 413] as const
+const SCRUBLAND_DETAILS = [402, 404, 406, 411, 413] as const
+
+/** @internal Deterministic biome palette used by chunk projection and focused tests. */
+export function vegetationFamilyForBiome(biome: number): readonly number[] {
+  switch (biome) {
+    case RenderBiome.forest: return FOREST_VEGETATION
+    case RenderBiome.arid: return ARID_VEGETATION
+    case RenderBiome.wetland: return WETLAND_VEGETATION
+    case RenderBiome.alpine: return ALPINE_VEGETATION
+    case RenderBiome.coast: return COAST_VEGETATION
+    case RenderBiome.meadow: return MEADOW_VEGETATION
+    case RenderBiome.boreal: return BOREAL_VEGETATION
+    case RenderBiome.scrubland: return SCRUBLAND_VEGETATION
+    default:
+      return AUTHORED_VEGETATION_ARCHETYPES
+  }
+}
+
+/** @internal Deterministic ground-detail palette used by chunk projection and focused tests. */
+export function terrainFamilyForBiome(biome: number): readonly number[] {
+  switch (biome) {
+    case RenderBiome.forest: return FOREST_DETAILS
+    case RenderBiome.arid: return ARID_DETAILS
+    case RenderBiome.wetland: return WETLAND_DETAILS
+    case RenderBiome.alpine: return ALPINE_DETAILS
+    case RenderBiome.coast: return COAST_DETAILS
+    case RenderBiome.meadow: return MEADOW_DETAILS
+    case RenderBiome.boreal: return BOREAL_DETAILS
+    case RenderBiome.scrubland: return SCRUBLAND_DETAILS
+    default: return AUTHORED_TERRAIN_ARCHETYPES
+  }
+}
+
+/** Thresholds are out of 1024 stable hash values; no viewport state affects density. */
+export function biomeVegetationThreshold(biome: number): number {
+  if (biome === RenderBiome.forest) return 310
+  if (biome === RenderBiome.wetland) return 138
+  if (biome === RenderBiome.boreal) return 265
+  if (biome === RenderBiome.meadow) return 112
+  if (biome === RenderBiome.scrubland) return 54
+  return 0
+}
+
+export function biomeDetailThreshold(biome: number): number {
+  if (biome === RenderBiome.forest) return 52
+  if (biome === RenderBiome.wetland) return 38
+  if (biome === RenderBiome.alpine) return 62
+  if (biome === RenderBiome.arid) return 46
+  if (biome === RenderBiome.coast) return 35
+  if (biome === RenderBiome.meadow) return 48
+  if (biome === RenderBiome.boreal) return 44
+  if (biome === RenderBiome.scrubland) return 55
+  return 18
+}
+
+/** Smooth deterministic density field: broad patches, soft edges and clearings. */
+export function naturalPatchDensity(seed: number, x: number, y: number, biome: number): number {
+  if (biome !== RenderBiome.forest && biome !== RenderBiome.wetland &&
+    biome !== RenderBiome.boreal && biome !== RenderBiome.meadow &&
+    biome !== RenderBiome.scrubland) return 0
+  const broad = valueNoise(seed ^ 0x6a09_e667, x / 23, y / 23)
+  const local = valueNoise(seed ^ 0xbb67_ae85, x / 8, y / 8)
+  const combined = broad * 0.68 + local * 0.32
+  const biomeBias = biome === RenderBiome.forest ? 0.12
+    : biome === RenderBiome.boreal ? 0.04
+      : biome === RenderBiome.meadow ? -0.18
+        : biome === RenderBiome.scrubland ? -0.24 : -0.08
+  // Smoothstep turns the middle of the field into recognizable forest edges
+  // while preserving occasional enclosed clearings.
+  const edge = smooth01((combined + biomeBias - 0.34) / 0.48)
+  return edge * edge * (3 - 2 * edge) * 1.32
+}
+
+/**
+ * One stable jittered candidate per tile with local conflict rejection. This
+ * is a compact Poisson-like sampler: it avoids rows and near-collisions while
+ * requiring no retained point set or viewport-dependent generation.
+ */
+export function acceptsNaturalSpacing(seed: number, x: number, y: number): boolean {
+  const point = naturalJitter(seed, x, y)
+  const priority = coordinateHash(seed ^ 0x510e_527f, x, y)
+  for (let oy = -1; oy <= 1; oy++) {
+    for (let ox = -1; ox <= 1; ox++) {
+      if (ox === 0 && oy === 0) continue
+      const other = naturalJitter(seed, x + ox, y + oy)
+      const dx = ox + other.x - point.x
+      const dy = oy + other.y - point.y
+      if (dx * dx + dy * dy >= 0.62 * 0.62) continue
+      const otherPriority = coordinateHash(seed ^ 0x510e_527f, x + ox, y + oy)
+      if (otherPriority > priority || (otherPriority === priority && (oy < 0 || (oy === 0 && ox < 0)))) {
+        return false
+      }
+    }
+  }
+  return true
+}
+
+function acceptsGroundDetailSpacing(seed: number, x: number, y: number): boolean {
+  return acceptsNaturalSpacing(seed ^ 0xa54f_f53a, x, y)
+}
+
+function naturalJitter(seed: number, x: number, y: number): { x: number; y: number } {
+  const hash = coordinateHash(seed ^ 0x1f83_d9ab, x, y)
+  return {
+    x: (hashUnit(hash) - 0.5) * 0.42,
+    y: (hashUnit(hash ^ 0x5be0_cd19) - 0.5) * 0.42,
+  }
+}
+
+function naturalSpeciesIndex(seed: number, x: number, y: number, biome: number, count: number): number {
+  const grove = coordinateHash(seed ^ Math.imul(biome + 1, 0x45d9_f3b), Math.floor(x / 6), Math.floor(y / 6))
+  const local = coordinateHash(seed ^ 0x243f_6a88, x, y)
+  // Most trees follow their grove's dominant family; roughly one quarter are
+  // stable edge/understory variants so stands do not become monocultures.
+  return (local & 3) === 0 ? local % count : grove % count
+}
+
+function selectNaturalGroundDetail(
+  details: readonly number[],
+  seed: number,
+  x: number,
+  y: number,
+  biome: number,
+): number {
+  const hash = coordinateHash(seed ^ 0x3c6e_f372, x, y)
+  const rockChance = biome === RenderBiome.alpine ? 0.16 : biome === RenderBiome.arid ? 0.07 : 0.018
+  const rocks = details.filter(isRockDetail)
+  const soft = details.filter(detail => !isRockDetail(detail))
+  if (rocks.length > 0 && hashUnit(hash ^ 0x9b05_688c) < rockChance) return rocks[hash % rocks.length]!
+  const palette = soft.length > 0 ? soft : details
+  return palette[hash % palette.length]!
+}
+
+/** @internal exported for focused density/rock-budget tests. */
+export function isRockDetail(archetypeId: number): boolean {
+  return archetypeId === SceneryArchetype.groundRock ||
+    archetypeId === SceneryArchetype.forestRocky ||
+    archetypeId === AuthoredSceneryArchetype.pebbleGroup ||
+    archetypeId === AuthoredSceneryArchetype.graniteOutcrop ||
+    archetypeId === AuthoredSceneryArchetype.sandstoneOutcrop ||
+    archetypeId === AuthoredSceneryArchetype.hillBoulders
+}
+
+function valueNoise(seed: number, x: number, y: number): number {
+  const x0 = Math.floor(x)
+  const y0 = Math.floor(y)
+  const tx = smooth01(x - x0)
+  const ty = smooth01(y - y0)
+  const nw = hashUnit(coordinateHash(seed, x0, y0))
+  const ne = hashUnit(coordinateHash(seed, x0 + 1, y0))
+  const sw = hashUnit(coordinateHash(seed, x0, y0 + 1))
+  const se = hashUnit(coordinateHash(seed, x0 + 1, y0 + 1))
+  const north = nw + (ne - nw) * tx
+  const south = sw + (se - sw) * tx
+  return north + (south - north) * ty
+}
+
+function coordinateHash(seed: number, x: number, y: number): number {
+  return mix32(seed ^ Math.imul(x, 0x1e35_a7bd) ^ Math.imul(y, 0x94d0_49bb))
+}
+
+function hashUnit(hash: number): number {
+  return (hash >>> 0) / 0x1_0000_0000
+}
+
+function smooth01(value: number): number {
+  const t = Math.max(0, Math.min(1, value))
+  return t * t * (3 - 2 * t)
 }
 
 function lakeEdgeYaw(neighborMask: number): number {
@@ -915,6 +2114,24 @@ export function facilityArchetypeFor(
 function constructionScale(progress: number, target: number): number {
   if (target <= 0 || progress >= target) return 1
   return Math.max(0.08, Math.min(1, progress / target))
+}
+
+/**
+ * Approximate finished building height in world units, used only to size
+ * tower cranes above a construction site. Mirrors the kit height ratios.
+ */
+function facilityHeightHint(kind: string, level: number): number {
+  const base =
+    kind === 'hq_l' ? 4.0 :
+    kind === 'hq_m' ? 2.2 :
+    kind === 'hq' || kind === 'office' ? 0.9 :
+    kind === 'dc_l' ? 1.35 :
+    kind === 'dc_m' ? 1.1 :
+    kind === 'dc' ? 0.9 :
+    kind === 'nuclear' || kind === 'fab' ? 0.62 :
+    kind === 'lab' ? 0.5 :
+    0.55
+  return base * (1 + Math.max(0, level) * 0.1)
 }
 
 function stableStringId(value: string): number {

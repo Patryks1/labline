@@ -39,6 +39,16 @@ function deterministicProjection(state: ReturnType<typeof spectatorSeed>) {
       valuation: rival.finance?.valuation ?? 0,
       models: rival.models.map((model) => [model.id, model.capability, model.release]),
       debt: rival.finance?.debtOutstanding ?? 0,
+      comeback: rival.financialComeback
+        ? {
+            episode: rival.financialComeback.distressEpisode,
+            attempted: rival.financialComeback.attemptedEpisode,
+            cooldown: rival.financialComeback.cooldownUntilDay,
+            status: rival.financialComeback.status,
+            modelId: rival.financialComeback.modelId,
+            releaseDay: rival.financialComeback.releaseDay,
+          }
+        : null,
     })),
     market: state.lastMarket,
     progression: state.progression,
@@ -66,8 +76,17 @@ describe('decade simulation replay', () => {
       expect(deterministicProjection(first)).toEqual(deterministicProjection(second))
       expect(first.day).toBe(4_001)
       expect(first.rivals).toHaveLength(5)
-      expect(finalDemand).toBeGreaterThanOrEqual(initialDemand * 4)
-      expect(finalDemand).toBeLessThanOrEqual(initialDemand * 12.000001)
+      const userMin =
+        initial.industryDataPack.demand.reportYearUserMinMultiplier ?? 1.5
+      const userMax =
+        initial.industryDataPack.demand.reportYearUserMaxMultiplier ?? 3
+      const taskMax = initial.industryDataPack.demand.reportYearMaxMultiplier
+      // People adopting the product and work per adopter are separate curves:
+      // population never gets multiplied by the much larger task-growth rate.
+      expect(finalDemand).toBeGreaterThanOrEqual(initialDemand * userMin - 1)
+      expect(finalDemand).toBeLessThanOrEqual(initialDemand * userMax + 1)
+      expect(first.lastMarket.marketTaskIntensity ?? 1).toBeGreaterThan(1)
+      expect(first.lastMarket.marketTaskIntensity ?? 1).toBeLessThanOrEqual(taskMax)
       expect(first.financeHistory.length).toBeLessThanOrEqual(180)
       expect(first.alerts.length).toBeLessThanOrEqual(40)
       expect(first.news.length).toBeLessThanOrEqual(64)
@@ -77,6 +96,25 @@ describe('decade simulation replay', () => {
       expect(first.benchmarkSeasons.length).toBeLessThanOrEqual(64)
       expect(first.financeMonthlyHistory.length).toBeLessThanOrEqual(600)
       expect(first.externalities?.incidents.length ?? 0).toBeLessThanOrEqual(160)
+      const comebackRounds = first.rivals.flatMap((rival) =>
+        (rival.capital?.fundingRounds ?? []).filter(
+          (round) => round.label === 'Emergency restructure',
+        ),
+      )
+      expect(comebackRounds.length).toBeLessThanOrEqual(
+        first.rivals.length * (1 + Math.ceil(4_000 / 720)),
+      )
+      for (const rival of first.rivals) {
+        const comeback = rival.financialComeback
+        if (!comeback) continue
+        expect(comeback.attemptedEpisode ?? 0).toBeLessThanOrEqual(
+          comeback.distressEpisode,
+        )
+        expect(Number.isFinite(comeback.cooldownUntilDay)).toBe(true)
+        expect(
+          comeback.releaseDay == null || Number.isFinite(comeback.releaseDay),
+        ).toBe(true)
+      }
       expect(
         first.rivals.reduce(
           (sum, rival) => sum + (rival.data?.assets.length ?? 0),

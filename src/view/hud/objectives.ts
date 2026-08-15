@@ -1,6 +1,7 @@
 import type { BuildableKind, PanelId, SimState } from '../../sim/types'
 import { computeSnapshot } from '../../sim/systems/compute'
-import { isDcAnchor, isDcKind } from '../../sim/systems/map'
+import { isDcAnchor, isDcKind, isHqAnchor, isHqKind } from '../../sim/systems/map'
+import { playerHqStaffCap, playerStaff, staffTotal } from '../../sim/systems/staff'
 import { facilityAnchorTiles } from '../../sim/systems/worldAccess'
 import { money } from './format'
 
@@ -15,6 +16,15 @@ export interface Objective {
   panel: PanelId
   actionLabel: string
   buildKind?: BuildableKind
+}
+
+function playerHasCompletedHq(state: SimState): boolean {
+  return facilityAnchorTiles(state, { ownerId: 'player' }).some(
+    (tile) =>
+      isHqKind(tile.kind) &&
+      isHqAnchor(tile) &&
+      tile.buildingProgress >= tile.buildingTarget,
+  )
 }
 
 export function buildObjectives(state: SimState, includeGuidance = true): Objective[] {
@@ -44,6 +54,9 @@ export function buildObjectives(state: SimState, includeGuidance = true): Object
   const activeCloudPf = state.computeContracts
     .filter((contract) => contract.status === 'active' && contract.buyerLabId === state.playerLabId)
     .reduce((sum, contract) => sum + contract.pf, 0)
+  const hasHq = playerHasCompletedHq(state)
+  const researchers = playerStaff(state).researcher ?? 0
+  const seats = playerHqStaffCap(state)
 
   if (state.player.finance.runwayDays < 30) {
     objectives.push({
@@ -96,7 +109,28 @@ export function buildObjectives(state: SimState, includeGuidance = true): Object
   }
 
   if (includeGuidance) {
-    if (activeCloudPf <= 0 && publicModels.length === 0) {
+    if (!hasHq || state.player.starterHqGrant) {
+      objectives.push({
+        id: 'place-hq',
+        title: 'Place your free HQ',
+        description: 'Claim an in-city lot with the starter grant — desks unlock hiring.',
+        progress: state.player.starterHqGrant ? 'Grant ready · $0' : 'No HQ online',
+        severity: 'info',
+        panel: 'build',
+        buildKind: 'hq',
+        actionLabel: 'Place HQ',
+      })
+    } else if (researchers < 1) {
+      objectives.push({
+        id: 'hire-researchers',
+        title: 'Hire researchers',
+        description: 'Staff the HQ from the city talent pool before research or training.',
+        progress: `${researchers} researchers · ${seats} seats · ${staffTotal(playerStaff(state))} hired`,
+        severity: 'info',
+        panel: 'org',
+        actionLabel: 'Open hiring',
+      })
+    } else if (activeCloudPf <= 0 && publicModels.length === 0) {
       objectives.push({
         id: 'secure-cloud',
         title: 'Secure launch compute',

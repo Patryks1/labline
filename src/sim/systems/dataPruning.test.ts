@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
 import type { SimState } from '../types'
+import { createDataManifest } from './dataAssets'
 import {
   enqueueAllDataPrunes,
   enqueueDataPrune,
@@ -24,6 +25,13 @@ function game(): SimState {
     ...state,
     player: {
       ...state.player,
+      // Prune jobs need researchers; HQ-first starts with an empty headcount.
+      staff: {
+        researcher: 3,
+        data_processor: state.player.staff?.data_processor ?? 0,
+        engineer: state.player.staff?.engineer ?? 0,
+        ops: state.player.staff?.ops ?? 0,
+      },
       allocation: { training: 0.1, inference: 0.1, research: 0.8 },
     },
     computeLeases: [
@@ -103,6 +111,11 @@ describe('low-quality data pruning', () => {
     const beforeProcessed = beforeStock.processed
     const beforeQuality = beforeStock.quality
     const beforeCash = state.player.cash
+    const beforeAssetCode = ensureLabData(state).assets.reduce(
+      (sum, asset) =>
+        sum + asset.volumeMTok * Math.max(0, asset.domainWeights.code ?? 0),
+      0,
+    )
 
     state = enqueueDataPrune(state, 'code')
     const queued = ensureLabData(state).pruneQueue[0]
@@ -119,6 +132,32 @@ describe('low-quality data pruning', () => {
     expect(afterData.stocks.code.processed).toBeLessThan(beforeProcessed)
     expect(afterData.stocks.code.quality).toBeGreaterThan(beforeQuality)
     expect(state.player.cash).toBeLessThan(beforeCash)
+
+    const afterAssetCode = afterData.assets.reduce(
+      (sum, asset) =>
+        sum + asset.volumeMTok * Math.max(0, asset.domainWeights.code ?? 0),
+      0,
+    )
+    expect(beforeAssetCode - afterAssetCode).toBeCloseTo(
+      beforeProcessed - afterData.stocks.code.processed,
+      8,
+    )
+    expect(afterAssetCode).toBeLessThanOrEqual(
+      afterData.stocks.code.processed + 1e-8,
+    )
+
+    const { manifest } = createDataManifest({
+      data: afterData,
+      consumed: { code: beforeProcessed },
+      totalMTok: beforeProcessed,
+      day: state.day,
+      seed: state.seed,
+      runId: 'post-prune-integrity',
+    })
+    expect(manifest.uniqueMTok).toBeLessThanOrEqual(
+      afterData.stocks.code.processed + 1e-8,
+    )
+    expect(manifest.repeatedMTok).toBeGreaterThan(0)
   })
 
   it('can preview and queue every eligible domain in one action', () => {
@@ -130,5 +169,20 @@ describe('low-quality data pruning', () => {
     expect(estimate.domains.length).toBeGreaterThan(1)
     expect(ensureLabData(next).pruneQueue.map((job) => job.domain)).toEqual(estimate.domains)
     expect(researchPoolForTech(next)).toBeLessThan(1)
+  })
+
+  it('preserves a negative company ledger across consecutive unaffordable prune days', () => {
+    const queued = enqueueDataPrune(game(), 'code')
+    let state: SimState = {
+      ...queued,
+      player: { ...queued.player, cash: -25_000 },
+    }
+    const initialQueue = ensureLabData(state).pruneQueue
+    state = tickData({ ...state, day: state.day + 1 })
+    expect(state.player.cash).toBe(-25_000)
+    expect(ensureLabData(state).pruneQueue).toEqual(initialQueue)
+    state = tickData({ ...state, day: state.day + 1 })
+    expect(state.player.cash).toBe(-25_000)
+    expect(ensureLabData(state).pruneQueue).toEqual(initialQueue)
   })
 })

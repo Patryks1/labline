@@ -1,9 +1,31 @@
 import { ECONOMY } from '../balance/economy'
 import { STAFF_HIRE_COST, STAFF_ROLES, STAFF_WAGE_PER_DAY } from '../balance/staff'
-import type { Model, SimState, TileKind } from '../types'
-import { isBuildableKind, isHqAnchor } from './map'
+import type { CashDistressStage, Model, SimState, TileKind } from '../types'
+import { isBuildableKind, isDcKind, isHqAnchor } from './map'
 import { playerStaff } from './staff'
 import { facilityAnchorTiles, usesCompactWorld } from './worldAccess'
+import { dataCenterFacilityIds, facilityNav } from './facilityMarket'
+
+/** Cash-distress thresholds: warning stages between $0 and the bankruptcy floor. */
+export const CASH_DISTRESS_SEVERE = -100_000_000
+export const CASH_DISTRESS_FINAL = -250_000_000
+
+/**
+ * Cash-distress ladder. Cash keeps falling unclamped between stages — credit
+ * gets expensive and emergency funding may appear — until the bankruptcy
+ * floor ends the run.
+ */
+export function cashDistressStage(cash: number): CashDistressStage {
+  if (cash <= ECONOMY.victory.bankruptCash) return 'bankrupt'
+  if (cash < CASH_DISTRESS_FINAL) return 'final'
+  if (cash < CASH_DISTRESS_SEVERE) return 'severe'
+  if (cash < 0) return 'distressed'
+  return 'stable'
+}
+
+function formatCashM(n: number) {
+  return `-$${(Math.abs(n) / 1e6).toFixed(0)}M`
+}
 
 /**
  * How close the lab's best public model is to industry frontier (0–1).
@@ -63,11 +85,12 @@ export function modelIpValue(state: SimState): number {
 }
 
 /** Real estate + plant: halls, HQs, labs, power, fabs (completed + WIP). */
-export function buildingAssetValue(state: SimState): number {
+export function buildingAssetValue(state: SimState, includeDataCenters = true): number {
   let value = 0
   if (usesCompactWorld(state)) {
     state.map.world!.forEachFacility({ ownerId: 'player' }, (facility) => {
       if (!isBuildableKind(facility.kind as TileKind)) return
+      if (!includeDataCenters && isDcKind(facility.kind)) return
 
       const complete =
         facility.constructionTarget > 0
@@ -95,6 +118,7 @@ export function buildingAssetValue(state: SimState): number {
 
   for (const t of facilityAnchorTiles(state, { ownerId: 'player' })) {
     if (!isBuildableKind(t.kind)) continue
+    if (!includeDataCenters && isDcKind(t.kind)) continue
     // Multi-tile pads carry capex on anchor only
     if (t.campusRole === 'pad') continue
 
@@ -148,10 +172,10 @@ export function staffAssetValue(state: SimState): number {
 }
 
 /** Live silicon + ordered (at cost) fleet. */
-export function fleetAssetValue(state: SimState): number {
+export function fleetAssetValue(state: SimState, includeInstalledDataCenterRacks = true): number {
   let value = 0
   for (const r of state.player.rackFleet ?? []) {
-    if (r.status === 'live') value += r.paidEach * r.count * 0.58
+    if (r.status === 'live' && includeInstalledDataCenterRacks) value += r.paidEach * r.count * 0.58
     else if (r.status === 'ordered') value += r.paidEach * r.count * 0.85 // prepaid inventory
   }
   for (const inv of state.player.chips ?? []) {
@@ -189,7 +213,14 @@ export function valuationDrivers(state: SimState): ValuationDrivers {
   const annualizedNet = daily * 365
   const share = f.totalShare
   const brand = state.player.brandTrust / 50
-  const plantAndFleet = buildingAssetValue(state) + fleetAssetValue(state)
+  // Data centres use the same neutral NAV shown in acquisitions. Their live
+  // racks are already inside that NAV, so exclude the older fleet mark here.
+  const infrastructureNav = dataCenterFacilityIds(state, state.playerLabId)
+    .reduce((sum, facilityId) => sum + facilityNav(state, facilityId).total, 0)
+  const plantAndFleet =
+    buildingAssetValue(state, false) +
+    fleetAssetValue(state, false) +
+    infrastructureNav
   const talentAndResearch = staffAssetValue(state) + researchAssetValue(state)
   const debt =
     (state.player.loans ?? []).reduce((sum, loan) => sum + loan.remaining, 0) +
@@ -249,9 +280,47 @@ export function tickVictory(state: SimState): SimState {
   if (state.victory.outcome !== 'playing') return state
 
   const valuation = computeValuation(state)
-  const bestCap = state.player.models.reduce((m, x) => Math.max(m, x.capability), 0)
   const share = state.player.finance.totalShare
   const v = ECONOMY.victory
+  const overallServeRate = Math.max(
+    0,
+    Math.min(1, 1 - (state.lastMarket.unservedRatio ?? 1)),
+  )
+  const apiServeRate = Math.max(
+    0,
+    Math.min(1, state.lastMarket.apiServeFrac ?? overallServeRate),
+  )
+  const subServeRate = Math.max(
+    0,
+    Math.min(1, state.lastMarket.subServeFrac ?? overallServeRate),
+  )
+  const headroom =
+    state.lastMarket.capacityPf > 1e-12
+      ? Math.max(
+          0,
+          1 - state.lastMarket.demandPf / state.lastMarket.capacityPf,
+        )
+      : 0
+  const dominanceQualified =
+    share >= v.share &&
+    overallServeRate >= v.minServeRate &&
+    apiServeRate >= v.minPaidServeRate &&
+    subServeRate >= v.minPaidServeRate &&
+    headroom >= v.minHeadroom &&
+    state.player.finance.dayGrossProfit > 0
+  const priorDominanceDays = state.victory.dominanceQualifiedDays ?? 0
+  const alreadyCountedToday =
+    state.victory.lastDominanceQualifiedDay === state.day
+  const dominanceQualifiedDays = dominanceQualified
+    ? alreadyCountedToday
+      ? priorDominanceDays
+      : priorDominanceDays + 1
+    : 0
+  const victoryProgress = {
+    ...state.victory,
+    dominanceQualifiedDays,
+    lastDominanceQualifiedDay: dominanceQualified ? state.day : 0,
+  }
 
   let player = {
     ...state.player,
@@ -267,6 +336,29 @@ export function tickVictory(state: SimState): SimState {
     }
   }
 
+  // Surface cash-distress stages in state once per day (UI reads the same
+  // ladder via cashDistressStage).
+  const distress = cashDistressStage(player.cash)
+  const distressMessage =
+    distress === 'severe'
+      ? `Severe cash distress (${formatCashM(player.cash)}). Credit is expensive and terms are worsening — raise cash or cut burn.`
+      : distress === 'final'
+        ? `Final warning (${formatCashM(player.cash)}). At ${formatCashM(v.bankruptCash)} the company is forced into a fire sale.`
+        : null
+  const alerts =
+    distressMessage &&
+    !state.alerts.some((a) => a.id === `cash-distress-${distress}-${state.day}`)
+      ? [
+          {
+            id: `cash-distress-${distress}-${state.day}`,
+            day: state.day,
+            severity: 'danger' as const,
+            message: distressMessage,
+          },
+          ...state.alerts,
+        ].slice(0, 40)
+      : state.alerts
+
   const founderOwnership = (state.player.capital?.capTable ?? [])
     .filter((stake) => stake.kind === 'founder')
     .reduce((sum, stake) => sum + stake.ownership, 0)
@@ -275,94 +367,68 @@ export function tickVictory(state: SimState): SimState {
       ...state,
       player,
       financeHistory,
+      alerts,
       paused: true,
       progression: { ...state.progression, runPhase: 'failed' },
       victory: {
-        ...state.victory,
+        ...victoryProgress,
         outcome: 'lost',
         reason: `Founder ownership fell to ${(founderOwnership * 100).toFixed(1)}%. The company is no longer yours.`,
       },
     }
   }
 
-  // V4 decade campaigns use non-terminal milestone titles and the capital
-  // recovery ladder. Valuation remains live here for funding and reports.
-  if (state.config?.campaignRules) {
-    if (
-      state.player.capital?.restructuring.stage === 'bankruptcy' &&
-      player.cash < -20_000_000
-    ) {
-      return {
-        ...state,
-        player,
-        financeHistory,
-        paused: true,
-        progression: { ...state.progression, runPhase: 'failed' },
-        victory: {
-          ...state.victory,
-          outcome: 'lost',
-          reason: 'Restructuring failed and the company entered bankruptcy.',
-        },
-      }
-    }
-    return { ...state, player, financeHistory }
-  }
-
-  // loss: bankrupt
-  if (player.cash < v.bankruptCash) {
+  // loss: bankrupt (campaign + endless share the same cash floor) — checked
+  // after all daily financing and settlement, cash is never clamped above it
+  if (player.cash <= v.bankruptCash) {
     return {
       ...state,
       player,
       financeHistory,
+      alerts,
       paused: true,
+      ...(state.config?.campaignRules
+        ? { progression: { ...state.progression, runPhase: 'failed' as const } }
+        : {}),
       victory: {
-        ...state.victory,
+        ...victoryProgress,
         outcome: 'lost',
-        reason: 'Cash cratered. The board forces a fire sale.',
+        reason: state.config?.campaignRules
+          ? 'Restructuring failed and the company entered bankruptcy.'
+          : `Cash hit ${formatCashM(v.bankruptCash)}. The board forces a fire sale.`,
       },
     }
   }
 
-  // win conditions after min day
-  if (state.day >= v.minDay) {
-    if (share >= v.share && valuation >= v.valuation * 0.5) {
-      return {
-        ...state,
-        player,
-        financeHistory,
-        paused: true,
-        victory: {
-          ...state.victory,
-          outcome: 'won',
-          reason: `Market dominance — ${(share * 100).toFixed(0)}% share and a real business.`,
-        },
-      }
+  // V4 decade campaigns use non-terminal milestone titles. Valuation remains
+  // live here for funding and reports; skip classic win/soft-loss checks.
+  if (state.config?.campaignRules) {
+    return {
+      ...state,
+      player,
+      financeHistory,
+      alerts,
+      victory: victoryProgress,
     }
-    if (bestCap >= v.capability && valuation >= v.valuation * 0.35) {
-      return {
-        ...state,
-        player,
-        financeHistory,
-        paused: true,
-        victory: {
-          ...state.victory,
-          outcome: 'won',
-          reason: `Frontier milestone — capability ${bestCap.toFixed(0)} with a sustainable lab.`,
-        },
-      }
-    }
-    if (valuation >= v.valuation && share >= v.share * 0.55) {
-      return {
-        ...state,
-        player,
-        financeHistory,
-        paused: true,
-        victory: {
-          ...state.victory,
-          outcome: 'won',
-          reason: `Valuation moonshot — ${(valuation / 1e9).toFixed(1)}B paper wealth.`,
-        },
-      }
+  }
+
+  // Dominance is fulfilled demand sustained under an enterprise-grade SLO;
+  // valuation and a single frontier model remain milestones, not shortcuts.
+  if (
+    state.day >= v.minDay &&
+    dominanceQualifiedDays >= v.sustainDays
+  ) {
+    return {
+      ...state,
+      player,
+      financeHistory,
+      alerts,
+      paused: true,
+      victory: {
+        ...victoryProgress,
+        outcome: 'won',
+        reason: `Sustained market dominance — ${(share * 100).toFixed(0)}% fulfilled share for ${dominanceQualifiedDays} days with ${(headroom * 100).toFixed(0)}% capacity headroom.`,
+      },
     }
   }
 
@@ -372,14 +438,21 @@ export function tickVictory(state: SimState): SimState {
       ...state,
       player,
       financeHistory,
+      alerts,
       paused: true,
       victory: {
-        ...state.victory,
+        ...victoryProgress,
         outcome: 'lost',
         reason: 'Irrelevant. Rivals own the stack and you are out of runway.',
       },
     }
   }
 
-  return { ...state, player, financeHistory }
+  return {
+    ...state,
+    player,
+    financeHistory,
+    alerts,
+    victory: victoryProgress,
+  }
 }

@@ -13,6 +13,7 @@ import type {
   SubPlan,
 } from '../types'
 import { planAllowanceMTokPerMonth } from './plans'
+import { blendApiPrice, splitBlendedApiPrice } from '../balance/pricing'
 
 export const MAX_PROMOTED_PRODUCT_OFFERS = 6
 
@@ -59,10 +60,10 @@ const DEMAND_PROFILES: Record<SegmentId, DemandProfile> = {
     switchingFriction: 0.08,
     domainWeights: { language: 0.55, reasoning: 0.15, code: 0.05, vision: 0.1, audio: 0.05, tools: 0.1 },
     productQualityWeights: { steerability: 0.3, safety: 0.2, reliability: 0.3, factuality: 0.1, robustness: 0.1 },
-    preferredChannels: ['free_assistant', 'payg_api'],
+    preferredChannels: ['payg_api', 'free_assistant'],
     referencePrice: { value: 0, unit: 'monthly_usd' },
     targetLatencyMs: 1_800,
-    outsideOptionUtility: 4.5,
+    outsideOptionUtility: 4.2,
   },
   consumer: {
     priceSensitivity: 1.25,
@@ -75,44 +76,44 @@ const DEMAND_PROFILES: Record<SegmentId, DemandProfile> = {
     outsideOptionUtility: 3.5,
   },
   indie_api: {
-    priceSensitivity: 1.2,
-    switchingFriction: 0.14,
+    priceSensitivity: 1.15,
+    switchingFriction: 0.12,
     domainWeights: { code: 0.42, tools: 0.24, reasoning: 0.18, language: 0.1, math: 0.06 },
     productQualityWeights: { reliability: 0.3, steerability: 0.23, robustness: 0.22, factuality: 0.15, safety: 0.1 },
     preferredChannels: ['payg_api', 'creator_developer'],
     referencePrice: { value: 2, unit: 'usd_per_mtok' },
     targetLatencyMs: 800,
-    outsideOptionUtility: 4.2,
+    outsideOptionUtility: 3.9,
   },
   startup_api: {
-    priceSensitivity: 0.9,
-    switchingFriction: 0.28,
+    priceSensitivity: 0.85,
+    switchingFriction: 0.24,
     domainWeights: { code: 0.32, reasoning: 0.25, tools: 0.25, language: 0.1, math: 0.08 },
     productQualityWeights: { reliability: 0.34, robustness: 0.23, factuality: 0.18, steerability: 0.15, safety: 0.1 },
     preferredChannels: ['payg_api', 'reserved_throughput_api'],
     referencePrice: { value: 5, unit: 'usd_per_mtok' },
     targetLatencyMs: 600,
-    outsideOptionUtility: 3.2,
+    outsideOptionUtility: 2.9,
   },
   science: {
-    priceSensitivity: 0.6,
-    switchingFriction: 0.68,
+    priceSensitivity: 0.55,
+    switchingFriction: 0.6,
     domainWeights: { science: 0.38, math: 0.27, reasoning: 0.2, code: 0.1, tools: 0.05 },
     productQualityWeights: { factuality: 0.35, reliability: 0.25, robustness: 0.2, steerability: 0.1, safety: 0.1 },
-    preferredChannels: ['reserved_throughput_api', 'payg_api', 'enterprise_dedicated'],
+    preferredChannels: ['payg_api', 'reserved_throughput_api', 'enterprise_dedicated'],
     referencePrice: { value: 12, unit: 'usd_per_mtok' },
     targetLatencyMs: 2_500,
-    outsideOptionUtility: 3.8,
+    outsideOptionUtility: 3.5,
   },
   creative: {
-    priceSensitivity: 1,
-    switchingFriction: 0.2,
+    priceSensitivity: 0.95,
+    switchingFriction: 0.18,
     domainWeights: { vision: 0.35, video: 0.24, audio: 0.14, language: 0.12, reasoning: 0.08, tools: 0.07 },
     productQualityWeights: { steerability: 0.34, reliability: 0.2, robustness: 0.18, safety: 0.15, factuality: 0.13 },
-    preferredChannels: ['creator_developer', 'payg_api'],
+    preferredChannels: ['payg_api', 'creator_developer'],
     referencePrice: { value: 8, unit: 'usd_per_mtok' },
     targetLatencyMs: 3_000,
-    outsideOptionUtility: 3.6,
+    outsideOptionUtility: 3.3,
   },
   enterprise: {
     priceSensitivity: 0.5,
@@ -174,6 +175,7 @@ function planModels(state: SimState, plan: SubPlan, fallback: Model | null): Mod
 
 function modelApiRates(state: SimState, model: Model): { input: number; output: number } {
   const pricing = state.player.pricing
+  const pricingSplit = splitBlendedApiPrice(pricing.apiPricePerMTok)
   if (model.apiPriceInPerMTok != null && model.apiPriceOutPerMTok != null) {
     return {
       input: Math.max(0, model.apiPriceInPerMTok),
@@ -188,7 +190,7 @@ function modelApiRates(state: SimState, model: Model): { input: number; output: 
           model.suggestedApiPriceIn ??
           model.costApiPriceIn ??
           pricing.apiPriceInPerMTok ??
-          pricing.apiPricePerMTok * 0.35,
+          pricingSplit.priceIn,
       ),
       output: Math.max(
         0,
@@ -196,14 +198,15 @@ function modelApiRates(state: SimState, model: Model): { input: number; output: 
           model.suggestedApiPriceOut ??
           model.costApiPriceOut ??
           pricing.apiPriceOutPerMTok ??
-          pricing.apiPricePerMTok * 1.25,
+          pricingSplit.priceOut,
       ),
     }
   }
   if (model.apiPricePerMTok != null) {
+    const split = splitBlendedApiPrice(model.apiPricePerMTok)
     return {
-      input: Math.max(0, model.apiPricePerMTok * 0.35),
-      output: Math.max(0, model.apiPricePerMTok * 1.25),
+      input: split.priceIn,
+      output: split.priceOut,
     }
   }
   if (model.suggestedApiPriceIn != null && model.suggestedApiPriceOut != null) {
@@ -213,14 +216,15 @@ function modelApiRates(state: SimState, model: Model): { input: number; output: 
     }
   }
   if (model.suggestedApiPrice) {
+    const split = splitBlendedApiPrice(model.suggestedApiPrice)
     return {
-      input: Math.max(0, model.suggestedApiPrice * 0.35),
-      output: Math.max(0, model.suggestedApiPrice * 1.25),
+      input: split.priceIn,
+      output: split.priceOut,
     }
   }
   return {
-    input: Math.max(0, pricing.apiPriceInPerMTok ?? pricing.apiPricePerMTok * 0.35),
-    output: Math.max(0, pricing.apiPriceOutPerMTok ?? pricing.apiPricePerMTok * 1.25),
+    input: Math.max(0, pricing.apiPriceInPerMTok ?? pricingSplit.priceIn),
+    output: Math.max(0, pricing.apiPriceOutPerMTok ?? pricingSplit.priceOut),
   }
 }
 
@@ -405,7 +409,7 @@ export function deriveProductPortfolio(state: SimState): ProductPortfolio {
 
   if (apiModel) {
     const rates = modelApiRates(state, apiModel)
-    const blended = rates.input * 0.75 + rates.output * 0.25
+    const blended = blendApiPrice(rates.input, rates.output)
     candidates.push(
       productOffer({
         state,
@@ -456,7 +460,10 @@ export function deriveProductPortfolio(state: SimState): ProductPortfolio {
       ),
     )[0]!
     const enterpriseRates = modelApiRates(state, enterpriseModel)
-    const enterpriseBlended = enterpriseRates.input * 0.75 + enterpriseRates.output * 0.25
+    const enterpriseBlended = blendApiPrice(
+      enterpriseRates.input,
+      enterpriseRates.output,
+    )
     candidates.push(
       productOffer({
         state,

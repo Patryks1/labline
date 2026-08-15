@@ -1,17 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
-import { computeSnapshot } from './compute'
-import {
-  progressRivalTrainingJob,
-} from './rivals'
-import { enforceMinTrainingDuration, MIN_TRAINING_DAYS } from './trainingDuration'
+import { minimumTrainingCalendarDays } from './trainingDuration'
 import {
   appendLossPoint,
+  canReleaseTrainingJob,
+  playerTrainingResourcePlan,
   startTraining,
   tickTraining,
   trainingLoss,
 } from './training'
-import type { RivalTrainJob, TrainingJob } from '../types'
+import { fundedTrainingMaturity } from '../balance/training'
+import type { TrainingJob } from '../types'
+import { mwPerPf } from './computeMarket'
+import { computeSnapshot } from './compute'
 
 function richState(seed: number) {
   const state = createGame(seed)
@@ -26,13 +27,84 @@ function richState(seed: number) {
 }
 
 describe('minimum training duration', () => {
-  it('scales work so estimated duration is at least 30 days', () => {
-    expect(enforceMinTrainingDuration(100, 20)).toBe(600)
-    expect(enforceMinTrainingDuration(900, 20)).toBe(900)
-    expect(enforceMinTrainingDuration(10, 0)).toBe(MIN_TRAINING_DAYS)
+  it('derives a bounded calendar gate from scale, family, and mode', () => {
+    const small = minimumTrainingCalendarDays({ paramsB: 1, family: 'dense' })
+    const frontier = minimumTrainingCalendarDays({ paramsB: 405, family: 'dense' })
+    const video = minimumTrainingCalendarDays({ paramsB: 405, family: 'video' })
+    const distill = minimumTrainingCalendarDays({ paramsB: 405, family: 'dense', mode: 'distill' })
+    expect(frontier).toBeGreaterThan(small)
+    expect(video).toBeGreaterThan(frontier)
+    expect(distill).toBeLessThan(frontier)
+    expect(small).toBeGreaterThanOrEqual(18)
+    expect(frontier).toBeGreaterThanOrEqual(49)
   })
 
-  it('never finishes a started player job before day 30 even with massive compute', () => {
+  it('never compresses any training mode below ten calendar days', () => {
+    for (const mode of ['pretrain', 'continue', 'distill'] as const) {
+      expect(minimumTrainingCalendarDays({ paramsB: 0.001, family: 'dense', mode })).toBeGreaterThanOrEqual(10)
+    }
+  })
+
+  it('keeps PF work and upfront cash independent of launch-time pool size', () => {
+    const fast = startTraining(richState(1201), { name: 'PoolInvariant', family: 'dense', paramsB: 1 })
+    const slowBase = richState(1201)
+    const slow = startTraining({
+      ...slowBase,
+      player: { ...slowBase.player, allocation: { training: 0.05, inference: 0.9, research: 0.05 } },
+    }, { name: 'PoolInvariant', family: 'dense', paramsB: 1 })
+    expect(slow.player.trainingJob!.targetPfDays).toBeCloseTo(fast.player.trainingJob!.targetPfDays)
+    expect(slow.player.trainingJob!.cashSunk).toBe(fast.player.trainingJob!.cashSunk)
+  })
+
+  it('treats priority zero as an allocated-compute pause', () => {
+    const state = startTraining(richState(1204), {
+      name: 'Zero priority',
+      family: 'dense',
+      paramsB: 1,
+      computePriority: 0,
+    })
+    const job = state.player.trainingJob!
+    expect(job.computePriority).toBe(0)
+    expect(playerTrainingResourcePlan(state).jobs[job.id]!.effectivePf).toBe(0)
+    expect(tickTraining(state).player.trainingJob!.progressPfDays).toBe(0)
+    expect(computeSnapshot(state).mwBreakdown.training).toBe(0)
+  })
+
+  it('continues recurring training burn and allocated PF while cash is negative', () => {
+    const started = startTraining(richState(1205), {
+      name: 'Debt financed run',
+      family: 'dense',
+      paramsB: 1,
+      computePriority: 100,
+    })
+    const job = started.player.trainingJob!
+    const dailyPf = playerTrainingResourcePlan(started).jobs[job.id]!.effectivePf
+    const running = {
+      ...job,
+      targetPfDays: dailyPf * 100,
+      recommendedPfDays: dailyPf * 100,
+      campaignMilestonesReached: [],
+    }
+    let state = {
+      ...started,
+      player: {
+        ...started.player,
+        cash: -1,
+        trainingJob: running,
+        trainingJobs: [running],
+      },
+    }
+    const first = tickTraining(state)
+    const second = tickTraining({ ...first, day: first.day + 1 })
+    expect(first.player.cash).toBeLessThan(state.player.cash)
+    expect(second.player.cash).toBeLessThan(first.player.cash)
+    expect(first.player.trainingJob!.progressPfDays).toBeGreaterThan(0)
+    expect(second.player.trainingJob!.progressPfDays).toBeGreaterThan(
+      first.player.trainingJob!.progressPfDays,
+    )
+  })
+
+  it('keeps investing allocated PF after the releasable target is complete', () => {
     let state = startTraining(richState(1201), {
       name: 'FastTrain',
       family: 'dense',
@@ -40,61 +112,104 @@ describe('minimum training duration', () => {
       computePriority: 100,
     })
     const job = state.player.trainingJob!
-    const daily = computeSnapshot(state).pools.training
-    expect(job.targetPfDays).toBeGreaterThanOrEqual(daily * MIN_TRAINING_DAYS * 0.5)
-    expect(job.targetPfDays / Math.max(1e-9, daily)).toBeGreaterThanOrEqual(MIN_TRAINING_DAYS - 1e-6)
-
-    for (let day = 0; day < MIN_TRAINING_DAYS - 1; day++) {
-      const next = tickTraining(state)
-      state = {
-        ...next,
-        day: state.day + 1,
-        player: { ...next.player, cash: 5_000_000_000 },
-      }
-      expect(state.player.trainingJob).not.toBeNull()
-      expect(state.player.trainingJob!.progressPfDays).toBeLessThan(
-        state.player.trainingJob!.targetPfDays,
-      )
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        trainingJob: { ...job, progressPfDays: job.targetPfDays },
+        trainingJobs: [{ ...job, progressPfDays: job.targetPfDays }],
+      },
     }
+
+    const allocatedPf =
+      playerTrainingResourcePlan(state).jobs[job.id]!.effectivePf
+    state = tickTraining(state)
+    expect(state.player.trainingJob!.daysElapsed).toBe(1)
+    expect(state.player.trainingJob!.progressPfDays).toBeCloseTo(
+      job.targetPfDays + allocatedPf,
+    )
+    expect(canReleaseTrainingJob(state.player.trainingJob!).ok).toBe(true)
+    expect(fundedTrainingMaturity(state.player.trainingJob!).extraSignal).toBeGreaterThan(0)
+    expect(state.player.trainingJob!.awaitingDecision).toBe(false)
+    expect(state.player.trainingJob!.daysRemaining).toBe(0)
   })
 
-  it('scales rival jobs so they also respect the 30-day floor', () => {
-    const dailyThroughput = 40
-    const rawTarget = 100
-    const scaled = enforceMinTrainingDuration(rawTarget, dailyThroughput)
-    expect(scaled).toBe(dailyThroughput * MIN_TRAINING_DAYS)
-
-    const job: RivalTrainJob = {
-      id: 'rt-test',
-      name: 'RivalFast',
+  it('stops post-target optimization when compute priority is zero', () => {
+    let state = startTraining(richState(1206), {
+      name: 'Target complete idle',
       family: 'dense',
       paramsB: 1,
-      targetPfDays: scaled,
-      progressPfDays: 0,
-      modalities: ['text'],
-      dataCoverage: 1,
-      dataQuality: 70,
-      includeSynthHQ: false,
-      includeSynthLQ: false,
-      synthLqShare: 0,
-      trainShare: 0.82,
-      totalMTok: 1_000,
-      cashBurnPerDay: 0,
-      cashSunk: 0,
+      computePriority: 0,
+    })
+    const job = state.player.trainingJob!
+    const complete = { ...job, progressPfDays: job.targetPfDays }
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        trainingJob: complete,
+        trainingJobs: [complete],
+      },
     }
 
-    let current = job
-    for (let day = 0; day < MIN_TRAINING_DAYS - 1; day++) {
-      current = progressRivalTrainingJob(current, dailyThroughput).job
-      expect(current.progressPfDays).toBeLessThan(current.targetPfDays)
+    const next = tickTraining(state)
+    expect(next.player.trainingJob!.progressPfDays).toBe(job.targetPfDays)
+    expect(next.player.trainingJob!.daysElapsed).toBe(0)
+    expect(next.player.cash).toBe(state.player.cash)
+  })
+
+  it('accumulates allocated-PF energy and recomputes live days remaining', () => {
+    let state = startTraining(richState(1202), {
+      name: 'MeteredTrain',
+      family: 'dense',
+      paramsB: 1,
+      computePriority: 100,
+    })
+    const started = state.player.trainingJob!
+    const firstAllocatedPf =
+      playerTrainingResourcePlan(state).jobs[started.id]!.effectivePf
+    expect(firstAllocatedPf).toBeGreaterThan(0)
+
+    // Keep the metering fixture below the first campaign checkpoint. Campaign
+    // decisions intentionally stop the run until the player intervenes.
+    const targetPfDays = firstAllocatedPf * 20
+    const meteredJob = {
+      ...started,
+      targetPfDays,
+      recommendedPfDays: targetPfDays,
+      minCalendarDays: 20,
+      daysRemaining: 20,
     }
-    current = progressRivalTrainingJob(current, dailyThroughput).job
-    expect(current.progressPfDays).toBeGreaterThanOrEqual(current.targetPfDays)
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        trainingJob: meteredJob,
+        trainingJobs: [meteredJob],
+      },
+    }
+
+    state = tickTraining(state)
+    const afterOne = state.player.trainingJob!
+    expect(afterOne.energyMwDays).toBeCloseTo(firstAllocatedPf * mwPerPf(), 10)
+    expect(afterOne.energyMWh).toBeCloseTo(firstAllocatedPf * mwPerPf() * 24, 10)
+    expect(afterOne.daysRemaining).toBeCloseTo(19, 10)
+
+    const secondAllocatedPf =
+      playerTrainingResourcePlan(state).jobs[started.id]!.effectivePf
+    state = tickTraining({ ...state, day: state.day + 1 })
+    const afterTwo = state.player.trainingJob!
+    expect(afterTwo.energyMwDays).toBeCloseTo(
+      (firstAllocatedPf + secondAllocatedPf) * mwPerPf(),
+      10,
+    )
+    expect(afterTwo.daysRemaining).toBeCloseTo(18, 10)
+    expect(afterTwo.daysRemaining!).toBeLessThan(afterOne.daysRemaining!)
   })
 })
 
 describe('training loss curve', () => {
-  const job: Pick<TrainingJob, 'id' | 'outcomeSeed' | 'targetParamsB'> = {
+  const job: Parameters<typeof trainingLoss>[0] = {
     id: 'loss-job',
     outcomeSeed: 4242,
     targetParamsB: 8,
@@ -113,6 +228,14 @@ describe('training loss curve', () => {
       trainingLoss(job, 'base', 0.85, 85) - trainingLoss(job, 'base', 0.95, 95)
     expect(earlyDelta).toBeGreaterThan(lateDelta * 2)
     expect(late).toBeGreaterThanOrEqual(1.15 * 0.92)
+  })
+
+  it('shows bounded post-target loss improvement instead of a flat line', () => {
+    const target = trainingLoss(job, 'base', 1, 100)
+    const extra = trainingLoss(job, 'base', 2, 100)
+    const extreme = trainingLoss(job, 'base', 20, 100)
+    expect(extra).toBeLessThan(target)
+    expect(target - extreme).toBeLessThan(0.2)
   })
 
   it('records non-monotonic observed history with up-ticks while trending down', () => {

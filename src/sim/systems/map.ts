@@ -14,7 +14,7 @@ import type { GameConfig } from '../balance/gameConfig'
 import { defaultGameConfig } from '../balance/gameConfig'
 import { ECONOMY } from '../balance/economy'
 import { getChassis } from '../balance/racks'
-import { getRackSku } from '../balance/rackSkus'
+import { getChipDef } from '../balance/chips'
 import { generateProceduralMap } from './mapGen'
 import {
   commitWorldBatch,
@@ -29,9 +29,24 @@ import {
   usesCompactWorld,
 } from './worldAccess'
 import { tileCoords, tileId } from '../world/ids'
-import type { Facility } from '../world/types'
 import type { DynamicWorld } from '../world/dynamicWorld'
+import {
+  WORLD_GENERATOR_VERSION_V4,
+  WORLD_GENERATOR_VERSION_V5,
+  WORLD_GENERATOR_VERSION_V6,
+  WORLD_GENERATOR_VERSION_V7,
+  type Facility,
+  type TileId,
+} from '../world/types'
+import { urbanUseAt } from '../world/urbanInfill'
+import {
+  facilityTransportAccess,
+  transportLandValueMultiplier,
+  transportLogisticsOpexSurcharge,
+} from './transport'
 import { energyContractCapacityMw } from './energyAccounting'
+import { calculateFleetVariableOpex } from './fleetOperatingCosts'
+import { labHallEquipmentOpexDay } from './dataHallConstruction'
 
 export const BUILDABLE_KINDS: BuildableKind[] = [
   'dc',
@@ -62,16 +77,18 @@ export function isDcAnchor(t: { kind: string; campusRole?: string }): boolean {
   return t.campusRole !== 'pad'
 }
 
-/** Medium and hyperscale campuses double rack PF through denser fabric and cooling. */
+/**
+ * Hall size changes physical bay capacity, not the capability of identical
+ * silicon. Layout topology and utility headroom provide the operational
+ * multiplier; the shell itself must remain neutral.
+ */
 export function dataHallComputeMultiplier(t: {
   kind: string
   dcSize?: string
   campusRole?: string
 }): number {
-  if (!isDcAnchor(t)) return 1
-  return t.kind === 'dc_m' || t.kind === 'dc_l' || t.dcSize === 'medium' || t.dcSize === 'large'
-    ? 2
-    : 1
+  void t
+  return 1
 }
 
 type FacilityEnergyTotals = {
@@ -105,9 +122,49 @@ export function isHqKind(kind: string): boolean {
   return kind === 'hq' || kind === 'hq_m' || kind === 'hq_l' || kind === 'office'
 }
 
+/**
+ * Builds allowed on commercial_infill city parcels (HQ / office / research).
+ * Industrial plant, data halls, and utility-scale generation stay on greenfield.
+ */
+export function isUrbanInfillCompatible(kind: BuildableKind): boolean {
+  return isHqKind(kind) || kind === 'lab'
+}
+
+/** Zoning reason that blocks placing `kind` on one compact-world cell, if any. */
+function urbanZoningReason(
+  state: SimState,
+  x: number,
+  y: number,
+  kind: BuildableKind,
+): string | undefined {
+  if (!usesCompactWorld(state) || !state.map.world) return undefined
+  const id = compactTileIdAt(state, x, y)
+  if (id === undefined) return undefined
+  const use = urbanUseAt(state.map.world.staticWorld, id)
+  if (use === 'municipal') return 'Municipal utility parcels are not developable.'
+  if (use === 'park') return 'Cannot build on protected park land.'
+  if (use === 'infrastructure') return 'Cannot build on city infrastructure.'
+  if (use === 'commercial_infill' && !isUrbanInfillCompatible(kind)) {
+    return 'Commercial city parcels allow HQ, offices, and research labs only.'
+  }
+  return undefined
+}
+
 export function isHqAnchor(t: { kind: string; campusRole?: string }): boolean {
   if (!isHqKind(t.kind)) return false
   return t.campusRole !== 'pad'
+}
+
+/**
+ * Construction crews: every 3 completed player facilities add +1 build
+ * progress per day (cap +3), so an established org brings new hardware
+ * online much faster than a first-time builder.
+ */
+export function constructionCrewBonus(state: SimState): number {
+  const completed = facilityAnchorTiles(state, { ownerId: 'player' }).filter(
+    (t) => t.buildingTarget > 0 && t.buildingProgress >= t.buildingTarget,
+  ).length
+  return Math.min(3, Math.floor(completed / 3))
 }
 
 export function dcFootprint(kind: BuildableKind): { dx: number; dy: number }[] {
@@ -180,12 +237,12 @@ export const BUILD_DEFS: BuildDef[] = [
     label: 'DC · Small',
     blurb: '1-tile edge hall · 96 bays. Compact shell — good first site or edge POP.',
     cash: 118_000_000,
-    days: 180,
+    days: 45,
     rack: 96,
     opexPerDay: 125_000,
     upgradeCash: 68_000_000,
     upgradeRack: 48,
-    upgradeDays: 90,
+    upgradeDays: 22,
     footprint: [{ dx: 0, dy: 0 }],
     dcSize: 'small',
   },
@@ -194,12 +251,12 @@ export const BUILD_DEFS: BuildDef[] = [
     label: 'DC · Medium',
     blurb: '4-tile campus (2×2) · 288 bays (3× small). Mid-game density without a mega shell.',
     cash: 340_000_000,
-    days: 360,
+    days: 90,
     rack: 288,
     opexPerDay: 340_000,
     upgradeCash: 180_000_000,
     upgradeRack: 96,
-    upgradeDays: 150,
+    upgradeDays: 38,
     footprint: [
       { dx: 0, dy: 0 },
       { dx: 1, dy: 0 },
@@ -213,12 +270,12 @@ export const BUILD_DEFS: BuildDef[] = [
     label: 'DC · Large',
     blurb: '6-tile mega campus (3×2) · 960 bays (10× small). Hyperscale shell — power hungry.',
     cash: 980_000_000,
-    days: 720,
+    days: 180,
     rack: 960,
     opexPerDay: 920_000,
     upgradeCash: 420_000_000,
     upgradeRack: 192,
-    upgradeDays: 240,
+    upgradeDays: 60,
     footprint: [
       { dx: 0, dy: 0 },
       { dx: 1, dy: 0 },
@@ -799,6 +856,11 @@ export type PlaceCheck = {
   totalCash: number
   buildCash: number
   landCash: number
+  gradingCash: number
+  minElevation: number
+  maxElevation: number
+  maxGrade: number
+  foundationHeight: number
 }
 
 /** Non-mutating placement check — used by ghost preview + placeBuilding. */
@@ -821,6 +883,11 @@ export function canPlaceBuilding(
     totalCash: 0,
     buildCash: 0,
     landCash: 0,
+    gradingCash: 0,
+    minElevation: 0,
+    maxElevation: 0,
+    maxGrade: 0,
+    foundationHeight: 0,
   }
 
   if (kind === 'nuclear' && state.day < 70) {
@@ -863,8 +930,16 @@ export function canPlaceBuilding(
     const ci = usesCompactWorld(state)
       ? (compactTileIdAt(state, cx, cy) as number)
       : mapTileIndexAt(state, cx, cy)
+    // Commercial_infill parcels may still be city/house fabric — redevelopment clears them.
+    const urbanUse =
+      usesCompactWorld(state) && state.map.world && ci >= 0
+        ? urbanUseAt(state.map.world.staticWorld, ci as TileId)
+        : undefined
+    const developableTerrain =
+      ct.kind === 'empty' ||
+      (urbanUse === 'commercial_infill' && (ct.kind === 'city' || ct.kind === 'house'))
     const cellOk =
-      ct.kind === 'empty' &&
+      developableTerrain &&
       (ct.owner === 'neutral' || ct.owner === 'player') &&
       ct.regionId !== 'void' &&
       state.map.regions.some((r) => r.id === ct.regionId)
@@ -874,20 +949,64 @@ export function canPlaceBuilding(
 
   const landOk = resolved.every((c) => c.ok)
   const econ = state.config?.economyMult ?? 1
-  const buildCash = Math.floor(def.cash * econ)
+  const starterHqGrant = kind === 'hq' && state.player.starterHqGrant === true
+  const buildCash = starterHqGrant ? 0 : Math.floor(def.cash * econ)
   let landCash = 0
-  for (const c of resolved) {
-    if (c.ok) landCash += Math.max(0, c.tile.landValue ?? 0)
+  if (!starterHqGrant) {
+    for (const c of resolved) {
+      if (c.ok) {
+        const accessMultiplier = c.idx >= 0 ? transportLandValueMultiplier(state, c.idx) : 1
+        landCash += Math.max(0, c.tile.landValue ?? 0) * accessMultiplier
+      }
+    }
   }
-  const totalCash = buildCash + landCash
-  const cashOk = state.player.cash >= totalCash
+  let minElevation = 0
+  let maxElevation = 0
+  let maxGrade = 0
+  const compactWorld = state.map.world
+  if ((compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V4 ||
+      compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
+      compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6 ||
+      compactWorld?.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7) && resolved.length > 0) {
+    minElevation = Number.POSITIVE_INFINITY
+    maxElevation = Number.NEGATIVE_INFINITY
+    for (const cell of resolved) {
+      if (cell.idx < 0) continue
+      maxGrade = Math.max(maxGrade, compactWorld.getTileSlope(cell.x, cell.y))
+      for (const [cornerX, cornerY] of [
+        [cell.x, cell.y], [cell.x + 1, cell.y], [cell.x, cell.y + 1], [cell.x + 1, cell.y + 1],
+      ] as const) {
+        const elevation = compactWorld.getCornerElevation(cornerX, cornerY)
+        minElevation = Math.min(minElevation, elevation)
+        maxElevation = Math.max(maxElevation, elevation)
+      }
+    }
+    if (!Number.isFinite(minElevation)) minElevation = 0
+    if (!Number.isFinite(maxElevation)) maxElevation = 0
+  }
+  const foundationHeight = Math.max(0, maxElevation - minElevation)
+  const gradingRate = starterHqGrant || maxGrade <= 0.08
+    ? 0
+    : 0.1 + Math.min(1, (maxGrade - 0.08) / 0.08) * 0.25
+  const gradingCash = Math.floor(buildCash * gradingRate)
+  const totalCash = buildCash + landCash + gradingCash
+  const cashOk = starterHqGrant || state.player.cash >= totalCash
 
   if (!landOk) {
     const bad = resolved.find((c) => !c.ok)
     let reason = `${def.label} footprint blocked.`
     if (bad) {
       if (bad.idx < 0) reason = `${def.label} footprint leaves the map.`
-      else if (bad.tile.kind !== 'empty') {
+      else if (
+        bad.tile.kind !== 'empty' &&
+        !(
+          usesCompactWorld(state) &&
+          state.map.world &&
+          bad.idx >= 0 &&
+          urbanUseAt(state.map.world.staticWorld, bad.idx as TileId) === 'commercial_infill' &&
+          (bad.tile.kind === 'city' || bad.tile.kind === 'house')
+        )
+      ) {
         const label = isScenicKind(bad.tile.kind)
           ? scenicLabel(bad.tile.kind).toLowerCase()
           : bad.tile.kind
@@ -898,7 +1017,43 @@ export function canPlaceBuilding(
         reason = 'Footprint must stay inside a developable region.'
       }
     }
-    return { ok: false, reason, cells, totalCash, buildCash, landCash }
+    return { ok: false, reason, cells, totalCash, buildCash, landCash, gradingCash,
+      minElevation, maxElevation, maxGrade, foundationHeight }
+  }
+  for (const cell of resolved) {
+    const zoning = urbanZoningReason(state, cell.x, cell.y, kind)
+    if (zoning) {
+      return {
+        ok: false,
+        reason: zoning,
+        cells: cells.map((c) =>
+          c.x === cell.x && c.y === cell.y ? { ...c, ok: false } : c,
+        ),
+        totalCash,
+        buildCash,
+        landCash,
+        gradingCash,
+        minElevation,
+        maxElevation,
+        maxGrade,
+        foundationHeight,
+      }
+    }
+  }
+  if (maxGrade > 0.16) {
+    return {
+      ok: false,
+      reason: `${def.label} footprint is too steep (${Math.round(maxGrade * 100)}% grade; maximum 16%).`,
+      cells: cells.map((cell) => ({ ...cell, ok: false })),
+      totalCash,
+      buildCash,
+      landCash,
+      gradingCash,
+      minElevation,
+      maxElevation,
+      maxGrade,
+      foundationHeight,
+    }
   }
   if (!cashOk) {
     return {
@@ -908,9 +1063,15 @@ export function canPlaceBuilding(
       totalCash,
       buildCash,
       landCash,
+      gradingCash,
+      minElevation,
+      maxElevation,
+      maxGrade,
+      foundationHeight,
     }
   }
-  return { ok: true, cells, totalCash, buildCash, landCash }
+  return { ok: true, cells, totalCash, buildCash, landCash, gradingCash,
+    minElevation, maxElevation, maxGrade, foundationHeight }
 }
 
 export function placeBuilding(
@@ -959,6 +1120,23 @@ export function placeBuilding(
       ? `campus-${state.day}-${state.tick}-${x}-${y}`
       : `facility-${state.day}-${state.tick}-${kind}-${x}-${y}`
 
+  const starterHqGrant = kind === 'hq' && state.player.starterHqGrant === true
+  // Starter grant: instant complete (progress == target; build days waived).
+  const finalTarget = starterHqGrant ? Math.max(1, def.days) : def.days
+  const finalProgress = starterHqGrant ? finalTarget : 0
+
+  const nextPlayer = {
+    ...state.player,
+    cash: state.player.cash - totalCash,
+    ...(starterHqGrant ? { starterHqGrant: false } : {}),
+  }
+
+  const buildAlert = starterHqGrant
+    ? `Starter HQ online: ${name} — free grant, desks ready to hire.`
+    : `Breaking ground: ${def.label} (${name}${
+        footprint.length > 1 ? ` · ${footprint.length} tiles` : ''
+      }) — $${(totalCash / 1e6).toFixed(1)}M, ${def.days}d`
+
   if (usesCompactWorld(state)) {
     const world = state.map.world!
     const facility: Facility = {
@@ -970,8 +1148,8 @@ export function placeBuilding(
         tileId(cell.x, cell.y, world.descriptor.width, world.descriptor.height),
       ),
       level: 1,
-      constructionProgress: 0,
-      constructionTarget: def.days,
+      constructionProgress: finalProgress,
+      constructionTarget: finalTarget,
       powered: isDcKind(kind) ? true : undefined,
       stats: {
         rackCapacity: def.rack ?? 0,
@@ -983,25 +1161,26 @@ export function placeBuilding(
       },
       data: {
         name,
-        note,
+        note: starterHqGrant ? `${note} · Starter grant.` : note,
         dcSize: def.dcSize,
         hqSize: def.hqSize,
+        foundationElevation: (check.minElevation + check.maxElevation) / 2,
+        foundationHeight: check.foundationHeight,
+        gradingCash: check.gradingCash,
       },
     }
     const batch = world.beginBatch().addFacility(facility)
-    const committed = commitWorldBatch(state, batch)
+    const committed = commitWorldBatch({ ...state, player: nextPlayer }, batch)
     return {
       ...committed,
       map: { ...committed.map, activeRegionId: cells[0]!.tile.regionId },
-      player: { ...committed.player, cash: committed.player.cash - totalCash },
+      player: { ...committed.player, ...nextPlayer },
       alerts: [
         {
           id: `build-${kind}-${x}-${y}-${state.day}`,
           day: state.day,
           severity: 'info' as const,
-          message: `Breaking ground: ${def.label} (${name}${
-            footprint.length > 1 ? ` · ${footprint.length} tiles` : ''
-          }) — $${(totalCash / 1e6).toFixed(1)}M, ${def.days}d`,
+          message: buildAlert,
         },
         ...state.alerts,
       ].slice(0, 40),
@@ -1017,15 +1196,17 @@ export function placeBuilding(
       owner: 'player',
       name: isAnchor ? name : `${name} pad`,
       level: 1,
-      buildingProgress: 0,
-      buildingTarget: def.days,
+      buildingProgress: finalProgress,
+      buildingTarget: finalTarget,
       rackCapacity: isAnchor ? (def.rack ?? 0) : 0,
       mwCapacity: isAnchor ? (def.mw ?? 0) : 0,
       mwGeneration: isAnchor ? (def.gen ?? 0) : 0,
       racksUsed: 0,
       capex: isAnchor ? totalCash : 0,
       opexPerDay: isAnchor ? Math.floor(def.opexPerDay * econ) : 0,
-      note: isAnchor ? note : `Footprint pad for ${name}`,
+      note: isAnchor
+        ? (starterHqGrant ? `${note} · Starter grant.` : note)
+        : `Footprint pad for ${name}`,
       landValue: 0,
       powered: isDcKind(kind) ? true : c.tile.powered,
       campusId: isDcKind(kind) || isHqKind(kind) ? campusId : undefined,
@@ -1039,15 +1220,13 @@ export function placeBuilding(
   return {
     ...state,
     map: { ...state.map, tiles, activeRegionId: anchorTile.regionId },
-    player: { ...state.player, cash: state.player.cash - totalCash },
+    player: nextPlayer,
     alerts: [
       {
         id: `build-${kind}-${x}-${y}-${state.day}`,
         day: state.day,
         severity: 'info' as const,
-        message: `Breaking ground: ${def.label} (${name}${
-          footprint.length > 1 ? ` · ${footprint.length} tiles` : ''
-        }) — $${(totalCash / 1e6).toFixed(1)}M, ${def.days}d`,
+        message: buildAlert,
       },
       ...state.alerts,
     ].slice(0, 40),
@@ -1056,6 +1235,8 @@ export function placeBuilding(
 
 /** Land + construction total for UI (sums land under full footprint). */
 export function buildingTotalCost(state: SimState, tile: MapTile, kind: BuildableKind): number {
+  const exact = canPlaceBuilding(state, tile.x, tile.y, kind)
+  if (usesCompactWorld(state) && exact.totalCash > 0) return exact.totalCash
   const def = getBuildDef(kind)
   const econ = state.config?.economyMult ?? 1
   let land = 0
@@ -1560,43 +1741,74 @@ export function gridScarcity(state: SimState): GridScarcitySnapshot {
   return snapshot
 }
 
-/**
- * Facility opex = completed building shells + live fleet load.
- * Empty halls stay cheap; full GPU halls cost real cooling/ops cash.
- */
-export function playerBuildingOpex(state: SimState): number {
-  let opex = 0
+/** Completed building-shell opex for any lab, before live-fleet variable costs. */
+export function labFacilityShellOpex(state: SimState, labId: LabId): number {
+  let shellOpex = 0
+  let logistics = 0
   if (usesCompactWorld(state)) {
-    for (const facility of compactCompletedFacilitiesForOwner(state, state.playerLabId) ?? []) {
-      opex += facility.stats?.opexPerDay ?? 0
+    for (const facility of compactCompletedFacilitiesForOwner(state, labId) ?? []) {
+      const facilityOpex = facility.stats?.opexPerDay ?? 0
+      shellOpex += facilityOpex
+      logistics += transportLogisticsOpexSurcharge(
+        facilityOpex,
+        facilityTransportAccess(state, facility.id),
+      )
     }
   } else {
-    for (const t of facilityAnchorTiles(state, { ownerId: state.playerLabId })) {
+    for (const t of facilityAnchorTiles(state, { ownerId: labId })) {
       if (t.buildingProgress < t.buildingTarget) continue
       if (t.kind === 'empty' || t.kind === 'city') continue
-      opex += t.opexPerDay
+      shellOpex += t.opexPerDay
     }
   }
-  // Live racks/GPUs drive ops beyond flat DC opex (no fleetStats — avoid map↔racks cycle)
-  let liveGpus = 0
-  let liveMw = 0
-  for (const r of state.player.rackFleet ?? []) {
-    if (r.status !== 'live' || r.count <= 0) continue
-    liveGpus += r.count
-    try {
-      const sku = getRackSku(r.skuId)
-      liveMw += sku.mw * r.count
-    } catch {
-      liveMw += 0.007 * r.count
-    }
+  return shellOpex * (ECONOMY.facilityOpexMultiplier ?? 1) + logistics
+}
+
+/** Rack/GPU and MW variable opex from the physical fleet owned by any lab. */
+export function labFleetVariableOpex(state: SimState, labId: LabId): number {
+  if (labId === state.playerLabId) {
+    const looseAccelerators = state.player.chips.map((inventory) => {
+      let mwPerDevice = 0.006
+      try {
+        mwPerDevice = getChipDef(inventory.defId).mwPerChip
+      } catch {
+        // Preserve a conservative load for unknown imported chip definitions.
+      }
+      return { count: inventory.count, mwPerDevice }
+    })
+    return calculateFleetVariableOpex({
+      rackFleet: state.player.rackFleet,
+      rackDesigns: state.player.rackDesigns,
+      looseAccelerators,
+    }).totalOpexDay
   }
-  for (const inv of state.player.chips) {
-    liveGpus += inv.count
-    liveMw += inv.count * 0.006
+
+  const rival = state.rivals.find((candidate) => candidate.id === labId)
+  if (!rival) return 0
+  let abstractChipMw = 0.0008
+  try {
+    abstractChipMw = getChipDef('gen2').mwPerChip
+  } catch {
+    // Rival compatibility fleets were originally valued as the shared gen-2 chip.
   }
-  opex += liveGpus * (ECONOMY.rackOpexPerGpuDay ?? 420)
-  opex += liveMw * (ECONOMY.rackOpexPerMwDay ?? 18_000)
-  return opex * (ECONOMY.facilityOpexMultiplier ?? 1)
+  return calculateFleetVariableOpex({
+    rackFleet: rival.rackFleet,
+    rackDesigns: rival.rackDesigns,
+    looseAccelerators: [{ count: rival.chips, mwPerDevice: abstractChipMw }],
+  }).totalOpexDay
+}
+
+/**
+ * Facility opex = completed shells + installed hall equipment + live fleet.
+ * The shell multiplier applies only to shells; variable fleet opex is already
+ * expressed as its final daily cash cost.
+ */
+export function labBuildingOpex(state: SimState, labId: LabId): number {
+  return labFacilityShellOpex(state, labId) + labHallEquipmentOpexDay(state, labId) + labFleetVariableOpex(state, labId)
+}
+
+export function playerBuildingOpex(state: SimState): number {
+  return labBuildingOpex(state, state.playerLabId)
 }
 
 export function ownerLabel(owner: TileOwner, state: SimState): string {
@@ -1617,11 +1829,13 @@ export function tickMap(state: SimState): SimState {
       batch.replaceFacility(facility)
     }
 
+    const crewBonus = constructionCrewBonus(state)
     for (const original of compactUnderConstructionFacilities(state) ?? []) {
       const facility = currentFacility(original)
       const progress = Math.min(
         facility.constructionTarget,
-        facility.constructionProgress + 1,
+        facility.constructionProgress +
+          facilityTransportAccess(state, facility.id) * (1 + crewBonus),
       )
       if (progress === facility.constructionProgress) continue
       const completed = progress >= facility.constructionTarget
@@ -1702,6 +1916,7 @@ export function tickMap(state: SimState): SimState {
   }
 
   // Advance construction; rack bay usage is driven by rackFleet (per hall)
+  const crewBonus = constructionCrewBonus(state)
   const tiles = state.map.tiles.slice()
   for (let i = 0; i < tiles.length; i++) {
     const current = tiles[i]!
@@ -1712,7 +1927,7 @@ export function tickMap(state: SimState): SimState {
       continue
     }
     const tile = { ...current }
-    tile.buildingProgress = Math.min(tile.buildingTarget, tile.buildingProgress + 1)
+    tile.buildingProgress = Math.min(tile.buildingTarget, tile.buildingProgress + 1 + crewBonus)
     if (tile.buildingProgress >= tile.buildingTarget && tile.owner === 'player') {
       tile.note = tile.note.includes('progress') ? `${tile.name} online.` : tile.note
     }
@@ -1933,31 +2148,53 @@ export function resolveLabPowerMw(
   if (scarcity.gridDemandMw > scarcity.gridCapMw && scarcity.gridDemandMw > 1e-6) {
     gridFrac = Math.max(0.15, scarcity.gridCapMw / scarcity.gridDemandMw)
   }
-  const needAfterGen = Math.max(0, mwDemand - mwGeneration)
-  const mwCityContractImport = Math.min(mwCityContractCap, needAfterGen, mwInterconnect)
-  const needAfterCityContract = Math.max(0, needAfterGen - mwCityContractImport)
-  const interconnectAfterCity = Math.max(0, mwInterconnect - mwCityContractImport)
-  const mwEnergyContractImport = Math.min(
+
+  // Resolve physical supply capacity independently from today's draw. Firm
+  // contracts reserve the interconnect first; only the unreserved remainder is
+  // exposed to congestion. Keeping this separate from the delivered import is
+  // important: a lightly loaded campus still has real headroom, while billing
+  // must only see MW that was actually consumed.
+  const mwCityContractCapacity = Math.min(mwCityContractCap, mwInterconnect)
+  const interconnectAfterCityCapacity = Math.max(
+    0,
+    mwInterconnect - mwCityContractCapacity,
+  )
+  const mwEnergyContractCapacity = Math.min(
     mwEnergyContractCap,
+    interconnectAfterCityCapacity,
+  )
+  const mwSpotCapacity = Math.max(
+    0,
+    interconnectAfterCityCapacity - mwEnergyContractCapacity,
+  ) * gridFrac
+  const mwAvailable =
+    mwGeneration +
+    mwCityContractCapacity +
+    mwEnergyContractCapacity +
+    mwSpotCapacity
+
+  // Dispatch owned generation before imports. The component import fields are
+  // delivered MW (not reservation capacity) and therefore remain suitable for
+  // settlement and the power panel's live supply breakdown.
+  const needAfterGen = Math.max(0, mwDemand - mwGeneration)
+  const mwCityContractImport = Math.min(
+    mwCityContractCapacity,
+    needAfterGen,
+  )
+  const needAfterCityContract = Math.max(0, needAfterGen - mwCityContractImport)
+  const mwEnergyContractImport = Math.min(
+    mwEnergyContractCapacity,
     needAfterCityContract,
-    interconnectAfterCity,
   )
   const needAfterContract = Math.max(
     0,
     needAfterCityContract - mwEnergyContractImport,
   )
-  const spotInterconnectMw = Math.max(
-    0,
-    interconnectAfterCity - mwEnergyContractImport,
-  )
-  // Only the uncontracted remainder is exposed to grid curtailment.
-  const mwSpotImport = Math.min(spotInterconnectMw, needAfterContract) * gridFrac
+  const mwSpotImport = Math.min(mwSpotCapacity, needAfterContract)
   const mwContractImport = mwCityContractImport + mwEnergyContractImport
   const mwGridImport = mwContractImport + mwSpotImport
-  const mwAvailable = mwGeneration + mwGridImport
   return {
-    // Floor so a powered campus never fully dies — brownouts throttle, don't blackout
-    mwAvailable: Math.max(0.05, mwAvailable),
+    mwAvailable,
     mwGeneration,
     mwGridImport,
     mwInterconnect,
@@ -1967,7 +2204,7 @@ export function resolveLabPowerMw(
     gridPriceMult: scarcity.priceMult,
     industryDcCount: scarcity.industryDcCount,
     gridCapped:
-      gridFrac < 0.999 || needAfterContract > spotInterconnectMw + 1e-6,
+      gridFrac < 0.999 || mwDemand > mwAvailable + 1e-6,
   }
 }
 

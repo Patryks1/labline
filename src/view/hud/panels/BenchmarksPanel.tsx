@@ -1,20 +1,22 @@
 import { useMemo, useState } from 'react'
-import { BENCHMARK_DEFS } from '../../../sim/balance/benchmarks'
+import type { BenchmarkMetricId } from '../../../sim/types'
 import { formatParams } from '../../../sim/balance/training'
+import {
+  EVALUATION_MARKETS,
+  SUITE_METRICS,
+  evaluationMarketsForModel,
+  suiteForEvaluationMarket,
+  type EvaluationMarket,
+} from '../../../sim/balance/evaluationSuites'
 import { collectLeaderboardModels } from '../../../sim/systems/rivals'
-import { isGenerationOnlyModel } from '../../../sim/systems/modelEligibility'
 import { useGameStore } from '../../../store/gameStore'
 import { num } from '../format'
 import {
   buildAudienceReviewGroups,
   type PlanAudienceReview,
 } from './planReviews'
-import {
-  GameCard,
-  MeterBar,
-  SegmentedTabs,
-  StatRow,
-} from '../ui/kit'
+import { BenchmarkCompareTab } from './BenchmarkCompareTab'
+import { GameCard, MeterBar, SegmentedTabs, StatRow } from '../ui/kit'
 import {
   EmptyState,
   HudButton,
@@ -25,7 +27,7 @@ import {
 
 const PAGE = 15
 
-type BenchTab = 'leaderboard' | 'reviews'
+type BenchTab = 'leaderboard' | 'compare' | 'reviews'
 
 /**
  * Cross-lab eval leaderboard — top 15 by default, load older/weaker models on demand.
@@ -33,40 +35,48 @@ type BenchTab = 'leaderboard' | 'reviews'
 export function BenchmarksPanel() {
   const state = useGameStore((s) => s.state)
   const [showAll, setShowAll] = useState(false)
-  const [sortId, setSortId] = useState<'cap' | string>('cap')
+  const [sortId, setSortId] = useState<'cap' | BenchmarkMetricId>('cap')
+  const [market, setMarket] = useState<EvaluationMarket>('language')
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null)
   const [tab, setTab] = useState<BenchTab>('leaderboard')
 
   const rows = useMemo(() => {
     const all = collectLeaderboardModels(state)
-    const generalModels = all.filter((row) => !isGenerationOnlyModel(row.model))
+    const marketModels = all.filter((row) =>
+      evaluationMarketsForModel(row.model).includes(market),
+    )
+    const suite = suiteForEvaluationMarket(market)
     return sortId === 'cap'
-      ? generalModels
-      : [...generalModels].sort((a, b) => {
-          const sa = a.model.benchmarks[sortId as keyof typeof a.model.benchmarks] ?? 0
-          const sb = b.model.benchmarks[sortId as keyof typeof b.model.benchmarks] ?? 0
+      ? marketModels
+      : [...marketModels].sort((a, b) => {
+          const sa = a.model.benchmarkSuites?.[suite]?.[sortId] ?? 0
+          const sb = b.model.benchmarkSuites?.[suite]?.[sortId] ?? 0
           return sb - sa
         })
-  }, [state, sortId])
+  }, [state, sortId, market])
+
+  const suiteId = suiteForEvaluationMarket(market)
+  const metrics = SUITE_METRICS[suiteId]
 
   const visible = showAll ? rows : rows.slice(0, PAGE)
   const hidden = Math.max(0, rows.length - PAGE)
   const reviewGroups = useMemo(() => buildAudienceReviewGroups(state), [state])
   const selectedReviewGroup =
-    reviewGroups.find((group) => group.reviewId === selectedReviewId) ?? reviewGroups[0]
+    reviewGroups.find((group) => group.reviewId === selectedReviewId) ??
+    reviewGroups[0]
 
   const leaders = useMemo(() => {
     const map: Record<string, number> = {}
-    for (const d of BENCHMARK_DEFS) {
+    for (const d of metrics) {
       let best = -1
       for (const r of rows) {
-        const s = r.model.benchmarks[d.id] ?? 0
+        const s = r.model.benchmarkSuites?.[suiteId]?.[d.id] ?? 0
         if (s > best) best = s
       }
       map[d.id] = best
     }
     return map
-  }, [rows])
+  }, [rows, metrics, suiteId])
 
   const playerBest = useMemo(() => {
     let best = 0
@@ -90,19 +100,24 @@ export function BenchmarksPanel() {
     let best = 0
     for (const r of rows) {
       if (!r.isPlayer) continue
-      const scores = BENCHMARK_DEFS.map((d) => r.model.benchmarks[d.id] ?? 0)
+      const scores = metrics.map(
+        (d) => r.model.benchmarkSuites?.[suiteId]?.[d.id] ?? 0,
+      )
       const avg =
-        scores.length === 0 ? 0 : scores.reduce((sum, value) => sum + value, 0) / scores.length
+        scores.length === 0
+          ? 0
+          : scores.reduce((sum, value) => sum + value, 0) / scores.length
       if (avg > best) best = avg
     }
     return best
-  }, [rows])
+  }, [rows, metrics, suiteId])
 
   const activeAudits = useMemo(() => {
     const day = state.day
     return (state.evaluations ?? []).filter(
       (evaluation) =>
-        (evaluation.kind === 'blind_audit' || evaluation.kind === 'real_world') &&
+        (evaluation.kind === 'blind_audit' ||
+          evaluation.kind === 'real_world') &&
         !evaluation.published &&
         evaluation.scheduledDay <= day &&
         evaluation.publishDay >= day,
@@ -110,16 +125,23 @@ export function BenchmarksPanel() {
   }, [state.day, state.evaluations])
 
   const pendingEvals = useMemo(() => {
-    return (state.evaluations ?? []).filter((evaluation) => !evaluation.published)
+    return (state.evaluations ?? []).filter(
+      (evaluation) => !evaluation.published,
+    )
   }, [state.evaluations])
 
   const activeSeason = useMemo(
-    () => (state.benchmarkSeasons ?? []).find((season) => season.active) ?? null,
+    () =>
+      (state.benchmarkSeasons ?? []).find((season) => season.active) ?? null,
     [state.benchmarkSeasons],
   )
 
   const gapTone =
-    frontierGap > 0 ? ('positive' as const) : frontierGap < -5 ? ('danger' as const) : ('warning' as const)
+    frontierGap > 0
+      ? ('positive' as const)
+      : frontierGap < -5
+        ? ('danger' as const)
+        : ('warning' as const)
   const gapLabel =
     frontierGap === 0 && playerBest === 0
       ? '—'
@@ -142,19 +164,25 @@ export function BenchmarksPanel() {
         <MetricTile
           label="Frontier gap"
           value={gapLabel}
-          detail={rivalBest > 0 ? `rival ${num(rivalBest, 0)}` : 'no rivals yet'}
+          detail={
+            rivalBest > 0 ? `rival ${num(rivalBest, 0)}` : 'no rivals yet'
+          }
           tone={gapTone}
         />
         <MetricTile
           label="Best suite"
           value={bestSuite > 0 ? num(bestSuite, 0) : '—'}
           detail="your avg suite"
-          tone={bestSuite >= 70 ? 'positive' : bestSuite > 0 ? 'warning' : 'neutral'}
+          tone={
+            bestSuite >= 70 ? 'positive' : bestSuite > 0 ? 'warning' : 'neutral'
+          }
         />
         <MetricTile
           label="Active audits"
           value={String(activeAudits)}
-          detail={pendingEvals.length > 0 ? `${pendingEvals.length} pending` : 'clear'}
+          detail={
+            pendingEvals.length > 0 ? `${pendingEvals.length} pending` : 'clear'
+          }
           tone={activeAudits > 0 ? 'research' : 'neutral'}
         />
         <MetricTile
@@ -175,16 +203,24 @@ export function BenchmarksPanel() {
               label: (
                 <span className="inline-flex items-center gap-1.5">
                   Leaderboard
-                  <span className="font-mono text-[0.625rem] text-muted">{rows.length}</span>
+                  <span className="font-mono text-[0.625rem] text-muted">
+                    {rows.length}
+                  </span>
                 </span>
               ),
+            },
+            {
+              id: 'compare',
+              label: 'Compare',
             },
             {
               id: 'reviews',
               label: (
                 <span className="inline-flex items-center gap-1.5">
                   Reviews
-                  <span className="font-mono text-[0.625rem] text-muted">{reviewGroups.length}</span>
+                  <span className="font-mono text-[0.625rem] text-muted">
+                    {reviewGroups.length}
+                  </span>
                 </span>
               ),
             },
@@ -195,9 +231,30 @@ export function BenchmarksPanel() {
       <div key={tab} className="panel-swap mt-3 space-y-3">
         {tab === 'leaderboard' ? (
           <>
+            <div
+              className="flex flex-wrap gap-1"
+              aria-label="Evaluation market"
+            >
+              {EVALUATION_MARKETS.map((candidate) => (
+                <SortChip
+                  key={candidate.id}
+                  active={market === candidate.id}
+                  onClick={() => {
+                    setMarket(candidate.id)
+                    setSortId('cap')
+                    setShowAll(false)
+                  }}
+                  label={candidate.label}
+                />
+              ))}
+            </div>
             <div className="flex flex-wrap gap-1">
-              <SortChip active={sortId === 'cap'} onClick={() => setSortId('cap')} label="Capability" />
-              {BENCHMARK_DEFS.map((d) => (
+              <SortChip
+                active={sortId === 'cap'}
+                onClick={() => setSortId('cap')}
+                label="Capability"
+              />
+              {metrics.map((d) => (
                 <SortChip
                   key={d.id}
                   active={sortId === d.id}
@@ -209,16 +266,29 @@ export function BenchmarksPanel() {
 
             <div className="flex flex-wrap items-center gap-2 text-[0.6875rem] text-muted">
               <StatusChip tone="positive">PUBLIC</StatusChip>
-              <StatusChip tone="research">PRIVATE</StatusChip>
-              <span>Private checkpoints compare only — no customers or revenue.</span>
+              <span>
+                Public releases only. Private checkpoint evidence stays in
+                Models.
+              </span>
             </div>
 
             {pendingEvals.length > 0 && (
-              <GameCard eyebrow="In flight" title="Audits & field reviews" tone="research" live>
+              <GameCard
+                eyebrow="In flight"
+                title="Audits & field reviews"
+                tone="research"
+                live
+              >
                 <div className="anim-stagger space-y-2">
                   {pendingEvals.slice(0, 4).map((evaluation) => {
-                    const span = Math.max(1, evaluation.publishDay - evaluation.scheduledDay)
-                    const elapsed = Math.max(0, state.day - evaluation.scheduledDay)
+                    const span = Math.max(
+                      1,
+                      evaluation.publishDay - evaluation.scheduledDay,
+                    )
+                    const elapsed = Math.max(
+                      0,
+                      state.day - evaluation.scheduledDay,
+                    )
                     const progress = Math.min(1, elapsed / span)
                     return (
                       <div
@@ -227,8 +297,10 @@ export function BenchmarksPanel() {
                       >
                         <div className="flex items-center justify-between gap-2">
                           <span className="truncate text-[0.8125rem] text-bone">
-                            {evaluation.kind === 'blind_audit' ? 'Blind audit' : 'Field review'} ·{' '}
-                            {evaluation.modelId}
+                            {evaluation.kind === 'blind_audit'
+                              ? 'Blind audit'
+                              : 'Field review'}{' '}
+                            · {evaluation.modelId}
                           </span>
                           <StatusChip tone="research">
                             D{evaluation.publishDay}
@@ -250,17 +322,25 @@ export function BenchmarksPanel() {
               </GameCard>
             )}
 
-            <div className="overflow-x-auto rounded-lg border border-line/70">
+            <div className="overflow-x-auto overscroll-x-contain rounded-lg border border-line/70">
               <table className="w-full min-w-[720px] border-collapse text-left text-[0.8125rem]">
                 <thead>
                   <tr className="border-b border-line bg-panel-2 font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
-                    <th className="sticky left-0 z-10 bg-panel-2 px-2 py-2">#</th>
-                    <th className="sticky left-6 z-10 bg-panel-2 px-2 py-2">Model</th>
+                    <th className="sticky left-0 z-10 bg-panel-2 px-2 py-2">
+                      #
+                    </th>
+                    <th className="sticky left-6 z-10 bg-panel-2 px-2 py-2">
+                      Model
+                    </th>
                     <th className="px-1.5 py-2">Lab</th>
                     <th className="px-1.5 py-2">Size</th>
                     <th className="px-1.5 py-2">Cap</th>
-                    {BENCHMARK_DEFS.map((d) => (
-                      <th key={d.id} className="px-1 py-2 text-center" title={d.name}>
+                    {metrics.map((d) => (
+                      <th
+                        key={d.id}
+                        className="px-1 py-2 text-center"
+                        title={d.label}
+                      >
                         {d.short}
                       </th>
                     ))}
@@ -270,18 +350,15 @@ export function BenchmarksPanel() {
                 <tbody className="anim-stagger">
                   {visible.map((r, i) => {
                     const rank = i + 1
-                    const isPrivate = r.model.release === 'internal' && !r.model.shipped
                     return (
                       <tr
                         key={`${r.labId}-${r.model.id}`}
                         className={`border-b border-line/60 ${
-                          isPrivate
-                            ? 'bg-research/10'
-                            : r.isPlayer
-                              ? 'bg-mint/5'
-                              : i % 2 === 0
-                                ? 'bg-void/30'
-                                : ''
+                          r.isPlayer
+                            ? 'bg-mint/5'
+                            : i % 2 === 0
+                              ? 'bg-void/30'
+                              : ''
                         }`}
                       >
                         <td className="sticky left-0 z-10 bg-inherit px-2 py-1.5 font-mono tabular-nums text-muted">
@@ -289,9 +366,12 @@ export function BenchmarksPanel() {
                         </td>
                         <td className="sticky left-6 z-10 max-w-[180px] bg-inherit px-2 py-1.5 font-medium text-bone">
                           <span className="flex min-w-0 items-center gap-1">
-                            <span className="min-w-0 truncate">{r.model.name}</span>
-                            {isPrivate && <StatusChip tone="research">private</StatusChip>}
-                            {r.isPlayer && <StatusChip tone="positive">you</StatusChip>}
+                            <span className="min-w-0 truncate">
+                              {r.model.name}
+                            </span>
+                            {r.isPlayer && (
+                              <StatusChip tone="positive">you</StatusChip>
+                            )}
                           </span>
                         </td>
                         <td className="px-1.5 py-1.5">
@@ -308,21 +388,19 @@ export function BenchmarksPanel() {
                         <td className="px-1.5 py-1.5 font-mono tabular-nums text-muted">
                           {formatParams(r.model.paramsB)}
                         </td>
-                        <td
-                          className={`px-1.5 py-1.5 font-mono tabular-nums ${
-                            isPrivate ? 'text-research' : 'text-bone'
-                          }`}
-                        >
+                        <td className="px-1.5 py-1.5 font-mono tabular-nums text-bone">
                           {num(r.model.capability, 0)}
                         </td>
-                        {BENCHMARK_DEFS.map((d) => {
-                          const s = r.model.benchmarks[d.id] ?? 0
-                          const isLead = s >= (leaders[d.id] ?? 0) - 0.05 && s > 1
+                        {metrics.map((d) => {
+                          const s =
+                            r.model.benchmarkSuites?.[suiteId]?.[d.id] ?? 0
+                          const isLead =
+                            s >= (leaders[d.id] ?? 0) - 0.05 && s > 1
                           return (
                             <td
                               key={d.id}
                               className={`px-1 py-1.5 text-center font-mono tabular-nums ${
-                                isPrivate ? 'text-research' : isLead ? 'text-mint' : 'text-muted'
+                                isLead ? 'text-mint' : 'text-muted'
                               }`}
                             >
                               {s > 0 ? s.toFixed(0) : '—'}
@@ -347,16 +425,36 @@ export function BenchmarksPanel() {
             )}
 
             {!showAll && hidden > 0 && (
-              <HudButton variant="secondary" className="w-full" onClick={() => setShowAll(true)}>
+              <HudButton
+                variant="secondary"
+                className="w-full"
+                onClick={() => setShowAll(true)}
+              >
                 Load {hidden} older / lower-ranked models
               </HudButton>
             )}
             {showAll && rows.length > PAGE && (
-              <HudButton variant="ghost" className="w-full" onClick={() => setShowAll(false)}>
+              <HudButton
+                variant="ghost"
+                className="w-full"
+                onClick={() => setShowAll(false)}
+              >
                 Show top {PAGE} only
               </HudButton>
             )}
           </>
+        ) : tab === 'compare' ? (
+          <BenchmarkCompareTab
+            rows={rows}
+            suiteId={suiteId}
+            metrics={metrics}
+            market={market}
+            onMarketChange={(candidate) => {
+              setMarket(candidate)
+              setSortId('cap')
+              setShowAll(false)
+            }}
+          />
         ) : (
           <ReviewsTab
             reviewGroups={reviewGroups}
@@ -375,7 +473,8 @@ function ReviewsTab({
   onSelect,
 }: {
   reviewGroups: ReturnType<typeof buildAudienceReviewGroups>
-  selectedReviewGroup: ReturnType<typeof buildAudienceReviewGroups>[number] | undefined
+  selectedReviewGroup:
+    ReturnType<typeof buildAudienceReviewGroups>[number] | undefined
   onSelect: (id: string) => void
 }) {
   if (reviewGroups.length === 0) {
@@ -410,7 +509,7 @@ function ReviewsTab({
             key={group.reviewId}
             type="button"
             onClick={() => onSelect(group.reviewId)}
-            className={`rounded-md px-2.5 py-1 text-[0.75rem] transition ${
+            className={`min-h-11 rounded-md px-2.5 py-1 text-[0.75rem] transition sm:min-h-0 ${
               selectedReviewGroup?.reviewId === group.reviewId
                 ? 'bg-mint text-void'
                 : 'border border-line/70 bg-void/40 text-muted hover:text-bone'
@@ -422,7 +521,10 @@ function ReviewsTab({
       </div>
 
       {selectedReviewGroup && (
-        <p className="mb-2 truncate text-[0.6875rem] text-muted" title={selectedReviewGroup.modelNames.join(', ')}>
+        <p
+          className="mb-2 truncate text-[0.6875rem] text-muted"
+          title={selectedReviewGroup.modelNames.join(', ')}
+        >
           {selectedReviewGroup.modelNames.join(' + ') || 'No released model'}
         </p>
       )}
@@ -451,7 +553,7 @@ function SortChip({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-md px-2.5 py-1 text-[0.75rem] transition ${
+      className={`min-h-11 rounded-md px-2.5 py-1 text-[0.75rem] transition sm:min-h-0 ${
         active ? 'bg-mint text-void' : 'bg-panel-2 text-muted hover:text-bone'
       }`}
     >
@@ -462,7 +564,11 @@ function SortChip({
 
 function AudienceReviewCard({ review }: { review: PlanAudienceReview }) {
   const tone =
-    review.score >= 70 ? ('positive' as const) : review.score >= 50 ? ('warning' as const) : ('danger' as const)
+    review.score >= 70
+      ? ('positive' as const)
+      : review.score >= 50
+        ? ('warning' as const)
+        : ('danger' as const)
   return (
     <GameCard
       title={
@@ -471,17 +577,33 @@ function AudienceReviewCard({ review }: { review: PlanAudienceReview }) {
           <StatusChip tone={tone}>{review.score.toFixed(0)}</StatusChip>
         </span>
       }
-      tone={tone === 'positive' ? 'mint' : tone === 'warning' ? 'train' : 'danger'}
+      tone={
+        tone === 'positive' ? 'mint' : tone === 'warning' ? 'train' : 'danger'
+      }
       pad
     >
-      <p className="text-[0.8125rem] leading-snug text-muted">{review.summary}</p>
-      <div className={`mt-2 grid gap-1.5 ${review.metrics.length === 3 ? 'grid-cols-3' : 'grid-cols-2'}`}>
+      <p className="text-[0.8125rem] leading-snug text-muted">
+        {review.summary}
+      </p>
+      <div
+        className={`mt-2 grid gap-1.5 ${review.metrics.length === 3 ? 'grid-cols-2 sm:grid-cols-3' : 'grid-cols-2'}`}
+      >
         {review.metrics.map((metric) => (
           <div key={metric.label} className="min-w-0">
-            <StatRow label={metric.label} value={metric.value.toFixed(0)} strong />
+            <StatRow
+              label={metric.label}
+              value={metric.value.toFixed(0)}
+              strong
+            />
             <MeterBar
               value={metric.value / 100}
-              tone={metric.value >= 70 ? 'positive' : metric.value >= 50 ? 'warning' : 'danger'}
+              tone={
+                metric.value >= 70
+                  ? 'positive'
+                  : metric.value >= 50
+                    ? 'warning'
+                    : 'danger'
+              }
             />
           </div>
         ))}

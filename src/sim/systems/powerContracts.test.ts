@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
+import type { MapTile } from '../types'
 import { tileId } from '../world/ids'
 import {
+  citiesInGridConnectorRange,
   cityGridConnectorCapacity,
   evaluatePowerExportOffer,
   evaluatePowerImportOffer,
@@ -11,9 +13,53 @@ import {
   signCityPowerContract,
   signPowerExportContract,
   tickPowerExportContracts,
+  tileDist,
 } from './facilities'
 
 describe('power contracts', () => {
+  it('lists only cities within 50 tiles of a commissioned player connector', () => {
+    const created = createGame(91_203)
+    const templateCity = created.map.cities?.[0]
+    if (!templateCity) throw new Error('Expected a generated city')
+    const connector = {
+      x: 0,
+      y: 0,
+      kind: 'substation',
+      owner: 'player',
+      buildingProgress: 1,
+      buildingTarget: 1,
+      mwCapacity: 12,
+    } as MapTile
+    const state = {
+      ...created,
+      map: {
+        ...created.map,
+        storage: 'legacy' as const,
+        world: undefined,
+        tiles: [connector],
+        cities: [
+          { ...templateCity, id: 'at-limit', cx: 50, cy: 50 },
+          { ...templateCity, id: 'outside-limit', cx: 51, cy: 0 },
+        ],
+      },
+    }
+
+    expect(citiesInGridConnectorRange(state).map((city) => city.id)).toEqual(['at-limit'])
+
+    for (const unusable of [
+      { ...connector, buildingProgress: 0 },
+      { ...connector, mwCapacity: 0 },
+      { ...connector, owner: 'rival-0' },
+    ] as MapTile[]) {
+      expect(
+        citiesInGridConnectorRange({
+          ...state,
+          map: { ...state.map, tiles: [unusable] },
+        }),
+      ).toEqual([])
+    }
+  })
+
   it('signs import and export commitments and settles delivered surplus', () => {
     const created = createGame(91_204)
     const city = created.map.cities?.[0]
@@ -64,6 +110,8 @@ describe('power contracts', () => {
 
     const connector = cityGridConnectorCapacity(state, city.id)
     expect(connector.connectorCount).toBe(1)
+    expect(connector.surplusMw).toBeGreaterThan(0)
+    // Connector headroom is the binding limit while surplus lasts.
     expect(connector.availableMw).toBe(6)
 
     const importQuote = powerImportNegotiationQuote(state, city.id, 8, 60)!
@@ -105,6 +153,117 @@ describe('power contracts', () => {
       },
     }
     const result = signCityPowerContract(withoutConnectors, city.id, 5, 60)
+    expect(result.cityPowerContracts).toHaveLength(0)
+    expect(result.alerts[0]?.message).toContain('grid interconnect')
+  })
+
+  it('caps import contracts by municipal surplus even with spare interconnect', () => {
+    const created = createGame(91_205)
+    const city = created.map.cities?.[0]
+    if (!city) throw new Error('Expected a generated city')
+    const world = created.map.world
+    if (!world) throw new Error('Expected a compact world')
+    let connectorSite: ReturnType<typeof tileId> | null = null
+    for (let y = city.cy - city.powerRadius; y <= city.cy + city.powerRadius && !connectorSite; y += 1) {
+      for (let x = city.cx - city.powerRadius; x <= city.cx + city.powerRadius; x += 1) {
+        if (x < 0 || y < 0 || x >= created.map.width || y >= created.map.height) continue
+        const id = tileId(x, y, created.map.width, created.map.height)
+        if (!world.getFacilityAt(id)) {
+          connectorSite = id
+          break
+        }
+      }
+    }
+    if (!connectorSite) throw new Error('Expected a free connector site')
+    world.beginBatch()
+      .addFacility({
+        id: 'test-surplus-connector',
+        kind: 'substation',
+        ownerId: 'player',
+        anchor: connectorSite,
+        footprint: [connectorSite],
+        level: 1,
+        constructionProgress: 1,
+        constructionTarget: 1,
+        stats: { mwCapacity: 50_000 },
+      })
+      .commit()
+    const open = {
+      ...created,
+      player: { ...created.player, cash: 1_000_000_000 },
+      map: { ...created.map, worldRevision: world.revision },
+    }
+    const openCap = cityGridConnectorCapacity(open, city.id)
+    expect(openCap.surplusMw).toBeGreaterThan(0)
+    expect(openCap.availableMw).toBe(openCap.surplusMw)
+
+    const soaked = {
+      ...open,
+      cityPowerContracts: [
+        {
+          id: 'soak-surplus',
+          cityId: city.id,
+          cityName: city.name,
+          mw: openCap.surplusMw,
+          pricePerMWh: 40,
+          daysLeft: 60,
+          daysTotal: 60,
+        },
+      ],
+    }
+    const soakedCap = cityGridConnectorCapacity(soaked, city.id)
+    expect(soakedCap.surplusMw).toBe(0)
+    expect(soakedCap.availableMw).toBe(0)
+    expect(powerImportNegotiationQuote(soaked, city.id, 10, 60)?.contractMw).toBe(0)
+  })
+
+  it('ignores a commissioned connector outside the city power zone', () => {
+    const created = createGame(91_206)
+    const city = created.map.cities?.[0]
+    if (!city) throw new Error('Expected a generated city')
+    const world = created.map.world
+    if (!world) throw new Error('Expected a compact world')
+    const scanRadius = city.powerRadius + 2
+    let remoteSite: ReturnType<typeof tileId> | null = null
+    for (let y = city.cy - scanRadius; y <= city.cy + scanRadius && !remoteSite; y += 1) {
+      for (let x = city.cx - scanRadius; x <= city.cx + scanRadius; x += 1) {
+        if (x < 0 || y < 0 || x >= created.map.width || y >= created.map.height) continue
+        if (tileDist(x, y, city.cx, city.cy) <= city.powerRadius) continue
+        const id = tileId(x, y, created.map.width, created.map.height)
+        if (!world.getFacilityAt(id)) {
+          remoteSite = id
+          break
+        }
+      }
+    }
+    if (!remoteSite) throw new Error('Expected a free tile outside the power zone')
+    world.beginBatch()
+      .addFacility({
+        id: 'test-remote-connector',
+        kind: 'substation',
+        ownerId: 'player',
+        anchor: remoteSite,
+        footprint: [remoteSite],
+        level: 1,
+        constructionProgress: 1,
+        constructionTarget: 1,
+        stats: { mwCapacity: 6 },
+      })
+      .commit()
+    const state = {
+      ...created,
+      player: { ...created.player, cash: 1_000_000_000 },
+      map: { ...created.map, worldRevision: world.revision },
+    }
+
+    const connector = cityGridConnectorCapacity(state, city.id)
+    expect(connector.connectorCount).toBe(0)
+    expect(connector.availableMw).toBe(0)
+
+    const quote = powerImportNegotiationQuote(state, city.id, 8, 60)
+    expect(quote?.contractMw).toBe(0)
+
+    const result = signCityPowerContract(state, city.id, 8, 60)
     expect(result.cityPowerContracts).toHaveLength(0)
     expect(result.alerts[0]?.message).toContain('grid interconnect')
   })

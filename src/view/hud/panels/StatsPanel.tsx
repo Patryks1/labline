@@ -40,7 +40,7 @@ export function StatsPanel() {
           variant="ghost"
           className="!px-2.5 !py-1 text-[0.75rem]"
           onClick={() => setCommandView('pnl')}
-          title="Open dock P&L (F1)"
+          title="Open dock P&L"
         >
           Dock
         </HudButton>
@@ -222,10 +222,10 @@ function PnlSection({
                     {Math.round(p.subscribers).toLocaleString()} subs
                   </span>
                 </div>
-                <div className="mt-1 grid grid-cols-3 gap-2 font-mono text-[0.8125rem] tabular-nums">
+                <div className="mt-1 grid grid-cols-2 gap-2 font-mono text-[0.8125rem] tabular-nums sm:grid-cols-3">
                   <span className="text-mint">{money(p.dayRevenue)}</span>
-                  <span className="text-center text-danger">{money(-p.dayCogs)}</span>
-                  <span className={`text-right ${p.marginPerSubMonth < 0 ? 'text-danger' : 'text-mint'}`}>
+                  <span className="text-right text-danger sm:text-center">{money(-p.dayCogs)}</span>
+                  <span className={`col-span-2 text-center sm:col-span-1 sm:text-right ${p.marginPerSubMonth < 0 ? 'text-danger' : 'text-mint'}`}>
                     {money(p.marginPerSubMonth)}/sub
                   </span>
                 </div>
@@ -439,11 +439,10 @@ function ComputeSection({
             detail={`${num(c.mwDemand, 2)} / ${num(c.mwAvailable, 2)} MW`}
             tone="warning"
           />
-          <MeterBar
-            label="Rack space"
-            value={c.rackCap > 0 ? c.racksUsed / c.rackCap : 0}
-            detail={`${c.racksUsed} / ${c.rackCap} racks`}
-            tone="serve"
+          <StatRow
+            label="Operational rack footprint"
+            value={`${c.racksUsed} rack-width`}
+            hint="Admitted by physical layout, utilities, and access"
           />
         </div>
       </GameCard>

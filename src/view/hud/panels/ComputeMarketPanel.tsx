@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Handshake, PaperPlaneTilt } from "@phosphor-icons/react";
 import {
   acceptComputeOffer,
@@ -8,7 +8,12 @@ import {
   rejectComputeOffer,
 } from "../../../sim/systems/computeMarket";
 import { useGameStore } from "../../../store/gameStore";
-import { useUiStore } from "../../../store/uiStore";
+import {
+  EMPTY_NEGOTIATION,
+  formatNegotiationTimestamp,
+  reopenEndedNegotiation,
+  useUiStore,
+} from "../../../store/uiStore";
 import {
   computeMw,
   computeMwValue,
@@ -16,10 +21,13 @@ import {
   money,
   mwToPf,
   pct,
+  pf,
   pfToMw,
   pricePerMwDayFromPf,
 } from "../format";
 import {
+  computeContractCashReserve,
+  evaluateComputeProviderOffer,
   quoteComputeContract,
   signComputeContract,
   terminateComputeContract,
@@ -29,6 +37,7 @@ import { remoteAcceleratorRamGb } from "../../../sim/systems/compute";
 import { CapacitySalesCeilingCard } from "../ui/CapacitySalesCeilingCard";
 import {
   NegotiationHeader,
+  NegotiationComposer,
   NegotiationMessage,
   NegotiationMetric,
   NegotiationSlider,
@@ -130,25 +139,28 @@ export function ComputeMarketPanel() {
   const [cloudPf, setCloudPf] = useState(24);
   const [cloudTerm, setCloudTerm] = useState(90);
   const [offerPercent, setOfferPercent] = useState(95);
-  const [negotiationStatus, setNegotiationStatus] =
-    useState<NegotiationStatus>("idle");
-  const [negotiationMessage, setNegotiationMessage] = useState("");
-  const [chatHistory, setChatHistory] = useState<ChatLine[]>([]);
-  const [failedAttemptsByProvider, setFailedAttemptsByProvider] = useState<
-    Record<string, number>
-  >({});
-  const [contactAgainByProvider, setContactAgainByProvider] = useState<
-    Record<string, number>
-  >({});
-  const clearNegotiation = () => {
-    setNegotiationStatus("idle");
-    setNegotiationMessage("");
-    setChatHistory([]);
-  };
+  const updateComputeNegotiation = useUiStore((store) => store.updateComputeNegotiation);
+  const conversation = useUiStore((store) => store.computeNegotiations[cloudProviderId] ?? EMPTY_NEGOTIATION);
+  const negotiationStatus = conversation.status;
+  const negotiationMessage = conversation.message ?? "";
+  const chatHistory = conversation.transcript;
+  const saveConversation = (
+    patch: Partial<typeof conversation>,
+    append: ChatLine[] = [],
+  ) => updateComputeNegotiation(cloudProviderId, (current) => ({
+    ...current,
+    ...patch,
+    transcript: [...current.transcript, ...append.map((line, index) => ({ ...line, day: state.day, sequence: current.transcript.length + index }))],
+  }));
   const continueNegotiation = () => {
-    setNegotiationStatus("idle");
-    setNegotiationMessage("");
+    saveConversation({ status: "idle", message: undefined });
   };
+  useEffect(() => {
+    if (!conversation.proposal || (conversation.status !== "countered" && conversation.status !== "agreed")) return;
+    setCloudPf(conversation.proposal.capacity);
+    setCloudTerm(conversation.proposal.termDays);
+    setOfferPercent(conversation.proposal.offer);
+  }, [cloudProviderId, conversation.proposal, conversation.status]);
   const cloudQuote = useMemo(
     () =>
       quoteComputeContract(state, {
@@ -164,18 +176,16 @@ export function ComputeMarketPanel() {
     (provider) => provider.id === cloudProviderId,
   );
   const dealEvent = providerEvent(state.day, cloudProviderId);
-  const providerSatisfaction = clamp(
-    0,
-    100,
-    42 +
-      ((selectedProvider?.reliability ?? 0.9) - 0.88) * 100 +
-      Math.min(12, cloudTerm / 30) +
-      (offerPercent - 90) * 0.9 -
-      (cloudPf / Math.max(1, selectedProvider?.availablePf ?? 1)) * 25 +
-      dealEvent.satisfactionDelta,
-  );
-  const failedAttempts = failedAttemptsByProvider[cloudProviderId] ?? 0;
-  const contactAgainDay = contactAgainByProvider[cloudProviderId] ?? 0;
+  const offerEvaluation = evaluateComputeProviderOffer({
+    reliability: selectedProvider?.reliability ?? 0.9,
+    pf: cloudPf,
+    availablePf: Math.max(1, selectedProvider?.availablePf ?? 1),
+    termDays: cloudTerm,
+    offerPercent,
+    satisfactionDelta: dealEvent.satisfactionDelta,
+  });
+  const failedAttempts = conversation.failures;
+  const contactAgainDay = conversation.contactAgainDay;
   const contactLocked = state.day < contactAgainDay;
   const negotiatedQuote = useMemo(() => {
     const bonusPf = Math.max(
@@ -221,6 +231,21 @@ export function ComputeMarketPanel() {
       contract.buyerLabId === state.playerLabId &&
       contract.status !== "expired",
   );
+  const selectedProviderContractActive = state.computeContracts.some(
+    (contract) =>
+      (conversation.contractId
+        ? contract.id === conversation.contractId
+        : contract.providerId === cloudProviderId) &&
+      contract.buyerLabId === state.playerLabId &&
+      contract.status !== "expired" &&
+      contract.daysLeft > 0,
+  );
+  useEffect(() => {
+    if (conversation.status !== "signed" || selectedProviderContractActive) return;
+    updateComputeNegotiation(cloudProviderId, (current) =>
+      reopenEndedNegotiation(current, false),
+    );
+  }, [cloudProviderId, conversation.status, selectedProviderContractActive, updateComputeNegotiation]);
   const capacitySnapshot = computeLabSnapshot(state, state.playerLabId);
   const providerBoughtPf = state.computeContracts
     .filter(
@@ -264,10 +289,53 @@ export function ComputeMarketPanel() {
         )
       : 0;
 
-  const blockers =
-    !negotiatedQuote.canSign && negotiatedQuote.reason
-      ? [{ text: negotiatedQuote.reason, tone: "warning" as const }]
-      : [];
+  const cashReserve = computeContractCashReserve(negotiatedQuote.contract);
+  const blockers: { text: string; tone: "danger" | "warning" }[] = [];
+  if (!negotiatedQuote.canSign && negotiatedQuote.reason) {
+    blockers.push({ text: negotiatedQuote.reason, tone: "warning" });
+  }
+  if (state.player.cash < cashReserve) {
+    blockers.push({
+      text: `Insufficient cash — hold ${money(cashReserve)} to cover up to 30 days of billing.`,
+      tone: "danger",
+    });
+  }
+  if (contactLocked) {
+    blockers.push({
+      text: `Offer expired — the vendor is unavailable until day ${contactAgainDay}.`,
+      tone: "danger",
+    });
+  }
+  if (offerEvaluation.belowFloor) {
+    blockers.push({
+      text: `Offer is below the seller floor (${offerEvaluation.floorOfferPercent}% of list) — raise your bid.`,
+      tone: "warning",
+    });
+  }
+  const actionDisabled = blockers.length > 0;
+  const actionDisabledReason = blockers[0]?.text;
+
+  const acceptNegotiatedTerms = () => {
+    const signed = signComputeContract(state, negotiatedQuote);
+    const newContract = signed.computeContracts.find(
+      (contract) =>
+        !state.computeContracts.some((existing) => existing.id === contract.id),
+    );
+    setState(signed);
+    if (!newContract) {
+      const failed =
+        "We could not activate these terms — capacity or funds changed. Send a fresh proposal.";
+      saveConversation({ status: "declined", message: failed }, [
+        { side: "provider", text: failed, status: "declined" },
+      ]);
+      return;
+    }
+    const activeMsg = `Contract active. ${computeMw(pfToMw(newContract.pf))} is online.`;
+    saveConversation(
+      { status: "signed", message: activeMsg, contractId: newContract.id },
+      [{ side: "provider", text: activeMsg, status: "signed" }],
+    );
+  };
 
   return (
     <PanelScaffold
@@ -277,16 +345,16 @@ export function ComputeMarketPanel() {
     >
       <div className="space-y-3">
         <GameCard eyebrow="Capacity mix" title="Owned vs rented" tone="mint">
-          <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3">
+          <div className="grid min-w-0 grid-cols-1 items-center gap-3 min-[400px]:grid-cols-[auto_minmax(0,1fr)]">
             <OwnedRentedDonut owned={ownedPf} rented={rentedPf} />
             <div className="min-w-0 space-y-1.5">
               <StatRow
                 label="Owned"
-                value={computeMw(pfToMw(ownedPf))}
+                value={pf(ownedPf)}
                 tone="positive"
                 strong
               />
-              <StatRow label="Rented" value={computeMw(pfToMw(rentedPf))} tone="serve" />
+              <StatRow label="Rented" value={pf(rentedPf)} tone="serve" />
               <StatRow
                 label="Rented RAM"
                 value={gb(remoteAcceleratorRamGb(rentedPf))}
@@ -308,11 +376,7 @@ export function ComputeMarketPanel() {
           ariaLabel="Compute market views"
           active={tab}
           onChange={(id) => {
-            const nextTab = id as MarketTab;
-            if (tab === "negotiate" && nextTab !== "negotiate") {
-              clearNegotiation();
-            }
-            setTab(nextTab);
+            setTab(id as MarketTab);
           }}
           items={[
             { id: "negotiate", label: "Provider desk" },
@@ -356,7 +420,6 @@ export function ComputeMarketPanel() {
                           ),
                         ),
                       );
-                      clearNegotiation();
                     }}
                     className="min-w-0 flex-1 bg-transparent text-right text-[0.8125rem] font-medium text-bone outline-none"
                     aria-label="Compute provider"
@@ -368,7 +431,8 @@ export function ComputeMarketPanel() {
                         className="bg-void"
                       >
                         {provider.name} · {computeMw(pfToMw(provider.availablePf))}
-                        open
+                        {" open / "}
+                        {computeMw(pfToMw(provider.baselinePf))} total
                       </option>
                     ))}
                   </select>
@@ -378,6 +442,7 @@ export function ComputeMarketPanel() {
                   <NegotiationMessage
                     side="provider"
                     name={selectedProvider?.name ?? "Provider"}
+                    timestamp={`Day ${state.day} · 09:00`}
                   >
                     <span className="font-medium text-bone">
                       {dealEvent.title}
@@ -397,6 +462,7 @@ export function ComputeMarketPanel() {
                           : (selectedProvider?.name ?? "Provider")
                       }
                       status={line.status}
+                      timestamp={formatNegotiationTimestamp(line, state.day, index)}
                     >
                       {line.text}
                     </NegotiationMessage>
@@ -418,7 +484,7 @@ export function ComputeMarketPanel() {
                 {negotiationStatus !== "signed" &&
                 negotiationStatus !== "agreed" ? (
                   <>
-                    <div className="rounded-lg border border-line/70 bg-void/45 p-2">
+                    <NegotiationComposer>
                       <div className="space-y-1.5">
                         <NegotiationSlider
                           label="Compute"
@@ -474,9 +540,9 @@ export function ComputeMarketPanel() {
                           }}
                         />
                       </div>
-                    </div>
+                    </NegotiationComposer>
 
-                    <div className="grid grid-cols-5 gap-1 font-mono text-[0.6875rem]">
+                    <div className="grid grid-cols-2 gap-1 font-mono text-[0.6875rem] sm:grid-cols-5">
                       <NegotiationMetric
                         label="Capacity"
                         value={computeMw(pfToMw(negotiatedQuote.contract.pf))}
@@ -498,16 +564,6 @@ export function ComputeMarketPanel() {
                         value={`${(negotiatedQuote.contract.interruptionRisk * 100).toFixed(1)}%`}
                       />
                     </div>
-                    {contactLocked ? (
-                      <BlockerList
-                        items={[
-                          {
-                            text: `Vendor unavailable until day ${contactAgainDay}.`,
-                            tone: "danger",
-                          },
-                        ]}
-                      />
-                    ) : null}
                     <BlockerList items={blockers} />
                   </>
                 ) : null}
@@ -516,96 +572,45 @@ export function ComputeMarketPanel() {
                   <HudButton
                     type="button"
                     variant="primary"
-                    disabled={!negotiatedQuote.canSign || contactLocked}
-                    title={
-                      !negotiatedQuote.canSign
-                        ? negotiatedQuote.reason
-                        : undefined
-                    }
+                    disabled={actionDisabled}
+                    title={actionDisabledReason}
                     className="flex w-full items-center justify-center gap-1.5"
                     onClick={() => {
                       const proposal = `${computeMw(pfToMw(cloudPf))} for ${cloudTerm} days at ${offerPercent}% of list.`;
-                      setChatHistory((history) => [
-                        ...history,
-                        { side: "player", text: proposal },
-                      ]);
-                      if (providerSatisfaction >= 58) {
+                      if (offerEvaluation.outcome === "agreed") {
                         const agreement =
                           "We agree to these terms. Accept to activate the contract, or decline to keep negotiating.";
-                        setChatHistory((history) => [
-                          ...history,
-                          {
-                            side: "provider",
-                            text: agreement,
-                            status: "agreed",
-                          },
-                        ]);
-                        setNegotiationStatus("agreed");
-                        setNegotiationMessage(agreement);
+                        saveConversation(
+                          { status: "agreed", message: agreement, proposal: { capacity: cloudPf, termDays: cloudTerm, offer: offerPercent } },
+                          [{ side: "player", text: proposal }, { side: "provider", text: agreement, status: "agreed" }],
+                        );
                         return;
                       }
-                      if (providerSatisfaction < 30) {
+                      if (offerEvaluation.outcome === "declined") {
                         const failures = failedAttempts + 1;
-                        setFailedAttemptsByProvider((current) => ({
-                          ...current,
-                          [cloudProviderId]: failures,
-                        }));
-                        const refusal =
-                          "That offer is too low. Improve the price or reduce the capacity.";
-                        setChatHistory((history) => [
-                          ...history,
-                          {
-                            side: "provider",
-                            text: refusal,
-                            status: "declined",
-                          },
-                        ]);
+                        const refusal = offerEvaluation.belowFloor
+                          ? `That offer is below our floor — we cannot sign under ${offerEvaluation.floorOfferPercent}% of list.`
+                          : "That offer is too low. Improve the price or reduce the capacity.";
                         if (failures >= 3) {
-                          setContactAgainByProvider((current) => ({
-                            ...current,
-                            [cloudProviderId]: state.day + 30,
-                          }));
                           const lockMsg = `We are ending talks. Contact us again on day ${state.day + 30}.`;
-                          setChatHistory((history) => [
-                            ...history,
-                            {
-                              side: "provider",
-                              text: lockMsg,
-                              status: "declined",
-                            },
-                          ]);
-                          setNegotiationStatus("declined");
-                          setNegotiationMessage(lockMsg);
+                          saveConversation(
+                            { status: "declined", message: lockMsg, failures, contactAgainDay: state.day + 30 },
+                            [{ side: "player", text: proposal }, { side: "provider", text: refusal, status: "declined" }, { side: "provider", text: lockMsg, status: "declined" }],
+                          );
+                        } else {
+                          saveConversation(
+                            { status: "idle", message: refusal, failures },
+                            [{ side: "player", text: proposal }, { side: "provider", text: refusal, status: "declined" }],
+                          );
                         }
                         return;
                       }
-                      const counter = Math.min(
-                        115,
-                        offerPercent +
-                          Math.max(
-                            2,
-                            Math.ceil((58 - providerSatisfaction) / 2),
-                          ),
+                      const counter = offerEvaluation.counter!;
+                      const counterText = `We can do ${computeMw(pfToMw(counter.pf))} for ${counter.termDays} days at ${counter.offerPercent}% of list. Accept or decline.`;
+                      saveConversation(
+                        { status: "countered", message: counterText, proposal: { capacity: counter.pf, termDays: counter.termDays, offer: counter.offerPercent } },
+                        [{ side: "player", text: proposal }, { side: "provider", text: counterText, status: "countered" }],
                       );
-                      const counterPf = Math.max(1, Math.floor(cloudPf * 0.9));
-                      const counterTerm = Math.max(
-                        30,
-                        Math.min(720, cloudTerm + 30),
-                      );
-                      setOfferPercent(counter);
-                      setCloudPf(counterPf);
-                      setCloudTerm(counterTerm);
-                      const counterText = `We can do ${computeMw(pfToMw(counterPf))} for ${counterTerm} days at ${counter}% of list. Accept or decline.`;
-                      setChatHistory((history) => [
-                        ...history,
-                        {
-                          side: "provider",
-                          text: counterText,
-                          status: "countered",
-                        },
-                      ]);
-                      setNegotiationStatus("countered");
-                      setNegotiationMessage(counterText);
                     }}
                   >
                     <PaperPlaneTilt size={15} weight="fill" />
@@ -613,87 +618,77 @@ export function ComputeMarketPanel() {
                   </HudButton>
                 )}
                 {negotiationStatus === "countered" && (
-                  <div className="grid grid-cols-2 gap-2">
-                    <HudButton
-                      variant="primary"
-                      disabled={!negotiatedQuote.canSign || contactLocked}
-                      title={
-                        !negotiatedQuote.canSign
-                          ? negotiatedQuote.reason
-                          : undefined
-                      }
-                      onClick={() => {
-                        const signed = signComputeContract(
-                          state,
-                          negotiatedQuote,
-                        );
-                        setState(signed);
-                        const activeMsg = `Contract active. ${computeMw(pfToMw(negotiatedQuote.contract.pf))} is online.`;
-                        setChatHistory([]);
-                        setNegotiationStatus("signed");
-                        setNegotiationMessage(activeMsg);
-                      }}
-                    >
-                      Accept counter
-                    </HudButton>
-                    <HudButton
-                      variant="ghost"
-                      onClick={() => {
-                        setChatHistory((history) => [
-                          ...history,
-                          {
-                            side: "player",
-                            text: "Declining that counter. Adjusting the package.",
-                          },
-                        ]);
-                        setNegotiationStatus("idle");
-                        setNegotiationMessage("");
-                      }}
-                    >
-                      Decline
-                    </HudButton>
+                  <div className="space-y-2">
+                    <BlockerList items={blockers} />
+                    <div className="grid grid-cols-2 gap-2">
+                      <HudButton
+                        variant="primary"
+                        disabled={actionDisabled}
+                        title={actionDisabledReason}
+                        onClick={acceptNegotiatedTerms}
+                      >
+                        Accept counter
+                      </HudButton>
+                      <HudButton
+                        variant="ghost"
+                        onClick={() => {
+                          saveConversation(
+                            { status: "idle", message: undefined },
+                            [{ side: "player", text: "Declining that counter. Adjusting the package." }],
+                          );
+                        }}
+                      >
+                        Decline
+                      </HudButton>
+                    </div>
                   </div>
                 )}
                 {negotiationStatus === "agreed" && (
-                  <div className="grid grid-cols-2 gap-2">
-                    <HudButton
-                      variant="primary"
-                      onClick={() => {
-                        const signed = signComputeContract(
-                          state,
-                          negotiatedQuote,
-                        );
-                        setState(signed);
-                        const activeMsg = `Contract active. ${computeMw(pfToMw(negotiatedQuote.contract.pf))} is online.`;
-                        setChatHistory([]);
-                        setNegotiationStatus("signed");
-                        setNegotiationMessage(activeMsg);
-                      }}
-                    >
-                      Accept agreement
-                    </HudButton>
-                    <HudButton
-                      variant="ghost"
-                      onClick={() => {
-                        setChatHistory((history) => [
-                          ...history,
-                          {
-                            side: "player",
-                            text: "Declining those terms. I want to revise the package.",
-                          },
-                        ]);
-                        setNegotiationStatus("idle");
-                        setNegotiationMessage("");
-                      }}
-                    >
-                      Decline
-                    </HudButton>
+                  <div className="space-y-2">
+                    <BlockerList items={blockers} />
+                    <div className="grid grid-cols-2 gap-2">
+                      <HudButton
+                        variant="primary"
+                        disabled={actionDisabled}
+                        title={actionDisabledReason}
+                        onClick={acceptNegotiatedTerms}
+                      >
+                        Accept agreement
+                      </HudButton>
+                      <HudButton
+                        variant="ghost"
+                        onClick={() => {
+                          saveConversation(
+                            { status: "idle", message: undefined },
+                            [{ side: "player", text: "Declining those terms. I want to revise the package." }],
+                          );
+                        }}
+                      >
+                        Decline
+                      </HudButton>
+                    </div>
                   </div>
                 )}
                 {negotiationStatus === "signed" && (
-                  <div className="flex items-center justify-center gap-1.5 rounded-md border border-mint/35 bg-mint/10 px-2 py-1.5 text-[0.8125rem] font-medium text-mint">
-                    <Handshake size={16} weight="duotone" />
-                    Contract active · compute online
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-center gap-1.5 rounded-md border border-mint/35 bg-mint/10 px-2 py-1.5 text-[0.8125rem] font-medium text-mint">
+                      <Handshake size={16} weight="duotone" />
+                      Contract active · compute online
+                    </div>
+                    <HudButton
+                      type="button"
+                      variant="ghost"
+                      className="flex w-full items-center justify-center gap-1.5"
+                      title="Open a fresh negotiation with this provider while the current contract runs"
+                      onClick={() =>
+                        updateComputeNegotiation(cloudProviderId, (current) =>
+                          reopenEndedNegotiation(current, false),
+                        )
+                      }
+                    >
+                      <Handshake size={15} />
+                      Negotiate another contract
+                    </HudButton>
                   </div>
                 )}
                 {negotiationStatus === "declined" && (
@@ -854,7 +849,14 @@ export function ComputeMarketPanel() {
   );
 }
 
-function OwnedRentedDonut({
+/**
+ * Owned-vs-rented capacity graphic. The SVG is hard-capped at 88px, the center
+ * overlay carries only the compact total, and the long electrical equivalent
+ * moved to a truncated caption below the chart so it can never be absolutely
+ * positioned beyond the card. Below the narrow breakpoint the donut swaps for
+ * a full-width horizontal capacity bar.
+ */
+export function OwnedRentedDonut({
   owned,
   rented,
 }: {
@@ -868,53 +870,72 @@ function OwnedRentedDonut({
   const c = 2 * Math.PI * r;
   const ownedLen = c * ownedPct;
   const rentedLen = c * rentedPct;
+  const ariaLabel = `Owned ${pf(owned)} versus rented ${pf(rented)} compute`;
+  const electrical = `≈ ${computeMw(pfToMw(total))} electrical`;
   return (
-    <div className="relative h-24 w-24 shrink-0">
-      <svg
-        viewBox="0 0 88 88"
-        className="h-24 w-24"
-        role="img"
-        aria-label="Owned versus rented compute"
-      >
-        <circle
-          cx="44"
-          cy="44"
-          r={r}
-          fill="none"
-          stroke="rgba(139,171,181,.22)"
-          strokeWidth="10"
-        />
-        <circle
-          cx="44"
-          cy="44"
-          r={r}
-          fill="none"
-          stroke="#56e1dc"
-          strokeWidth="10"
-          strokeDasharray={`${ownedLen} ${c - ownedLen}`}
-          strokeDashoffset={c * 0.25}
-          strokeLinecap="butt"
-        />
-        <circle
-          cx="44"
-          cy="44"
-          r={r}
-          fill="none"
-          stroke="#7aa2ff"
-          strokeWidth="10"
-          strokeDasharray={`${rentedLen} ${c - rentedLen}`}
-          strokeDashoffset={c * 0.25 - ownedLen}
-          strokeLinecap="butt"
-        />
-      </svg>
-      <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-        <strong className="font-mono text-sm font-semibold tabular-nums text-bone">
-          {computeMw(pfToMw(total))}
-        </strong>
-        <span className="text-[0.625rem] uppercase tracking-[0.12em] text-muted">
-          total
-        </span>
+    <div className="w-full min-w-0 min-[400px]:w-24 min-[400px]:shrink-0">
+      <div className="relative hidden h-24 w-24 max-w-full min-[400px]:block">
+        <svg
+          viewBox="0 0 88 88"
+          width="88"
+          height="88"
+          className="h-24 w-24 max-w-full"
+          role="img"
+          aria-label={ariaLabel}
+        >
+          <circle
+            cx="44"
+            cy="44"
+            r={r}
+            fill="none"
+            stroke="rgba(139,171,181,.22)"
+            strokeWidth="10"
+          />
+          <circle
+            cx="44"
+            cy="44"
+            r={r}
+            fill="none"
+            stroke="#56e1dc"
+            strokeWidth="10"
+            strokeDasharray={`${ownedLen} ${c - ownedLen}`}
+            strokeDashoffset={c * 0.25}
+            strokeLinecap="butt"
+          />
+          <circle
+            cx="44"
+            cy="44"
+            r={r}
+            fill="none"
+            stroke="#7aa2ff"
+            strokeWidth="10"
+            strokeDasharray={`${rentedLen} ${c - rentedLen}`}
+            strokeDashoffset={c * 0.25 - ownedLen}
+            strokeLinecap="butt"
+          />
+        </svg>
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <strong className="max-w-[4.5rem] truncate font-mono text-sm font-semibold tabular-nums text-bone">
+            {pf(total)}
+          </strong>
+        </div>
       </div>
+      <div className="min-[400px]:hidden" role="img" aria-label={ariaLabel}>
+        <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-void/80">
+          <div className="h-full bg-[#56e1dc]" style={{ width: `${ownedPct * 100}%` }} />
+          <div className="h-full bg-[#7aa2ff]" style={{ width: `${rentedPct * 100}%` }} />
+        </div>
+        <div className="mt-1 flex items-baseline justify-between gap-2 font-mono text-[0.625rem] tabular-nums text-muted">
+          <span className="min-w-0 truncate">Owned {pf(owned)}</span>
+          <span className="min-w-0 truncate">Rented {pf(rented)}</span>
+        </div>
+      </div>
+      <p
+        className="mt-1 truncate text-center text-[0.625rem] uppercase tracking-[0.12em] text-muted"
+        title={electrical}
+      >
+        {electrical}
+      </p>
     </div>
   );
 }

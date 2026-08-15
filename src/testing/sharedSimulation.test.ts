@@ -19,7 +19,9 @@ describe('player/rival shared simulation invariants', () => {
   })
 
   it('accounts for equivalent player and rival facilities identically on the shared grid', () => {
-    const result = runFacilityOwnershipDifferential(createGame(3_117))
+    const result = runFacilityOwnershipDifferential(
+      createGame({ seed: 3_117, legacyMapFixture: true }),
+    )
     expect(result.failures).toEqual([])
     expect(() => assertFacilityOwnershipInvariants(result)).not.toThrow()
     const last = result.observations.at(-1)
@@ -28,7 +30,9 @@ describe('player/rival shared simulation invariants', () => {
   })
 
   it('keeps player power finite and bounded as demand crosses private headroom', () => {
-    const result = runFacilityOwnershipDifferential(createGame(5_901))
+    const result = runFacilityOwnershipDifferential(
+      createGame({ seed: 5_901, legacyMapFixture: true }),
+    )
     const observations = observePlayerPower(result.playerOwnedState, [5, 30, 60, 120])
     for (const observation of observations) {
       expect(Number.isFinite(observation.power.mwAvailable)).toBe(true)
@@ -40,7 +44,9 @@ describe('player/rival shared simulation invariants', () => {
   })
 
   it('makes rival expansion deterministic, visibility-independent, and non-destructive to player sites', () => {
-    const prepared = runFacilityOwnershipDifferential(createGame(8_813)).playerOwnedState
+    const prepared = runFacilityOwnershipDifferential(
+      createGame({ seed: 8_813, legacyMapFixture: true }),
+    ).playerOwnedState
     const state = {
       ...prepared,
       day: 80,

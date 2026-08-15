@@ -7,7 +7,7 @@ describe('cloud versus owned capacity economics', () => {
     const state = createGame(811)
     const quote = quoteCapacityEconomics(state, {
       utilization: 0.49,
-      cloudPricePerPfDay: 480,
+      cloudPricePerPfDay: 120,
     })
     expect(quote.route).toBe('cloud')
     expect(quote.paybackMonths).toBeGreaterThan(30)
@@ -19,7 +19,7 @@ describe('cloud versus owned capacity economics', () => {
     for (const utilization of [0.7, 0.75, 0.8]) {
       const quote = quoteCapacityEconomics(state, {
         utilization,
-        cloudPricePerPfDay: 480,
+        cloudPricePerPfDay: 120,
       })
       expect(quote.paybackMonths).toBeGreaterThan(0)
       expect(quote.paybackMonths).toBeLessThan(60)

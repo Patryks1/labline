@@ -17,12 +17,14 @@ import {
   capacityAdjustedMarketShare,
   collectOffers,
   dominantCapacitySalesGate,
+  marketingOutcomeUtilityBonus,
   marketingUtilityBonus,
   PLAN_SEAT_CONVERSION,
   perceivedServiceReliability,
   settleRivalOfferDemand,
   tickMarket,
 } from './market'
+import { computeMarketingOutcome } from './marketing'
 
 function releasedModel(
   id: string,
@@ -223,6 +225,7 @@ describe('player and rival product-market parity', () => {
   it('settles the exact model and price attached to every winning demand bucket', () => {
     const small = releasedModel('small', 50, 80, 7, 2)
     const large = releasedModel('large', 80, 80, 140, 18)
+    const rivalSeats = 4_000 * PLAN_SEAT_CONVERSION
     const buckets = [
       {
         offer: offer(small, 2, 20),
@@ -236,7 +239,8 @@ describe('player and rival product-market parity', () => {
         model: large,
         apiMTok: 2,
         subscriptionMTok: 9,
-        subscriptionUsers: 4_000,
+        // Seats already converted upstream — settle must not apply 0.0125 again.
+        subscriptionUsers: rivalSeats,
       },
     ]
     const servingEfficiency = 1.1
@@ -257,10 +261,8 @@ describe('player and rival product-market parity', () => {
     expect(settled.apiServedMTok).toBeCloseTo(15, 12)
     expect(settled.subscriptionServedMTok).toBeCloseTo(9, 12)
     expect(settled.apiRevenue).toBeCloseTo(13 * 2 + 2 * 18, 12)
-    expect(settled.subscriptionRevenue).toBeCloseTo(
-      (4_000 * PLAN_SEAT_CONVERSION * 60) / 30,
-      12,
-    )
+    expect(settled.subscriptionRevenue).toBeCloseTo((rivalSeats * 60) / 30, 12)
+    expect(settled.keptSubscriptionUsers).toBeCloseTo(rivalSeats, 12)
 
     const reversed = settleRivalOfferDemand(
       [...buckets].reverse(),
@@ -277,7 +279,7 @@ describe('player and rival product-market parity', () => {
       model,
       apiMTok: 100,
       subscriptionMTok: 100,
-      subscriptionUsers: 10_000,
+      subscriptionUsers: 10_000 * PLAN_SEAT_CONVERSION,
     }
     const requiredPf = inferencePfDemand(200, model, 1)
     const healthy = settleRivalOfferDemand([bucket], requiredPf * 2, 1)
@@ -389,9 +391,40 @@ describe('player and rival product-market parity', () => {
     expect(cheapTitle.costPerUsefulTask).toBeLessThan(dearTitle.costPerUsefulTask)
   })
 
-  it('gives paid acquisition the same subscription utility lift for every lab', () => {
+  it('gives paid acquisition utility lift on subscription and API-native segments', () => {
     expect(marketingUtilityBonus(550_000, true)).toBeGreaterThan(0)
-    expect(marketingUtilityBonus(550_000, false)).toBe(0)
+    expect(marketingUtilityBonus(550_000, false)).toBeGreaterThan(0)
+    expect(marketingUtilityBonus(550_000, true)).toBeGreaterThan(
+      marketingUtilityBonus(550_000, false),
+    )
+    const outcome = computeMarketingOutcome({
+      ...createGame(8_121),
+      player: {
+        ...createGame(8_121).player,
+        marketingSpendPerDay: 550_000,
+        marketingChannels: {
+          web: 550_000 * 0.38,
+          billboards: 550_000 * 0.2,
+          restaurants: 550_000 * 0.24,
+          enterprise: 550_000 * 0.18,
+        },
+      },
+    })
+    expect(marketingOutcomeUtilityBonus(outcome, true)).toBeGreaterThan(0)
+    expect(marketingOutcomeUtilityBonus(outcome, true)).toBeGreaterThan(
+      marketingOutcomeUtilityBonus(outcome, false),
+    )
+    // Outcome utility tracks acquisitions only — brandGain is ignored here so
+    // campaign brand (written by marketing.ts) is not double-counted.
+    expect(
+      marketingOutcomeUtilityBonus(
+        {
+          acquiredCustomers: outcome.acquiredCustomers,
+          enterpriseLeads: outcome.enterpriseLeads,
+        },
+        true,
+      ),
+    ).toBeCloseTo(marketingOutcomeUtilityBonus(outcome, true), 10)
 
     const created = createGame(8_122)
     const template = created.rivals[0]!

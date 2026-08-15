@@ -93,7 +93,10 @@ function automateAllocation(state: SimState): SimState {
   const demandPf = Math.max(0, state.lastMarket.demandPf)
   const targetInferencePf = demandPf * (1 + clamp(0, 0.75, policy.inferenceHeadroom))
   const inference = clamp(0.12, 0.82, targetInferencePf / Math.max(0.01, snapshot.effectiveFlopsPf))
-  const hasTraining = state.player.trainingJob != null || (state.player.trainingPrograms ?? []).length > 0
+  const hasTraining =
+    state.player.trainingJob != null ||
+    (state.player.trainingJobs ?? []).some((job) => !job.paused) ||
+    (state.player.trainingPrograms ?? []).length > 0
   const hasResearch =
     state.player.activeResearch != null ||
     (state.player.researchPrograms ?? []).some((program) => program.phase !== 'complete')

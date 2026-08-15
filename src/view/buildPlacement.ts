@@ -1,4 +1,4 @@
-import { BUILDABLE_KINDS, buildingTotalCost, getBuildDef } from '../sim/systems/map'
+import { BUILDABLE_KINDS, canPlaceBuilding } from '../sim/systems/map'
 import { mapTileAtAny } from '../sim/systems/worldAccess'
 import type { BuildableKind, SimState } from '../sim/types'
 
@@ -9,6 +9,7 @@ const BUILDABLE_KIND_SET = new Set<string>(BUILDABLE_KINDS)
 export interface PlacementCost {
   buildCash: number
   landCash: number
+  gradingCash: number
   totalCash: number
 }
 
@@ -46,14 +47,12 @@ export function placementCostAt(
 ): PlacementCost | null {
   const tile = mapTileAtAny(state, x, y)
   if (!tile) return null
-  const buildCash = Math.floor(
-    getBuildDef(kind).cash * (state.config?.economyMult ?? 1),
-  )
-  const totalCash = buildingTotalCost(state, tile, kind)
+  const check = canPlaceBuilding(state, x, y, kind)
   return {
-    buildCash,
-    landCash: Math.max(0, totalCash - buildCash),
-    totalCash,
+    buildCash: check.buildCash,
+    landCash: check.landCash,
+    gradingCash: check.gradingCash,
+    totalCash: check.totalCash,
   }
 }
 

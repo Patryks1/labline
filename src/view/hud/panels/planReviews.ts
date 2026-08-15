@@ -1,4 +1,5 @@
 import { planAllowanceMTokPerMonth } from '../../../sim/systems/plans'
+import { splitBlendedApiPrice } from '../../../sim/balance/pricing'
 import type { Model, SimState, SubPlan } from '../../../sim/types'
 
 export interface PlanReviewMetric {
@@ -221,14 +222,15 @@ function buildAudienceReviews(
 function modelApiRates(state: SimState, model: Model): { input: number; output: number } {
   const pricing = state.player.pricing
   const blended = model.apiPricePerMTok ?? model.suggestedApiPrice ?? pricing.apiPricePerMTok
+  const split = splitBlendedApiPrice(blended)
   return {
     input: Math.max(
       0,
-      model.apiPriceInPerMTok ?? model.suggestedApiPriceIn ?? pricing.apiPriceInPerMTok ?? blended * 0.35,
+      model.apiPriceInPerMTok ?? model.suggestedApiPriceIn ?? pricing.apiPriceInPerMTok ?? split.priceIn,
     ),
     output: Math.max(
       0,
-      model.apiPriceOutPerMTok ?? model.suggestedApiPriceOut ?? pricing.apiPriceOutPerMTok ?? blended * 1.25,
+      model.apiPriceOutPerMTok ?? model.suggestedApiPriceOut ?? pricing.apiPriceOutPerMTok ?? split.priceOut,
     ),
   }
 }

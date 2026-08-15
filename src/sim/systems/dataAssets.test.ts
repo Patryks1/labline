@@ -7,6 +7,7 @@ import {
   marketDatasetLineageId,
   mergeRecurringDatasetAsset,
   mergeSyntheticDatasetAsset,
+  pruneDatasetAssetsForDomain,
   SYNTHETIC_TEACHER_LINEAGE_LIMIT,
   syntheticDatasetAsset,
 } from './dataAssets'
@@ -166,8 +167,306 @@ describe('canonical dataset assets', () => {
     })
     expect(manifest.assetIds).toContain('dataset-public-foundation-2026')
     expect(manifest.uniqueMTok + manifest.repeatedMTok).toBe(600)
-    expect(manifest.domainWeights).toMatchObject({ chat: 0.7, code: 0.3 })
+    expect(manifest.domainWeights.chat).toBeCloseTo(80 / 260, 12)
+    expect(manifest.domainWeights.code).toBeCloseTo(180 / 260, 12)
     expect(data.manifests).toEqual([manifest])
     expect(base.manifests).toEqual([])
+  })
+
+  it('limits availability to each asset domain-weighted share', () => {
+    const base = createEmptyLabData()
+    base.assets = [
+      {
+        ...base.assets[0]!,
+        id: 'mixed-lot',
+        volumeMTok: 100,
+        domainWeights: { chat: 0.2, code: 0.8 },
+      },
+    ]
+    const { manifest } = createDataManifest({
+      data: base,
+      consumed: { chat: 50 },
+      totalMTok: 50,
+      day: 2,
+      seed: 8,
+      runId: 'weighted-domain',
+    })
+
+    expect(manifest.uniqueMTok).toBeCloseTo(20, 12)
+    expect(manifest.repeatedMTok).toBeCloseTo(30, 12)
+    expect(manifest.assetIds).toEqual(['mixed-lot'])
+  })
+
+  it('records the mix actually attributed by assets rather than requested weights', () => {
+    const base = createEmptyLabData()
+    const foundation = base.assets[0]!
+    base.assets = [
+      {
+        ...foundation,
+        id: 'small-chat-lot',
+        volumeMTok: 10,
+        domainWeights: { chat: 1 },
+      },
+      {
+        ...foundation,
+        id: 'large-code-lot',
+        volumeMTok: 90,
+        domainWeights: { code: 1 },
+      },
+    ]
+    const { manifest } = createDataManifest({
+      data: base,
+      consumed: { chat: 50, code: 50 },
+      totalMTok: 100,
+      day: 3,
+      seed: 81,
+      runId: 'attributed-mix',
+    })
+
+    expect(manifest.uniqueMTok).toBe(60)
+    expect(manifest.repeatedMTok).toBe(40)
+    expect(manifest.domainWeights.chat).toBeCloseTo(1 / 6, 12)
+    expect(manifest.domainWeights.code).toBeCloseTo(5 / 6, 12)
+    expect(
+      Object.values(manifest.domainWeights).reduce(
+        (sum, weight) => sum + (weight ?? 0),
+        0,
+      ),
+    ).toBeCloseTo(1, 12)
+  })
+
+  it('weights quality and contamination only by consumed domain fractions', () => {
+    const base = createEmptyLabData()
+    const foundation = base.assets[0]!
+    base.assets = [
+      {
+        ...foundation,
+        id: 'unrelated-clean-code',
+        volumeMTok: 10_000,
+        domainWeights: { code: 1 },
+        quality: 100,
+        contaminationRisk: 0,
+      },
+      {
+        ...foundation,
+        id: 'dirty-chat',
+        volumeMTok: 10,
+        domainWeights: { chat: 1 },
+        quality: 20,
+        contaminationRisk: 0.9,
+      },
+    ]
+    const { manifest } = createDataManifest({
+      data: base,
+      consumed: { chat: 10 },
+      totalMTok: 10,
+      day: 4,
+      seed: 9,
+      runId: 'no-laundering',
+    })
+
+    expect(manifest.assetIds).toEqual(['dirty-chat'])
+    expect(manifest.uniqueMTok).toBe(10)
+    expect(manifest.effectiveQuality).toBe(20)
+    expect(manifest.contaminationRisk).toBeCloseTo(0.9, 12)
+  })
+
+  it('uses proportional consumed fractions for blended domain provenance', () => {
+    const base = createEmptyLabData()
+    const foundation = base.assets[0]!
+    base.assets = [
+      {
+        ...foundation,
+        id: 'clean-chat',
+        volumeMTok: 90,
+        domainWeights: { chat: 1 },
+        quality: 90,
+        contaminationRisk: 0.01,
+      },
+      {
+        ...foundation,
+        id: 'noisy-chat',
+        volumeMTok: 10,
+        domainWeights: { chat: 1 },
+        quality: 10,
+        contaminationRisk: 0.91,
+      },
+    ]
+    const { manifest } = createDataManifest({
+      data: base,
+      consumed: { chat: 10 },
+      totalMTok: 10,
+      day: 5,
+      seed: 10,
+      runId: 'proportional-blend',
+    })
+
+    expect(manifest.assetIds).toEqual(['clean-chat', 'noisy-chat'])
+    expect(manifest.effectiveQuality).toBeCloseTo(82, 12)
+    expect(manifest.contaminationRisk).toBeCloseTo(0.1, 12)
+  })
+
+  it('captures weighted diversity, freshness, rights, and synthetic lineage', () => {
+    const base = createEmptyLabData()
+    const foundation = base.assets[0]!
+    base.assets = [
+      {
+        ...foundation,
+        id: 'licensed-human-chat',
+        volumeMTok: 75,
+        domainWeights: { chat: 1 },
+        diversity: 0.8,
+        freshness: 0.6,
+        rights: 'licensed',
+        source: 'partner',
+        contaminationRisk: 0.04,
+      },
+      syntheticDatasetAsset({
+        id: 'recursive-chat',
+        name: 'Recursive chat traces',
+        domain: 'chat',
+        volumeMTok: 25,
+        quality: foundation.quality,
+        teacherModelId: 'teacher-v3',
+        tier: 'hq',
+        day: 4,
+        provenance: {
+          generationDepth: 3,
+          promptDiversity: 0.4,
+          humanAnchorShare: 0.2,
+        },
+      }),
+    ]
+    const { manifest } = createDataManifest({
+      data: base,
+      consumed: { chat: 100 },
+      totalMTok: 100,
+      day: 8,
+      seed: 11,
+      runId: 'manifest-depth',
+    })
+
+    expect(manifest.effectiveDiversity).toBeCloseTo(0.7, 12)
+    expect(manifest.effectiveFreshness).toBeCloseTo(0.7, 12)
+    expect(manifest.syntheticShare).toBeCloseTo(0.25, 12)
+    expect(manifest.syntheticGenerationDepth).toBeCloseTo(3, 12)
+    expect(manifest.humanAnchorShare).toBeCloseTo(0.8, 12)
+    expect(manifest.rightsRisk).toBeCloseTo(0.095, 12)
+    expect(manifest.effectiveTrainingValue).toBeGreaterThan(0)
+    expect(manifest.effectiveTrainingValue).toBeLessThan(1)
+  })
+
+  it('assigns no training value when no canonical asset can supply the request', () => {
+    const base = createEmptyLabData()
+    base.assets = []
+    for (const stock of Object.values(base.stocks)) stock.processed = 0
+    const { manifest } = createDataManifest({
+      data: base,
+      consumed: { audio: 40 },
+      totalMTok: 40,
+      day: 9,
+      seed: 12,
+      runId: 'empty-manifest',
+    })
+
+    expect(manifest.uniqueMTok).toBe(0)
+    expect(manifest.repeatedMTok).toBe(40)
+    expect(manifest.effectiveTrainingValue).toBe(0)
+  })
+
+  it('attributes only the aggregate stock gap for legacy corpora without assets', () => {
+    const base = createEmptyLabData()
+    base.stocks.audio.processed = 120
+    base.stocks.audio.fromWeb = 120
+    const { manifest } = createDataManifest({
+      data: base,
+      consumed: { audio: 200 },
+      totalMTok: 200,
+      day: 10,
+      seed: 13,
+      runId: 'legacy-audio-stock',
+    })
+
+    expect(manifest.uniqueMTok).toBe(120)
+    expect(manifest.repeatedMTok).toBe(80)
+    expect(manifest.domainWeights).toEqual({ audio: 1 })
+    expect(manifest.assetIds).toContain('dataset-legacy-stock-audio')
+    expect(manifest.assetIds).not.toContain('dataset-public-foundation-2026')
+  })
+
+  it('does not create fallback volume when assets already represent processed stock', () => {
+    const base = createEmptyLabData()
+    const { manifest } = createDataManifest({
+      data: base,
+      consumed: { code: 500 },
+      totalMTok: 500,
+      day: 11,
+      seed: 14,
+      runId: 'no-double-count',
+    })
+
+    expect(manifest.uniqueMTok).toBe(180)
+    expect(manifest.repeatedMTok).toBe(320)
+    expect(manifest.assetIds).toEqual(['dataset-public-foundation-2026'])
+  })
+
+  it('prunes backing volume without removing another domain from a mixed asset', () => {
+    const base = createEmptyLabData()
+    const foundation = base.assets[0]!
+    base.assets = [{
+      ...foundation,
+      id: 'mixed-media',
+      volumeMTok: 100,
+      domainWeights: { image: 0.4, chat: 0.6 },
+      quality: 48,
+    }]
+    const result = pruneDatasetAssetsForDomain({
+      data: base,
+      domain: 'image',
+      amountMTok: 15,
+    })
+    const domainVolume = (domain: 'image' | 'chat') =>
+      result.data.assets.reduce(
+        (sum, asset) =>
+          sum + asset.volumeMTok * Math.max(0, asset.domainWeights[domain] ?? 0),
+        0,
+      )
+    const qualityMass = result.data.assets.reduce(
+      (sum, asset) => sum + asset.quality * asset.volumeMTok,
+      0,
+    )
+    const imageSurvivor = result.data.assets.find(
+      (asset) => (asset.domainWeights.image ?? 0) > 0,
+    )
+
+    expect(result.removedMTok).toBeCloseTo(15, 12)
+    expect(result.data.assets.reduce((sum, asset) => sum + asset.volumeMTok, 0)).toBeCloseTo(85, 12)
+    expect(domainVolume('image')).toBeCloseTo(25, 12)
+    expect(domainVolume('chat')).toBeCloseTo(60, 12)
+    expect(imageSurvivor?.quality).toBeGreaterThan(48)
+    expect(qualityMass + result.removedQualityMTok).toBeCloseTo(
+      48 * 100,
+      8,
+    )
+  })
+
+  it('prevents future manifests from consuming pruned asset volume', () => {
+    const base = createEmptyLabData()
+    const pruned = pruneDatasetAssetsForDomain({
+      data: base,
+      domain: 'code',
+      amountMTok: 45,
+    }).data
+    const { manifest } = createDataManifest({
+      data: pruned,
+      consumed: { code: 180 },
+      totalMTok: 180,
+      day: 8,
+      seed: 7,
+      runId: 'post-prune',
+    })
+
+    expect(manifest.uniqueMTok).toBeCloseTo(135, 8)
+    expect(manifest.repeatedMTok).toBeCloseTo(45, 8)
   })
 })

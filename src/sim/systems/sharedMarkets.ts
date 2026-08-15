@@ -1,7 +1,6 @@
 import { DATA_DOMAIN_META, normalizeDomainStock } from '../balance/data'
 import { ECONOMY } from '../balance/economy'
 import { RACK_SKU_CATALOG } from '../balance/rackSkus'
-import { getChassis } from '../balance/racks'
 import { createRng, hashSeed, seededId } from '../rng'
 import type {
   ActiveLoan,
@@ -124,39 +123,6 @@ function destinationForLab(state: SimState, labId: LabId): { x: number; y: numbe
   return hall ? { x: hall.x, y: hall.y } : null
 }
 
-/** Remaining physical bay units after live and in-flight inventory. */
-export function labFreeRackUnits(state: SimState, labId: LabId): number {
-  const capacity = facilityAnchorTiles(state, { ownerId: labId })
-    .filter(
-      (tile) =>
-        (tile.kind === 'dc' || tile.kind === 'dc_m' || tile.kind === 'dc_l') &&
-        tile.buildingProgress >= tile.buildingTarget,
-    )
-    .reduce((sum, tile) => sum + Math.max(0, tile.rackCapacity), 0)
-  const lab = getLab(state, labId)
-  let committed = lab.rackFleet.reduce(
-    (sum, install) =>
-      sum + Math.max(0, install.count) * Math.max(1, install.rackUnits || 1),
-    0,
-  )
-  if (labId === state.playerLabId) {
-    committed += (state.player.chips ?? []).reduce(
-      (sum, inventory) => sum + Math.max(0, inventory.count),
-      0,
-    )
-    committed += (state.player.deployedRacks ?? []).reduce((sum, deployed) => {
-      const design = state.player.rackDesigns.find((entry) => entry.id === deployed.designId)
-      if (!design) return sum + Math.max(0, deployed.count)
-      try {
-        return sum + Math.max(0, deployed.count) * getChassis(design.chassisId).rackUnits
-      } catch {
-        return sum + Math.max(0, deployed.count)
-      }
-    }, 0)
-  }
-  return Math.max(0, capacity - committed)
-}
-
 function applyAcceleratorFill(
   state: SimState,
   order: ResourceOrder,
@@ -275,17 +241,11 @@ function clearAccelerators(state: SimState): SimState {
     )
     const price = clearingPrice(orders, supply.available, supply.reserveUnitPrice)
     let available = supply.available
-    const sku = RACK_SKU_CATALOG.find((candidate) => candidate.id === skuId)
     for (const order of orders) {
       const wanted = Math.max(0, order.quantity - order.quantityFilled)
-      // Re-check bay capacity at clearing time. Multiple bids can be queued
-      // against the same free space, and another delivery may land first.
-      const capacityQty = sku
-        ? Math.floor(labFreeRackUnits(next, order.labId) / Math.max(1, sku.rackUnits))
-        : 0
       const filled =
         order.maxUnitPrice >= price
-          ? Math.max(0, Math.floor(Math.min(wanted, available, capacityQty)))
+          ? Math.max(0, Math.floor(Math.min(wanted, available)))
           : 0
       available -= filled
       const spent = filled * price
@@ -964,10 +924,13 @@ export function queueRivalMarketOrders(state: SimState): SimState {
 
     const processed = Object.values(lab.data.stocks).reduce((sum, stock) => sum + stock.processed, 0)
     const comfortableNeed = Math.max(1, (lab.models[0]?.paramsB ?? 1) * 6000)
-    const hasDataBid = next.worldMarkets.orders.some(
+    const dataStarved = processed < comfortableNeed / 2
+    // Weekly restocking, plus a 3-day rhythm while the corpus is starved.
+    const dataCadence = weekly || (dataStarved && next.day % 3 === index % 3)
+    const openDataOrders = next.worldMarkets.orders.filter(
       (order) => order.labId === rivalId && order.kind === 'data',
-    )
-    if (weekly && !hasDataBid && processed < comfortableNeed && lab.cash > 5_000_000) {
+    ).length
+    if (dataCadence && openDataOrders < 2 && processed < comfortableNeed && lab.cash > 5_000_000) {
       const domain =
         lab.archetype === 'multimodal'
           ? 'image'
@@ -976,14 +939,23 @@ export function queueRivalMarketOrders(state: SimState): SimState {
             : lab.archetype === 'open_weights'
               ? 'code'
               : 'chat'
-      const candidate = next.dataMarket.offers
+      // Never tie up more than a fifth of cash in one data reservation.
+      const budget = lab.cash * 0.2
+      const candidates = next.dataMarket.offers
         .filter((offer) => offer.mTokLeft > 0 && (offer.domain === domain || offer.quality >= 70))
+        .filter((offer) => {
+          const lot = Math.min(offer.lotMTok, offer.mTokLeft)
+          return (offer.cash / Math.max(1, offer.lotMTok)) * lot <= budget
+        })
         .sort(
           (a, b) =>
             b.quality / Math.max(1, b.cash / b.lotMTok) -
             a.quality / Math.max(1, a.cash / a.lotMTok),
-        )[0]
-      if (candidate) next = queueDataOfferOrder(next, rivalId, candidate.id)
+        )
+      // Starved rivals buy up to two lots at once; otherwise one restock.
+      for (const candidate of candidates.slice(0, dataStarved ? 2 : 1)) {
+        next = queueDataOfferOrder(next, rivalId, candidate.id)
+      }
     }
   }
   return next

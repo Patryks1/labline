@@ -131,7 +131,7 @@ export function KpiHistoryPopover({
 
   return (
     <section
-      className="pointer-events-auto fixed left-1/2 top-[3.75rem] z-[90] w-[min(44rem,calc(100vw-1rem))] -translate-x-1/2 rounded-lg border border-line bg-panel/95 p-3 shadow-2xl backdrop-blur-xl"
+      className="kpi-history-popover panel-scroll pointer-events-auto fixed left-1/2 top-[3.75rem] z-[90] w-[min(44rem,calc(100vw-1rem))] -translate-x-1/2 overflow-y-auto rounded-lg border border-line bg-panel/95 p-3 shadow-2xl backdrop-blur-xl"
       aria-label={`${definition.label} history`}
     >
       <div className="flex items-start justify-between gap-3">
@@ -150,7 +150,7 @@ export function KpiHistoryPopover({
           type="button"
           aria-label="Close metric history"
           onClick={onClose}
-          className="rounded-md p-1.5 text-muted hover:bg-void hover:text-bone"
+          className="flex min-h-11 min-w-11 items-center justify-center rounded-md text-muted hover:bg-void hover:text-bone"
         >
           <X size="1rem" />
         </button>
@@ -168,7 +168,7 @@ export function KpiHistoryPopover({
         />
       </div>
 
-      <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto] items-end gap-3">
+      <div className="kpi-history-summary mt-3 grid grid-cols-[minmax(0,1fr)_auto] items-end gap-3">
         <div className="min-w-0">
           <div className="font-mono text-xl font-semibold tabular-nums text-bone">
             {definition.format(points.at(-1)?.value ?? definition.current(current))}
@@ -182,7 +182,7 @@ export function KpiHistoryPopover({
             {definition.format(delta)} over selected range
           </div>
         </div>
-        <div className="w-[12rem]">
+        <div className="kpi-history-range w-[12rem]">
           <SegmentedTabs
             ariaLabel="History range"
             active={String(range)}

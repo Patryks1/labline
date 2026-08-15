@@ -11,6 +11,7 @@ import type {
   TrainingForecast,
   TrainingOutcome,
 } from '../types'
+import { mixFit } from './modelScaling'
 
 export const CAPABILITY_DOMAINS: CapabilityDomain[] = [
   'language',
@@ -76,7 +77,15 @@ export interface ModelCapabilityInputs {
   io: ModelIO
   family: ModelFamily
   postTrain: PostTrainStage
+  /** Earned post-training evidence; avoids granting full signal from a stage label. */
+  postTrainStrength?: number
   quality: QualityAxes
+  /**
+   * Per-lab generative-modality maturity (0–1), keyed by modality. Scales
+   * ONLY the achievable modality domain ceilings (vision/video/audio); every
+   * other input still determines the theoretical score first.
+   */
+  modalityMaturity?: Partial<Record<GenerativeModality, number>>
 }
 
 /** Domain vector derived from scale and evidence; no research node grants raw points. */
@@ -85,6 +94,11 @@ export function deriveModelCapabilities(input: ModelCapabilityInputs): ModelCapa
   const dataSignal = 1 - Math.exp(-Math.max(0, input.effectiveDataRatio) / 6)
   const scaleSignal = clamp01(input.finalCapability / 100)
   const dataQuality = clamp01(input.dataQuality / 100)
+  const mix = mixFit(input.domainWeights)
+  const weightTotal = Object.values(input.domainWeights).reduce(
+    (sum, value) => sum + Math.max(0, value ?? 0),
+    0,
+  )
   const generalSignal =
     0.55 * scaleSignal + 0.2 * computeSignal + 0.25 * dataSignal * dataQuality
   const domains = {} as Record<CapabilityDomain, number>
@@ -93,12 +107,22 @@ export function deriveModelCapabilities(input: ModelCapabilityInputs): ModelCapa
     const coefficients = DOMAIN_AFFINITY[domain]
     let affinity = 0
     for (const [dataDomain, coefficient] of Object.entries(coefficients) as [DataDomain, number][]) {
-      affinity += Math.max(0, input.domainWeights[dataDomain] ?? 0) * coefficient
+      affinity +=
+        (Math.max(0, input.domainWeights[dataDomain] ?? 0) /
+          Math.max(1e-9, weightTotal)) *
+        coefficient
     }
     const domainEvidence =
       1 - Math.exp(-(Math.max(0, input.effectiveDataRatio) * clamp01(affinity)) / 2)
     const latent = 0.58 * generalSignal + 0.42 * domainEvidence * dataQuality
-    domains[domain] = clampScore(saturate(latent) * 0.82 + qualityAxis(domain, input.quality) * 0.18)
+    const affinitySignal = clamp01(affinity)
+    const specializationLift =
+      9 * mix.specialization * Math.sqrt(scaleSignal) * affinitySignal
+    domains[domain] = clampScore(
+      saturate(latent) * 0.82 +
+        qualityAxis(domain, input.quality) * 0.18 +
+        specializationLift,
+    )
   }
 
   if (!modalityAvailable(input.io, 'image')) domains.vision = Math.min(domains.vision, 12)
@@ -106,7 +130,24 @@ export function deriveModelCapabilities(input: ModelCapabilityInputs): ModelCapa
   if (!modalityAvailable(input.io, 'audio')) domains.audio = Math.min(domains.audio, 10)
   if (input.io.tools <= 0) domains.tools = Math.min(domains.tools, 15)
 
-  const post = postTrainSignal(input.postTrain)
+  // Lab experience caps only the achievable modality ceiling, never general
+  // capability: first-generation audio/image/video models are immature.
+  const maturity = input.modalityMaturity
+  if (maturity) {
+    if (maturity.image != null && modalityAvailable(input.io, 'image')) {
+      domains.vision = clampScore(domains.vision * clamp01(maturity.image))
+    }
+    if (maturity.video != null && modalityAvailable(input.io, 'video')) {
+      domains.video = clampScore(domains.video * clamp01(maturity.video))
+    }
+    if (maturity.audio != null && modalityAvailable(input.io, 'audio')) {
+      domains.audio = clampScore(domains.audio * clamp01(maturity.audio))
+    }
+  }
+
+  const post = clamp01(
+    input.postTrainStrength ?? postTrainSignal(input.postTrain),
+  )
   const factuality = clampScore(
     domains.reasoning * 0.35 +
       domains.science * 0.25 +
@@ -134,6 +175,53 @@ export interface SyntheticQualityInputs {
   domain: DataDomain
   teacherDomainCapability: number
   provenance: SyntheticProvenance
+}
+
+/** Generative modalities whose achievable ceiling grows with lab experience. */
+export type GenerativeModality = 'image' | 'audio' | 'video'
+
+/**
+ * Per-lab modality experience curve, shared by player and rivals.
+ * n = previously completed models in that modality for that lab. Maturity
+ * scales ONLY the achievable modality ceiling:
+ *   achieved modality score = theoretical score × maturity.
+ * First generation ≈45% of mature potential, then ≈63%, ≈75%, ≈85%, …
+ */
+export function modalityMaturity(completedCount: number): number {
+  const n = Math.max(0, Number.isFinite(completedCount) ? completedCount : 0)
+  return 0.45 + 0.55 * (1 - Math.exp(-n / 2.5))
+}
+
+/**
+ * Count previously completed models per generative modality for one lab.
+ * Exported so the rival engine consumes the exact same curve as the player.
+ */
+export function modalityExperienceCounts(
+  models: readonly Pick<Model, 'modalities'>[],
+): Record<GenerativeModality, number> {
+  const counts: Record<GenerativeModality, number> = { image: 0, audio: 0, video: 0 }
+  for (const model of models) {
+    for (const modality of ['image', 'audio', 'video'] as const) {
+      if (model.modalities.includes(modality)) counts[modality] += 1
+    }
+  }
+  return counts
+}
+
+/** Scale the image/audio/video entries of a model IO vector by maturity. */
+export function matureModelIo(
+  io: ModelIO,
+  maturity: Partial<Record<GenerativeModality, number>>,
+): ModelIO {
+  const inputs: ModelIO['inputs'] = { ...io.inputs }
+  const outputs: ModelIO['outputs'] = { ...io.outputs }
+  for (const modality of ['image', 'audio', 'video'] as const) {
+    const mult = maturity[modality]
+    if (mult == null) continue
+    if (inputs[modality] != null) inputs[modality] = inputs[modality]! * mult
+    if (outputs[modality] != null) outputs[modality] = outputs[modality]! * mult
+  }
+  return { inputs, outputs, tools: io.tools }
 }
 
 /** Maps a dataset domain to the teacher skill that can actually supervise it. */

@@ -50,12 +50,76 @@ describe('authoritative training programs', () => {
     expect(program.targetSegments).toEqual(['indie_api', 'science'])
     expect(program.integratedMethods).toEqual(['dense_basics'])
     expect(program.dataManifestId).toBeTruthy()
-    expect(state.player.data.manifests.find((manifest) => manifest.id === program.dataManifestId)).toMatchObject({
-      domainWeights: job.dataPlan.weights,
-      assetIds: ['dataset-public-foundation-2026'],
+    const manifest = state.player.data.manifests.find(
+      (candidate) => candidate.id === program.dataManifestId,
+    )!
+    expect(manifest.assetIds).toEqual(['dataset-public-foundation-2026'])
+    expect(Object.values(manifest.domainWeights).reduce((sum, weight) => sum + (weight ?? 0), 0)).toBeCloseTo(1)
+    expect(manifest.domainWeights.audio ?? 0).toBe(0)
+    expect(manifest.domainWeights.video ?? 0).toBe(0)
+    expect(job.dataEvidence).toMatchObject({
+      effectiveQuality: manifest.effectiveQuality,
+      contaminationRisk: manifest.contaminationRisk,
+      effectiveTrainingValue: manifest.effectiveTrainingValue,
     })
     expect(state.player.researchPods?.find((pod) => pod.id === 'pod-foundations')?.assignmentId).toBe(job.id)
     expect(program.domainForecasts.code?.high).toBeGreaterThan(program.domainForecasts.code?.low ?? 0)
+  })
+
+  it('uses the asset-attributed mix for the live job instead of stock-only recipe weights', () => {
+    const initial = createGame(713)
+    const foundation = initial.player.data.assets[0]!
+    const state = startTrainingProgram(
+      {
+        ...initial,
+        player: {
+          ...initial.player,
+          data: {
+            ...initial.player.data,
+            stocks: Object.fromEntries(
+              Object.entries(initial.player.data.stocks).map(([domain, stock]) => [
+                domain,
+                domain === 'chat'
+                  ? stock
+                  : {
+                      ...stock,
+                      processed: 0,
+                      fromWeb: 0,
+                      fromUser: 0,
+                      fromBought: 0,
+                      fromSynth: 0,
+                      fromSynthHQ: 0,
+                      fromSynthLQ: 0,
+                    },
+              ]),
+            ) as typeof initial.player.data.stocks,
+            assets: [
+              {
+                ...foundation,
+                id: 'chat-only-provenance',
+                volumeMTok: 80,
+                domainWeights: { chat: 1 },
+              },
+            ],
+          },
+        },
+      },
+      PROGRAM,
+    )
+    const job = state.player.trainingJob!
+    const manifest = state.player.data.manifests.find(
+      (candidate) => candidate.id === job.dataManifestId,
+    )!
+
+    expect(job, state.alerts[0]?.message).not.toBeNull()
+    expect(manifest.domainWeights).toEqual({ chat: 1 })
+    expect(job.dataPlan?.weights.chat).toBe(1)
+    expect(job.dataPlan?.weights.code).toBe(0)
+    expect(job.dataConsumed?.code ?? 0).toBe(0)
+    expect(job.dataConsumed?.chat).toBeCloseTo(
+      (job.trainMTok ?? 0) + (job.verifyMTok ?? 0),
+      8,
+    )
   })
 
   it('spends accumulated compute on a deterministic pilot and narrows ranges without rerolling', () => {
@@ -125,7 +189,20 @@ describe('authoritative training programs', () => {
       ...state,
       player: {
         ...state.player,
-        trainingJob: { ...stabilized, progressPfDays: stabilized.targetPfDays },
+        trainingJob: {
+          ...stabilized,
+          progressPfDays: stabilized.targetPfDays,
+          daysElapsed: stabilized.minCalendarDays ?? 0,
+        },
+        trainingJobs: (state.player.trainingJobs ?? [stabilized]).map((job) =>
+          job.id === stabilized.id
+            ? {
+                ...job,
+                progressPfDays: job.targetPfDays,
+                daysElapsed: job.minCalendarDays ?? 0,
+              }
+            : job,
+        ),
       },
     }
     state = finalizeModel(state, programId, 'released')

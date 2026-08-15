@@ -23,24 +23,24 @@ export function BenchmarkOverlay() {
     <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-void/75 p-4 backdrop-blur-sm">
       <div
         ref={ref}
-        className="glass max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-3xl p-6 shadow-2xl shadow-black/50"
+        className="glass max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-lg p-6 shadow-2xl shadow-void/50"
       >
-        <p className="font-mono text-[0.75rem] uppercase tracking-[0.2em] text-research">
+        <p className="font-mono text-[0.75rem] uppercase tracking-[0.12em] text-research">
           Benchmark day · day {ev.day}
         </p>
         <h2 className="mt-2 text-2xl font-semibold tracking-tight text-bone">{ev.modelName}</h2>
         <p className="mt-2 text-sm leading-relaxed text-muted">{ev.headline}</p>
 
         <div className="mt-4 flex gap-3 font-mono text-xs">
-          <div className="flex-1 rounded-xl border border-mint/30 bg-mint/10 px-3 py-2 text-center">
+          <div className="flex-1 rounded-md border border-mint/30 bg-mint/10 px-3 py-2 text-center">
             <div className="text-muted">Wins</div>
             <div className="text-lg text-mint">{ev.wins}</div>
           </div>
-          <div className="flex-1 rounded-xl border border-line bg-panel-2 px-3 py-2 text-center">
+          <div className="flex-1 rounded-md border border-line bg-panel-2 px-3 py-2 text-center">
             <div className="text-muted">Capability</div>
             <div className="text-lg text-bone">{num(ev.capability, 0)}</div>
           </div>
-          <div className="flex-1 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-center">
+          <div className="flex-1 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-center">
             <div className="text-muted">Trails</div>
             <div className="text-lg text-danger">{ev.losses}</div>
           </div>
@@ -48,7 +48,7 @@ export function BenchmarkOverlay() {
 
         <div className="mt-5 space-y-2">
           {ev.rivalCompare.map((row) => (
-            <div key={row.benchmarkId} className="rounded-xl border border-line bg-panel-2 px-3 py-2">
+            <div key={row.benchmarkId} className="rounded-md border border-line bg-panel-2 px-3 py-2">
               <div className="flex items-center justify-between text-xs">
                 <span className="font-medium text-bone">{row.label}</span>
                 <span className={row.win ? 'text-mint' : 'text-amber'}>

@@ -3,8 +3,9 @@
  * Used by player training finalize AND rivals so everyone plays by the same rules.
  *
  * Design goals:
- * - Tiny models land ~10–20% on benches (not maxed)
- * - ~70B with solid data is mid-pack (~45–60), not saturated
+ * - Early sub-1B models land ~5–10 capability (millions-era, not mid-pack)
+ * - ~7B with a good early recipe is teens–mid-20s; ~70B is mid-pack (~45–65)
+ * - Late research + reasoning + overtrain lets tiny models punch up to ~35
  * - Multi-hundred-B / T-scale + great data + research approaches ceiling
  * - Wrong mix (all code / no chat) hurts general benches; helps specialists
  * - Under-trained big models stay dumb (data is a real gate)
@@ -12,6 +13,7 @@
 import type {
   BenchmarkId,
   BenchmarkScores,
+  ModelBackbone,
   ModelFamily,
   QualityAxes,
 } from "../types";
@@ -19,6 +21,20 @@ import {
   applyBenchmarkPolicy,
   inferReasoningEnabled,
 } from "./evaluationSuites";
+import { activeBalanceTuning } from "./tuning";
+// training.ts does not import modelScaling (verified: it pulls only types,
+// economy, trainingPrecision, and a pricing re-export), so this is acyclic.
+import {
+  COMPUTE_OPTIMAL_TOKENS_PER_PARAMETER,
+  distillRetentionFor,
+  GAMEPLAY_STRONG_TOKENS_PER_PARAMETER,
+} from "./training";
+import {
+  architectureAdjustedDataCoverage,
+  architectureBlueprintId,
+  architecturePretrainingCapabilityCap,
+  type ArchitectureBlueprintId,
+} from "./architectureFrontiers";
 
 function emptyBenchmarks(): BenchmarkScores {
   return {
@@ -37,17 +53,63 @@ function emptyBenchmarks(): BenchmarkScores {
 
 /** Capability / bench score bounds (game units 0–100). */
 export const SCALE = {
-  CAP_FLOOR: 9,
+  /** Low floor so early millions-param models can score ~5–10 TOPS. */
+  CAP_FLOOR: 3,
   CAP_CEIL: 94,
   /** Soft asymptotic bench ceiling even with perfect setup */
   BENCH_HARD_CEIL: 96,
 } as const;
 
+/**
+ * Compute-intensity (overtrain) headroom. Early game is tight; research raises
+ * the hard cap so long runs on smaller models can punch above size late-game.
+ */
+export const OVERTRAIN = {
+  /** Campaign progression anchor retained for existing balance/save pacing. */
+  STRONG_COVERAGE: GAMEPLAY_STRONG_TOKENS_PER_PARAMETER,
+  /** Physical dense compute-optimal reference used by modern comparisons. */
+  COMPUTE_OPTIMAL_COVERAGE: COMPUTE_OPTIMAL_TOKENS_PER_PARAMETER,
+  /** Capability points available from overtrain with no research unlocks. */
+  BASE_CAP: 1.5,
+  /** Absolute ceiling on overtrain contribution (with full research). */
+  MAX_CAP: 8,
+  /** Diminishing-returns scale for coverage beyond STRONG_COVERAGE. */
+  INTENSITY_SCALE: 9,
+  /** Absolute capability points per unit of (researchMult - 1). */
+  RESEARCH_RAW_WEIGHT: 100,
+  /** Absolute capability points from process-reward / reasoning stack. */
+  REASONING_RAW: 8,
+  /** Ceiling technology weight on (researchMult - 1); was 24. */
+  RESEARCH_CEILING_WEIGHT: 48,
+  /** Ceiling technology points from reasoning; was 4. */
+  REASONING_CEILING: 8,
+} as const;
+
+/** Bend capability past ~52 so high-end gains cost progressively more scale. */
+export function progressionBend(capability: number, steepness: number): number {
+  if (!(steepness > 0) || capability <= 52) return capability;
+  return 52 + (capability - 52) / (1 + ((capability - 52) / 42) * steepness);
+}
+
+/**
+ * Capability ceiling with the active progression bend applied. Precision
+ * quality caps multiply this so lower-precision formats keep a strict
+ * ordering even deep in the bent region.
+ */
+export function bentCapabilityCeiling(rawCeiling: number): number {
+  return progressionBend(
+    rawCeiling,
+    activeBalanceTuning().progressionSteepness,
+  );
+}
+
 export interface ScaleInputs {
   paramsB: number;
   activeParamsB?: number;
   family?: ModelFamily;
-  /** 0–1.2+ data volume vs recommended for this size (Chinchilla-ish coverage) */
+  /** Compute topology; product family remains authoritative for benchmark policy. */
+  backbone?: ModelBackbone;
+  /** Quality-weighted training tokens per total parameter (1, 6, 20, ...). */
   dataCoverage: number;
   /**
    * Data quality multiplier.
@@ -67,8 +129,25 @@ export interface ScaleInputs {
   postTrainStrength?: number;
   /** Process-reward/reasoning stack is an earned route to more general headroom. */
   reasoningEnabled?: boolean;
+  /**
+   * Research-unlocked overtrain headroom (capability points beyond BASE_CAP).
+   * Aggregated from `overtrainCapBonus` research effects; optional for old saves.
+   */
+  overtrainCapBonus?: number;
   /** Distillation may transfer capability that the student could not pretrain alone. */
   teacherCapability?: number;
+  /**
+   * Teacher size in billions of parameters. With `teacherCapability`, enables
+   * the size-gap-aware distill ceiling via `distillRetentionFor`; without it
+   * the ceiling falls back to the legacy flat 0.88 retention.
+   */
+  teacherParamsB?: number;
+  /**
+   * Independently verified capability retained from completed recursive
+   * research loops. Only omni blueprints can use it, and the blueprint helper
+   * bounds the gain. A research unlock by itself must not populate this value.
+   */
+  verifiedRecursiveCapabilityBonus?: number;
 }
 
 export interface ScaleResult {
@@ -76,12 +155,18 @@ export interface ScaleResult {
   paramPotential: number;
   /** 0–1.15 data volume × quality fit */
   dataFit: number;
+  /** Coverage after the architecture's data-breadth demand; input remains raw. */
+  architectureDataCoverage: number;
   /** 0.7–1.05 generalist mix efficiency */
   mixGeneral: number;
   /** Domain specialty 0–1 boosts */
   domainBoost: Record<string, number>;
   /** Combined 0–1 intelligence index before map to capability */
   intelligence: number;
+  /** Earned overtrain / compute-intensity contribution (0..cap). */
+  overtrain: number;
+  /** Absolute research + reasoning + overtrain lift applied to raw capability. */
+  techRawBonus: number;
   /** 0–100 capability score */
   capability: number;
   /** Enforced general-capability ceiling for this recipe. */
@@ -96,7 +181,15 @@ export interface CapabilityCeilingResult {
   dataBonus: number;
   technologyBonus: number;
   distillationBonus: number;
-  limitingFactor: "parameters" | "data quality" | "technology" | "teacher";
+  architectureBlueprint: ArchitectureBlueprintId;
+  /** Gameplay blueprint wall applied to pretraining before teacher transfer. */
+  blueprintCap: number;
+  limitingFactor:
+    | "parameters"
+    | "data quality"
+    | "technology"
+    | "architecture blueprint"
+    | "teacher";
 }
 
 /**
@@ -104,44 +197,99 @@ export interface CapabilityCeilingResult {
  * excluded: a narrow corpus can win its benchmarks, but does not become free
  * general intelligence. This function is shared by player and rival builds.
  */
+/** Hard cap on overtrain points; research raises this from BASE_CAP toward MAX_CAP. */
+export function overtrainCap(overtrainCapBonus = 0): number {
+  return Math.min(
+    OVERTRAIN.MAX_CAP,
+    OVERTRAIN.BASE_CAP + Math.max(0, overtrainCapBonus),
+  );
+}
+
+/**
+ * Diminishing compute-intensity score from the campaign's 6:1 progression
+ * anchor. This is a gameplay bonus, not a claim that 6N is compute-optimal;
+ * the physical reference is COMPUTE_OPTIMAL_COVERAGE (20N).
+ * Returns earned capability points in [0, overtrainCap].
+ */
+export function overtrainBonus(
+  dataCoverage: number,
+  overtrainCapBonus = 0,
+): number {
+  const excess = Math.max(0, dataCoverage - OVERTRAIN.STRONG_COVERAGE);
+  const intensity = 1 - Math.exp(-excess / OVERTRAIN.INTENSITY_SCALE);
+  return intensity * overtrainCap(overtrainCapBonus);
+}
+
 export function capabilityCeiling(input: ScaleInputs): CapabilityCeilingResult {
+  const architectureBlueprint = architectureBlueprintId(input);
+  const blueprintCap = architecturePretrainingCapabilityCap(input);
+  const architectureDataCoverage = architectureAdjustedDataCoverage(input);
   const potential = paramScalePotential(
     input.paramsB,
     input.activeParamsB,
     input.family,
+    input.backbone,
   );
-  const sizeBase = 12 + potential * 76;
+  // Early tiny ceilings sit near ~8–12 so the raw score leads, not the cap.
+  const sizeBase = 4 + potential * 84;
   const quality = Math.max(0.3, Math.min(1.4, input.dataQuality));
-  const qualityBonus = Math.max(0, quality - 0.92) * 15;
+  // Data remains meaningful but secondary to technology headroom.
+  const qualityBonus = Math.max(0, quality - 0.92) * 12;
   const volumeBonus = Math.max(
     0,
-    Math.min(4, Math.log2(Math.max(1, input.dataCoverage)) * 1.3),
+    Math.min(3.2, Math.log2(Math.max(1, architectureDataCoverage)) * 1.05),
   );
   const dataBonus = qualityBonus + volumeBonus;
   const research = Math.max(0.9, Math.min(1.14, input.researchMult ?? 1));
+  const unlockedOvertrain = overtrainCap(input.overtrainCapBonus ?? 0);
   const technologyBonus =
-    Math.max(0, research - 1) * 24 + (input.reasoningEnabled ? 4 : 0);
-  const pretrainedCeiling = Math.min(
-    96,
+    Math.max(0, research - 1) * OVERTRAIN.RESEARCH_CEILING_WEIGHT +
+    (input.reasoningEnabled ? OVERTRAIN.REASONING_CEILING : 0) +
+    unlockedOvertrain;
+  const uncappedPretrainedCeiling = Math.min(
+    97,
     sizeBase + dataBonus + technologyBonus,
   );
-  const teacherTarget = Math.max(0, input.teacherCapability ?? 0) * 0.88;
+  // Gameplay architecture wall: ordinary scale, data, and research can reach
+  // this cap but cannot cross it. Teacher transfer is intentionally evaluated
+  // after this line, so distillation remains a distinct way past the wall.
+  const pretrainedCeiling = Math.min(blueprintCap, uncappedPretrainedCeiling);
+  // Size-gap-aware retention when the teacher size is known (a slightly
+  // generous +0.1 planning estimate, capped); flat 0.88 fallback otherwise.
+  const teacherRetention =
+    input.teacherCapability != null && input.teacherParamsB != null
+      ? Math.min(
+          0.88,
+          distillRetentionFor({
+            teacherParamsB: input.teacherParamsB,
+            studentParamsB: input.paramsB,
+            dataFactor: 0.6,
+            rng01: 0.5,
+          }) + 0.1,
+        )
+      : 0.88;
+  const teacherTarget =
+    Math.max(0, input.teacherCapability ?? 0) * teacherRetention;
   const distillationBonus = Math.max(0, teacherTarget - pretrainedCeiling);
   const capability = Math.min(97, pretrainedCeiling + distillationBonus);
   const limitingFactor =
     distillationBonus > 0
       ? "teacher"
-      : quality < 1.08
-        ? "data quality"
-        : technologyBonus < 2
-          ? "technology"
-          : "parameters";
+      : uncappedPretrainedCeiling > blueprintCap
+        ? "architecture blueprint"
+        : quality < 1.08
+          ? "data quality"
+          : technologyBonus < 2
+            ? "technology"
+            : "parameters";
   return {
     capability,
     sizeBase,
     dataBonus,
     technologyBonus,
     distillationBonus,
+    architectureBlueprint,
+    blueprintCap,
     limitingFactor,
   };
 }
@@ -158,33 +306,56 @@ export function effectiveScaleParamsB(
   paramsB: number,
   activeParamsB?: number,
   family?: ModelFamily,
+  backbone?: ModelBackbone,
 ): number {
   const n = Math.max(0.001, paramsB);
-  if (family === "moe") {
+  if (backbone === "moe" || (backbone == null && family === "moe")) {
     const active = Math.max(0.001, Math.min(n, activeParamsB ?? n * 0.1));
     const partialExpertCapacity = active + (n - active) * 0.35;
-    return Math.min(n * 0.9, partialExpertCapacity);
+    return Math.min(
+      n * 0.9,
+      partialExpertCapacity * moeRoutingCapacityMultiplier(n, active),
+    );
   }
   return n;
 }
 
 /**
+ * Extremely sparse routes are playable, but cannot exploit a huge expert bank
+ * as effectively as a healthy active path. Two percent is the no-penalty knee,
+ * not a launch gate; below it capability falls continuously with sqrt(route).
+ */
+export function moeRoutingCapacityMultiplier(
+  totalParamsB: number,
+  activeParamsB: number,
+): number {
+  const total = Math.max(0.001, totalParamsB);
+  const activeFraction =
+    Math.max(0.001, Math.min(total, activeParamsB)) / total;
+  return Math.max(0.35, Math.min(1, Math.sqrt(activeFraction / 0.02)));
+}
+
+/**
  * Asymptotic size potential 0–~0.92 from parameter count.
  *
+ * Steep sigmoid (width ~0.55 decades) keeps sub-1B potential tiny so early
+ * meta is won by scale; late tech adds absolute points on top.
+ *
  * Rough targets (perfect data still multiplies):
- *  7M → 0.05 · 1B → 0.20 · 7B → 0.36 · 70B → 0.58 · 405B → 0.74 · 1T → 0.81
+ *  70M → 0.015 · 1B → 0.06 · 7B → 0.23 · 70B → 0.65 · 405B → 0.88 · 1T → 0.92
  */
 export function paramScalePotential(
   paramsB: number,
   activeParamsB?: number,
   family?: ModelFamily,
+  backbone?: ModelBackbone,
 ): number {
-  const n = effectiveScaleParamsB(paramsB, activeParamsB, family);
+  const n = effectiveScaleParamsB(paramsB, activeParamsB, family, backbone);
   // log10 of parameter count in millions
   const u = Math.log10(Math.max(n, 1e-5) * 1000);
-  // Sigmoid centered near ~30B (u≈4.5)
-  const pot = 1 / (1 + Math.exp(-(u - 4.5) / 1.05));
-  return Math.max(0.02, Math.min(0.93, pot));
+  // Sigmoid centered near ~30B (u≈4.5); narrow width crushes sub-1B potential.
+  const pot = 1 / (1 + Math.exp(-(u - 4.5) / 0.55));
+  return Math.max(0.015, Math.min(0.93, pot));
 }
 
 /**
@@ -208,7 +379,9 @@ export function normalizeDataQuality(opts: {
 
 /**
  * Data volume × quality gate.
- * Coverage 1.0 = recommended tokens for this size; underfeed hurts hard.
+ * Coverage is quality-weighted tokens per parameter. 1N is the viability
+ * floor, 6N preserves the existing strong campaign recipe, and 20N is the
+ * modern dense compute-optimal reference. Underfeeding hurts hard.
  */
 export function dataFitScore(coverage: number, dataQuality: number): number {
   const c = Math.max(0, coverage);
@@ -233,6 +406,11 @@ export function dataFitScore(coverage: number, dataQuality: number): number {
 export function mixFit(weights?: Partial<Record<string, number>>): {
   general: number;
   domainBoost: Record<string, number>;
+  /** 0–1 strength of a corpus dominated by its largest one or two domains. */
+  specialization: number;
+  /** Fractional loss applied to general capability (hard-capped at 50%). */
+  generalPenalty: number;
+  dominantDomains: string[];
 } {
   const keys = [
     "code",
@@ -265,6 +443,9 @@ export function mixFit(weights?: Partial<Record<string, number>>): {
         health: 0.1,
         image: 0.08,
       },
+      specialization: 0,
+      generalPenalty: 0,
+      dominantDomains: [],
     };
   }
   for (const k of keys) w[k] = (w[k] ?? 0) / sum;
@@ -277,14 +458,34 @@ export function mixFit(weights?: Partial<Record<string, number>>): {
   }
   const entMax = Math.log(keys.length);
   const diversity = entMax > 0 ? ent / entMax : 1;
-  // Mono-domain ~0.72 general efficiency; balanced ~1.05
-  const general = 0.72 + diversity * 0.33;
+  const ranked = [...keys].sort((a, b) => w[b]! - w[a]!);
+  const topTwoMass = (w[ranked[0]!] ?? 0) + (w[ranked[1]!] ?? 0);
+  // Narrowing starts just before 60%, then eases smoothly toward the cap.
+  // Smoothstep keeps small recipe changes from causing a discontinuous cliff.
+  const concentration = Math.max(0, Math.min(1, (topTwoMass - 0.58) / 0.42));
+  const specialization =
+    concentration * concentration * (3 - 2 * concentration);
+  const generalPenalty = Math.min(0.5, specialization * 0.5);
+  const general = (1 + diversity * 0.05) * (1 - generalPenalty);
+  const dominantDomains = ranked
+    .slice(0, 2)
+    .filter((domain) => (w[domain] ?? 0) >= 0.18);
 
   const domainBoost: Record<string, number> = {};
   for (const k of keys) {
-    domainBoost[k] = Math.min(1, (w[k] ?? 0) * 1.65);
+    const share = w[k] ?? 0;
+    const dominantLift = dominantDomains.includes(k)
+      ? specialization * Math.sqrt(share) * 0.45
+      : 0;
+    domainBoost[k] = Math.min(1, share * 1.65 + dominantLift);
   }
-  return { general: Math.max(0.65, Math.min(1.08, general)), domainBoost };
+  return {
+    general: Math.max(0.5, Math.min(1.08, general)),
+    domainBoost,
+    specialization,
+    generalPenalty,
+    dominantDomains,
+  };
 }
 
 /**
@@ -295,12 +496,18 @@ export function scaleIntelligence(input: ScaleInputs): ScaleResult {
     input.paramsB,
     input.activeParamsB,
     input.family,
+    input.backbone,
   );
-  const dataFit = dataFitScore(input.dataCoverage, input.dataQuality);
+  const architectureDataCoverage = architectureAdjustedDataCoverage(input);
+  const dataFit = dataFitScore(architectureDataCoverage, input.dataQuality);
   const { general: mixGeneral, domainBoost } = mixFit(input.mixWeights);
   const research = Math.max(0.9, Math.min(1.14, input.researchMult ?? 1));
-  const complete = Math.max(0.55, Math.min(1, input.trainComplete ?? 1));
+  // Allow deep early-launch haircuts; floor keeps near-zero progress from
+  // collapsing intelligence entirely (explicit earlyReleasePenalty still applies).
+  const complete = Math.max(0.2, Math.min(1, input.trainComplete ?? 1));
   const post = Math.max(0, Math.min(1, input.postTrainStrength ?? 0.35));
+  const capBonus = input.overtrainCapBonus ?? 0;
+  const overtrain = overtrainBonus(architectureDataCoverage, capBonus);
 
   // Core product: size × data × mix. Post-train / research are soft (can't invent scale).
   let intelligence =
@@ -312,23 +519,45 @@ export function scaleIntelligence(input: ScaleInputs): ScaleResult {
   );
   intelligence = Math.max(0.03, Math.min(0.96, intelligence));
 
+  // Tech is the dominant late-game lever: research + reasoning + earned overtrain
+  // add absolute points (overtrain hard-capped; research unlocks a higher cap).
+  const techRawBonus =
+    Math.max(0, research - 1) * OVERTRAIN.RESEARCH_RAW_WEIGHT +
+    (input.reasoningEnabled ? OVERTRAIN.REASONING_RAW : 0) +
+    overtrain;
   const rawCapability =
-    SCALE.CAP_FLOOR + (SCALE.CAP_CEIL - SCALE.CAP_FLOOR) * intelligence;
+    SCALE.CAP_FLOOR +
+    (SCALE.CAP_CEIL - SCALE.CAP_FLOOR) * intelligence +
+    techRawBonus;
   const ceiling = capabilityCeiling(input);
-  const capability = Math.min(rawCapability, ceiling.capability);
+  // Post-ceiling progression bend: gains past ~52 get progressively harder,
+  // asymptoting at 52 + 42/steepness (94 at the default steepness of 1).
+  // No-op when progressionSteepness is 0 (legacy curve restored).
+  const steepness = activeBalanceTuning().progressionSteepness;
+  const capability = progressionBend(
+    Math.min(rawCapability, ceiling.capability),
+    steepness,
+  );
 
   const benchCeilings = benchCeilingsFromIntelligence(
     intelligence,
     domainBoost,
     input.family,
   );
+  // Bend each bench ceiling with the same curve so benchmarks track capability.
+  for (const id of Object.keys(benchCeilings) as BenchmarkId[]) {
+    benchCeilings[id] = progressionBend(benchCeilings[id]!, steepness);
+  }
 
   return {
     paramPotential,
     dataFit,
+    architectureDataCoverage,
     mixGeneral,
     domainBoost,
     intelligence,
+    overtrain,
+    techRawBonus,
     capability: clamp100(capability),
     capabilityCeiling: ceiling.capability,
     benchCeilings,
@@ -544,6 +773,7 @@ export function modelBenchCeiling(
     paramsB: number;
     activeParamsB?: number;
     family?: ModelFamily;
+    backbone?: ModelBackbone;
     capability: number;
   },
   benchId: BenchmarkId,
@@ -561,6 +791,7 @@ export function modelBenchCeiling(
     model.paramsB,
     model.activeParamsB,
     model.family,
+    model.backbone,
   );
   const use = Math.min(intel, sizeIntel * 1.15);
   const ceilings = benchCeilingsFromIntelligence(use, {}, model.family);

@@ -4,25 +4,20 @@ import {
   type SaveSlotId,
 } from '../../sim/save'
 import { useGameStore } from '../../store/gameStore'
+import { money, pct } from './format'
+import { LablineMenuShell } from './menu/LablineMenuShell'
+import { SettingsPanel } from './menu/SettingsPanel'
+import { ConsoleDialog } from './ui/ConsoleDialog'
 import {
-  RENDER_PRESETS,
-  type InterfaceScale,
-  type RenderPreset,
-  useResolvedUiScale,
-  useUiStore,
-} from '../../store/uiStore'
-import { money } from './format'
-import { ArrowsOut, Eye, Monitor, X } from '@phosphor-icons/react'
-
-const SCALE_OPTIONS: { value: InterfaceScale; label: string }[] = [
-  { value: 'auto', label: 'Auto' },
-  { value: 0.8, label: '80%' },
-  { value: 0.9, label: '90%' },
-  { value: 1, label: '100%' },
-  { value: 1.1, label: '110%' },
-  { value: 1.25, label: '125%' },
-  { value: 1.5, label: '150%' },
-]
+  BALANCE_TUNING_GROUPS,
+  resolveBalanceTuning,
+  type BalanceTuning,
+} from '../../sim/balance/tuning'
+import {
+  runBalanceSimulation,
+  type BalanceSimulationReport,
+} from '../../sim/play/balanceSimulation'
+import type { SimState } from '../../sim/types'
 
 /**
  * In-run pause menu: resume, save/load slots, return to main menu.
@@ -43,15 +38,13 @@ export function PauseMenu() {
   const newGame = useGameStore((s) => s.newGame)
   const onboardingDismissed = useGameStore((s) => s.state.onboardingDismissed)
   const setOnboardingDismissed = useGameStore((s) => s.setOnboardingDismissed)
-  const interfaceScale = useUiStore((s) => s.interfaceScale)
-  const setInterfaceScale = useUiStore((s) => s.setInterfaceScale)
-  const renderPreset = useUiStore((s) => s.renderPreset)
-  const setRenderPreset = useUiStore((s) => s.setRenderPreset)
-  const reducedMotion = useUiStore((s) => s.reducedMotion)
-  const setReducedMotion = useUiStore((s) => s.setReducedMotion)
-  const resolvedScale = useResolvedUiScale()
+  const cash = useGameStore((s) => s.state.player.cash)
+  const adjustCheatMoney = useGameStore((s) => s.adjustCheatMoney)
+  const runInstantCheat = useGameStore((s) => s.runInstantCheat)
+  const balanceTuning = useGameStore((s) => s.state.balanceTuning)
+  const gameState = useGameStore((s) => s.state)
   const [msg, setMsg] = useState<string | null>(null)
-  const [tab, setTab] = useState<'main' | 'save' | 'load' | 'interface'>('main')
+  const [tab, setTab] = useState<'main' | 'save' | 'load' | 'settings' | 'balance'>('main')
   const [confirm, setConfirm] = useState<{
     title: string
     body: string
@@ -62,6 +55,12 @@ export function PauseMenu() {
   useEffect(() => {
     if (open) void refreshSaves()
   }, [open, refreshSaves])
+  useEffect(() => {
+    if (open) return
+    setTab('main')
+    setMsg(null)
+    setConfirm(null)
+  }, [open])
   void savesTick
   const bySlot = Object.fromEntries(saves.map((m) => [m.slotId, m])) as Partial<
     Record<SaveSlotId, (typeof saves)[0]>
@@ -93,26 +92,26 @@ export function PauseMenu() {
     })
   }
 
+  const requestClose = () => {
+    if (confirm) {
+      setConfirm(null)
+      return
+    }
+    setOpen(false)
+  }
+
   return (
-    <div
-      className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-void/70 p-4 backdrop-blur-sm"
-      onClick={() => setOpen(false)}
+    <LablineMenuShell
+      variant="pause"
+      titleId="labline-pause-title"
+      onRequestClose={requestClose}
+      contentClassName="pause-menu-content max-h-[calc(100dvh-11.5rem)] max-w-[46rem] p-5 sm:p-6"
     >
-      <div
-        className="hud-surface relative w-full max-w-[32rem] overflow-hidden rounded-xl p-5"
-        onClick={(e) => e.stopPropagation()}
-      >
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-sm font-semibold text-bone">
-            {tab === 'main' ? 'Paused' : tab === 'save' ? 'Save run' : tab === 'load' ? 'Load run' : 'Interface'}
+            {tab === 'main' ? 'Paused' : tab === 'save' ? 'Save run' : tab === 'load' ? 'Load run' : tab === 'settings' ? 'Settings' : 'Balance'}
           </h2>
-          <button
-            type="button"
-            onClick={() => setOpen(false)}
-            className="rounded-full px-2 py-0.5 text-[0.8125rem] text-muted hover:bg-panel-2 hover:text-bone"
-          >
-            Esc
-          </button>
+          <span className="font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">Esc to close</span>
         </div>
 
         {(msg ?? lifecycleError) && (
@@ -156,10 +155,17 @@ export function PauseMenu() {
               onClick={() => void onSave('auto')}
             />
             <MenuBtn
-              label="Interface settings"
+              label="Settings"
               onClick={() => {
                 setMsg(null)
-                setTab('interface')
+                setTab('settings')
+              }}
+            />
+            <MenuBtn
+              label="Balance"
+              onClick={() => {
+                setMsg(null)
+                setTab('balance')
               }}
             />
             <MenuBtn
@@ -184,7 +190,7 @@ export function PauseMenu() {
           <div className="space-y-2">
             <button
               type="button"
-              className="text-[0.8125rem] text-mint hover:underline"
+              className="min-h-11 text-[0.8125rem] text-mint hover:underline"
               onClick={() => {
                 setTab('main')
                 setMsg(null)
@@ -214,192 +220,63 @@ export function PauseMenu() {
           </div>
         )}
 
-        {tab === 'interface' && (
-          <div className="space-y-4">
+        {tab === 'settings' && (
+          <div>
             <button
               type="button"
-              className="text-[0.75rem] text-mint hover:underline"
+              className="min-h-11 text-[0.75rem] text-mint hover:underline"
               onClick={() => setTab('main')}
             >
               ← Back
             </button>
-
-            <section className="rounded-xl border border-line/70 bg-panel-2/70 p-3.5">
-              <div className="flex items-start gap-3">
-                <Monitor size="1.25rem" className="mt-0.5 text-mint" />
-                <div className="min-w-0 flex-1">
-                  <h3 className="text-[0.875rem] font-semibold text-bone">Render preset</h3>
-                  <p className="mt-1 text-[0.75rem] leading-snug text-muted">
-                    Pixel ratio, decorative traffic, and LOD transition timing.
-                  </p>
-                  <div className="mt-3 grid grid-cols-3 gap-1.5">
-                    {([
-                      ['performance', 'Performance'],
-                      ['balanced', 'Balanced'],
-                      ['quality', 'Quality'],
-                    ] as const).map(([id, label]) => {
-                      const preset = RENDER_PRESETS[id as RenderPreset]
-                      return (
-                        <button
-                          key={id}
-                          type="button"
-                          aria-pressed={renderPreset === id}
-                          onClick={() => setRenderPreset(id)}
-                          className={`rounded-lg border px-2 py-2 text-left transition ${
-                            renderPreset === id
-                              ? 'border-mint/50 bg-mint/15 text-mint'
-                              : 'border-line bg-void/35 text-muted hover:text-bone'
-                          }`}
-                        >
-                          <strong className="block text-[0.75rem]">{label}</strong>
-                          <span className="mt-1 block font-mono text-[0.625rem] tabular-nums opacity-80">
-                            {preset.pixelRatio}× · {preset.decorativeTraffic ? 'traffic' : 'no traffic'} · {preset.lodTransitionMs}ms
-                          </span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            <section className="rounded-xl border border-line/70 bg-panel-2/70 p-3.5">
-              <div className="flex items-start gap-3">
-                <Monitor size="1.25rem" className="mt-0.5 text-mint" />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <h3 className="text-[0.875rem] font-semibold text-bone">Interface scale</h3>
-                      <p className="mt-1 text-[0.75rem] leading-snug text-muted">
-                        Auto follows display height. Ultrawide width does not enlarge controls.
-                      </p>
-                    </div>
-                    <span className="status-chip status-chip--positive">{Math.round(resolvedScale * 100)}%</span>
-                  </div>
-                  <div className="mt-3 grid grid-cols-4 gap-1.5">
-                    {SCALE_OPTIONS.map((option) => (
-                      <button
-                        key={String(option.value)}
-                        type="button"
-                        onClick={() => setInterfaceScale(option.value)}
-                        className={`min-h-9 rounded-lg border px-2 font-mono text-[0.6875rem] transition ${
-                          interfaceScale === option.value
-                            ? 'border-mint/50 bg-mint/15 text-mint'
-                            : 'border-line bg-void/35 text-muted hover:text-bone'
-                        }`}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setInterfaceScale('auto')}
-                    className="mt-2 text-[0.75rem] font-medium text-mint hover:underline"
-                  >
-                    Reset to Auto
-                  </button>
-                </div>
-              </div>
-            </section>
-
-            <button
-              type="button"
-              aria-pressed={reducedMotion}
-              onClick={() => setReducedMotion(!reducedMotion)}
-              className="flex w-full items-center gap-3 rounded-xl border border-line/70 bg-panel-2/70 p-3.5 text-left hover:border-mint/30"
-            >
-              <ArrowsOut size="1.25rem" className="text-mint" />
-              <span className="min-w-0 flex-1">
-                <span className="block text-[0.875rem] font-semibold text-bone">Reduce interface motion</span>
-                <span className="mt-1 block text-[0.75rem] text-muted">Remove panel transitions and animated status changes.</span>
-              </span>
-              <span className={`status-chip ${reducedMotion ? 'status-chip--positive' : ''}`}>{reducedMotion ? 'On' : 'Off'}</span>
-            </button>
-
-            <section className="rounded-xl border border-line/70 bg-panel-2/70 p-3.5">
-              <div>
-                <h3 className="text-[0.875rem] font-semibold text-bone">Simulation auto-pause</h3>
-                <p className="mt-1 text-[0.75rem] leading-snug text-muted">
-                  Off by default. Enable only the interruptions you want; rack deliveries never stop time.
-                </p>
-              </div>
-              <div className="mt-3 space-y-1.5">
-                {([
-                  ['projectComplete', 'Project completion', 'Construction, research, or model projects finish.'],
-                  ['majorEvent', 'Major world event', 'A new industry event begins.'],
-                  ['quarterlyReport', 'Quarterly review', 'A scheduled company review is ready.'],
-                  ['runwayEmergency', 'Runway emergency', 'Cash runway falls below 60 days.'],
-                ] as const).map(([key, label, description]) => {
-                  const enabled = autoPause[key]
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      aria-pressed={enabled}
-                      onClick={() => setAutoPause(key, !enabled)}
-                      className="flex w-full items-center gap-3 rounded-lg border border-line/60 bg-void/35 px-2.5 py-2 text-left hover:border-mint/30"
-                    >
-                      <span className="min-w-0 flex-1">
-                        <span className="block text-[0.8125rem] text-bone">{label}</span>
-                        <span className="mt-0.5 block text-[0.6875rem] text-muted">{description}</span>
-                      </span>
-                      <span className={`status-chip ${enabled ? 'status-chip--positive' : ''}`}>
-                        {enabled ? 'On' : 'Off'}
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
-            </section>
-
-            <button
-              type="button"
-              aria-pressed={!onboardingDismissed}
-              onClick={() => setOnboardingDismissed(!onboardingDismissed)}
-              className="flex w-full items-center gap-3 rounded-xl border border-line/70 bg-panel-2/70 p-3.5 text-left hover:border-mint/30"
-            >
-              <Eye size="1.25rem" className="text-mint" />
-              <span className="min-w-0 flex-1">
-                <span className="block text-[0.875rem] font-semibold text-bone">Starter objectives</span>
-                <span className="mt-1 block text-[0.75rem] text-muted">Show the guided launch sequence in mission control.</span>
-              </span>
-              <span className={`status-chip ${!onboardingDismissed ? 'status-chip--positive' : ''}`}>{onboardingDismissed ? 'Hidden' : 'Visible'}</span>
-            </button>
+            <SettingsPanel gameplay={{
+              autoPause,
+              setAutoPause,
+              onboardingDismissed,
+              setOnboardingDismissed,
+            }} cheats={{ cash, adjustMoney: adjustCheatMoney, runInstantAction: runInstantCheat }} />
           </div>
         )}
 
-        {confirm ? (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-void/88 p-5 backdrop-blur-sm">
-            <div className="w-full rounded-xl border border-danger/30 bg-panel p-4 shadow-2xl">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-[1rem] font-semibold text-bone">{confirm.title}</h3>
-                  <p className="mt-2 text-[0.8125rem] leading-relaxed text-muted">{confirm.body}</p>
-                </div>
-                <button type="button" aria-label="Cancel" onClick={() => setConfirm(null)} className="flex h-8 w-8 items-center justify-center rounded-lg text-muted hover:bg-panel-2 hover:text-bone">
-                  <X size="1rem" />
-                </button>
-              </div>
-              <div className="mt-4 flex justify-end gap-2">
-                <button type="button" className="hud-button hud-button--secondary" onClick={() => setConfirm(null)}>Cancel</button>
-                <button
-                  type="button"
-                  className="hud-button hud-button--danger"
-                  onClick={() => {
-                    const action = confirm.onConfirm
-                    setConfirm(null)
-                    action()
-                  }}
-                >
-                  {confirm.action}
-                </button>
-              </div>
+        {tab === 'balance' && (
+          <BalanceTab
+            overrides={balanceTuning}
+            snapshot={gameState}
+            onBack={() => {
+              setTab('main')
+              setMsg(null)
+            }}
+          />
+        )}
+
+        <ConsoleDialog
+          open={Boolean(confirm)}
+          titleId="pause-confirm-title"
+          eyebrow="Confirm save operation"
+          title={confirm?.title ?? 'Confirm operation'}
+          onClose={() => setConfirm(null)}
+          closeLabel="Cancel operation"
+          maxWidthClass="max-w-[30rem]"
+          footer={confirm ? (
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button type="button" className="hud-button hud-button--secondary" onClick={() => setConfirm(null)}>Cancel</button>
+              <button
+                type="button"
+                className="hud-button hud-button--danger"
+                onClick={() => {
+                  const action = confirm.onConfirm
+                  setConfirm(null)
+                  action()
+                }}
+              >
+                {confirm.action}
+              </button>
             </div>
-          </div>
-        ) : null}
-      </div>
-    </div>
+          ) : null}
+        >
+          <p className="text-[0.875rem] leading-relaxed text-muted">{confirm?.body}</p>
+        </ConsoleDialog>
+    </LablineMenuShell>
   )
 }
 
@@ -418,7 +295,7 @@ function MenuBtn({
     <button
       type="button"
       onClick={onClick}
-      className={`w-full rounded-xl border px-3 py-2.5 text-left text-[0.8125rem] transition ${
+      className={`min-h-11 w-full rounded-xl border px-3 py-2.5 text-left text-[0.8125rem] transition ${
         primary
           ? 'border-mint/40 bg-mint/15 text-mint hover:bg-mint/25'
           : danger
@@ -428,6 +305,182 @@ function MenuBtn({
     >
       {label}
     </button>
+  )
+}
+
+function BalanceTab({
+  overrides,
+  snapshot,
+  onBack,
+}: {
+  overrides: Partial<BalanceTuning> | undefined
+  snapshot: SimState
+  onBack: () => void
+}) {
+  const setBalanceTuning = useGameStore((s) => s.setBalanceTuning)
+  const resetBalanceTuning = useGameStore((s) => s.resetBalanceTuning)
+  const resolved = resolveBalanceTuning(overrides)
+  const [simDays, setSimDays] = useState(90)
+  const [simRunning, setSimRunning] = useState(false)
+  const [simProgress, setSimProgress] = useState(0)
+  const [report, setReport] = useState<BalanceSimulationReport | null>(null)
+
+  const runSimulation = () => {
+    if (simRunning) return
+    setSimRunning(true)
+    setSimProgress(0)
+    setReport(null)
+    // Defer so the "running" paint lands before the synchronous sim loop
+    // blocks the main thread; progress flows back through onProgress
+    // (React batches the state updates). Runs are capped at 180 days here.
+    setTimeout(() => {
+      const result = runBalanceSimulation(snapshot, simDays, {
+        onProgress: (done, total) => {
+          setSimProgress(total > 0 ? done / total : 1)
+        },
+      })
+      setReport(result)
+      setSimProgress(1)
+      setSimRunning(false)
+    }, 30)
+  }
+
+  return (
+    <div className="max-h-[calc(100dvh-16rem)] space-y-4 overflow-y-auto pr-1">
+      <button
+        type="button"
+        className="text-[0.75rem] text-mint hover:underline"
+        onClick={onBack}
+      >
+        ← Back
+      </button>
+
+      {BALANCE_TUNING_GROUPS.map((group) => (
+        <section key={group.id}>
+          <h3 className="mb-1.5 font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">
+            {group.label}
+          </h3>
+          <div className="space-y-2">
+            {group.sliders.map((slider) => {
+              const value = resolved[slider.key]
+              return (
+                <div
+                  key={slider.key}
+                  className="rounded-xl border border-line bg-panel-2 px-2.5 py-2"
+                >
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="text-[0.75rem] font-medium text-bone">{slider.label}</span>
+                    <span className="font-mono text-[0.6875rem] tabular-nums text-mint">
+                      {slider.format(value)}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={slider.min}
+                    max={slider.max}
+                    step={slider.step}
+                    value={value}
+                    title={slider.hint}
+                    onChange={(event) =>
+                      setBalanceTuning({
+                        [slider.key]: Number(event.currentTarget.value),
+                      } as Partial<BalanceTuning>)
+                    }
+                    className="mt-1 w-full accent-mint"
+                  />
+                  <p className="mt-0.5 text-[0.625rem] leading-snug text-muted">{slider.hint}</p>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      ))}
+
+      <button
+        type="button"
+        className="hud-button hud-button--secondary w-full"
+        onClick={() => resetBalanceTuning()}
+      >
+        Reset to defaults
+      </button>
+
+      <section className="border-t border-line pt-3">
+        <h3 className="mb-1.5 font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">
+          Simulation
+        </h3>
+        <p className="mb-2 text-[0.6875rem] leading-snug text-muted">
+          Fast-forward a clone of this run with the current tuning. The live game is not touched.
+        </p>
+        <div className="flex items-center gap-1.5">
+          {[30, 90, 180].map((d) => (
+            <button
+              key={d}
+              type="button"
+              disabled={simRunning}
+              onClick={() => setSimDays(d)}
+              className={`rounded-lg border px-2.5 py-1 text-[0.75rem] transition disabled:opacity-50 ${
+                simDays === d
+                  ? 'border-mint/40 bg-mint/15 text-mint'
+                  : 'border-line bg-panel-2 text-bone hover:border-mint/30'
+              }`}
+            >
+              {d}d
+            </button>
+          ))}
+          <button
+            type="button"
+            disabled={simRunning}
+            onClick={runSimulation}
+            className="ml-auto rounded-lg border border-mint/40 bg-mint/15 px-3 py-1 text-[0.75rem] text-mint transition hover:bg-mint/25 disabled:opacity-50"
+          >
+            {simRunning ? `Running… ${Math.round(simProgress * 100)}%` : 'Run'}
+          </button>
+        </div>
+
+        {report && (
+          <div className="mt-2 space-y-1.5 rounded-xl border border-line bg-panel-2 px-2.5 py-2 text-[0.75rem]">
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-muted">Days simulated</span>
+              <span className="font-mono tabular-nums text-bone">
+                {report.daysSimulated} (day {report.startDay} → {report.startDay + report.daysSimulated})
+              </span>
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-muted">Cash</span>
+              <span className="font-mono tabular-nums text-bone">
+                {money(report.startCash)} → {money(report.endCash)}
+              </span>
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-muted">Cash negative</span>
+              <span className="font-mono tabular-nums text-bone">
+                {report.firstCashNegativeDay !== null ? `Day ${report.firstCashNegativeDay}` : 'Never'}
+              </span>
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-muted">Top capability</span>
+              <span className="font-mono tabular-nums text-bone">{report.endTopCapability.toFixed(1)}</span>
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-muted">Avg unserved demand</span>
+              <span className="font-mono tabular-nums text-bone">{pct(report.avgUnservedRatio)}</span>
+            </div>
+            {report.error && (
+              <p className="rounded-lg border border-danger/30 bg-danger/10 px-2 py-1 text-[0.6875rem] text-danger">
+                Simulation stopped early: {report.error}
+              </p>
+            )}
+            {report.warnings.length > 0 && (
+              <ul className="list-disc space-y-0.5 pl-4 text-[0.6875rem] text-amber">
+                {report.warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </section>
+    </div>
   )
 }
 

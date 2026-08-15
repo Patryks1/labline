@@ -8,7 +8,6 @@ import type {
   MapTile,
   PowerExportContract,
   SimState,
-  TileOwner,
 } from '../types'
 import { ECONOMY } from '../balance/economy'
 import { seededId } from '../rng'
@@ -21,7 +20,6 @@ import {
   isDcAnchor,
   mapTileAt,
 } from './map'
-import { resolveRackSku } from './racks'
 import { computeSnapshot } from './compute'
 import { tileCoords } from '../world/ids'
 import {
@@ -33,6 +31,14 @@ import {
   usesCompactWorld,
 } from './worldAccess'
 import { splitEnergyContractLoad } from './energyAccounting'
+import {
+  acceptFacilityOffer,
+  publicFacilityAsk,
+  quoteFacilitySale,
+  submitFacilityOffer,
+} from './facilityMarket'
+import { removeDataHallLayout } from './dataHallLayouts'
+import { deriveCityStats } from './cityStats'
 
 function alert(state: SimState, severity: 'info' | 'warn' | 'danger', message: string): SimState {
   return {
@@ -65,6 +71,30 @@ export function tileDist(ax: number, ay: number, bx: number, by: number): number
 export function citiesOf(state: SimState): MapCity[] {
   const raw = state.map.cities ?? []
   return raw.map((c, i) => enrichCity(c, i))
+}
+
+export const CITY_UTILITY_CONNECTOR_RANGE_TILES = 50
+
+function commissionedPlayerGridConnectors(state: SimState): MapTile[] {
+  return facilityAnchorTiles(state, { ownerId: 'player' }).filter(
+    (tile) =>
+      tile.kind === 'substation' &&
+      tile.buildingProgress >= tile.buildingTarget &&
+      tile.mwCapacity > 0,
+  )
+}
+
+/** Cities reachable from at least one commissioned player grid connector. */
+export function citiesInGridConnectorRange(state: SimState): MapCity[] {
+  const connectors = commissionedPlayerGridConnectors(state)
+  if (connectors.length === 0) return []
+  return citiesOf(state).filter((city) =>
+    connectors.some(
+      (connector) =>
+        tileDist(connector.x, connector.y, city.cx, city.cy) <=
+        CITY_UTILITY_CONNECTOR_RANGE_TILES,
+    ),
+  )
 }
 
 function enrichCity(
@@ -134,6 +164,8 @@ export function playerLiveHalls(state: SimState): MapTile[] {
 export function powerBalance(state: SimState): {
   demandMw: number
   genMw: number
+  /** Completed on-site generation split by facility kind. */
+  genBySourceMw: { solarMw: number; gasMw: number; nuclearMw: number; otherMw: number }
   surplusMw: number
   deficitMw: number
   gridImportMw: number
@@ -147,18 +179,9 @@ export function powerBalance(state: SimState): {
   generationCostDay: number
 } {
   const snap = computeSnapshot(state)
-  // Demand only from powered halls' share of fleet — approximate with full fleet * powered fraction
-  const halls = facilityAnchorTiles(state, { ownerId: 'player' }).filter(
-    (t) =>
-      isDcKind(t.kind) && isDcAnchor(t) &&
-      t.buildingProgress >= t.buildingTarget,
-  )
-  const poweredUnits = halls
-    .filter(isHallPowered)
-    .reduce((s, t) => s + Math.max(1, t.racksUsed), 0)
-  const allUnits = halls.reduce((s, t) => s + Math.max(1, t.racksUsed), 0) || 1
-  const poweredFrac = Math.max(0.05, Math.min(1, poweredUnits / allUnits))
-  const demandMw = snap.mwDemand * (halls.length === 0 ? 1 : poweredFrac)
+  // Snapshot demand already reflects live powered-hall fleet draw. Do not
+  // discount again by powered fraction or export/import accounting double-cuts.
+  const demandMw = Math.max(0, snap.mwDemand)
 
   const power = resolvePlayerPowerMw(state, demandMw)
   const surplusMw = Math.max(0, power.mwGeneration - demandMw)
@@ -171,9 +194,14 @@ export function powerBalance(state: SimState): {
   let cityMult = 0.75
   let cityMwCap = 0
   let n = 0
+  const genBySourceMw = { solarMw: 0, gasMw: 0, nuclearMw: 0, otherMw: 0 }
   for (const t of facilityAnchorTiles(state, { ownerId: 'player' })) {
     if (t.buildingProgress < t.buildingTarget) continue
     if (t.mwGeneration <= 0) continue
+    if (t.kind === 'solar') genBySourceMw.solarMw += t.mwGeneration
+    else if (t.kind === 'gas') genBySourceMw.gasMw += t.mwGeneration
+    else if (t.kind === 'nuclear') genBySourceMw.nuclearMw += t.mwGeneration
+    else genBySourceMw.otherMw += t.mwGeneration
     const city = tileInCityPowerZone(state, t.x, t.y)
     if (city) {
       cityMult += city.powerBuyPriceMult
@@ -201,6 +229,7 @@ export function powerBalance(state: SimState): {
   return {
     demandMw,
     genMw: power.mwGeneration,
+    genBySourceMw,
     surplusMw,
     deficitMw,
     gridImportMw: power.mwGridImport,
@@ -212,6 +241,32 @@ export function powerBalance(state: SimState): {
     cityBuyPerMWh: cityPrice,
     generationUsedMw,
     generationCostDay,
+  }
+}
+
+/** Daily window of power→compute efficiency samples kept on the player. */
+export const POWER_EFFICIENCY_HISTORY_DAYS = 30
+
+/**
+ * Append today's raw-PF-per-drawn-MW sample for the Power panel trend.
+ * Generated power feeds raw compute; the ratio rises with better chips and PUE.
+ */
+export function recordPowerEfficiencyDay(state: SimState): SimState {
+  const snap = computeSnapshot(state)
+  const pfPerMw = snap.mwDemand > 1e-6 ? snap.rawFlopsPf / snap.mwDemand : 0
+  const history = state.player.powerEfficiencyHistory ?? []
+  const last = history[history.length - 1]
+  const sample = { day: state.day, pfPerMw }
+  const next =
+    last && last.day === state.day
+      ? [...history.slice(0, -1), sample]
+      : [...history, sample]
+  return {
+    ...state,
+    player: {
+      ...state.player,
+      powerEfficiencyHistory: next.slice(-POWER_EFFICIENCY_HISTORY_DAYS),
+    },
   }
 }
 
@@ -246,6 +301,8 @@ export interface CityGridConnectorCapacity {
   connectorCount: number
   totalMw: number
   committedMw: number
+  /** Municipal surplus still available to sell (after demand + existing imports). */
+  surplusMw: number
   availableMw: number
 }
 
@@ -255,24 +312,31 @@ export function cityGridConnectorCapacity(
   cityId: string,
 ): CityGridConnectorCapacity {
   const city = citiesOf(state).find((candidate) => candidate.id === cityId)
-  if (!city) return { connectorCount: 0, totalMw: 0, committedMw: 0, availableMw: 0 }
-  const connectors = facilityAnchorTiles(state, { ownerId: 'player' }).filter(
+  if (!city) {
+    return { connectorCount: 0, totalMw: 0, committedMw: 0, surplusMw: 0, availableMw: 0 }
+  }
+  const connectors = commissionedPlayerGridConnectors(state).filter(
     (tile) =>
-      tile.kind === 'substation' &&
-      tile.buildingProgress >= tile.buildingTarget &&
-      tile.mwCapacity > 0 &&
       tileDist(tile.x, tile.y, city.cx, city.cy) <= city.powerRadius,
   )
   const totalMw = connectors.reduce((sum, connector) => sum + connector.mwCapacity, 0)
   const committedMw = activeCityPowerContracts(state)
     .filter((contract) => contract.cityId === cityId)
     .reduce((sum, contract) => sum + contract.mw, 0)
-  const utilityRemainingMw = Math.max(0, city.powerBuyMw * 1.8 - committedMw)
+  const stats = deriveCityStats(state).find((row) => row.cityId === cityId)
+  // Sell only real municipal surplus. reserveMw already nets demand + committed
+  // imports against plant capacity (+ player exports into the city).
+  const surplusMw =
+    stats && stats.municipalCapacityMw > 0
+      ? Math.max(0, stats.reserveMw)
+      : Math.max(0, city.powerBuyMw * 1.8 - committedMw)
+  const connectorHeadroomMw = Math.max(0, totalMw - committedMw)
   return {
     connectorCount: connectors.length,
     totalMw,
     committedMw,
-    availableMw: Math.max(0, Math.min(totalMw - committedMw, utilityRemainingMw)),
+    surplusMw,
+    availableMw: Math.max(0, Math.min(connectorHeadroomMw, surplusMw)),
   }
 }
 
@@ -750,7 +814,7 @@ function clearParcel(tile: MapTile): MapTile {
 }
 
 export const CONSTRUCTION_FAST_TRACK_PREMIUM = 0.5
-export const CONSTRUCTION_FAST_TRACK_MIN_DAYS = 30
+export const CONSTRUCTION_FAST_TRACK_MIN_DAYS = 15
 
 export interface ConstructionFastTrackQuote {
   eligible: boolean
@@ -760,7 +824,7 @@ export interface ConstructionFastTrackQuote {
   acceleratedDays: number
 }
 
-/** One-time quote to halve a project's remaining schedule, never below 30 days. */
+/** One-time quote to halve a project's remaining schedule, never below the fast-track floor. */
 export function constructionFastTrackQuote(
   state: SimState,
   x: number,
@@ -783,12 +847,12 @@ export function constructionFastTrackQuote(
     return { eligible: false, reason: 'This project is already fast-tracked.', cost, remainingDays, acceleratedDays: remainingDays }
   }
   if (remainingDays <= CONSTRUCTION_FAST_TRACK_MIN_DAYS) {
-    return { eligible: false, reason: 'This project is already within 30 days of completion.', cost, remainingDays, acceleratedDays: remainingDays }
+    return { eligible: false, reason: `This project is already within ${CONSTRUCTION_FAST_TRACK_MIN_DAYS} days of completion.`, cost, remainingDays, acceleratedDays: remainingDays }
   }
   return { eligible: true, cost, remainingDays, acceleratedDays }
 }
 
-/** Pay a 50% capex premium to halve remaining construction time, with a 30-day floor. */
+/** Pay a 50% capex premium to halve remaining construction time, with a short-schedule floor. */
 export function fastTrackConstruction(state: SimState, x: number, y: number): SimState {
   const tile = resolveSellTile(state, x, y)
   const quote = constructionFastTrackQuote(state, x, y)
@@ -879,6 +943,9 @@ export function estimateBuildingSaleValue(state: SimState, x: number, y: number)
   const t = resolveSellTile(state, x, y)
   if (!t || t.owner !== 'player' || !isBuildableKind(t.kind)) return 0
   if (t.buildingProgress < t.buildingTarget) return estimateCancelRefund(state, t.x, t.y)
+  if (isDcKind(t.kind) && isDcAnchor(t)) {
+    return quoteFacilitySale(state, t.campusId ?? `facility:${t.x},${t.y}`)
+  }
 
   let shell = Math.max(t.capex * 0.42, 0)
   try {
@@ -887,19 +954,7 @@ export function estimateBuildingSaleValue(state: SimState, x: number, y: number)
   } catch {
     /* ok */
   }
-  let racks = 0
-  if (isDcKind(t.kind) && isDcAnchor(t)) {
-    for (const r of state.player.rackFleet ?? []) {
-      if (r.x !== t.x || r.y !== t.y || r.status !== 'live') continue
-      try {
-        const sku = resolveRackSku(r.skuId, state.player.rackDesigns)
-        racks += r.paidEach * sku.sellBackRate * r.count
-      } catch {
-        racks += r.paidEach * 0.35 * r.count
-      }
-    }
-  }
-  return Math.floor(shell + racks)
+  return Math.floor(shell)
 }
 
 /** @deprecated use estimateBuildingSaleValue */
@@ -925,7 +980,7 @@ export function cancelConstruction(state: SimState, x: number, y: number): SimSt
     const rackFleet = (state.player.rackFleet ?? []).filter(
       (rack) => !(rack.x === t.x && rack.y === t.y),
     )
-    return {
+    const sold = {
       ...committed,
       player: {
         ...committed.player,
@@ -942,6 +997,7 @@ export function cancelConstruction(state: SimState, x: number, y: number): SimSt
         ...state.alerts,
       ].slice(0, 40),
     }
+    return isDcKind(t.kind) ? removeDataHallLayout(sold, campusId) : sold
   }
   const tiles = state.map.tiles.map((tile) => {
     const clear =
@@ -952,7 +1008,7 @@ export function cancelConstruction(state: SimState, x: number, y: number): SimSt
   const rackFleet = (state.player.rackFleet ?? []).filter(
     (r) => !(r.x === t.x && r.y === t.y),
   )
-  return {
+  const sold = {
     ...state,
     map: { ...state.map, tiles },
     player: {
@@ -970,6 +1026,7 @@ export function cancelConstruction(state: SimState, x: number, y: number): SimSt
       ...state.alerts,
     ].slice(0, 40),
   }
+  return campusId && isDcKind(t.kind) ? removeDataHallLayout(sold, campusId) : sold
 }
 
 /** Sell any completed player building (DCs include racks). Clears multi-tile campuses. */
@@ -987,12 +1044,16 @@ export function sellPlayerBuilding(state: SimState, x: number, y: number): SimSt
     ? (state.player.rackFleet ?? []).filter((r) => !(r.x === t.x && r.y === t.y))
     : state.player.rackFleet
   const campusId = t.campusId
+  const facilityId = campusId ?? `facility:${t.x},${t.y}`
   if (usesCompactWorld(state) && campusId) {
     const batch = state.map.world!.beginBatch().removeFacility(campusId)
     const committed = commitWorldBatch(state, batch)
     const label = t.name || (isDcKind(t.kind) ? 'data hall' : 'building')
-    return {
+    const sold = {
       ...committed,
+      siteCapacities: isDcKind(t.kind)
+        ? committed.siteCapacities.filter((site) => site.facilityId !== campusId)
+        : committed.siteCapacities,
       player: {
         ...committed.player,
         cash: committed.player.cash + value,
@@ -1014,6 +1075,7 @@ export function sellPlayerBuilding(state: SimState, x: number, y: number): SimSt
         ...state.news,
       ].slice(0, 20),
     }
+    return isDcKind(t.kind) ? removeDataHallLayout(sold, campusId) : sold
   }
   const tiles = state.map.tiles.map((tile) => {
     const clear =
@@ -1021,9 +1083,12 @@ export function sellPlayerBuilding(state: SimState, x: number, y: number): SimSt
     return clear ? clearParcel(tile) : tile
   })
   const label = t.name || (isDcKind(t.kind) ? 'data hall' : 'building')
-  return {
+  const sold = {
     ...state,
     map: { ...state.map, tiles },
+    siteCapacities: isDcKind(t.kind)
+      ? state.siteCapacities.filter((site) => site.facilityId !== facilityId)
+      : state.siteCapacities,
     player: {
       ...state.player,
       cash: state.player.cash + value,
@@ -1045,6 +1110,7 @@ export function sellPlayerBuilding(state: SimState, x: number, y: number): SimSt
       ...state.news,
     ].slice(0, 20),
   }
+  return isDcKind(t.kind) ? removeDataHallLayout(sold, facilityId) : sold
 }
 
 /** @deprecated use sellPlayerBuilding */
@@ -1057,14 +1123,15 @@ export function sellDataCenter(state: SimState, x: number, y: number): SimState 
 }
 
 /** List price for a rival hall (what they'd accept). */
-export function rivalHallAskPrice(_state: SimState, t: MapTile): number {
-  const base = getBuildDef('dc').cash * (0.7 + t.level * 0.15)
-  const racks = t.racksUsed * 95_000
-  const premium = t.forSale && t.listPrice ? t.listPrice : base + racks
-  return Math.floor(premium)
+export function rivalHallAskPrice(state: SimState, t: MapTile): number {
+  if (t.forSale && t.listPrice) return Math.floor(t.listPrice)
+  return publicFacilityAsk(state, t.campusId ?? `facility:${t.x},${t.y}`)
 }
 
-/** Buy a rival (or for-sale) data hall — transfers ownership + abstract capacity. */
+/**
+ * Compatibility entrypoint for the map UI. Acquisitions now enter the
+ * cash-backed market instead of minting generic racks from abstract PF.
+ */
 export function buyRivalDataCenter(state: SimState, x: number, y: number): SimState {
   const t = getTile(state, x, y)
   if (!t) return state
@@ -1083,111 +1150,19 @@ export function buyRivalDataCenter(state: SimState, x: number, y: number): SimSt
     )
   }
 
-  const rival = state.rivals.find((r) => r.id === t.owner)
-  const acquiredName =
-    rival && t.name?.includes(rival.name)
-      ? t.name.replace(rival.name, state.player.name || 'Lab')
-      : `${state.player.name || 'Lab'} Hall`
-  let changedState = state
-  let tiles = state.map.tiles
-  if (usesCompactWorld(state)) {
-    const facility = state.map.world!.getFacilityAt(compactTileIdAt(state, x, y)!)
-    if (!facility) return state
-    const batch = state.map.world!.beginBatch().updateFacility(facility.id, {
-      ownerId: 'player',
-      forSale: false,
-      listPrice: undefined,
-      powered: true,
-      stats: {
-        ...(facility.stats ?? {}),
-        capex: ask,
-        opexPerDay: Math.max(
-          facility.stats?.opexPerDay ?? 0,
-          getBuildDef('dc').opexPerDay,
-        ),
-      },
-      data: facilityDataPatch(facility, {
-        name: acquiredName,
-        note: rival ? `Acquired from ${rival.name}.` : 'Acquired campus.',
-      }),
-    })
-    changedState = commitWorldBatch(state, batch)
-  } else {
-    const idx = state.map.tiles.findIndex((tile) => tile.x === x && tile.y === y)
-    tiles = state.map.tiles.slice()
-    tiles[idx] = {
-      ...t,
-      owner: 'player' as TileOwner,
-      name: acquiredName,
-      forSale: false,
-      listPrice: undefined,
-      powered: true,
-      note: rival ? `Acquired from ${rival.name}.` : 'Acquired campus.',
-      capex: ask,
-      opexPerDay: Math.max(t.opexPerDay, getBuildDef('dc').opexPerDay),
-    }
-  }
-
-  // Seed rack fleet abstract capacity: convert rival racksUsed into generic live racks
-  let rackFleet = [...(state.player.rackFleet ?? [])]
-  if (t.racksUsed > 0) {
-    const skuId = 'rack_h100'
-    let paidEach = 165_000
-    try {
-      paidEach = resolveRackSku(skuId, state.player.rackDesigns).price
-    } catch {
-      /* catalog default */
-    }
-    rackFleet.push({
-      id: `acq-${state.day}-${x}-${y}`,
-      skuId,
-      x,
-      y,
-      count: Math.max(1, Math.floor(t.racksUsed)),
-      rackUnits: 1,
-      status: 'live',
-      daysLeft: 0,
-      paidEach: Math.floor(paidEach * 0.85),
-    })
-  }
-
-  const rivals = state.rivals.map((r) => {
-    if (r.id !== t.owner) return r
-    return {
-      ...r,
-      cash: r.cash + ask * 0.92,
-      chips: Math.max(0, r.chips - t.racksUsed * 2),
-      flopsPf: Math.max(40, r.flopsPf - t.racksUsed * 0.45),
-    }
-  })
-
-  return {
-    ...changedState,
-    map: usesCompactWorld(state) ? changedState.map : { ...state.map, tiles },
-    rivals,
-    player: {
-      ...state.player,
-      cash: state.player.cash - ask,
-      rackFleet,
-    },
-    alerts: [
-      {
-        id: `buy-dc-${state.day}-${x}-${y}`,
-        day: state.day,
-        severity: 'info' as const,
-        message: `Acquired ${t.name || 'rival hall'} for $${(ask / 1e6).toFixed(2)}M${
-          rival ? ` from ${rival.name}` : ''
-        }.`,
-      },
-      ...state.alerts,
-    ].slice(0, 40),
-    news: [
-      `Day ${state.day}: ${state.player.name} buys ${t.name || 'a campus'}${
-        rival ? ` from ${rival.name}` : ''
-      }.`,
-      ...state.news,
-    ].slice(0, 20),
-  }
+  const offered = submitFacilityOffer(
+    state,
+    t.campusId ?? `facility:${t.x},${t.y}`,
+    state.playerLabId,
+    ask,
+  )
+  if (!t.forSale || !t.listPrice || offered === state) return offered
+  const offer = offered.facilityMarket?.offers.find(
+    (candidate) =>
+      candidate.facilityId === (t.campusId ?? `facility:${t.x},${t.y}`) &&
+      candidate.buyerLabId === state.playerLabId,
+  )
+  return offer?.status === 'pending' ? acceptFacilityOffer(offered, offer.id) : offered
 }
 
 /** Rival occasionally marks a small hall for sale. */
@@ -1211,7 +1186,7 @@ export function maybeListRivalHalls(state: SimState): SimState {
       const ask = rivalHallAskPrice(state, tile)
       batch.updateFacility(victim.id, {
         forSale: true,
-        listPrice: Math.floor(ask * 0.92),
+        listPrice: ask,
         data: facilityDataPatch(victim, {
           note: `${rival.name} is shopping this hall — cash-strapped expansion.`,
         }),
@@ -1239,7 +1214,7 @@ export function maybeListRivalHalls(state: SimState): SimState {
     tiles[idx] = {
       ...tiles[idx]!,
       forSale: true,
-      listPrice: Math.floor(ask * 0.92),
+      listPrice: ask,
       note: `${r.name} is shopping this hall — cash-strapped expansion.`,
     }
     changed = true
@@ -1290,6 +1265,7 @@ export function cityDashboard(state: SimState): {
       genInZone,
       connectorCount: connector.connectorCount,
       connectorMw: connector.totalMw,
+      connectorSurplusMw: connector.surplusMw,
       connectorAvailableMw: connector.availableMw,
     }
   })

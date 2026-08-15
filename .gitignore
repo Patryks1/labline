@@ -27,6 +27,8 @@ id_rsa
 id_rsa.*
 id_ed25519
 id_ed25519.*
+# Guard against accidentally redirecting an ssh-keygen command itself to a file.
+ssh-keygen -t*
 credentials.json
 service-account*.json
 

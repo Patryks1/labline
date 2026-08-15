@@ -222,6 +222,39 @@ export function buildLabStats(state: SimState): LabStats {
     },
   ]
 
+  const ledgerLines: MoneyLine[] = (
+    [
+      {
+        id: 'data',
+        label: 'Data',
+        amount: -(f.dayDataCost ?? 0),
+        kind: 'out' as const,
+        hint: 'Supplier contracts, processing, audits',
+      },
+      {
+        id: 'training',
+        label: 'Training',
+        amount: -(f.dayTrainingCost ?? 0),
+        kind: 'out' as const,
+        hint: 'Setup + daily cluster burn',
+      },
+      {
+        id: 'research',
+        label: 'Research',
+        amount: -(f.dayResearchCost ?? 0),
+        kind: 'out' as const,
+        hint: 'Active research cash burn',
+      },
+      {
+        id: 'hiring',
+        label: 'Hiring',
+        amount: -(f.dayHiringCost ?? 0),
+        kind: 'out' as const,
+        hint: 'Hire and poach signing costs',
+      },
+    ] satisfies MoneyLine[]
+  ).filter((line) => Math.abs(line.amount) > 1)
+
   const operatingCosts: MoneyLine[] = [
     {
       id: 'energy',
@@ -267,6 +300,7 @@ export function buildLabStats(state: SimState): LabStats {
       kind: 'out',
       hint: 'Completed player buildings',
     },
+    ...ledgerLines,
     {
       id: 'amort',
       label: 'Chip amort (non-cash)',
@@ -304,10 +338,10 @@ export function buildLabStats(state: SimState): LabStats {
     },
     {
       id: 'out',
-      label: 'Total cash out (ops)',
+      label: 'Total cash out',
       amount: -(f.dayTotalOut ?? f.dayEnergyCost + f.dayWageCost + (f.dayMarketing ?? 0) + f.dayBuildingOpex),
       kind: 'total',
-      hint: 'Cash ops only (excludes non-cash amort)',
+      hint: 'All cash outflows today (excludes non-cash amort)',
     },
     {
       id: 'net',

@@ -1,97 +1,198 @@
-import { useEffect, useMemo } from 'react'
-import { RocketLaunch, X } from '@phosphor-icons/react'
-import { useUiStore } from '../../store/uiStore'
+import { useMemo } from 'react'
+import { ChartLineUp, RocketLaunch } from '@phosphor-icons/react'
+import type { BenchmarkSuiteId } from '../../sim/types'
+import { formatParams } from '../../sim/balance/training'
+import { useGameStore } from '../../store/gameStore'
+import { type ReleaseEvent, useUiStore } from '../../store/uiStore'
+import { money } from './format'
+import { ConsoleDialog } from './ui/ConsoleDialog'
+import { HudButton, StatusChip } from './ui/HudPrimitives'
+import { TrainingLossChart } from './panels/models/TrainingLossChart'
+import { BENCHMARK_SUITE_UI } from './panels/models/benchmarkRunUi'
+import { measuredReleaseEvidence, releasedModelForEvent } from './releaseReview'
 
-const PARTICLE_COLORS = ['var(--color-gold)', 'var(--color-mint)', 'var(--color-bone)', 'var(--color-infer)']
-const AUTO_DISMISS_MS = 5200
+function preferredReleaseSuites(event: ReleaseEvent): BenchmarkSuiteId[] {
+  const preferred: BenchmarkSuiteId[] =
+    event.productPreset === 'image_generation' || event.family === 'diffusion'
+      ? ['image_generation']
+      : event.productPreset === 'video_generation' || event.family === 'video'
+        ? ['video_generation']
+        : event.productPreset === 'audio'
+          ? ['audio_generation']
+          : event.productPreset === 'omni' || event.family === 'omni'
+            ? ['omni_overview', 'language']
+            : ['language']
+  return [...new Set([...preferred, ...(event.benchmarkSuiteIds ?? [])])]
+}
 
-/**
- * Global model-release celebration. Panels announce via
- * useUiStore.getState().announceRelease({ name, capability }).
- */
+/** Persistent post-release review; it remains until the player dismisses it. */
 export function ReleaseCelebration() {
-  const event = useUiStore((s) => s.releaseEvent)
-  const clear = useUiStore((s) => s.clearRelease)
+  const event = useUiStore((state) => state.releaseEvent)
+  const clear = useUiStore((state) => state.clearRelease)
+  const state = useGameStore((store) => store.state)
 
-  useEffect(() => {
-    if (!event) return
-    const id = window.setTimeout(clear, AUTO_DISMISS_MS)
-    return () => window.clearTimeout(id)
-  }, [event, clear])
+  const review = useMemo(() => {
+    if (!event) return null
+    const model = releasedModelForEvent(state.player.models, event.modelId, event.name)
+    const preferredSuites = preferredReleaseSuites(event)
+    const evidence = measuredReleaseEvidence(model, preferredSuites)
+    const suiteId = evidence?.suite.suiteId ?? preferredSuites[0] ?? 'language'
+    return { model, suiteId, evidence }
+  }, [event, state])
 
-  const particles = useMemo(() => {
-    if (!event) return []
-    // Deterministic per event id so re-renders don't reshuffle.
-    return Array.from({ length: 26 }, (_, i) => {
-      const angle = (i / 26) * Math.PI * 2
-      const distance = 90 + ((event.id + i * 37) % 70)
-      return {
-        px: `${Math.cos(angle) * distance}px`,
-        py: `${Math.sin(angle) * distance * 0.72 - 30}px`,
-        pr: `${((i * 53) % 240) - 120}deg`,
-        color: PARTICLE_COLORS[i % PARTICLE_COLORS.length]!,
-        delay: `${(i % 6) * 45}ms`,
-      }
-    })
-  }, [event])
+  if (!event || !review) return null
 
-  if (!event) return null
+  const latestSnapshot = event.benchmarkSnapshots?.at(-1)
+  const apiIn = review.model?.apiPriceInPerMTok ?? review.model?.suggestedApiPriceIn
+  const apiOut = review.model?.apiPriceOutPerMTok ?? review.model?.suggestedApiPriceOut
+  const hasLoss = (event.lossHistory?.length ?? 0) > 0
 
   return (
-    <div
-      role="status"
-      aria-live="polite"
-      className="pointer-events-none fixed inset-0 z-[80] flex items-center justify-center"
-    >
-      <div className="absolute inset-0 bg-void/55 backdrop-blur-[2px]" />
-
-      {/* Expanding rings */}
-      <span aria-hidden className="release-burst__ring h-40 w-40" />
-      <span aria-hidden className="release-burst__ring h-40 w-40" style={{ animationDelay: '140ms' }} />
-      <span aria-hidden className="release-burst__ring h-40 w-40" style={{ animationDelay: '280ms' }} />
-
-      {/* Particles */}
-      {particles.map((p, i) => (
-        <span
-          key={i}
-          aria-hidden
-          className="release-particle"
-          style={{
-            background: p.color,
-            animationDelay: p.delay,
-            ['--px' as string]: p.px,
-            ['--py' as string]: p.py,
-            ['--pr' as string]: p.pr,
-          }}
-        />
-      ))}
-
-      <div className="release-card pointer-events-auto relative w-[min(22rem,90vw)] overflow-hidden rounded-lg border border-gold/50 bg-panel p-5 text-center shadow-[0_24px_80px_rgba(2,12,17,0.7)]">
-        <div aria-hidden className="release-card__shine" />
-        <button
-          type="button"
-          aria-label="Dismiss"
-          onClick={clear}
-          className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-bone"
-        >
-          <X size="0.9rem" />
-        </button>
-        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full border border-gold/60 bg-gold/15 text-gold">
-          <RocketLaunch size="1.5rem" weight="fill" />
+    <ConsoleDialog
+      open
+      titleId={`release-review-${event.id}`}
+      eyebrow="Release review · production live"
+      title={event.name}
+      description={`${review.model ? formatParams(review.model.paramsB) : event.family ?? 'Model'} · ${review.evidence ? `${BENCHMARK_SUITE_UI[review.suiteId].label} measured evaluation` : 'Public evaluation pending'}`}
+      onClose={clear}
+      closeLabel="Close release review"
+      maxWidthClass="max-w-6xl"
+      footer={
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-[0.75rem] text-muted">
+            {review.evidence
+              ? 'Release is live. Review measured evidence and list pricing before scaling traffic.'
+              : 'Release is live. Evaluation scores stay unknown until a measured report completes.'}
+          </p>
+          <HudButton type="button" variant="primary" onClick={clear} className="sm:min-w-40">
+            Continue operations
+          </HudButton>
         </div>
-        <p className="hud-eyebrow mt-3 text-gold">Model released</p>
-        <h2 className="mt-1 text-xl font-semibold text-bone">{event.name}</h2>
-        <p className="mt-1 font-mono text-[0.8125rem] tabular-nums text-muted">
-          Capability {event.capability.toFixed(1)} · now serving production traffic
-        </p>
-        <button
-          type="button"
-          onClick={clear}
-          className="btn-primary mt-4 w-full"
-        >
-          Ship it
-        </button>
+      }
+    >
+      <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <div className="rounded-lg border border-gold/35 bg-gold/10 p-3">
+          <span className="flex items-center gap-1.5 font-mono text-[0.625rem] uppercase tracking-[0.13em] text-gold">
+            <RocketLaunch size="0.875rem" weight="fill" /> Release status
+          </span>
+          <strong className="mt-1 block font-mono text-xl tabular-nums text-bone">Public</strong>
+        </div>
+        <div className="rounded-lg border border-mint/25 bg-mint/5 p-3">
+          <span className="font-mono text-[0.625rem] uppercase tracking-[0.13em] text-muted">Evaluation score</span>
+          <strong className="mt-1 block font-mono text-xl tabular-nums text-mint">
+            {review.evidence ? review.evidence.suite.score.toFixed(1) : 'Unknown'}
+          </strong>
+        </div>
+        <div className="rounded-lg border border-line/70 bg-void/35 p-3">
+          <span className="font-mono text-[0.625rem] uppercase tracking-[0.13em] text-muted">Measured position</span>
+          <strong className="mt-1 block font-mono text-xl tabular-nums text-bone">
+            {review.evidence?.rankLabel ?? '—'}
+          </strong>
+        </div>
+        <div className="rounded-lg border border-line/70 bg-void/35 p-3">
+          <span className="font-mono text-[0.625rem] uppercase tracking-[0.13em] text-muted">API list / MTok</span>
+          <strong className="mt-1 block truncate font-mono text-sm tabular-nums text-bone">
+            {apiIn != null && apiOut != null ? `${money(apiIn)} in · ${money(apiOut)} out` : 'Not listed'}
+          </strong>
+        </div>
       </div>
-    </div>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(20rem,0.82fr)_minmax(32rem,1.18fr)]">
+        <section className="rounded-lg border border-line/70 bg-panel-2/55 p-3.5" aria-labelledby={`release-curve-${event.id}`}>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="hud-eyebrow">Training trace</p>
+              <h3 id={`release-curve-${event.id}`} className="mt-1 text-sm font-semibold text-bone">
+                Loss and private evaluation checkpoints
+              </h3>
+            </div>
+            {latestSnapshot?.totalCost != null ? (
+              <StatusChip tone="research">{money(latestSnapshot.totalCost)} eval</StatusChip>
+            ) : null}
+          </div>
+          {hasLoss ? (
+            <TrainingLossChart
+              history={event.lossHistory ?? []}
+              failed={false}
+              energyMWh={event.energyMWh}
+              mwDays={event.energyMwDays}
+              benchmarks={event.benchmarkSnapshots}
+            />
+          ) : (
+            <div className="mt-3 rounded-lg border border-line/50 bg-void/30 px-3 py-8 text-center">
+              <ChartLineUp className="mx-auto text-muted" size="1.5rem" />
+              <p className="mt-2 text-[0.75rem] text-muted">
+                This checkpoint predates retained training telemetry. Public evaluation evidence remains pending.
+              </p>
+            </div>
+          )}
+        </section>
+
+        <section className="min-w-0 rounded-lg border border-line/70 bg-panel-2/55 p-3.5" aria-labelledby={`release-bench-${event.id}`}>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="hud-eyebrow">Measured evidence</p>
+              <h3 id={`release-bench-${event.id}`} className="mt-1 text-sm font-semibold text-bone">
+                {review.evidence
+                  ? `${BENCHMARK_SUITE_UI[review.suiteId].label} · same-metric public peers`
+                  : 'Public evaluation pending'}
+              </h3>
+            </div>
+            {review.evidence ? (
+              <StatusChip tone="research">
+                {(review.evidence.report.quote.accuracy * 100).toFixed(0)}% accuracy
+              </StatusChip>
+            ) : null}
+          </div>
+          {review.evidence ? (
+            <>
+              <div className="panel-scroll mt-3 overflow-x-auto rounded-md border border-line/60">
+                <table className="w-full min-w-[38rem] border-collapse text-left text-[0.75rem]">
+                  <thead>
+                    <tr className="border-b border-line/70 bg-void/55 font-mono text-[0.625rem] uppercase tracking-[0.11em] text-muted">
+                      <th className="px-2.5 py-2">Metric</th>
+                      <th className="px-2 py-2 text-right">Estimate</th>
+                      <th className="px-2 py-2 text-right">Interval</th>
+                      <th className="px-2 py-2 text-right">Closest public peer</th>
+                      <th className="px-2 py-2 text-right">Delta</th>
+                      <th className="px-2 py-2 text-right">Rank</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {review.evidence.metrics.map((metric) => (
+                      <tr key={metric.metricId} className="border-b border-line/45 bg-panel/20 last:border-0">
+                        <td className="px-2.5 py-2 font-medium text-bone">{metric.label}</td>
+                        <td className="px-2 py-2 text-right font-mono tabular-nums text-mint">{metric.score.toFixed(1)}</td>
+                        <td className="px-2 py-2 text-right font-mono tabular-nums text-muted">{metric.low.toFixed(1)}–{metric.high.toFixed(1)}</td>
+                        <td className="px-2 py-2 text-right text-muted">
+                          {metric.rival ? `${metric.rival.modelName}${metric.rival.labName ? ` · ${metric.rival.labName}` : ''}` : '—'}
+                        </td>
+                        <td className={`px-2 py-2 text-right font-mono tabular-nums ${metric.rival && metric.rival.delta >= 0 ? 'text-mint' : 'text-warning'}`}>
+                          {metric.rival ? `${metric.rival.delta >= 0 ? '+' : ''}${metric.rival.delta.toFixed(1)}` : '—'}
+                        </td>
+                        <td className="px-2 py-2 text-right font-mono tabular-nums text-bone">
+                          {metric.rival ? `#${metric.rival.rank}/${metric.rival.fieldSize}` : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="mt-3 font-mono text-[0.625rem] tabular-nums text-muted">
+                Report day {review.evidence.report.completedDay} · {review.evidence.report.request.mode.replaceAll('_', ' ')} · {money(review.evidence.report.quote.totalCost)} · {(review.evidence.report.confidence * 100).toFixed(0)}% confidence
+              </p>
+            </>
+          ) : (
+            <div className="mt-3 rounded-lg border border-research/25 bg-research/5 px-4 py-8 text-center">
+              <ChartLineUp className="mx-auto text-research" size="1.5rem" />
+              <strong className="mt-2 block text-sm text-bone">Public evaluation pending</strong>
+              <p className="mx-auto mt-1 max-w-lg text-[0.75rem] leading-relaxed text-muted">
+                No measured report is retained for this exact model version yet. Its latent capability and benchmark suites remain hidden until evaluation evidence completes.
+              </p>
+            </div>
+          )}
+        </section>
+      </div>
+    </ConsoleDialog>
   )
 }

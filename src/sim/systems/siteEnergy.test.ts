@@ -263,7 +263,10 @@ describe('shared site and energy runtime', () => {
     const settled = tickEnergyContracts(state)
 
     expect(power.mwEnergyContractImport).toBeCloseTo(1, 8)
-    expect(power.mwAvailable).toBeCloseTo(1.5, 8)
+    // Available MW is physical headroom (the full 2 MW interconnect), while
+    // imported/billed MW remains capped to the 1.5 MW demand.
+    expect(power.mwAvailable).toBeCloseTo(2, 8)
+    expect(power.mwGridImport).toBeCloseTo(1.5, 8)
     expect(bill.energyContractMw).toBeCloseTo(1, 8)
     expect(bill.spotMw).toBeCloseTo(0.5, 8)
     expect(bill.spotCostDay).toBeCloseTo(

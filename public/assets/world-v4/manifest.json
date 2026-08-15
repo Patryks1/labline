@@ -1,0 +1,2192 @@
+{
+  "version": 1,
+  "generatedBy": "scripts/generate-world-models.mjs",
+  "coordinateSystem": {
+    "up": "+Y",
+    "forward": "+X",
+    "ground": 0,
+    "tileSize": 1
+  },
+  "bundles": [
+    {
+      "family": "terrain",
+      "url": "/assets/world-v4/terrain.9307a8edc4d6.glb",
+      "sha256": "9307a8edc4d60c929874e0a7ddfeeea7785941f37672747956d15fda28ac8a49",
+      "bytes": 503340
+    },
+    {
+      "family": "vegetation",
+      "url": "/assets/world-v4/vegetation.b4f786f05420.glb",
+      "sha256": "b4f786f05420fc3ac63ea5f1e57a7ba613229043037cc433311c2d82c79c9ad5",
+      "bytes": 1106720
+    },
+    {
+      "family": "residential",
+      "url": "/assets/world-v4/residential.f7b75ff1d291.glb",
+      "sha256": "f7b75ff1d29175eb3243610ed8073917a09083c49dd53003b9259c53caa345d3",
+      "bytes": 454304
+    },
+    {
+      "family": "urban",
+      "url": "/assets/world-v4/urban.b902debab016.glb",
+      "sha256": "b902debab016484157e66e8c33fb06a377c5d4908c237c5b8c5680735922aa08",
+      "bytes": 697344
+    },
+    {
+      "family": "industrial",
+      "url": "/assets/world-v4/industrial.8f66b9edff85.glb",
+      "sha256": "8f66b9edff85c5861a5bd9062d3f5bbbbc0415c717db33a378d46ab56603e326",
+      "bytes": 359976
+    },
+    {
+      "family": "facilities",
+      "url": "/assets/world-v4/facilities.564cfe7ed80f.glb",
+      "sha256": "564cfe7ed80f23a6adee9f7a9b2e57b4b67742ed78ce99da1ab0084c59c1806f",
+      "bytes": 989044
+    },
+    {
+      "family": "municipal",
+      "url": "/assets/world-v4/municipal.e8ec44fbd29d.glb",
+      "sha256": "e8ec44fbd29df81d40cd4b14542d413b1b692814edca0f075da9ea5ebda83686",
+      "bytes": 233516
+    },
+    {
+      "family": "vehicles",
+      "url": "/assets/world-v4/vehicles.5c5ffb3eebbf.glb",
+      "sha256": "5c5ffb3eebbf99c27fa57505a0eda763bf53be93911ff65e17a9654ef00399a6",
+      "bytes": 445488
+    },
+    {
+      "family": "boats",
+      "url": "/assets/world-v4/boats.5d135f996424.glb",
+      "sha256": "5d135f9964247a129b6fc55b660206ffab0dbc141df5316b6032ea0191d45125",
+      "bytes": 169808
+    },
+    {
+      "family": "ducks",
+      "url": "/assets/world-v4/ducks.41cc4803763d.glb",
+      "sha256": "41cc4803763de34be57b687204758db38085807e5f0a11226e1a36f15d1fb2c3",
+      "bytes": 121616
+    },
+    {
+      "family": "props",
+      "url": "/assets/world-v4/props.a22ae716f91c.glb",
+      "sha256": "a22ae716f91c01f63d6ccb9635ccfc1d8b5e12e8fc931be084dd295898312435",
+      "bytes": 362160
+    }
+  ],
+  "models": [
+    {
+      "family": "terrain",
+      "key": "ground-rock",
+      "archetypeId": 236,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "ground-rock__near",
+        "mid": "ground-rock__mid",
+        "far": "ground-rock__far"
+      },
+      "fallbackKey": "ground-rock"
+    },
+    {
+      "family": "terrain",
+      "key": "ground-log",
+      "archetypeId": 237,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "ground-log__near",
+        "mid": "ground-log__mid",
+        "far": "ground-log__far"
+      },
+      "fallbackKey": "ground-log"
+    },
+    {
+      "family": "terrain",
+      "key": "grass-tufts",
+      "archetypeId": 400,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "grass-tufts__near",
+        "mid": "grass-tufts__mid",
+        "far": "grass-tufts__far"
+      },
+      "fallbackKey": "grass-tufts"
+    },
+    {
+      "family": "terrain",
+      "key": "meadow-flowers",
+      "archetypeId": 401,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "meadow-flowers__near",
+        "mid": "meadow-flowers__mid",
+        "far": "meadow-flowers__far"
+      },
+      "fallbackKey": "meadow-flowers"
+    },
+    {
+      "family": "terrain",
+      "key": "dry-scrub",
+      "archetypeId": 402,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "dry-scrub__near",
+        "mid": "dry-scrub__mid",
+        "far": "dry-scrub__far"
+      },
+      "fallbackKey": "dry-scrub"
+    },
+    {
+      "family": "terrain",
+      "key": "fern-cluster",
+      "archetypeId": 403,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "fern-cluster__near",
+        "mid": "fern-cluster__mid",
+        "far": "fern-cluster__far"
+      },
+      "fallbackKey": "fern-cluster"
+    },
+    {
+      "family": "terrain",
+      "key": "pebble-group",
+      "archetypeId": 404,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "pebble-group__near",
+        "mid": "pebble-group__mid",
+        "far": "pebble-group__far"
+      },
+      "fallbackKey": "pebble-group"
+    },
+    {
+      "family": "terrain",
+      "key": "granite-outcrop",
+      "archetypeId": 405,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "granite-outcrop__near",
+        "mid": "granite-outcrop__mid",
+        "far": "granite-outcrop__far"
+      },
+      "fallbackKey": "granite-outcrop"
+    },
+    {
+      "family": "terrain",
+      "key": "sandstone-outcrop",
+      "archetypeId": 406,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "sandstone-outcrop__near",
+        "mid": "sandstone-outcrop__mid",
+        "far": "sandstone-outcrop__far"
+      },
+      "fallbackKey": "sandstone-outcrop"
+    },
+    {
+      "family": "terrain",
+      "key": "fallen-pine",
+      "archetypeId": 407,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "fallen-pine__near",
+        "mid": "fallen-pine__mid",
+        "far": "fallen-pine__far"
+      },
+      "fallbackKey": "fallen-pine"
+    },
+    {
+      "family": "terrain",
+      "key": "fallen-birch",
+      "archetypeId": 408,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "fallen-birch__near",
+        "mid": "fallen-birch__mid",
+        "far": "fallen-birch__far"
+      },
+      "fallbackKey": "fallen-birch"
+    },
+    {
+      "family": "terrain",
+      "key": "shore-reeds",
+      "archetypeId": 409,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "shore-reeds__near",
+        "mid": "shore-reeds__mid",
+        "far": "shore-reeds__far"
+      },
+      "fallbackKey": "shore-reeds"
+    },
+    {
+      "family": "terrain",
+      "key": "cattail-clump",
+      "archetypeId": 410,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "cattail-clump__near",
+        "mid": "cattail-clump__mid",
+        "far": "cattail-clump__far"
+      },
+      "fallbackKey": "cattail-clump"
+    },
+    {
+      "family": "terrain",
+      "key": "mushroom-ring",
+      "archetypeId": 411,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "mushroom-ring__near",
+        "mid": "mushroom-ring__mid",
+        "far": "mushroom-ring__far"
+      },
+      "fallbackKey": "mushroom-ring"
+    },
+    {
+      "family": "terrain",
+      "key": "wild-grass",
+      "archetypeId": 412,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "wild-grass__near",
+        "mid": "wild-grass__mid",
+        "far": "wild-grass__far"
+      },
+      "fallbackKey": "wild-grass"
+    },
+    {
+      "family": "terrain",
+      "key": "hill-boulders",
+      "archetypeId": 413,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "hill-boulders__near",
+        "mid": "hill-boulders__mid",
+        "far": "hill-boulders__far"
+      },
+      "fallbackKey": "hill-boulders"
+    },
+    {
+      "family": "vegetation",
+      "key": "forest-pine",
+      "archetypeId": 1,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "forest-pine__near",
+        "mid": "forest-pine__mid",
+        "far": "forest-pine__far"
+      },
+      "fallbackKey": "forest-pine"
+    },
+    {
+      "family": "vegetation",
+      "key": "forest-oak",
+      "archetypeId": 231,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "forest-oak__near",
+        "mid": "forest-oak__mid",
+        "far": "forest-oak__far"
+      },
+      "fallbackKey": "forest-oak"
+    },
+    {
+      "family": "vegetation",
+      "key": "scots-pine",
+      "archetypeId": 414,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "scots-pine__near",
+        "mid": "scots-pine__mid",
+        "far": "scots-pine__far"
+      },
+      "fallbackKey": "scots-pine"
+    },
+    {
+      "family": "vegetation",
+      "key": "spruce-tall",
+      "archetypeId": 415,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "spruce-tall__near",
+        "mid": "spruce-tall__mid",
+        "far": "spruce-tall__far"
+      },
+      "fallbackKey": "spruce-tall"
+    },
+    {
+      "family": "vegetation",
+      "key": "fir-young",
+      "archetypeId": 416,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "fir-young__near",
+        "mid": "fir-young__mid",
+        "far": "fir-young__far"
+      },
+      "fallbackKey": "fir-young"
+    },
+    {
+      "family": "vegetation",
+      "key": "cedar-wide",
+      "archetypeId": 417,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "cedar-wide__near",
+        "mid": "cedar-wide__mid",
+        "far": "cedar-wide__far"
+      },
+      "fallbackKey": "cedar-wide"
+    },
+    {
+      "family": "vegetation",
+      "key": "birch-white",
+      "archetypeId": 418,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "birch-white__near",
+        "mid": "birch-white__mid",
+        "far": "birch-white__far"
+      },
+      "fallbackKey": "birch-white"
+    },
+    {
+      "family": "vegetation",
+      "key": "aspen-column",
+      "archetypeId": 419,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "aspen-column__near",
+        "mid": "aspen-column__mid",
+        "far": "aspen-column__far"
+      },
+      "fallbackKey": "aspen-column"
+    },
+    {
+      "family": "vegetation",
+      "key": "maple-red",
+      "archetypeId": 420,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "maple-red__near",
+        "mid": "maple-red__mid",
+        "far": "maple-red__far"
+      },
+      "fallbackKey": "maple-red"
+    },
+    {
+      "family": "vegetation",
+      "key": "beech-round",
+      "archetypeId": 421,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "beech-round__near",
+        "mid": "beech-round__mid",
+        "far": "beech-round__far"
+      },
+      "fallbackKey": "beech-round"
+    },
+    {
+      "family": "vegetation",
+      "key": "willow-droop",
+      "archetypeId": 422,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "willow-droop__near",
+        "mid": "willow-droop__mid",
+        "far": "willow-droop__far"
+      },
+      "fallbackKey": "willow-droop"
+    },
+    {
+      "family": "vegetation",
+      "key": "poplar-tall",
+      "archetypeId": 423,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "poplar-tall__near",
+        "mid": "poplar-tall__mid",
+        "far": "poplar-tall__far"
+      },
+      "fallbackKey": "poplar-tall"
+    },
+    {
+      "family": "vegetation",
+      "key": "dead-pine",
+      "archetypeId": 424,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "dead-pine__near",
+        "mid": "dead-pine__mid",
+        "far": "dead-pine__far"
+      },
+      "fallbackKey": "dead-pine"
+    },
+    {
+      "family": "vegetation",
+      "key": "dead-oak",
+      "archetypeId": 425,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "dead-oak__near",
+        "mid": "dead-oak__mid",
+        "far": "dead-oak__far"
+      },
+      "fallbackKey": "dead-oak"
+    },
+    {
+      "family": "vegetation",
+      "key": "hawthorn-shrub",
+      "archetypeId": 426,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "hawthorn-shrub__near",
+        "mid": "hawthorn-shrub__mid",
+        "far": "hawthorn-shrub__far"
+      },
+      "fallbackKey": "hawthorn-shrub"
+    },
+    {
+      "family": "vegetation",
+      "key": "flowering-shrub",
+      "archetypeId": 427,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "flowering-shrub__near",
+        "mid": "flowering-shrub__mid",
+        "far": "flowering-shrub__far"
+      },
+      "fallbackKey": "flowering-shrub"
+    },
+    {
+      "family": "vegetation",
+      "key": "juniper-scrub",
+      "archetypeId": 428,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "juniper-scrub__near",
+        "mid": "juniper-scrub__mid",
+        "far": "juniper-scrub__far"
+      },
+      "fallbackKey": "juniper-scrub"
+    },
+    {
+      "family": "vegetation",
+      "key": "mixed-grove",
+      "archetypeId": 429,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "mixed-grove__near",
+        "mid": "mixed-grove__mid",
+        "far": "mixed-grove__far"
+      },
+      "fallbackKey": "mixed-grove"
+    },
+    {
+      "family": "vegetation",
+      "key": "pine-grove",
+      "archetypeId": 430,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "pine-grove__near",
+        "mid": "pine-grove__mid",
+        "far": "pine-grove__far"
+      },
+      "fallbackKey": "pine-grove"
+    },
+    {
+      "family": "vegetation",
+      "key": "birch-grove",
+      "archetypeId": 431,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "birch-grove__near",
+        "mid": "birch-grove__mid",
+        "far": "birch-grove__far"
+      },
+      "fallbackKey": "birch-grove"
+    },
+    {
+      "family": "residential",
+      "key": "house-single",
+      "archetypeId": 2,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "house-single__near",
+        "mid": "house-single__mid",
+        "far": "house-single__far"
+      },
+      "fallbackKey": "house-single"
+    },
+    {
+      "family": "residential",
+      "key": "house-duplex",
+      "archetypeId": 432,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "house-duplex__near",
+        "mid": "house-duplex__mid",
+        "far": "house-duplex__far"
+      },
+      "fallbackKey": "house-duplex"
+    },
+    {
+      "family": "residential",
+      "key": "house-terrace",
+      "archetypeId": 433,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "house-terrace__near",
+        "mid": "house-terrace__mid",
+        "far": "house-terrace__far"
+      },
+      "fallbackKey": "house-terrace"
+    },
+    {
+      "family": "residential",
+      "key": "house-townhome",
+      "archetypeId": 434,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "house-townhome__near",
+        "mid": "house-townhome__mid",
+        "far": "house-townhome__far"
+      },
+      "fallbackKey": "house-townhome"
+    },
+    {
+      "family": "residential",
+      "key": "house-row",
+      "archetypeId": 435,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "house-row__near",
+        "mid": "house-row__mid",
+        "far": "house-row__far"
+      },
+      "fallbackKey": "house-row"
+    },
+    {
+      "family": "residential",
+      "key": "house-courtyard",
+      "archetypeId": 436,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "house-courtyard__near",
+        "mid": "house-courtyard__mid",
+        "far": "house-courtyard__far"
+      },
+      "fallbackKey": "house-courtyard"
+    },
+    {
+      "family": "residential",
+      "key": "house-garden",
+      "archetypeId": 437,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "house-garden__near",
+        "mid": "house-garden__mid",
+        "far": "house-garden__far"
+      },
+      "fallbackKey": "house-garden"
+    },
+    {
+      "family": "residential",
+      "key": "house-stilt",
+      "archetypeId": 438,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "house-stilt__near",
+        "mid": "house-stilt__mid",
+        "far": "house-stilt__far"
+      },
+      "fallbackKey": "house-stilt"
+    },
+    {
+      "family": "residential",
+      "key": "house-corner",
+      "archetypeId": 439,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "house-corner__near",
+        "mid": "house-corner__mid",
+        "far": "house-corner__far"
+      },
+      "fallbackKey": "house-corner"
+    },
+    {
+      "family": "residential",
+      "key": "house-cottage",
+      "archetypeId": 440,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "house-cottage__near",
+        "mid": "house-cottage__mid",
+        "far": "house-cottage__far"
+      },
+      "fallbackKey": "house-cottage"
+    },
+    {
+      "family": "residential",
+      "key": "house-modern",
+      "archetypeId": 441,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "house-modern__near",
+        "mid": "house-modern__mid",
+        "far": "house-modern__far"
+      },
+      "fallbackKey": "house-modern"
+    },
+    {
+      "family": "residential",
+      "key": "apartment-walkup",
+      "archetypeId": 442,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "apartment-walkup__near",
+        "mid": "apartment-walkup__mid",
+        "far": "apartment-walkup__far"
+      },
+      "fallbackKey": "apartment-walkup"
+    },
+    {
+      "family": "residential",
+      "key": "apartment-brick",
+      "archetypeId": 443,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "apartment-brick__near",
+        "mid": "apartment-brick__mid",
+        "far": "apartment-brick__far"
+      },
+      "fallbackKey": "apartment-brick"
+    },
+    {
+      "family": "residential",
+      "key": "apartment-courtyard",
+      "archetypeId": 444,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "apartment-courtyard__near",
+        "mid": "apartment-courtyard__mid",
+        "far": "apartment-courtyard__far"
+      },
+      "fallbackKey": "apartment-courtyard"
+    },
+    {
+      "family": "urban",
+      "key": "city-district-a",
+      "archetypeId": 3,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "city-district-a__near",
+        "mid": "city-district-a__mid",
+        "far": "city-district-a__far"
+      },
+      "fallbackKey": "city-district-a"
+    },
+    {
+      "family": "urban",
+      "key": "city-district-b",
+      "archetypeId": 4,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "city-district-b__near",
+        "mid": "city-district-b__mid",
+        "far": "city-district-b__far"
+      },
+      "fallbackKey": "city-district-b"
+    },
+    {
+      "family": "urban",
+      "key": "office-glass",
+      "archetypeId": 445,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "office-glass__near",
+        "mid": "office-glass__mid",
+        "far": "office-glass__far"
+      },
+      "fallbackKey": "office-glass"
+    },
+    {
+      "family": "urban",
+      "key": "office-stepped",
+      "archetypeId": 446,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "office-stepped__near",
+        "mid": "office-stepped__mid",
+        "far": "office-stepped__far"
+      },
+      "fallbackKey": "office-stepped"
+    },
+    {
+      "family": "urban",
+      "key": "mixed-use-podium",
+      "archetypeId": 447,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "mixed-use-podium__near",
+        "mid": "mixed-use-podium__mid",
+        "far": "mixed-use-podium__far"
+      },
+      "fallbackKey": "mixed-use-podium"
+    },
+    {
+      "family": "urban",
+      "key": "mixed-use-corner",
+      "archetypeId": 448,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "mixed-use-corner__near",
+        "mid": "mixed-use-corner__mid",
+        "far": "mixed-use-corner__far"
+      },
+      "fallbackKey": "mixed-use-corner"
+    },
+    {
+      "family": "urban",
+      "key": "civic-hall",
+      "archetypeId": 449,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "civic-hall__near",
+        "mid": "civic-hall__mid",
+        "far": "civic-hall__far"
+      },
+      "fallbackKey": "civic-hall"
+    },
+    {
+      "family": "urban",
+      "key": "public-library",
+      "archetypeId": 450,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "public-library__near",
+        "mid": "public-library__mid",
+        "far": "public-library__far"
+      },
+      "fallbackKey": "public-library"
+    },
+    {
+      "family": "urban",
+      "key": "covered-market",
+      "archetypeId": 451,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "covered-market__near",
+        "mid": "covered-market__mid",
+        "far": "covered-market__far"
+      },
+      "fallbackKey": "covered-market"
+    },
+    {
+      "family": "urban",
+      "key": "city-hotel",
+      "archetypeId": 452,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "city-hotel__near",
+        "mid": "city-hotel__mid",
+        "far": "city-hotel__far"
+      },
+      "fallbackKey": "city-hotel"
+    },
+    {
+      "family": "urban",
+      "key": "shopping-arcade",
+      "archetypeId": 453,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "shopping-arcade__near",
+        "mid": "shopping-arcade__mid",
+        "far": "shopping-arcade__far"
+      },
+      "fallbackKey": "shopping-arcade"
+    },
+    {
+      "family": "urban",
+      "key": "transit-hub",
+      "archetypeId": 454,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "transit-hub__near",
+        "mid": "transit-hub__mid",
+        "far": "transit-hub__far"
+      },
+      "fallbackKey": "transit-hub"
+    },
+    {
+      "family": "urban",
+      "key": "clock-tower",
+      "archetypeId": 455,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "clock-tower__near",
+        "mid": "clock-tower__mid",
+        "far": "clock-tower__far"
+      },
+      "fallbackKey": "clock-tower"
+    },
+    {
+      "family": "urban",
+      "key": "hospital-block",
+      "archetypeId": 456,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "hospital-block__near",
+        "mid": "hospital-block__mid",
+        "far": "hospital-block__far"
+      },
+      "fallbackKey": "hospital-block"
+    },
+    {
+      "family": "urban",
+      "key": "university-hall",
+      "archetypeId": 457,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "university-hall__near",
+        "mid": "university-hall__mid",
+        "far": "university-hall__far"
+      },
+      "fallbackKey": "university-hall"
+    },
+    {
+      "family": "urban",
+      "key": "broadcast-tower",
+      "archetypeId": 458,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "broadcast-tower__near",
+        "mid": "broadcast-tower__mid",
+        "far": "broadcast-tower__far"
+      },
+      "fallbackKey": "broadcast-tower"
+    },
+    {
+      "family": "industrial",
+      "key": "warehouse",
+      "archetypeId": 5,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "warehouse__near",
+        "mid": "warehouse__mid",
+        "far": "warehouse__far"
+      },
+      "fallbackKey": "warehouse"
+    },
+    {
+      "family": "industrial",
+      "key": "warehouse-sawtooth",
+      "archetypeId": 459,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "warehouse-sawtooth__near",
+        "mid": "warehouse-sawtooth__mid",
+        "far": "warehouse-sawtooth__far"
+      },
+      "fallbackKey": "warehouse-sawtooth"
+    },
+    {
+      "family": "industrial",
+      "key": "warehouse-cold-store",
+      "archetypeId": 460,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "warehouse-cold-store__near",
+        "mid": "warehouse-cold-store__mid",
+        "far": "warehouse-cold-store__far"
+      },
+      "fallbackKey": "warehouse-cold-store"
+    },
+    {
+      "family": "industrial",
+      "key": "warehouse-depot",
+      "archetypeId": 461,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "warehouse-depot__near",
+        "mid": "warehouse-depot__mid",
+        "far": "warehouse-depot__far"
+      },
+      "fallbackKey": "warehouse-depot"
+    },
+    {
+      "family": "industrial",
+      "key": "warehouse-freight",
+      "archetypeId": 462,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "warehouse-freight__near",
+        "mid": "warehouse-freight__mid",
+        "far": "warehouse-freight__far"
+      },
+      "fallbackKey": "warehouse-freight"
+    },
+    {
+      "family": "industrial",
+      "key": "container-yard",
+      "archetypeId": 463,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "container-yard__near",
+        "mid": "container-yard__mid",
+        "far": "container-yard__far"
+      },
+      "fallbackKey": "container-yard"
+    },
+    {
+      "family": "industrial",
+      "key": "grain-silos",
+      "archetypeId": 464,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "grain-silos__near",
+        "mid": "grain-silos__mid",
+        "far": "grain-silos__far"
+      },
+      "fallbackKey": "grain-silos"
+    },
+    {
+      "family": "industrial",
+      "key": "tank-yard",
+      "archetypeId": 465,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "tank-yard__near",
+        "mid": "tank-yard__mid",
+        "far": "tank-yard__far"
+      },
+      "fallbackKey": "tank-yard"
+    },
+    {
+      "family": "industrial",
+      "key": "light-industry",
+      "archetypeId": 466,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "light-industry__near",
+        "mid": "light-industry__mid",
+        "far": "light-industry__far"
+      },
+      "fallbackKey": "light-industry"
+    },
+    {
+      "family": "industrial",
+      "key": "rail-terminal",
+      "archetypeId": 467,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "rail-terminal__near",
+        "mid": "rail-terminal__mid",
+        "far": "rail-terminal__far"
+      },
+      "fallbackKey": "rail-terminal"
+    },
+    {
+      "family": "facilities",
+      "key": "facility-small",
+      "archetypeId": 100,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "facility-small__near",
+        "mid": "facility-small__mid",
+        "far": "facility-small__far"
+      },
+      "fallbackKey": "facility-small"
+    },
+    {
+      "family": "facilities",
+      "key": "facility-medium",
+      "archetypeId": 101,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "facility-medium__near",
+        "mid": "facility-medium__mid",
+        "far": "facility-medium__far"
+      },
+      "fallbackKey": "facility-medium"
+    },
+    {
+      "family": "facilities",
+      "key": "facility-large",
+      "archetypeId": 102,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "facility-large__near",
+        "mid": "facility-large__mid",
+        "far": "facility-large__far"
+      },
+      "fallbackKey": "facility-large"
+    },
+    {
+      "family": "facilities",
+      "key": "headquarters",
+      "archetypeId": 110,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "headquarters__near",
+        "mid": "headquarters__mid",
+        "far": "headquarters__far"
+      },
+      "fallbackKey": "headquarters"
+    },
+    {
+      "family": "facilities",
+      "key": "solar-field",
+      "archetypeId": 111,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "solar-field__near",
+        "mid": "solar-field__mid",
+        "far": "solar-field__far"
+      },
+      "fallbackKey": "solar-field"
+    },
+    {
+      "family": "facilities",
+      "key": "grid-substation",
+      "archetypeId": 112,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "grid-substation__near",
+        "mid": "grid-substation__mid",
+        "far": "grid-substation__far"
+      },
+      "fallbackKey": "grid-substation"
+    },
+    {
+      "family": "facilities",
+      "key": "power-generation",
+      "archetypeId": 113,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "power-generation__near",
+        "mid": "power-generation__mid",
+        "far": "power-generation__far"
+      },
+      "fallbackKey": "power-generation"
+    },
+    {
+      "family": "facilities",
+      "key": "chip-fabrication",
+      "archetypeId": 114,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "chip-fabrication__near",
+        "mid": "chip-fabrication__mid",
+        "far": "chip-fabrication__far"
+      },
+      "fallbackKey": "chip-fabrication"
+    },
+    {
+      "family": "facilities",
+      "key": "cooling-campus",
+      "archetypeId": 115,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "cooling-campus__near",
+        "mid": "cooling-campus__mid",
+        "far": "cooling-campus__far"
+      },
+      "fallbackKey": "cooling-campus"
+    },
+    {
+      "family": "facilities",
+      "key": "gas-generation",
+      "archetypeId": 116,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "gas-generation__near",
+        "mid": "gas-generation__mid",
+        "far": "gas-generation__far"
+      },
+      "fallbackKey": "gas-generation"
+    },
+    {
+      "family": "facilities",
+      "key": "battery-yard",
+      "archetypeId": 117,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "battery-yard__near",
+        "mid": "battery-yard__mid",
+        "far": "battery-yard__far"
+      },
+      "fallbackKey": "battery-yard"
+    },
+    {
+      "family": "facilities",
+      "key": "office-campus",
+      "archetypeId": 118,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "office-campus__near",
+        "mid": "office-campus__mid",
+        "far": "office-campus__far"
+      },
+      "fallbackKey": "office-campus"
+    },
+    {
+      "family": "facilities",
+      "key": "headquarters-small",
+      "archetypeId": 119,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "headquarters-small__near",
+        "mid": "headquarters-small__mid",
+        "far": "headquarters-small__far"
+      },
+      "fallbackKey": "headquarters-small"
+    },
+    {
+      "family": "facilities",
+      "key": "headquarters-medium",
+      "archetypeId": 120,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "headquarters-medium__near",
+        "mid": "headquarters-medium__mid",
+        "far": "headquarters-medium__far"
+      },
+      "fallbackKey": "headquarters-medium"
+    },
+    {
+      "family": "facilities",
+      "key": "research-lab",
+      "archetypeId": 121,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "research-lab__near",
+        "mid": "research-lab__mid",
+        "far": "research-lab__far"
+      },
+      "fallbackKey": "research-lab"
+    },
+    {
+      "family": "facilities",
+      "key": "training-centre",
+      "archetypeId": 468,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "training-centre__near",
+        "mid": "training-centre__mid",
+        "far": "training-centre__far"
+      },
+      "fallbackKey": "training-centre"
+    },
+    {
+      "family": "facilities",
+      "key": "network-operations",
+      "archetypeId": 469,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "network-operations__near",
+        "mid": "network-operations__mid",
+        "far": "network-operations__far"
+      },
+      "fallbackKey": "network-operations"
+    },
+    {
+      "family": "facilities",
+      "key": "construction-shell",
+      "archetypeId": 470,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "construction-shell__near",
+        "mid": "construction-shell__mid",
+        "far": "construction-shell__far"
+      },
+      "fallbackKey": "construction-shell"
+    },
+    {
+      "family": "facilities",
+      "key": "utility-plant",
+      "archetypeId": 471,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "utility-plant__near",
+        "mid": "utility-plant__mid",
+        "far": "utility-plant__far"
+      },
+      "fallbackKey": "utility-plant"
+    },
+    {
+      "family": "facilities",
+      "key": "security-centre",
+      "archetypeId": 472,
+      "tintMode": "owner",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "security-centre__near",
+        "mid": "security-centre__mid",
+        "far": "security-centre__far"
+      },
+      "fallbackKey": "security-centre"
+    },
+    {
+      "family": "municipal",
+      "key": "municipal-coal-campus",
+      "archetypeId": 506,
+      "tintMode": "base",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "municipal-coal-campus__near",
+        "mid": "municipal-coal-campus__mid",
+        "far": "municipal-coal-campus__far"
+      },
+      "fallbackKey": "municipal-coal-campus"
+    },
+    {
+      "family": "municipal",
+      "key": "municipal-wind-campus",
+      "archetypeId": 507,
+      "tintMode": "base",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "municipal-wind-campus__near",
+        "mid": "municipal-wind-campus__mid",
+        "far": "municipal-wind-campus__far"
+      },
+      "fallbackKey": "municipal-wind-campus"
+    },
+    {
+      "family": "municipal",
+      "key": "municipal-solar-campus",
+      "archetypeId": 508,
+      "tintMode": "base",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "municipal-solar-campus__near",
+        "mid": "municipal-solar-campus__mid",
+        "far": "municipal-solar-campus__far"
+      },
+      "fallbackKey": "municipal-solar-campus"
+    },
+    {
+      "family": "municipal",
+      "key": "municipal-nuclear-campus",
+      "archetypeId": 509,
+      "tintMode": "base",
+      "footprint": [
+        2,
+        2
+      ],
+      "nodes": {
+        "near": "municipal-nuclear-campus__near",
+        "mid": "municipal-nuclear-campus__mid",
+        "far": "municipal-nuclear-campus__far"
+      },
+      "fallbackKey": "municipal-nuclear-campus"
+    },
+    {
+      "family": "vehicles",
+      "key": "city-bus",
+      "archetypeId": 300,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "city-bus__near",
+        "mid": "city-bus__mid",
+        "far": "city-bus__far"
+      },
+      "fallbackKey": "city-bus"
+    },
+    {
+      "family": "vehicles",
+      "key": "compact-car",
+      "archetypeId": 473,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "compact-car__near",
+        "mid": "compact-car__mid",
+        "far": "compact-car__far"
+      },
+      "fallbackKey": "compact-car"
+    },
+    {
+      "family": "vehicles",
+      "key": "sedan-car",
+      "archetypeId": 474,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "sedan-car__near",
+        "mid": "sedan-car__mid",
+        "far": "sedan-car__far"
+      },
+      "fallbackKey": "sedan-car"
+    },
+    {
+      "family": "vehicles",
+      "key": "estate-car",
+      "archetypeId": 475,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "estate-car__near",
+        "mid": "estate-car__mid",
+        "far": "estate-car__far"
+      },
+      "fallbackKey": "estate-car"
+    },
+    {
+      "family": "vehicles",
+      "key": "delivery-van",
+      "archetypeId": 476,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "delivery-van__near",
+        "mid": "delivery-van__mid",
+        "far": "delivery-van__far"
+      },
+      "fallbackKey": "delivery-van"
+    },
+    {
+      "family": "vehicles",
+      "key": "cargo-van",
+      "archetypeId": 477,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "cargo-van__near",
+        "mid": "cargo-van__mid",
+        "far": "cargo-van__far"
+      },
+      "fallbackKey": "cargo-van"
+    },
+    {
+      "family": "vehicles",
+      "key": "pickup-truck",
+      "archetypeId": 478,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "pickup-truck__near",
+        "mid": "pickup-truck__mid",
+        "far": "pickup-truck__far"
+      },
+      "fallbackKey": "pickup-truck"
+    },
+    {
+      "family": "vehicles",
+      "key": "box-truck",
+      "archetypeId": 479,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "box-truck__near",
+        "mid": "box-truck__mid",
+        "far": "box-truck__far"
+      },
+      "fallbackKey": "box-truck"
+    },
+    {
+      "family": "vehicles",
+      "key": "semi-truck",
+      "archetypeId": 480,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "semi-truck__near",
+        "mid": "semi-truck__mid",
+        "far": "semi-truck__far"
+      },
+      "fallbackKey": "semi-truck"
+    },
+    {
+      "family": "vehicles",
+      "key": "tanker-truck",
+      "archetypeId": 481,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "tanker-truck__near",
+        "mid": "tanker-truck__mid",
+        "far": "tanker-truck__far"
+      },
+      "fallbackKey": "tanker-truck"
+    },
+    {
+      "family": "vehicles",
+      "key": "service-truck",
+      "archetypeId": 482,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "service-truck__near",
+        "mid": "service-truck__mid",
+        "far": "service-truck__far"
+      },
+      "fallbackKey": "service-truck"
+    },
+    {
+      "family": "vehicles",
+      "key": "electric-shuttle",
+      "archetypeId": 483,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "electric-shuttle__near",
+        "mid": "electric-shuttle__mid",
+        "far": "electric-shuttle__far"
+      },
+      "fallbackKey": "electric-shuttle"
+    },
+    {
+      "family": "boats",
+      "key": "utility-boat",
+      "archetypeId": 301,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "utility-boat__near",
+        "mid": "utility-boat__mid",
+        "far": "utility-boat__far"
+      },
+      "fallbackKey": "utility-boat"
+    },
+    {
+      "family": "boats",
+      "key": "rowboat",
+      "archetypeId": 484,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "rowboat__near",
+        "mid": "rowboat__mid",
+        "far": "rowboat__far"
+      },
+      "fallbackKey": "rowboat"
+    },
+    {
+      "family": "boats",
+      "key": "lake-dinghy",
+      "archetypeId": 485,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "lake-dinghy__near",
+        "mid": "lake-dinghy__mid",
+        "far": "lake-dinghy__far"
+      },
+      "fallbackKey": "lake-dinghy"
+    },
+    {
+      "family": "boats",
+      "key": "sailboat-small",
+      "archetypeId": 486,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "sailboat-small__near",
+        "mid": "sailboat-small__mid",
+        "far": "sailboat-small__far"
+      },
+      "fallbackKey": "sailboat-small"
+    },
+    {
+      "family": "boats",
+      "key": "sailboat-cabin",
+      "archetypeId": 487,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "sailboat-cabin__near",
+        "mid": "sailboat-cabin__mid",
+        "far": "sailboat-cabin__far"
+      },
+      "fallbackKey": "sailboat-cabin"
+    },
+    {
+      "family": "ducks",
+      "key": "mallard-pair",
+      "archetypeId": 302,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "mallard-pair__near",
+        "mid": "mallard-pair__mid",
+        "far": "mallard-pair__far"
+      },
+      "fallbackKey": "mallard-pair"
+    },
+    {
+      "family": "ducks",
+      "key": "brown-duck",
+      "archetypeId": 488,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "brown-duck__near",
+        "mid": "brown-duck__mid",
+        "far": "brown-duck__far"
+      },
+      "fallbackKey": "brown-duck"
+    },
+    {
+      "family": "ducks",
+      "key": "duckling-group",
+      "archetypeId": 489,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "duckling-group__near",
+        "mid": "duckling-group__mid",
+        "far": "duckling-group__far"
+      },
+      "fallbackKey": "duckling-group"
+    },
+    {
+      "family": "props",
+      "key": "road-lamp",
+      "archetypeId": 210,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "road-lamp__near",
+        "mid": "road-lamp__mid",
+        "far": "road-lamp__far"
+      },
+      "fallbackKey": "road-lamp"
+    },
+    {
+      "family": "props",
+      "key": "park-details",
+      "archetypeId": 207,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "park-details__near",
+        "mid": "park-details__mid",
+        "far": "park-details__far"
+      },
+      "fallbackKey": "park-details"
+    },
+    {
+      "family": "props",
+      "key": "park-bench",
+      "archetypeId": 303,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "park-bench__near",
+        "mid": "park-bench__mid",
+        "far": "park-bench__far"
+      },
+      "fallbackKey": "park-bench"
+    },
+    {
+      "family": "props",
+      "key": "traffic-light",
+      "archetypeId": 490,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "traffic-light__near",
+        "mid": "traffic-light__mid",
+        "far": "traffic-light__far"
+      },
+      "fallbackKey": "traffic-light"
+    },
+    {
+      "family": "props",
+      "key": "pedestrian-signal",
+      "archetypeId": 491,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "pedestrian-signal__near",
+        "mid": "pedestrian-signal__mid",
+        "far": "pedestrian-signal__far"
+      },
+      "fallbackKey": "pedestrian-signal"
+    },
+    {
+      "family": "props",
+      "key": "road-sign",
+      "archetypeId": 492,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "road-sign__near",
+        "mid": "road-sign__mid",
+        "far": "road-sign__far"
+      },
+      "fallbackKey": "road-sign"
+    },
+    {
+      "family": "props",
+      "key": "street-bollards",
+      "archetypeId": 493,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "street-bollards__near",
+        "mid": "street-bollards__mid",
+        "far": "street-bollards__far"
+      },
+      "fallbackKey": "street-bollards"
+    },
+    {
+      "family": "props",
+      "key": "fire-hydrant",
+      "archetypeId": 494,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "fire-hydrant__near",
+        "mid": "fire-hydrant__mid",
+        "far": "fire-hydrant__far"
+      },
+      "fallbackKey": "fire-hydrant"
+    },
+    {
+      "family": "props",
+      "key": "utility-box",
+      "archetypeId": 495,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "utility-box__near",
+        "mid": "utility-box__mid",
+        "far": "utility-box__far"
+      },
+      "fallbackKey": "utility-box"
+    },
+    {
+      "family": "props",
+      "key": "wood-fence",
+      "archetypeId": 496,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "wood-fence__near",
+        "mid": "wood-fence__mid",
+        "far": "wood-fence__far"
+      },
+      "fallbackKey": "wood-fence"
+    },
+    {
+      "family": "props",
+      "key": "highway-guardrail",
+      "archetypeId": 497,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "highway-guardrail__near",
+        "mid": "highway-guardrail__mid",
+        "far": "highway-guardrail__far"
+      },
+      "fallbackKey": "highway-guardrail"
+    },
+    {
+      "family": "props",
+      "key": "construction-barrier",
+      "archetypeId": 498,
+      "tintMode": "base",
+      "footprint": [
+        1,
+        1
+      ],
+      "nodes": {
+        "near": "construction-barrier__near",
+        "mid": "construction-barrier__mid",
+        "far": "construction-barrier__far"
+      },
+      "fallbackKey": "construction-barrier"
+    }
+  ]
+}

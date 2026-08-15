@@ -48,6 +48,12 @@ export const HQ_STAFF_CAP: Record<string, number> = {
   office: 12, // legacy
 }
 
+/**
+ * Leased/remote desk seats before an owned HQ completes.
+ * HQ-first starts at 0 — hire only after placing a completed HQ.
+ */
+export const BASE_REMOTE_TEAM_SEATS = 0
+
 export function emptyStaff(): StaffHeadcount {
   return { researcher: 0, data_processor: 0, engineer: 0, ops: 0 }
 }

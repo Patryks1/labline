@@ -14,7 +14,7 @@ import { facilityAnchorTiles } from '../../../sim/systems/worldAccess'
 import type { MapTile, PanelId, SimState } from '../../../sim/types'
 import { useGameStore } from '../../../store/gameStore'
 import { computeSnapshot } from '../../../sim/tick'
-import { computeMw, gb, mw, num, pfToMw } from '../format'
+import { gb, mw, num, pf } from '../format'
 import { BuildingNameField } from '../ui/BuildingNameField'
 import {
   EmptyState,
@@ -73,8 +73,8 @@ export function InfrastructureOverview() {
     (tile) => tile.buildingTarget <= 0 || tile.buildingProgress >= tile.buildingTarget,
   )
   const liveHalls = live.filter((tile) => isDcKind(tile.kind) && isDcAnchor(tile))
-  const freeBays = liveHalls.reduce(
-    (sum, hall) => sum + dcBayUsage(state, hall.x, hall.y).free,
+  const stagedRackWidths = liveHalls.reduce(
+    (sum, hall) => sum + dcBayUsage(state, hall.x, hall.y).staged,
     0,
   )
 
@@ -91,7 +91,7 @@ export function InfrastructureOverview() {
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <MetricTile label="Sites" value={String(live.length)} detail={`${construction.length} building`} />
-        <MetricTile label="Fleet compute" value={computeMw(pfToMw(fleet.flopsPf))} tone="positive" />
+        <MetricTile label="Fleet compute" value={pf(fleet.flopsPf)} detail="actual PF" tone="positive" />
         <MetricTile
           label="Power"
           value={mw(snap.mwDemand)}
@@ -99,10 +99,10 @@ export function InfrastructureOverview() {
           tone={snap.throttled ? 'danger' : 'neutral'}
         />
         <MetricTile
-          label="Open bays"
-          value={num(freeBays, 0)}
-          detail={host.shortOn === 'ok' ? 'balanced' : `short ${host.shortOn}`}
-          tone={host.shortOn === 'ok' ? 'positive' : 'warning'}
+          label="Staged hardware"
+          value={num(stagedRackWidths, 0)}
+          detail="rack-width units off-floor"
+          tone={stagedRackWidths > 0 ? 'warning' : 'positive'}
         />
       </div>
 
@@ -117,8 +117,8 @@ export function InfrastructureOverview() {
       >
         <div className="grid grid-cols-2 gap-x-4">
           <StatRow label="VRAM" value={gb(fleet.vramGb)} />
-          <StatRow label="Host need" value={computeMw(pfToMw(host.pfNeed))} tone={host.shortOn !== 'ok' ? 'warning' : 'neutral'} />
-          <StatRow label="Fleet draw" value={mw(fleet.mw)} />
+          <StatRow label="Host need" value={pf(host.pfNeed)} tone={host.shortOn !== 'ok' ? 'warning' : 'neutral'} />
+          <StatRow label="Fleet draw (electrical)" value={mw(fleet.mw)} />
           <StatRow
             label="Grid pressure"
             value={`${mw(snap.mwDemand)} / ${mw(snap.mwAvailable)}`}
@@ -186,17 +186,17 @@ export function InfrastructureOverview() {
                     active ? 'border-mint/50 bg-mint/10' : 'border-line/70 bg-panel-2/70'
                   }`}
                 >
-                  <div className="flex items-start justify-between gap-2">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                     <div className="min-w-0 flex-1">
                       <BuildingNameField tile={tile} compact />
                       <p className="mt-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
                         {facilityType(tile)}
-                        {usage ? ` · ${usage.used}/${usage.capacity} bays · ${mw(usage.mwLive)}` : ''}
+                        {usage ? ` · ${usage.used} placed · ${usage.live} online · ${usage.staged} staged · ${mw(usage.mwLive)}` : ''}
                         {tile.mwGeneration > 0 ? ` · ${mw(tile.mwGeneration)} gen` : ''}
                         {tile.mwCapacity > 0 ? ` · ${mw(tile.mwCapacity)} grid` : ''}
                       </p>
                     </div>
-                    <div className="flex shrink-0 gap-1">
+                    <div className="grid w-full grid-cols-2 gap-1 sm:w-auto sm:shrink-0">
                       <HudButton type="button" variant="ghost" onClick={() => showOnMap(tile)}>
                         Map
                       </HudButton>
@@ -229,8 +229,13 @@ function RackDeploymentPlanner({
   const [requested, setRequested] = useState<number | null>(null)
   const [chooserOpen, setChooserOpen] = useState(false)
   const deployableHalls = halls
-    .map((hall) => ({ hall, free: dcBayUsage(state, hall.x, hall.y).free }))
-    .filter(({ free }) => free > 0)
+    .map((hall) => ({
+      hall,
+      spaces: quoteRackDeployment(state, skuId, [
+        { x: hall.x, y: hall.y },
+      ]).plannedCabinets,
+    }))
+    .filter(({ spaces }) => spaces > 0)
   const targets = deployableHalls
     .filter(({ hall }) => !excluded.has(`${hall.x},${hall.y}`))
     .map(({ hall }) => ({ x: hall.x, y: hall.y }))
@@ -238,7 +243,8 @@ function RackDeploymentPlanner({
   const sku = resolveRackSku(skuId, state.player.rackDesigns)
   const quantity =
     quote.maxRacks > 0 ? Math.max(1, Math.min(requested ?? quote.maxRacks, quote.maxRacks)) : 0
-  const fullOrder = quote.canFillAll && quantity === quote.fillAllRacks
+  const fullOrder =
+    quote.canFillPlanned && quantity === quote.plannedCabinets
 
   const toggleHall = (hall: MapTile) => {
     const key = `${hall.x},${hall.y}`
@@ -253,7 +259,9 @@ function RackDeploymentPlanner({
 
   const blockers = []
   if (quote.maxRacks <= 0) {
-    blockers.push({ text: 'No deployable quantity — check bays, supply, and cash.' })
+    blockers.push({
+      text: 'No deployable quantity — add compatible physical cabinet footprints, then check supply and cash.',
+    })
   }
 
   return (
@@ -267,13 +275,13 @@ function RackDeploymentPlanner({
         {sku.name} across selected halls. Supply and cash cap the order.
       </p>
       <div className="rounded-lg border border-line/70 bg-void/35 p-2">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-col gap-2 min-[420px]:flex-row min-[420px]:items-center min-[420px]:justify-between">
           <div className="min-w-0">
             <span className="hud-eyebrow">Target halls</span>
             <strong className="mt-0.5 block truncate text-[0.8125rem] text-bone">
               {deployableHalls.length === 0
-                ? 'No halls with open bays'
-                : `${quote.selectedHalls} of ${deployableHalls.length} · ${quote.freeBays} bays`}
+                ? 'No halls with planned cabinet space'
+                : `${quote.selectedHalls} of ${deployableHalls.length} · ${quote.plannedCabinets} planned cabinets`}
             </strong>
           </div>
           {deployableHalls.length > 1 ? (
@@ -291,7 +299,7 @@ function RackDeploymentPlanner({
         {deployableHalls.length === 1 ? (
           <div className="mt-1.5 flex items-center justify-between rounded-md bg-panel-2/70 px-2 py-1.5 text-[0.6875rem]">
             <span className="truncate text-bone">{deployableHalls[0]!.hall.name || 'Data center'}</span>
-            <span className="shrink-0 font-mono tabular-nums text-mint">{deployableHalls[0]!.free} bays</span>
+            <span className="shrink-0 font-mono tabular-nums text-mint">{deployableHalls[0]!.spaces} planned</span>
           </div>
         ) : chooserOpen ? (
           <div className="mt-2 space-y-1 border-t border-line/60 pt-2">
@@ -302,7 +310,7 @@ function RackDeploymentPlanner({
                   setExcluded(new Set())
                   setRequested(null)
                 }}
-                className="rounded-md px-1.5 py-0.5 text-[0.625rem] text-mint hover:bg-mint/10"
+                className="min-h-11 rounded-md px-2 py-1 text-[0.6875rem] text-mint hover:bg-mint/10 sm:min-h-0"
               >
                 Select all
               </button>
@@ -312,12 +320,12 @@ function RackDeploymentPlanner({
                   setExcluded(new Set(deployableHalls.map(({ hall }) => `${hall.x},${hall.y}`)))
                   setRequested(null)
                 }}
-                className="rounded-md px-1.5 py-0.5 text-[0.625rem] text-muted hover:bg-panel-2 hover:text-bone"
+                className="min-h-11 rounded-md px-2 py-1 text-[0.6875rem] text-muted hover:bg-panel-2 hover:text-bone sm:min-h-0"
               >
                 Clear
               </button>
             </div>
-            {deployableHalls.map(({ hall, free }) => {
+            {deployableHalls.map(({ hall, spaces }) => {
               const key = `${hall.x},${hall.y}`
               const selected = !excluded.has(key)
               return (
@@ -326,14 +334,14 @@ function RackDeploymentPlanner({
                   type="button"
                   aria-pressed={selected}
                   onClick={() => toggleHall(hall)}
-                  className={`flex w-full items-center justify-between rounded-md border px-2 py-1.5 text-[0.6875rem] transition ${
+                  className={`flex min-h-11 w-full items-center justify-between rounded-md border px-2 py-1.5 text-[0.6875rem] transition ${
                     selected
                       ? 'border-mint/40 bg-mint/10 text-bone'
                       : 'border-line/70 bg-panel-2/50 text-muted'
                   }`}
                 >
                   <span className="truncate">{hall.name || 'Data center'}</span>
-                  <span className="shrink-0 font-mono tabular-nums">{free} bays</span>
+                  <span className="shrink-0 font-mono tabular-nums">{spaces} planned</span>
                 </button>
               )
             })}
@@ -341,17 +349,17 @@ function RackDeploymentPlanner({
         ) : null}
       </div>
 
-      <div className="mt-2 grid grid-cols-3 gap-2">
-        <MetricTile label="Selected space" value={`${quote.freeBays} bays`} />
-        <MetricTile label="Cash limit" value={`${quote.affordableRacks} racks`} />
-        <MetricTile label="Order ceiling" value={`${quote.maxRacks} racks`} tone="positive" />
-      </div>
+      <DeploymentLimitSummary
+        plannedCabinets={quote.plannedCabinets}
+        affordableRacks={quote.affordableRacks}
+        maxRacks={quote.maxRacks}
+      />
 
       {quote.maxRacks > 0 ? (
         <>
           <label className="mt-2 block text-[0.8125rem] text-muted">
             Quantity <strong className="font-mono tabular-nums text-bone">{quantity}</strong> racks ·{' '}
-            {quantity * quote.rackUnits} bays
+            {quantity * quote.rackUnits} rack-width units
             <input
               type="range"
               min={1}
@@ -372,7 +380,7 @@ function RackDeploymentPlanner({
             }}
           >
             {fullOrder
-              ? `Fill all selected halls · ${quantity} racks`
+              ? `Fill all planned cabinets · ${quantity} racks`
               : `Order ${quantity} racks across ${quote.selectedHalls} halls`}
           </HudButton>
         </>
@@ -382,5 +390,28 @@ function RackDeploymentPlanner({
         </div>
       )}
     </GameCard>
+  )
+}
+
+export function DeploymentLimitSummary({
+  plannedCabinets,
+  affordableRacks,
+  maxRacks,
+}: {
+  plannedCabinets: number
+  affordableRacks: number
+  maxRacks: number
+}) {
+  return (
+    <div className="mt-2 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 sm:grid-cols-3">
+      <MetricTile
+        label="Physical destinations"
+        value={`${plannedCabinets} cabinets`}
+      />
+      <MetricTile label="Cash limit" value={`${affordableRacks} racks`} />
+      <div className="min-[420px]:col-span-2 sm:col-span-1">
+        <MetricTile label="Order ceiling" value={`${maxRacks} racks`} tone="positive" />
+      </div>
+    </div>
   )
 }

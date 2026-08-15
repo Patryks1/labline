@@ -1,19 +1,18 @@
-import { useEffect, useState } from "react";
 import type { Model } from "../../../../sim/types";
 import {
   normalizeModelEvaluations,
   suiteComposite,
 } from "../../../../sim/balance/evaluationSuites";
-import {
-  modelCostMult,
-  suggestApiInOut,
-} from "../../../../sim/balance/pricing";
 import { GameCard, CardGrid, MeterBar, StatRow } from "../../ui/kit";
 import { EmptyState, HudButton, StatusChip } from "../../ui/HudPrimitives";
 import { money } from "../../format";
 import { ModelProductSummary } from "../../ui/ModelProductSummary";
-import { useUiStore } from "../../../../store/uiStore";
 import { RadarChart } from "../../ui/RadarChart";
+import {
+  checkpointRivalDelta,
+  confidenceLabel,
+  type CheckpointUiRecord,
+} from "./checkpointUi";
 
 function modelTier(capability: number) {
   if (capability >= 80)
@@ -28,106 +27,6 @@ function displayRate(value: number): string {
   return `$${value.toFixed(2)}`;
 }
 
-function PriceInput({
-  label,
-  value,
-  placeholder,
-  onChange,
-}: {
-  label: string;
-  value: number | null;
-  placeholder: number;
-  onChange: (value: number | null) => void;
-}) {
-  const [draft, setDraft] = useState(() =>
-    value == null ? "" : value.toFixed(2),
-  );
-  useEffect(() => {
-    setDraft(value == null ? "" : value.toFixed(2));
-  }, [value]);
-  const commit = () => {
-    if (draft.trim() === "") {
-      onChange(null);
-      return;
-    }
-    const parsed = Number(draft);
-    const next = Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
-    const rounded = Math.round(next * 100) / 100;
-    setDraft(rounded.toFixed(2));
-    onChange(rounded);
-  };
-  return (
-    <label className="text-[0.6875rem] text-muted">
-      {label}
-      <input
-        type="number"
-        min={0}
-        step={0.01}
-        inputMode="decimal"
-        placeholder={placeholder.toFixed(2)}
-        value={draft}
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={commit}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") event.currentTarget.blur();
-          if (event.key === "Escape")
-            setDraft(value == null ? "" : value.toFixed(2));
-        }}
-        className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1 font-mono text-xs text-bone outline-none focus:border-mint/50"
-      />
-    </label>
-  );
-}
-
-function MarkupControl({
-  initialPercent,
-  onApply,
-}: {
-  initialPercent: number;
-  onApply: (percent: number) => void;
-}) {
-  const [draft, setDraft] = useState(() => String(initialPercent));
-  const parsed = Number(draft);
-  const valid =
-    draft.trim() !== "" &&
-    Number.isFinite(parsed) &&
-    parsed >= 0 &&
-    parsed <= 10_000;
-  useEffect(() => {
-    setDraft(String(initialPercent));
-  }, [initialPercent]);
-  return (
-    <div className="flex items-stretch overflow-hidden rounded-md border border-mint/25 bg-mint/10">
-      <label className="flex items-center gap-1 px-2 text-[0.6875rem] text-muted">
-        <span>Markup</span>
-        <input
-          type="number"
-          min={0}
-          max={10_000}
-          step={0.01}
-          inputMode="decimal"
-          aria-label="Custom API markup percentage"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && valid) onApply(parsed);
-          }}
-          className="w-16 border-0 bg-transparent py-1 text-right font-mono text-[0.6875rem] text-bone outline-none"
-        />
-        <span aria-hidden>%</span>
-      </label>
-      <button
-        type="button"
-        disabled={!valid}
-        onClick={() => valid && onApply(parsed)}
-        className="border-l border-mint/25 px-2 py-1 text-[0.6875rem] text-mint hover:bg-mint/15 disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        Apply
-      </button>
-    </div>
-  );
-}
-
 export function FleetTab({
   internal,
   released,
@@ -135,15 +34,12 @@ export function FleetTab({
   onSelect,
   onRelease,
   onDelete,
-  onPriceInOut,
-  onApplyMarkup,
-  markupPct,
   frontierCapability,
-  unitCostActive,
-  activeModelRef,
+  unitCostForModel,
   onTrainFurther,
   onDistill,
   safetySlot,
+  checkpointEvidence,
 }: {
   internal: Model[];
   released: Model[];
@@ -151,19 +47,14 @@ export function FleetTab({
   onSelect: (id: string) => void;
   onRelease: (id: string) => void;
   onDelete: (id: string) => void;
-  onPriceInOut: (
-    id: string,
-    priceIn: number | null,
-    priceOut: number | null,
-  ) => void;
-  onApplyMarkup: (id: string, markupPct: number) => void;
-  markupPct: number;
   frontierCapability: number;
-  unitCostActive?: number;
-  activeModelRef?: Model | null;
+  /** Canonical $/MTok unit cost for suggested list prices. */
+  unitCostForModel?: (model: Model) => number;
   onTrainFurther: (model: Model) => void;
   onDistill: (model: Model) => void;
   safetySlot?: React.ReactNode;
+  /** Persisted, noisy evidence for models promoted from stealth checkpoints. */
+  checkpointEvidence?: Readonly<Record<string, CheckpointUiRecord>>;
 }) {
   return (
     <div className="panel-swap space-y-4">
@@ -185,43 +76,61 @@ export function FleetTab({
             description="Finish a job with Keep internal to unlock teachers and continue-train."
           />
         ) : (
-          <CardGrid min="32rem" className="anim-stagger">
+          <CardGrid min="min(32rem, 100%)" className="anim-stagger">
             {internal.map((source) => {
               const model = normalizeModelEvaluations(source);
               const selected = pricingId === model.id;
-              const tier = modelTier(model.capability);
-              const nextAt = tier.nextAt;
+              const evidence = checkpointEvidence?.[model.id];
+              const tier = evidence ? null : modelTier(model.capability);
+              const nextAt = tier?.nextAt;
               const progress =
-                nextAt == null
+                tier == null
+                  ? evidence?.confidence ?? 0
+                  : nextAt == null
                   ? 1
                   : (model.capability - tier.floor) /
                     Math.max(1, nextAt - tier.floor);
-              const gap = model.capability - frontierCapability;
+              const measuredDelta = evidence?.benchmark
+                ? checkpointRivalDelta(evidence.benchmark)
+                : null;
+              const gap = evidence
+                ? measuredDelta
+                : model.capability - frontierCapability;
               const speed =
                 model.serviceProfile?.interactiveTokPerSec ??
                 52 * model.tokPerSecMult;
-              const primarySuite =
-                model.benchmarkSuites?.omni_overview ??
-                model.benchmarkSuites?.image_generation ??
-                model.benchmarkSuites?.video_generation ??
-                model.benchmarkSuites?.audio_generation ??
-                model.benchmarkSuites?.language;
-              const suiteScore = suiteComposite(primarySuite);
-              const suiteId = model.benchmarkSuites?.omni_overview
-                ? "omni_overview"
-                : model.benchmarkSuites?.image_generation
-                  ? "image_generation"
-                  : model.benchmarkSuites?.video_generation
-                    ? "video_generation"
-                    : model.benchmarkSuites?.audio_generation
-                      ? "audio_generation"
-                      : "language";
+              const primarySuite = evidence
+                ? undefined
+                : model.benchmarkSuites?.omni_overview ??
+                  model.benchmarkSuites?.image_generation ??
+                  model.benchmarkSuites?.video_generation ??
+                  model.benchmarkSuites?.audio_generation ??
+                  model.benchmarkSuites?.language;
+              const suiteScore = evidence ? null : suiteComposite(primarySuite);
+              const suiteId = evidence
+                ? null
+                : model.benchmarkSuites?.omni_overview
+                  ? "omni_overview"
+                  : model.benchmarkSuites?.image_generation
+                    ? "image_generation"
+                    : model.benchmarkSuites?.video_generation
+                      ? "video_generation"
+                      : model.benchmarkSuites?.audio_generation
+                        ? "audio_generation"
+                        : "language";
+              const measuredScore = evidence?.evaluationScore.estimate;
+              const measuredLow = evidence?.evaluationScore.low;
+              const measuredHigh = evidence?.evaluationScore.high;
               return (
                 <GameCard
                   key={model.id}
                   className={`hover-lift ${selected ? "ring-1 ring-mint/40" : ""}`}
                   tone={selected ? "mint" : undefined}
-                  eyebrow={`internal · ${tier.label}`}
+                  eyebrow={
+                    evidence
+                      ? "internal · measured checkpoint"
+                      : `internal · ${tier!.label}`
+                  }
                   title={
                     <button
                       type="button"
@@ -233,7 +142,9 @@ export function FleetTab({
                   }
                   actions={
                     <StatusChip tone="neutral">
-                      {model.capability.toFixed(0)}
+                      {evidence
+                        ? measuredScore?.toFixed(1) ?? "Unknown"
+                        : model.capability.toFixed(0)}
                     </StatusChip>
                   }
                 >
@@ -243,11 +154,28 @@ export function FleetTab({
                     className="w-full text-left"
                   >
                     <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
-                      <StatRow label="Suite" value={suiteScore.toFixed(2)} />
                       <StatRow
-                        label="Frontier"
-                        value={`${gap >= 0 ? "+" : ""}${gap.toFixed(2)}`}
-                        tone={gap >= 0 ? "positive" : "warning"}
+                        label={evidence ? "Eval score" : "Suite"}
+                        value={
+                          evidence
+                            ? measuredScore?.toFixed(1) ?? "Unknown"
+                            : suiteScore!.toFixed(2)
+                        }
+                      />
+                      <StatRow
+                        label={evidence ? "Rival delta" : "Frontier"}
+                        value={
+                          gap == null
+                            ? "Unknown"
+                            : `${gap >= 0 ? "+" : ""}${gap.toFixed(2)}`
+                        }
+                        tone={
+                          gap == null
+                            ? undefined
+                            : gap >= 0
+                              ? "positive"
+                              : "warning"
+                        }
                       />
                       <StatRow
                         label="Speed"
@@ -293,21 +221,57 @@ export function FleetTab({
                     ) : null}
                     <div className="mt-2">
                       <MeterBar
-                        label="Tier progress"
+                        label={evidence ? "Evidence confidence" : "Tier progress"}
                         value={progress}
-                        detail={tier.label}
+                        detail={
+                          evidence
+                            ? confidenceLabel(evidence.confidence)
+                            : tier!.label
+                        }
                         tone="positive"
                       />
                     </div>
                   </button>
                   <div className="mt-3 border-t border-line/50 pt-3">
-                    <RadarChart
-                      suiteId={suiteId}
-                      scores={model.benchmarkSuites?.[suiteId] ?? {}}
-                      profile={model.evaluationProfile}
-                    />
+                    {evidence ? (
+                      <div
+                        aria-label={`${model.name} persisted checkpoint evidence`}
+                        className="rounded-md border border-line/60 bg-void/30 p-2.5"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="hud-eyebrow">Measured evidence</p>
+                            <strong className="mt-1 block text-[0.8125rem] text-bone">
+                              {evidence.evaluationScore.label ?? "Not evaluated"}
+                            </strong>
+                          </div>
+                          <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
+                            {Math.round(evidence.confidence * 100)}% conf.
+                          </span>
+                        </div>
+                        <p className="mt-2 font-mono text-[0.75rem] tabular-nums text-bone">
+                          {measuredScore == null
+                            ? "Evaluation score unknown"
+                            : `${measuredScore.toFixed(1)} · ${(
+                                measuredLow ?? measuredScore
+                              ).toFixed(1)}–${(
+                                measuredHigh ?? measuredScore
+                              ).toFixed(1)}`}
+                        </p>
+                        <p className="mt-1 text-[0.6875rem] leading-5 text-muted">
+                          {evidence.review?.summary ??
+                            "Run a private evaluation to replace latent estimates with a measured interval."}
+                        </p>
+                      </div>
+                    ) : (
+                      <RadarChart
+                        suiteId={suiteId!}
+                        scores={model.benchmarkSuites?.[suiteId!] ?? {}}
+                        profile={model.evaluationProfile}
+                      />
+                    )}
                   </div>
-                  <div className="mt-3 flex flex-wrap gap-1.5">
+                  <div className="mt-3 grid grid-cols-2 gap-1.5 sm:flex sm:flex-wrap">
                     <HudButton
                       type="button"
                       variant="secondary"
@@ -328,20 +292,14 @@ export function FleetTab({
                       type="button"
                       variant="primary"
                       className="!px-2 !py-1 text-[0.6875rem]"
-                      onClick={() => {
-                        onRelease(model.id);
-                        useUiStore.getState().announceRelease({
-                          name: model.name,
-                          capability: model.capability,
-                        });
-                      }}
+                      onClick={() => onRelease(model.id)}
                     >
                       Release
                     </HudButton>
                     <HudButton
                       type="button"
                       variant="danger"
-                      className="ml-auto !px-2 !py-1 text-[0.6875rem]"
+                      className="sm:ml-auto !px-2 !py-1 text-[0.6875rem]"
                       onClick={() => onDelete(model.id)}
                     >
                       Delete
@@ -377,43 +335,34 @@ export function FleetTab({
             {released.map((source) => {
               const model = normalizeModelEvaluations(source);
               const selected = pricingId === model.id;
-              const tier = modelTier(model.capability);
-              const unit =
-                unitCostActive != null && activeModelRef
-                  ? Math.max(
-                      0.005,
-                      unitCostActive *
-                        (modelCostMult(model) /
-                          Math.max(0.08, modelCostMult(activeModelRef))),
-                    )
-                  : unitCostActive;
-              const suggested =
-                unit != null
-                  ? suggestApiInOut({
-                      costPerMTokBase: unit,
-                      paramsB: model.paramsB,
-                      activeParamsB: model.activeParamsB,
-                      family: model.family,
-                      inferCostMult: model.inferCostMult,
-                      capability: model.capability,
-                      markupPct,
-                      applyModelMult: false,
-                    })
-                  : null;
-              const gap = model.capability - frontierCapability;
+              const evidence = checkpointEvidence?.[model.id];
+              const tier = evidence ? null : modelTier(model.capability);
+              const unit = unitCostForModel?.(model);
+              const measuredDelta = evidence?.benchmark
+                ? checkpointRivalDelta(evidence.benchmark)
+                : null;
+              const gap = evidence
+                ? measuredDelta
+                : model.capability - frontierCapability;
               const speed =
                 model.serviceProfile?.interactiveTokPerSec ??
                 52 * model.tokPerSecMult;
-              const primarySuite =
-                model.benchmarkSuites?.omni_overview ??
-                model.benchmarkSuites?.language;
-              const suiteScore = suiteComposite(primarySuite);
+              const primarySuite = evidence
+                ? undefined
+                : model.benchmarkSuites?.omni_overview ??
+                  model.benchmarkSuites?.language;
+              const suiteScore = evidence ? null : suiteComposite(primarySuite);
+              const measuredScore = evidence?.evaluationScore.estimate;
               return (
                 <GameCard
                   key={model.id}
                   className={`hover-lift ${selected ? "ring-1 ring-gold/40" : ""}`}
                   tone="gold"
-                  eyebrow={`released · ${tier.label}`}
+                  eyebrow={
+                    evidence
+                      ? "released · measured checkpoint"
+                      : `released · ${tier!.label}`
+                  }
                   title={
                     <button
                       type="button"
@@ -425,7 +374,9 @@ export function FleetTab({
                   }
                   actions={
                     <StatusChip tone="positive">
-                      {model.capability.toFixed(0)}
+                      {evidence
+                        ? measuredScore?.toFixed(1) ?? "Unknown"
+                        : model.capability.toFixed(0)}
                     </StatusChip>
                   }
                 >
@@ -436,90 +387,115 @@ export function FleetTab({
                   >
                     <ModelProductSummary
                       model={model}
-                      badge={`released · ${tier.label}`}
-                      badgeTone={gap >= 0 ? "mint" : "amber"}
-                      score={model.capability.toFixed(2)}
-                      metrics={[
-                        { label: "suite", value: suiteScore.toFixed(2) },
-                        {
-                          label: "frontier",
-                          value: `${gap >= 0 ? "+" : ""}${gap.toFixed(2)}`,
-                          tone: gap >= 0 ? "text-mint" : "text-amber",
-                        },
-                        { label: "speed", value: `${speed.toFixed(1)} t/s` },
-                        {
-                          label: "serve",
-                          value: unit == null ? "—" : `${displayRate(unit)}/M`,
-                        },
-                      ]}
-                    />
+                      badge={
+                        evidence
+                          ? "released · measured"
+                          : `released · ${tier!.label}`
+                      }
+                      badgeTone={
+                        gap == null ? "muted" : gap >= 0 ? "mint" : "amber"
+                      }
+                      score={
+                        evidence
+                          ? measuredScore?.toFixed(1) ?? "Unknown"
+                          : model.capability.toFixed(2)
+                      }
+                      metrics={
+                        evidence
+                          ? [
+                              {
+                                label: "evaluation",
+                                value:
+                                  measuredScore?.toFixed(1) ?? "Unknown",
+                              },
+                              {
+                                label: "rival",
+                                value:
+                                  gap == null
+                                    ? "Unknown"
+                                    : `${gap >= 0 ? "+" : ""}${gap.toFixed(1)}`,
+                                tone:
+                                  gap == null
+                                    ? "text-muted"
+                                    : gap >= 0
+                                      ? "text-mint"
+                                      : "text-amber",
+                              },
+                              {
+                                label: "speed",
+                                value: `${speed.toFixed(1)} t/s`,
+                              },
+                              {
+                                label: "serve",
+                                value:
+                                  unit == null ? "—" : `${displayRate(unit)}/M`,
+                              },
+                            ]
+                          : [
+                              {
+                                label: "suite",
+                                value: suiteScore!.toFixed(2),
+                              },
+                              {
+                                label: "frontier",
+                                value: `${gap! >= 0 ? "+" : ""}${gap!.toFixed(2)}`,
+                                tone:
+                                  gap! >= 0 ? "text-mint" : "text-amber",
+                              },
+                              {
+                                label: "speed",
+                                value: `${speed.toFixed(1)} t/s`,
+                              },
+                              {
+                                label: "serve",
+                                value:
+                                  unit == null ? "—" : `${displayRate(unit)}/M`,
+                              },
+                            ]
+                      }
+                    >
+                      {evidence ? (
+                        <p className="mt-2 text-[0.6875rem] leading-5 text-muted">
+                          {evidence.evaluationScore.label ?? "No measured metric"}
+                          {evidence.evaluationScore.low != null &&
+                          evidence.evaluationScore.high != null
+                            ? ` · ${evidence.evaluationScore.low.toFixed(1)}–${evidence.evaluationScore.high.toFixed(1)}`
+                            : " · private evaluation required"}
+                        </p>
+                      ) : null}
+                    </ModelProductSummary>
                   </button>
+                  <div className="mt-3 grid grid-cols-2 gap-1.5 border-t border-line/50 pt-3 sm:flex sm:flex-wrap">
+                    <HudButton
+                      type="button"
+                      variant="secondary"
+                      className="!px-2 !py-1 text-[0.6875rem]"
+                      onClick={() => onTrainFurther(model)}
+                    >
+                      Train new version
+                    </HudButton>
+                    <HudButton
+                      type="button"
+                      variant="ghost"
+                      className="!px-2 !py-1 text-[0.6875rem]"
+                      onClick={() => onDistill(model)}
+                    >
+                      Distill
+                    </HudButton>
+                  </div>
                   {selected ? (
-                    <div className="mt-3 space-y-2 border-t border-line/50 pt-3">
-                      <div className="grid grid-cols-2 gap-1.5">
-                        <PriceInput
-                          label="Input $/1M"
-                          value={model.apiPriceInPerMTok}
-                          placeholder={
-                            model.suggestedApiPriceIn ?? model.costApiPriceIn
-                          }
-                          onChange={(value) =>
-                            onPriceInOut(
-                              model.id,
-                              value,
-                              model.apiPriceOutPerMTok,
-                            )
-                          }
-                        />
-                        <PriceInput
-                          label="Output $/1M"
-                          value={model.apiPriceOutPerMTok}
-                          placeholder={
-                            model.suggestedApiPriceOut ?? model.costApiPriceOut
-                          }
-                          onChange={(value) =>
-                            onPriceInOut(
-                              model.id,
-                              model.apiPriceInPerMTok,
-                              value,
-                            )
-                          }
-                        />
-                      </div>
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        {suggested ? (
-                          <>
-                            <HudButton
-                              type="button"
-                              variant="ghost"
-                              className="!px-2 !py-1 text-[0.6875rem]"
-                              onClick={() =>
-                                onPriceInOut(
-                                  model.id,
-                                  model.costApiPriceIn,
-                                  model.costApiPriceOut,
-                                )
-                              }
-                            >
-                              At cost
-                            </HudButton>
-                            <MarkupControl
-                              initialPercent={markupPct}
-                              onApply={(percent) =>
-                                onApplyMarkup(model.id, percent)
-                              }
-                            />
-                          </>
-                        ) : null}
-                        <HudButton
-                          type="button"
-                          variant="danger"
-                          className="ml-auto !px-2 !py-1 text-[0.6875rem]"
-                          onClick={() => onDelete(model.id)}
-                        >
-                          Delete
-                        </HudButton>
-                      </div>
+                    <div className="mt-3 flex flex-col gap-2 rounded-md border border-line/60 bg-void/25 p-2.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                      <p className="text-[0.6875rem] leading-5 text-muted">
+                        Edit input/output list prices from Plans → API.
+                      </p>
+                      <HudButton
+                        type="button"
+                        variant="danger"
+                        className="!px-2 !py-1 text-[0.6875rem]"
+                        onClick={() => onDelete(model.id)}
+                      >
+                        Delete
+                      </HudButton>
                     </div>
                   ) : null}
                 </GameCard>

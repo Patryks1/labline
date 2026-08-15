@@ -11,6 +11,7 @@ import {
 } from './balance/gameConfig'
 import { createRivals } from './systems/rivals'
 import { createWorldMarkets, refreshPublicEstimates, syncLabIndex } from './systems/labEngine'
+import { migrateDataHallLayouts } from './systems/dataHallLayouts'
 import { createInitialMap } from './systems/map'
 import { defaultPlans } from './systems/plans'
 import {
@@ -25,15 +26,15 @@ import type {
   SimState,
   SiteCapacity,
 } from './types'
-import { cityTalentCapacity, cityTalentInitial } from './balance/staff'
+import { cityTalentCapacity, cityTalentInitial, emptyStaff } from './balance/staff'
 import {
   getIndustryDataPack,
-  GROUNDED_2026_COMPUTE_V2_PACK,
+  GROUNDED_2026_ECONOMY_V3_PACK,
 } from './balance/industryDataPack'
 import {
   TERRAIN_KIND,
   createDynamicWorld,
-  generateStaticWorldV2,
+  generateStaticWorldV7,
   tileId,
   type DynamicWorld,
   type Facility,
@@ -52,6 +53,8 @@ export interface CreateGameOpts {
   advanced?: AdvancedOverrides
   /** Full config wins over difficulty/advanced when provided */
   config?: GameConfig
+  /** Compatibility-fixture escape hatch. Normal campaigns always use V7. */
+  legacyMapFixture?: boolean
 }
 
 /** Legacy tiles stay available for established small-map consumers/tests. */
@@ -71,6 +74,11 @@ function compactCities(world: StaticWorld): MapCity[] {
       powerBuyMw: city.powerBuyMw,
       powerBuyPriceMult: city.powerBuyPriceMult,
       industry: city.industry,
+      tier: city.tier,
+      parentCityIndex: city.parentCityIndex,
+      regionIndex: city.regionIndex,
+      palette: city.palette,
+      growth: city.growth,
       talentCapacity,
       talentAvailable: cityTalentInitial(talentCapacity, 0.36),
       talentWageMult: city.talentWageMult,
@@ -97,7 +105,10 @@ function findRivalStart(
   rivalIndex: number,
   reserved: ReadonlySet<TileId> = new Set(),
 ): TileId | undefined {
-  const city = world.staticWorld.cities[(rivalIndex + 1) % world.staticWorld.cities.length]
+  const regionalCenters = world.staticWorld.cities.filter(
+    (city) => city.tier === undefined || city.tier === 'metro' || city.tier === 'satellite',
+  )
+  const city = regionalCenters[(rivalIndex + 1) % regionalCenters.length]
   if (!city) return world.staticWorld.starterPads[rivalIndex]
   for (let radius = city.radius + 2; radius <= city.radius + 24; radius++) {
     const perimeter = radius * 8
@@ -108,7 +119,12 @@ function findRivalStart(
       const y = side === 0 ? city.cy - radius : side === 1 ? city.cy + offset : side === 2 ? city.cy + radius : city.cy - offset
       if (x < 0 || y < 0 || x >= world.descriptor.width || y >= world.descriptor.height) continue
       const id = tileId(x, y, world.descriptor.width, world.descriptor.height)
-      if (reserved.has(id) || world.getFacilityAt(id) || world.getOwner(id) !== 'neutral') continue
+      if (
+        reserved.has(id) ||
+        world.getFacilityAt(id) ||
+        world.getOwner(id) !== 'neutral' ||
+        world.getTransport(id) !== 0
+      ) continue
       const kind = world.getKind(id)
       if (kind === TERRAIN_KIND.empty || kind === TERRAIN_KIND.forest) return id
     }
@@ -169,6 +185,7 @@ function toRunConfig(cfg: GameConfig): RunConfig {
     startingCashMult: cfg.startingCashMult,
     landValueBase: cfg.landValueBase,
     landValueCityPeak: cfg.landValueCityPeak,
+    drivingSide: cfg.drivingSide === 'right' ? 'right' : 'left',
     campaignRules: cfg.campaignRules ?? defaultCampaignRules(),
   }
 }
@@ -189,9 +206,12 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
 
   const seed = cfg.seed
   const startingCash = Math.floor(ECONOMY.startingCash * cfg.startingCashMult)
-  const compact = cfg.mapWidth * cfg.mapHeight >= COMPACT_WORLD_MIN_TILES
+  // Every newly-created campaign uses the deterministic layered world. The
+  // size threshold is retained only as historical documentation; legacy maps
+  // are still supported when loading old saves, but are no longer created.
+  const compact = opts.legacyMapFixture !== true
   const staticWorld = compact
-    ? generateStaticWorldV2({
+    ? generateStaticWorldV7({
         seed,
         width: cfg.mapWidth,
         height: cfg.mapHeight,
@@ -208,7 +228,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
     seed,
     cfg.rivalCount,
     regions.map((region) => region.id),
-    300_000_000,
+    ECONOMY.incumbentStartingEnterpriseValue,
     cfg.difficulty,
   )
   const compactWorld = staticWorld ? createDynamicWorld(staticWorld) : undefined
@@ -237,7 +257,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
 
   const campaignRules = cfg.campaignRules ?? defaultCampaignRules()
   const industryDataPack =
-    getIndustryDataPack(campaignRules.contentPackId) ?? GROUNDED_2026_COMPUTE_V2_PACK
+    getIndustryDataPack(campaignRules.contentPackId) ?? GROUNDED_2026_ECONOMY_V3_PACK
   const calendar = calendarForDay(1, campaignRules)
   const initialSiteCapacities: SiteCapacity[] = rivals.map((rival) => {
     const firmMw = Math.max(0.25, rival.flopsPf * 0.011 * (rival.pue ?? 1.42) * 1.12)
@@ -259,6 +279,16 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
     tick: 0,
     speed: 1,
     paused: true,
+    transport: {
+      version: 1,
+      day: 0,
+      networkRevision: 0,
+      segmentLoads: [],
+      junctionLoads: [],
+      regionCongestion: {},
+      cityAccess: {},
+      facilityAccess: {},
+    },
     config: toRunConfig(cfg),
     industryDataPack,
     calendar,
@@ -291,8 +321,9 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       // dense_basics starter unlock includes +0.05 trainEfficiency
       trainEfficiency: ECONOMY.startingTrainEfficiency + 0.05,
       pue: ECONOMY.startingPue,
-      talent: ECONOMY.startingTalent,
-      staff: { researcher: 3, data_processor: 1, engineer: 3, ops: 1 },
+      talent: 1,
+      staff: emptyStaff(),
+      starterHqGrant: true,
       researchLeads: [
         {
           id: 'lead-mira-chen',
@@ -321,9 +352,9 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
           name: 'Foundations Pod',
           leadId: 'lead-mira-chen',
           focus: 'scaling',
-          researchers: 3,
-          engineers: 1,
-          dataStaff: 1,
+          researchers: 0,
+          engineers: 0,
+          dataStaff: 0,
           assignmentId: null,
         },
         {
@@ -332,7 +363,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
           leadId: 'lead-jonah-reyes',
           focus: 'systems',
           researchers: 0,
-          engineers: 2,
+          engineers: 0,
           dataStaff: 0,
           assignmentId: null,
         },
@@ -344,11 +375,14 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       data: createEmptyLabData(),
       brandTrust: ECONOMY.startingBrand,
       servicePain: 0,
+      speedStrain: 0,
       // Dense transformers unlocked at start (same for player + rivals)
       researchUnlocked: ['dense_basics'],
       activeResearch: null,
       researchQueue: [],
       models: [],
+      trainingCheckpoints: [],
+      privateEvaluationJobs: [],
       trainingJobs: [],
       trainingJob: null,
       safetyCampaign: null,
@@ -359,13 +393,14 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
         apiPriceOutPerMTok: 3.2,
         apiMarkupPct: 120,
         apiVsSubPriority: ECONOMY.defaultApiVsSubPriority,
+        serveThrottlePolicy: 'balanced',
         activeModelId: null,
         enterpriseContractBonus: 0,
         plans: defaultPlans(),
         subPlusPrice: 20,
-        subProPrice: 60,
-        plusIncludedMTok: 0,
-        proIncludedMTok: 0,
+        subProPrice: 100,
+        plusIncludedMTok: 20,
+        proIncludedMTok: 100,
       },
       finance: {
         cash: startingCash,
@@ -444,7 +479,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
         kind: 'on_demand',
         regionId: 'global-cloud',
         pf: 24,
-        pricePerPfDay: 480,
+        pricePerPfDay: 120,
         daysLeft: 180,
         daysTotal: 180,
         interruptionRisk: 0.002,
@@ -496,11 +531,11 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
         id: 'welcome',
         day: 1,
         severity: 'info' as const,
-        message: `${cfg.labName} opens in January 2026 with $3M in cloud credits, 24 PF online, two technical leads, and 8 supporting staff. Ship before the runway closes.`,
+        message: `${cfg.labName} opens in January 2026 with a free HQ grant, $3M cloud credits, and 24 PF on-demand. Place your HQ in the city, hire researchers, then ship before the runway closes.`,
       },
     ],
     news: [
-      `Market open across ${map.cities?.length ?? 0} metros. ${rivals.length} rivals already have footholds.`,
+      `Market open across ${map.cities?.length ?? 0} settlements in ${map.regions.length} metro regions. ${rivals.length} rivals already have footholds.`,
     ],
     onboardingStep: 0,
     onboardingDismissed: false,
@@ -513,6 +548,8 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       goalValuation: ECONOMY.victory.valuation,
       goalCapability: ECONOMY.victory.capability,
       bankruptDay: 0,
+      dominanceQualifiedDays: 0,
+      lastDominanceQualifiedDay: 0,
     },
     lastMarket: {
       demandModelVersion: DEMAND_MODEL_VERSION,
@@ -544,6 +581,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       capacityProductRevenueCeiling: 0,
     },
     financeHistory: [],
+    planStatsHistory: [],
     financeMonthlyHistory: [],
     externalities: { accounts: {}, incidents: [] },
     lastBenchmarkEvent: null,
@@ -562,5 +600,5 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
     evaluations: [],
     reviews: [],
   }
-  return refreshPublicEstimates(syncLabIndex(normalizeSiteEnergyState(state)))
+  return refreshPublicEstimates(syncLabIndex(migrateDataHallLayouts(normalizeSiteEnergyState(state))))
 }

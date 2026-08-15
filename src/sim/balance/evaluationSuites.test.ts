@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { BenchmarkScores, QualityAxes } from '../types'
-import { applyBenchmarkPolicy } from './evaluationSuites'
+import type { BenchmarkScores, Model, QualityAxes } from '../types'
+import { applyBenchmarkPolicy, evaluationMarketsForModel, normalizeModelEvaluations } from './evaluationSuites'
 
 const scores = (value = 90): BenchmarkScores => ({
   mmlu: value,
@@ -79,5 +79,40 @@ describe('central benchmark policy', () => {
     })
     expect(curated.health).toBe(80)
     expect(lowQuality.health).toBeCloseTo(44)
+  })
+})
+
+describe('public modality eval markets', () => {
+  const checkpoint = (family: Model['family'], productPreset: Model['productPreset']): Model =>
+    normalizeModelEvaluations({
+      id: `${family}-${productPreset}`,
+      name: productPreset ?? family,
+      family,
+      backbone: family === 'diffusion' || family === 'video' ? 'diffusion' : 'dense',
+      productPreset,
+      io: productPreset === 'omni'
+        ? { inputs: { text: 60, image: 60, audio: 60, video: 60 }, outputs: { text: 60, image: 60, audio: 60, video: 60 }, tools: 60 }
+        : productPreset === 'image_generation'
+          ? { inputs: { text: 60 }, outputs: { image: 60 }, tools: 0 }
+          : { inputs: { text: 60 }, outputs: { text: 60 }, tools: 0 },
+      paramsB: 7,
+      capability: 60,
+      modalities: productPreset === 'omni' ? ['text', 'image', 'audio', 'video', 'tools'] : productPreset === 'image_generation' ? ['text', 'image'] : ['text'],
+      quality,
+      benchmarks: scores(60),
+      postTrain: 'rlhf',
+      releaseDay: 1,
+      shipped: true,
+      release: 'released',
+      tokPerSecMult: 0.7,
+      inferCostMult: 1,
+      trainComputeSpent: 1,
+    } as Model)
+
+  it('cross-lists omni across language, image, video, and audio boards', () => {
+    expect(evaluationMarketsForModel(checkpoint('omni', 'omni'))).toEqual([
+      'language', 'image', 'video', 'audio',
+    ])
+    expect(evaluationMarketsForModel(checkpoint('diffusion', 'image_generation'))).toEqual(['image'])
   })
 })

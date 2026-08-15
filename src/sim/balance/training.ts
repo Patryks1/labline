@@ -1,16 +1,32 @@
-import type { DataMix, ModelFamily } from '../types'
+import type { DataMix, ModelBackbone, ModelFamily, TrainMode, TrainingNumerics } from '../types'
+import { ECONOMY } from './economy'
+import {
+  trainingNumericsEconomicsProfile,
+  type TrainingNumericsEconomicsProfile,
+} from './trainingPrecision'
+import { activeBalanceTuning } from './tuning'
+import { MODEL_SYSTEMS_WORK_MULTIPLIER } from './computeCalibration'
 
 /** One petaflop-day is 10^15 FLOP/s for 86,400 seconds. */
 export const FLOPS_PER_PF_DAY = 8.64e19
 
 /**
  * Simulation time compression. Training still scales from physical 6ND work,
- * but four real calendar days of cluster work resolve in one game day.
+ * but two real calendar days of cluster work resolve in one game day. This
+ * keeps the physical model playable without making frontier runs a short
+ * product-cycle decision.
  */
-export const TRAINING_CALENDAR_COMPRESSION = 4
+export const TRAINING_CALENDAR_COMPRESSION = 2
 
-/** Chinchilla-style compute-optimal guidance, not a minimum or a cost clamp. */
+/** Modern dense compute-optimal reference, not a minimum or a cost clamp. */
 export const COMPUTE_OPTIMAL_TOKENS_PER_PARAMETER = 20
+
+/**
+ * Existing campaign recipes historically call 6 tokens/parameter "strong".
+ * Keep that progression anchor explicit and separate from the physical 20N
+ * reference so save pacing does not silently redefine compute-optimal work.
+ */
+export const GAMEPLAY_STRONG_TOKENS_PER_PARAMETER = 6
 
 export type TrainingFormulaVersion = 1 | 2
 
@@ -22,6 +38,83 @@ export interface TrainingRunEstimate {
   verificationPfDays: number
   physicalPfDays: number
   gamePfDays: number
+}
+
+export interface TrainingEconomicsEstimate extends TrainingRunEstimate {
+  targetPfDays: number
+  minCalendarDays: number
+  setupCost: number
+  dataCost: number
+  upfrontCash: number
+  cashBurnPerDay: number
+  precision: TrainingNumericsEconomicsProfile
+}
+
+export function minimumTrainingCalendarDays(opts: {
+  paramsB: number
+  family: ModelFamily
+  backbone?: ModelBackbone
+  mode?: TrainMode
+}): number {
+  const paramsB = Math.max(0.001, opts.paramsB)
+  const scaleDays = 18 + 12 * Math.log10(paramsB)
+  const familyMult =
+    opts.family === 'video'
+      ? 1.3
+      : opts.family === 'omni'
+        ? 1.2
+        : opts.family === 'diffusion'
+          ? 1.12
+          : opts.backbone === 'moe' || opts.family === 'moe'
+            ? 1.08
+            : 1
+  const modeMult = opts.mode === 'continue' ? 0.65 : opts.mode === 'distill' ? 0.8 : 1
+  return Math.ceil(Math.max(14, Math.min(100, scaleDays * familyMult * modeMult)))
+}
+
+export interface FundedTrainingMaturity {
+  /** PF spend relative to the originally recommended run. */
+  fundedRatio: number
+  /** Additional spend beyond the original recommendation. */
+  extraRatio: number
+  /** Bounded 0-1 signal with sharply diminishing returns. */
+  extraSignal: number
+  /** Capability points earned from deliberately extending the run. */
+  capabilityGain: number
+  /** Benchmark points earned from deliberately extending the run. */
+  benchmarkGain: number
+  /** Reliability points earned from longer validation/integration. */
+  reliabilityGain: number
+  /** Small extra ceiling headroom; training cannot substitute for a new architecture. */
+  ceilingGain: number
+}
+
+/**
+ * Quality earned by funding a run past its original recommendation. The first
+ * extra block matters, but repeated extensions asymptote quickly so players
+ * cannot turn a fixed architecture into a new technology generation.
+ */
+export function fundedTrainingMaturity(opts: {
+  progressPfDays: number
+  targetPfDays: number
+  recommendedPfDays?: number
+}): FundedTrainingMaturity {
+  const recommendation = Math.max(
+    1e-9,
+    opts.recommendedPfDays ?? opts.targetPfDays,
+  )
+  const fundedRatio = Math.max(0, opts.progressPfDays) / recommendation
+  const extraRatio = Math.max(0, fundedRatio - 1)
+  const extraSignal = 1 - Math.exp(-extraRatio / 0.75)
+  return {
+    fundedRatio,
+    extraRatio,
+    extraSignal,
+    capabilityGain: 5.5 * extraSignal,
+    benchmarkGain: 4.25 * extraSignal,
+    reliabilityGain: 3 * extraSignal,
+    ceilingGain: 4 * extraSignal,
+  }
 }
 
 export const PARAM_PRESETS = [
@@ -84,10 +177,17 @@ function legacyMoePfDays(totalB: number, activeB: number): number {
  * Active experts dominate FLOPs; inactive experts add routing, balancing and
  * communication overhead. Total parameters remain the basis for memory.
  */
-export function moeTrainingComputeParamsB(totalB: number, activeB: number): number {
+export const DEFAULT_MOE_ACTIVE_PATH_OVERHEAD = 0.1
+
+export function moeTrainingComputeParamsB(
+  totalB: number,
+  activeB: number,
+  overhead: number = DEFAULT_MOE_ACTIVE_PATH_OVERHEAD,
+): number {
   const total = Math.max(0.001, totalB)
   const active = Math.max(0.001, Math.min(activeB, total))
-  return active + (total - active) * 0.05
+  const boundedOverhead = Math.max(0.05, Math.min(0.2, overhead))
+  return Math.min(total, active * (1 + boundedOverhead))
 }
 
 /** Exact dense-transformer training work C ≈ 6ND, expressed in PF-days. */
@@ -95,6 +195,25 @@ export function denseTrainingPfDays(paramsB: number, trainingTokensMTok: number)
   const parameters = Math.max(0, paramsB) * 1e9
   const tokens = Math.max(0, trainingTokensMTok) * 1e6
   return (6 * parameters * tokens) / FLOPS_PER_PF_DAY
+}
+
+/** Training-token volume for a dense 20N reference run, in millions of tokens. */
+export function computeOptimalTrainingTokensMTok(
+  paramsB: number,
+  tokensPerParameter = COMPUTE_OPTIMAL_TOKENS_PER_PARAMETER,
+): number {
+  return Math.max(0, paramsB) * 1_000 * Math.max(0, tokensPerParameter)
+}
+
+/** Exact C ~= 6ND work at the modern dense tokens/parameter reference. */
+export function computeOptimalDensePfDays(
+  paramsB: number,
+  tokensPerParameter = COMPUTE_OPTIMAL_TOKENS_PER_PARAMETER,
+): number {
+  return denseTrainingPfDays(
+    paramsB,
+    computeOptimalTrainingTokensMTok(paramsB, tokensPerParameter),
+  )
 }
 
 /** Evaluation/verification is forward-only to first order: C ≈ 2ND. */
@@ -129,11 +248,14 @@ export function modalityComputeMultiplier(weights?: Partial<Record<string, numbe
 
 /** Linear PF multiplier for chosen volume; unlike v1 this is intentionally uncapped. */
 export function trainingVolumeMultiplier(dataRatio: number): number {
-  return Math.max(0, dataRatio) / 6
+  return Math.max(0, dataRatio) / GAMEPLAY_STRONG_TOKENS_PER_PARAMETER
 }
 
 function legacyTrainingVolumeMultiplier(dataRatio: number): number {
-  return Math.max(0.25, Math.min(4, Math.max(0, dataRatio) / 6))
+  return Math.max(
+    0.25,
+    Math.min(4, Math.max(0, dataRatio) / GAMEPLAY_STRONG_TOKENS_PER_PARAMETER),
+  )
 }
 
 function familyArchitectureComputeMultiplier(family: ModelFamily): number {
@@ -152,6 +274,7 @@ function distillationComputeMultiplier(paramsB: number, teacherParamsB?: number)
 function legacyTrainCostPfDays(opts: {
   paramsB: number
   family: ModelFamily
+  backbone?: ModelBackbone
   trainEfficiency: number
   activeParamsB?: number
   mode?: 'pretrain' | 'distill'
@@ -160,11 +283,12 @@ function legacyTrainCostPfDays(opts: {
   modalityComputeMult?: number
 }): number {
   let base: number
-  if (opts.family === 'moe') {
+  if (opts.backbone === 'moe' || (opts.backbone == null && opts.family === 'moe')) {
     base = legacyMoePfDays(opts.paramsB, opts.activeParamsB ?? opts.paramsB * 0.1)
   } else {
-    base = legacyDensePfDays(opts.paramsB) * familyArchitectureComputeMultiplier(opts.family)
+    base = legacyDensePfDays(opts.paramsB)
   }
+  base *= familyArchitectureComputeMultiplier(opts.family)
   if (opts.mode === 'distill') {
     base *= distillationComputeMultiplier(opts.paramsB, opts.teacherParamsB)
   }
@@ -177,11 +301,16 @@ function legacyTrainCostPfDays(opts: {
 export function trainCostPfDays(opts: {
   paramsB: number
   family: ModelFamily
+  backbone?: ModelBackbone
   trainEfficiency: number
   activeParamsB?: number
   mode?: 'pretrain' | 'distill'
   teacherParamsB?: number
-  /** Actual quality-weighted tokens per total parameter. Defaults to strong 6:1. */
+  /**
+   * Actual quality-weighted tokens per total parameter. Unspecified legacy
+   * previews retain the campaign's 6:1 progression anchor; new physical
+   * comparisons should call computeOptimalDensePfDays (20N) explicitly.
+   */
   dataRatio?: number
   /** Actual training tokens. Takes precedence over dataRatio. */
   trainingTokensMTok?: number
@@ -204,6 +333,7 @@ export function trainCostPfDays(opts: {
 export function estimateTrainingRun(opts: {
   paramsB: number
   family: ModelFamily
+  backbone?: ModelBackbone
   trainEfficiency: number
   activeParamsB?: number
   mode?: 'pretrain' | 'distill'
@@ -215,7 +345,7 @@ export function estimateTrainingRun(opts: {
 }): TrainingRunEstimate {
 
   const computeParamsB =
-    opts.family === 'moe'
+    opts.backbone === 'moe' || (opts.backbone == null && opts.family === 'moe')
       ? moeTrainingComputeParamsB(
           opts.paramsB,
           opts.activeParamsB ?? opts.paramsB * 0.1,
@@ -223,7 +353,9 @@ export function estimateTrainingRun(opts: {
       : Math.max(0.001, opts.paramsB)
   const trainingTokensMTok =
     opts.trainingTokensMTok ??
-    Math.max(0, opts.paramsB) * 1000 * Math.max(0, opts.dataRatio ?? 6)
+    Math.max(0, opts.paramsB) *
+      1000 *
+      Math.max(0, opts.dataRatio ?? GAMEPLAY_STRONG_TOKENS_PER_PARAMETER)
 
   let trainingPfDays = denseTrainingPfDays(computeParamsB, trainingTokensMTok)
   let heldOutPfDays = verificationPfDays(
@@ -232,8 +364,10 @@ export function estimateTrainingRun(opts: {
   )
   const architectureMult = familyArchitectureComputeMultiplier(opts.family)
   const modalityMult = Math.max(0.8, Math.min(12, opts.modalityComputeMult ?? 1))
-  trainingPfDays *= architectureMult * modalityMult
-  heldOutPfDays *= architectureMult * modalityMult
+  trainingPfDays *=
+    architectureMult * modalityMult * MODEL_SYSTEMS_WORK_MULTIPLIER
+  heldOutPfDays *=
+    architectureMult * modalityMult * MODEL_SYSTEMS_WORK_MULTIPLIER
   if (opts.mode === 'distill') {
     const distillMult = distillationComputeMultiplier(opts.paramsB, opts.teacherParamsB)
     trainingPfDays *= distillMult
@@ -253,8 +387,120 @@ export function estimateTrainingRun(opts: {
   }
 }
 
-/** Target student intelligence as fraction of teacher when fully teacher-weighted. */
+/**
+ * Shared player forecast/start economics. Physical work comes only from the
+ * actual train and verification token counts; quality affects outcomes, not
+ * the bill. Setup reserves cluster/orchestration capacity without prepaying a
+ * second full PF-scaled training bill.
+ */
+export function estimateTrainingEconomics(opts: {
+  paramsB: number
+  family: ModelFamily
+  backbone?: ModelBackbone
+  trainEfficiency: number
+  activeParamsB?: number
+  mode?: TrainMode
+  teacherParamsB?: number
+  distillTeacherShare?: number
+  trainingTokensMTok: number
+  verificationTokensMTok: number
+  modalityComputeMult?: number
+  trainCostMult?: number
+  dataCost?: number
+  numerics?: TrainingNumerics
+}): TrainingEconomicsEstimate {
+  const precision = trainingNumericsEconomicsProfile(opts.numerics)
+  const run = estimateTrainingRun({
+    paramsB: opts.paramsB,
+    family: opts.family,
+    backbone: opts.backbone,
+    trainEfficiency: opts.trainEfficiency,
+    activeParamsB: opts.activeParamsB,
+    mode: opts.mode === 'distill' ? 'distill' : 'pretrain',
+    teacherParamsB: opts.teacherParamsB,
+    trainingTokensMTok: opts.trainingTokensMTok,
+    verificationTokensMTok: opts.verificationTokensMTok,
+    modalityComputeMult: opts.modalityComputeMult,
+  })
+  const modeMult =
+    opts.mode === 'continue'
+      ? 0.55
+      : opts.mode === 'distill'
+        ? 0.9 + (1 - Math.max(0.05, Math.min(0.95, opts.distillTeacherShare ?? 0.72))) * 0.45
+        : 1
+  const tuning = activeBalanceTuning()
+  const costMult =
+    modeMult *
+    Math.max(0.05, opts.trainCostMult ?? 1) *
+    precision.trainingWorkMultiplier *
+    tuning.trainingWorkMult
+  const scale = (value: number) => value * costMult
+  const targetPfDays = scale(run.gamePfDays)
+  const minCalendarDays = minimumTrainingCalendarDays(opts) * tuning.trainingCalendarMult
+  // Cluster reservation is intentionally 25× the legacy 0.08 baseline.
+  const setupCost = Math.max(
+    1_000,
+    Math.floor(
+      targetPfDays *
+        ECONOMY.trainUpfrontPerPfDay *
+        2 *
+        precision.upfrontCashMultiplier,
+    ),
+  )
+  const dataCost = Math.max(0, Math.floor(opts.dataCost ?? 0))
+  const totalTokens = Math.max(0, opts.trainingTokensMTok + opts.verificationTokensMTok)
+  const cashBurnPerDay = Math.floor(
+    ECONOMY.trainCashBurnPerPfDay *
+      Math.sqrt(Math.max(1, opts.paramsB)) *
+      (1 + Math.log10(Math.max(10, totalTokens)) * 0.08) *
+      precision.dailyCashMultiplier *
+      tuning.trainingCostMult,
+  )
+  return {
+    ...run,
+    trainingPfDays: scale(run.trainingPfDays),
+    verificationPfDays: scale(run.verificationPfDays),
+    physicalPfDays: scale(run.physicalPfDays),
+    gamePfDays: targetPfDays,
+    targetPfDays,
+    minCalendarDays,
+    setupCost,
+    dataCost,
+    upfrontCash: setupCost + dataCost,
+    cashBurnPerDay,
+    precision,
+  }
+}
+
+/**
+ * Target student intelligence as fraction of teacher when fully teacher-weighted.
+ * Kept exported for existing callers; `distillRetentionFor` supersedes this flat
+ * constant for new work (size-gap aware, modulated by data quality and RNG).
+ */
 export const DISTILL_RETENTION = 0.8
+
+/**
+ * Size-gap distillation retention: how much teacher capability a student keeps.
+ * 1T → 1B lands ≈ 0.35 (mid 30–40% band); modulated by data and RNG.
+ */
+export function distillRetentionFor(input: {
+  teacherParamsB: number
+  studentParamsB: number
+  /** 0–1: effective data quality/coverage factor for the student run. */
+  dataFactor: number
+  /** 0–1 deterministic RNG draw. */
+  rng01: number
+}): number {
+  const gap = Math.log10(
+    Math.max(1, input.teacherParamsB) / Math.max(0.05, input.studentParamsB),
+  )
+  const base = 0.86 - 0.17 * gap
+  const data = (Math.max(0, Math.min(1, input.dataFactor)) - 0.5) * 0.12
+  const rng = (Math.max(0, Math.min(1, input.rng01)) - 0.5) * 0.12
+  const tuned =
+    (base + data + rng) * activeBalanceTuning().distillRetentionMult
+  return Math.max(0.25, Math.min(0.88, tuned))
+}
 
 /** Clamp distill teacher-share (own corpus = 1 − share). */
 export function clampDistillTeacherShare(n: number | undefined): number {
@@ -274,7 +520,8 @@ export function distillFromTeacher(opts: {
   /** Target fraction of teacher (default DISTILL_RETENTION = 0.80) */
   targetRetention?: number
 }): { capability: number; retention: number; benchmarks: Record<string, number> } {
-  const retention = Math.max(0.35, Math.min(0.92, opts.targetRetention ?? DISTILL_RETENTION))
+  // Floor relaxed 0.35 → 0.25 so the size-gap `distillRetentionFor` curve is not clipped.
+  const retention = Math.max(0.25, Math.min(0.92, opts.targetRetention ?? DISTILL_RETENTION))
   // Slight pull from student scale so tiny students cannot exceed ~80% of a giant teacher
   // while still staying in the 0.72–0.88 band for typical same-family distill.
   const scalePull = Math.min(

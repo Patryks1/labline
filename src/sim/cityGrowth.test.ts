@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { GameConfig } from './balance/gameConfig'
 import { createGame } from './createGame'
 import { tickCityGrowth } from './systems/cityGrowth'
+import { transportCityGrowthMultiplier } from './systems/transport'
 import {
   TERRAIN_KIND,
   createDynamicWorld,
@@ -61,6 +62,8 @@ function overlappingCitiesWorld(base: StaticWorld): StaticWorld {
   })
   return {
     ...base,
+    descriptor: { ...base.descriptor, generatorVersion: 2 },
+    transport: undefined,
     kind,
     feature,
     region,
@@ -114,7 +117,13 @@ describe('atomic city growth reservations', () => {
     const populationDelta =
       runtime0.population - staticWorld.cities[0]!.population +
       runtime7.population - staticWorld.cities[7]!.population
-    expect(populationDelta).toBe(claims.length * 1_350)
+    // Committed claims × flat V2 per-tile population × each city's transport
+    // growth multiplier (the overlap is claimed once, by the first city).
+    const expectedDelta =
+      first.tiles.length * 1_350 * transportCityGrowthMultiplier(state, staticWorld.cities[0]!.id) +
+      (second.tiles.length - rawOverlap.length) * 1_350 *
+        transportCityGrowthMultiplier(state, staticWorld.cities[7]!.id)
+    expect(populationDelta).toBeCloseTo(expectedDelta, 6)
     expect(runtime0.growthEvents).toBe(1)
     expect(runtime7.growthEvents).toBe(1)
     expect(next.map.cities![0]!.population).toBe(runtime0.population)

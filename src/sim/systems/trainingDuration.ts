@@ -1,20 +1,17 @@
-/** Shared calendar-duration floor for player, rival, and safety training runs. */
+export { minimumTrainingCalendarDays } from '../balance/training'
 
-/** Minimum calendar days for any base training / safety campaign run. */
+/** Legacy export retained for callers outside the player-training path. */
 export const MIN_TRAINING_DAYS = 30
 
 /**
- * Scale PF-day work so estimated duration at the given throughput is at least
- * `MIN_TRAINING_DAYS`. Forecasts stay honest because targetPfDays grows with
- * allocated compute rather than clamping daily progress.
+ * Calendar integration and validation do not disappear when a run has ample
+ * compute. Unlike the old duration floor, this never changes physical work.
  */
+/** @deprecated Calendar duration must not inflate PF-day work. */
 export function enforceMinTrainingDuration(
   targetPfDays: number,
-  dailyThroughputPf: number,
-  minDays: number = MIN_TRAINING_DAYS,
+  _dailyThroughputPf?: number,
+  _minDays?: number,
 ): number {
-  const target = Math.max(0, targetPfDays)
-  const throughput = Math.max(0, dailyThroughputPf)
-  if (!(throughput > 1e-9)) return Math.max(target, minDays)
-  return Math.max(target, throughput * minDays)
+  return Math.max(0, targetPfDays)
 }

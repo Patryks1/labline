@@ -1,4 +1,4 @@
-import type { BenchmarkId, BenchmarkScores, Model, ModelFamily, QualityAxes } from '../types'
+import type { BenchmarkId, BenchmarkScores, Model, ModelBackbone, ModelFamily, QualityAxes } from '../types'
 import {
   postTrainStrength,
   scaleIntelligence,
@@ -101,6 +101,7 @@ export interface ComputeBenchmarksOpts {
   /** Preferred: full scale path (params × data × mix) */
   paramsB?: number
   activeParamsB?: number
+  backbone?: ModelBackbone
   dataCoverage?: number
   mixWeights?: Partial<Record<string, number>>
   researchMult?: number
@@ -121,6 +122,7 @@ export function computeBenchmarks(opts: ComputeBenchmarksOpts): BenchmarkScores 
     dataQuality,
     paramsB,
     activeParamsB,
+    backbone,
     dataCoverage = 1,
     mixWeights,
     researchMult = 1,
@@ -144,6 +146,7 @@ export function computeBenchmarks(opts: ComputeBenchmarksOpts): BenchmarkScores 
     paramsB: scaleParams,
     activeParamsB,
     family,
+    backbone,
     dataCoverage,
     dataQuality: Math.max(0.3, Math.min(1.4, 0.4 + dataQuality * 0.45)),
     mixWeights,

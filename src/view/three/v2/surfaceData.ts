@@ -1,6 +1,26 @@
 import * as THREE from 'three'
 import { clampByte, tileCoords, type SurfaceTexel, type TileId } from './types'
 
+/** R-channel marker. Values below it retain the exact v2 RGBA layout. */
+export const SURFACE_TRANSPORT_MODE = 0x80
+const SURFACE_TRANSPORT_VISUAL_SHIFT = 4
+const SURFACE_TRANSPORT_VISUAL_MASK = 0x70
+
+/** Pack the road class and bridge flag into the three spare R-channel bits. */
+function transportVisualCode(transport: number): number {
+  const style = (transport >>> 8) & 0xff
+  const roadClass = Math.max(1, style & 0x07)
+  const bridge = (style & 0x08) !== 0 ? 0x04 : 0
+  return ((roadClass - 1) & 0x03) | bridge
+}
+
+function decodedTransportStyle(encodedKind: number): number {
+  const visual = (encodedKind & SURFACE_TRANSPORT_VISUAL_MASK) >>> SURFACE_TRANSPORT_VISUAL_SHIFT
+  const roadClass = (visual & 0x03) + 1
+  const bridge = (visual & 0x04) !== 0 ? 0x08 : 0
+  return roadClass | bridge
+}
+
 export interface SurfaceUpdateRange {
   /** Component offset, matching Three.js Texture.addUpdateRange. */
   start: number
@@ -72,8 +92,15 @@ export class SurfaceDataTexture {
   set(tileId: TileId, texel: SurfaceTexel): boolean {
     this.assertTileId(tileId)
     const offset = tileId * 4
-    const kind = clampByte(texel.kind)
-    const mask = clampByte(texel.neighborMask) & 0x0f
+    const hasTransport = texel.transport !== undefined && texel.transport !== 0
+    const kind = hasTransport
+      ? SURFACE_TRANSPORT_MODE |
+        (transportVisualCode(texel.transport!) << SURFACE_TRANSPORT_VISUAL_SHIFT) |
+        (clampByte(texel.kind) & 0x0f)
+      : clampByte(texel.kind)
+    const mask = hasTransport
+      ? clampByte(texel.transport! & 0xff)
+      : clampByte(texel.neighborMask) & 0x0f
     const region = clampByte(texel.region)
     const flags = clampByte(texel.flags)
     if (
@@ -104,10 +131,15 @@ export class SurfaceDataTexture {
   get(tileId: TileId, out: SurfaceTexel): SurfaceTexel {
     this.assertTileId(tileId)
     const offset = tileId * 4
-    out.kind = this.data[offset]!
+    const encodedKind = this.data[offset]!
+    const hasTransport = (encodedKind & SURFACE_TRANSPORT_MODE) !== 0
+    out.kind = hasTransport ? encodedKind & 0x0f : encodedKind
     out.neighborMask = this.data[offset + 1]!
     out.region = this.data[offset + 2]!
     out.flags = this.data[offset + 3]!
+    out.transport = hasTransport
+      ? out.neighborMask | (decodedTransportStyle(encodedKind) << 8)
+      : undefined
     return out
   }
 
@@ -115,10 +147,18 @@ export class SurfaceDataTexture {
   fill(read: (tileId: TileId, out: SurfaceTexel) => void): void {
     const out: SurfaceTexel = { kind: 0, neighborMask: 0, region: 0, flags: 0 }
     for (let tileId = 0; tileId < this.tileCount; tileId++) {
+      out.transport = undefined
       read(tileId, out)
       const offset = tileId * 4
-      this.data[offset] = clampByte(out.kind)
-      this.data[offset + 1] = clampByte(out.neighborMask) & 0x0f
+      const hasTransport = out.transport !== undefined && out.transport !== 0
+      this.data[offset] = hasTransport
+        ? SURFACE_TRANSPORT_MODE |
+          (transportVisualCode(out.transport!) << SURFACE_TRANSPORT_VISUAL_SHIFT) |
+          (clampByte(out.kind) & 0x0f)
+        : clampByte(out.kind)
+      this.data[offset + 1] = hasTransport
+        ? clampByte(out.transport! & 0xff)
+        : clampByte(out.neighborMask) & 0x0f
       this.data[offset + 2] = clampByte(out.region)
       this.data[offset + 3] = clampByte(out.flags)
     }
@@ -170,5 +210,47 @@ export class SurfaceDataTexture {
     if (!Number.isInteger(tileId) || tileId < 0 || tileId >= this.tileCount) {
       throw new RangeError(`Tile ${tileId} is outside 0..${this.tileCount - 1}`)
     }
+  }
+}
+
+/** Independent immutable R8 biome layer; keeps the packed RGBA surface contract intact. */
+export class SurfaceBiomeTexture {
+  readonly width: number
+  readonly height: number
+  readonly data: Uint8Array
+  readonly texture: THREE.DataTexture
+
+  constructor(width: number, height: number, read?: (tileId: TileId) => number) {
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) {
+      throw new RangeError(`Invalid biome dimensions ${width}x${height}`)
+    }
+    this.width = width
+    this.height = height
+    this.data = new Uint8Array(width * height)
+    if (read) {
+      for (let tileId = 0; tileId < this.data.length; tileId++) {
+        this.data[tileId] = clampByte(read(tileId))
+      }
+    }
+    this.texture = new THREE.DataTexture(
+      this.data,
+      width,
+      height,
+      THREE.RedFormat,
+      THREE.UnsignedByteType,
+    )
+    this.texture.name = 'map-biome-state-r8'
+    this.texture.magFilter = THREE.NearestFilter
+    this.texture.minFilter = THREE.NearestFilter
+    this.texture.wrapS = THREE.ClampToEdgeWrapping
+    this.texture.wrapT = THREE.ClampToEdgeWrapping
+    this.texture.generateMipmaps = false
+    this.texture.flipY = false
+    this.texture.unpackAlignment = 1
+    this.texture.needsUpdate = true
+  }
+
+  dispose(): void {
+    this.texture.dispose()
   }
 }

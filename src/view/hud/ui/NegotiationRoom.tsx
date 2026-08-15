@@ -66,11 +66,15 @@ export function NegotiationMessage({
   name,
   status = "idle",
   children,
+  timestamp = "Now",
+  delivery = side === "player" ? "read" : undefined,
 }: {
   side: "provider" | "player";
   name: string;
   status?: NegotiationStatus;
   children: ReactNode;
+  timestamp?: string;
+  delivery?: "sent" | "delivered" | "read";
 }) {
   const outcomeStyle =
     status === "signed"
@@ -97,7 +101,22 @@ export function NegotiationMessage({
           {status !== "idle" ? <NegotiationBadge status={status} /> : null}
         </div>
         {children}
+        <div className={`mt-1 flex items-center gap-1 font-mono text-[0.5625rem] text-muted/80 ${side === "player" ? "justify-end" : "justify-start"}`}>
+          <span>{timestamp}</span>
+          {delivery ? <span aria-label={delivery}>{delivery === "sent" ? "✓" : "✓✓"}</span> : null}
+        </div>
       </div>
+    </div>
+  );
+}
+
+export function NegotiationComposer({ children }: { children: ReactNode }) {
+  return (
+    <div className="rounded-xl border border-line/70 bg-void/55 p-2 shadow-[inset_0_1px_rgba(255,255,255,.025)]">
+      <div className="mb-1.5 flex items-center justify-between gap-2 font-mono text-[0.625rem] uppercase tracking-[0.1em] text-muted">
+        <span>Compose proposal</span><span>Terms attach below</span>
+      </div>
+      {children}
     </div>
   );
 }

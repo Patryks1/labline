@@ -1,5 +1,13 @@
-import { ECONOMY } from "../balance/economy";
-import { blendApiPrice } from "../balance/pricing";
+import { ECONOMY, SEGMENTS } from "../balance/economy";
+import {
+  API_PRICE_EPSILON,
+  avgTokensPerInteraction,
+  blendApiPrice,
+  commercialModelKind,
+  modelBlendedPublicApiPrice,
+  type CommercialModelKind,
+} from "../balance/pricing";
+import { precisionComputeMult } from "../balance/tokenServe";
 import type {
   BenchmarkId,
   Model,
@@ -13,6 +21,8 @@ import type {
   SubPlan,
 } from "../types";
 import {
+  customerBandForPrice,
+  expectedUtilizationRange,
   inferencePfDemand,
   planActualMTokPerUser,
 } from "../balance/serveCompute";
@@ -22,21 +32,95 @@ import {
   suiteComposite,
 } from "../balance/evaluationSuites";
 
+/** Paid plans above this monthly price cannot retain product traffic as training data. */
+export const PAID_DATA_COLLECTION_PRICE_CAP = 50;
+
+/**
+ * Hard cap on the share of a plan's served traffic that may be collected.
+ * Free: up to 100%. Paid ≤ $50: lerp(20% → 10%) by price/50. Above $50: 0%.
+ */
+export function maxPlanDataCollectionShare(pricePerMonth: number): number {
+  const price = Math.max(0, Number.isFinite(pricePerMonth) ? pricePerMonth : 0);
+  if (price <= 0) return 1;
+  if (price > PAID_DATA_COLLECTION_PRICE_CAP) return 0;
+  const t = price / PAID_DATA_COLLECTION_PRICE_CAP;
+  return 0.2 + (0.1 - 0.2) * t;
+}
+
+/** Effective collect share = min(setting, price cap); forced 0 above $50. */
+export function effectivePlanDataCollectionRate(
+  pricePerMonth: number,
+  setting: number,
+): number {
+  const cap = maxPlanDataCollectionShare(pricePerMonth);
+  if (cap <= 0) return 0;
+  const desired = Math.max(
+    0,
+    Math.min(1, Number.isFinite(setting) ? setting : 0),
+  );
+  return Math.min(desired, cap);
+}
+
+/** Defaults: Free on; paid ≤ $50 request the full allowed cap; > $50 locked off. */
+export function defaultPlanDataCollectionRate(pricePerMonth: number): number {
+  const cap = maxPlanDataCollectionShare(pricePerMonth);
+  return cap <= 0 ? 0 : 1;
+}
+
+/** Persist a 0–1 setting, forced to 0 when the plan price forbids collection. */
+export function clampPlanDataCollectionRate(
+  pricePerMonth: number,
+  rate: number | undefined,
+): number {
+  if (maxPlanDataCollectionShare(pricePerMonth) <= 0) return 0;
+  if (rate !== undefined && Number.isFinite(rate)) {
+    return Math.max(0, Math.min(1, rate));
+  }
+  return defaultPlanDataCollectionRate(pricePerMonth);
+}
+
+/**
+ * Starter blended public API list price (£/MTok) matching createGame defaults
+ * (in $0.80 / out $3.20). Used to seed advertised API-value subsidies on
+ * default and freshly created plans before any models are released.
+ */
+export const DEFAULT_PLAN_BLEND_API_PRICE = blendApiPrice(0.8, 3.2);
+
+/** Derive an advertised monthly subsidy from a legacy included-MTok allowance. */
+export function subsidyFromIncludedMTok(
+  includedMTokPerMonth: number,
+  blendedApiPricePerMTok = DEFAULT_PLAN_BLEND_API_PRICE,
+): number {
+  return (
+    Math.max(0, includedMTokPerMonth) *
+    Math.max(API_PRICE_EPSILON, blendedApiPricePerMTok)
+  );
+}
+
 export function defaultPlans(): SubPlan[] {
+  // Public-market ladder: mainstream $20, 5x power $100, 20x max $200.
+  // Entitlements are fixed native capacity promises, never API-price-derived.
+  const freeIncluded =
+    ECONOMY.basePlanUsageMTokPerDay * 0.2 * ECONOMY.daysPerMonth;
+  const plusIncluded = ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth;
+  const proIncluded =
+    ECONOMY.basePlanUsageMTokPerDay * 5 * ECONOMY.daysPerMonth;
+  const maxIncluded =
+    ECONOMY.basePlanUsageMTokPerDay * 20 * ECONOMY.daysPerMonth;
   return [
     {
       id: "plan-free",
       name: "Free",
       pricePerMonth: 0,
-      usageMultiplier: 0.1,
-      includedMTokPerMonth:
-        ECONOMY.basePlanUsageMTokPerDay * 0.1 * ECONOMY.daysPerMonth,
+      usageMultiplier: 0.2,
+      includedMTokPerMonth: freeIncluded,
       usageRate: null,
       modelIds: [],
       computePriority: 20,
       servePrecision: "fp16",
       servePrecisionByModel: {},
-      steadyUsageTarget: 0.1,
+      steadyUsageTarget: defaultSteadyPlanUsage(0),
+      dataCollectionRate: defaultPlanDataCollectionRate(0),
       modalityRoutes: {},
       demandShocks: [],
       enabled: true,
@@ -46,14 +130,14 @@ export function defaultPlans(): SubPlan[] {
       name: "Plus",
       pricePerMonth: 20,
       usageMultiplier: 1,
-      includedMTokPerMonth:
-        ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth,
+      includedMTokPerMonth: plusIncluded,
       usageRate: null,
       modelIds: [],
       computePriority: 55,
       servePrecision: "fp16",
       servePrecisionByModel: {},
-      steadyUsageTarget: 0.3,
+      steadyUsageTarget: defaultSteadyPlanUsage(20),
+      dataCollectionRate: defaultPlanDataCollectionRate(20),
       modalityRoutes: {},
       demandShocks: [],
       enabled: true,
@@ -61,16 +145,33 @@ export function defaultPlans(): SubPlan[] {
     {
       id: "plan-pro",
       name: "Pro",
-      pricePerMonth: 60,
+      pricePerMonth: 100,
       usageMultiplier: 5,
-      includedMTokPerMonth:
-        ECONOMY.basePlanUsageMTokPerDay * 5 * ECONOMY.daysPerMonth,
+      includedMTokPerMonth: proIncluded,
       usageRate: null,
       modelIds: [],
-      computePriority: 75,
+      computePriority: 85,
       servePrecision: "fp16",
       servePrecisionByModel: {},
-      steadyUsageTarget: 0.48,
+      steadyUsageTarget: defaultSteadyPlanUsage(100),
+      dataCollectionRate: defaultPlanDataCollectionRate(100),
+      modalityRoutes: {},
+      demandShocks: [],
+      enabled: true,
+    },
+    {
+      id: "plan-max",
+      name: "Max",
+      pricePerMonth: 200,
+      usageMultiplier: 20,
+      includedMTokPerMonth: maxIncluded,
+      usageRate: null,
+      modelIds: [],
+      computePriority: 95,
+      servePrecision: "fp16",
+      servePrecisionByModel: {},
+      steadyUsageTarget: defaultSteadyPlanUsage(200),
+      dataCollectionRate: defaultPlanDataCollectionRate(200),
       modalityRoutes: {},
       demandShocks: [],
       enabled: true,
@@ -94,9 +195,9 @@ export function defaultPremiumRouteShare(pricePerMonth: number): number {
 
 export function defaultSteadyPlanUsage(pricePerMonth: number): number {
   if (pricePerMonth <= 0) return 0.1;
-  if (pricePerMonth <= 30) return 0.3;
-  if (pricePerMonth <= 100) return 0.48;
-  return 0.65;
+  // Mid-band steady target from the smooth customer bands.
+  const [low, high] = expectedUtilizationRange(pricePerMonth);
+  return Math.round(((low + high) / 2) * 100) / 100;
 }
 
 function modelSupportsOutput(model: Model, modality: ModelIOModality): boolean {
@@ -279,10 +380,11 @@ export function planServeModifiers(
   label: string;
 } {
   const p = clampServePrecision(precision, unlocked);
+  // computeMult: single source of truth in SERVE_PRECISION_COMPUTE_MULT / precisionComputeMult.
   if (p === "ternary_1_58") {
     return {
       precision: p,
-      computeMult: 0.22,
+      computeMult: precisionComputeMult(p),
       qualityMult: 0.995,
       capabilityDelta: 0,
       benchmarkDeltas: {},
@@ -293,7 +395,7 @@ export function planServeModifiers(
   if (p === "nvfp4") {
     return {
       precision: p,
-      computeMult: 0.28,
+      computeMult: precisionComputeMult(p),
       qualityMult: 0.985,
       capabilityDelta: -0.5,
       benchmarkDeltas: {},
@@ -304,7 +406,7 @@ export function planServeModifiers(
   if (p === "int4") {
     return {
       precision: p,
-      computeMult: 0.34,
+      computeMult: precisionComputeMult(p),
       qualityMult: 0.93,
       capabilityDelta: -3,
       benchmarkDeltas: {
@@ -326,7 +428,7 @@ export function planServeModifiers(
   if (p === "int8") {
     return {
       precision: p,
-      computeMult: 0.58,
+      computeMult: precisionComputeMult(p),
       qualityMult: 0.99,
       capabilityDelta: -0.5,
       benchmarkDeltas: {
@@ -341,7 +443,7 @@ export function planServeModifiers(
   if (p === "fp8") {
     return {
       precision: p,
-      computeMult: 0.55,
+      computeMult: precisionComputeMult(p),
       qualityMult: 0.995,
       capabilityDelta: 0,
       benchmarkDeltas: {},
@@ -351,7 +453,7 @@ export function planServeModifiers(
   }
   return {
     precision: p === "bf16" ? "bf16" : "fp16",
-    computeMult: 1,
+    computeMult: precisionComputeMult(p === "bf16" ? "bf16" : "fp16"),
     qualityMult: 1,
     capabilityDelta: 0,
     benchmarkDeltas: {},
@@ -550,7 +652,10 @@ export interface PremiumPlanScrutiny {
 export function premiumPlanScrutiny(
   plan: SubPlan,
   allPlans: readonly SubPlan[],
+  /** Subsidy-aware allowance resolver; falls back to the stored fields. */
+  allowanceFor?: (candidate: SubPlan) => number,
 ): PremiumPlanScrutiny {
+  const allowanceOf = allowanceFor ?? planAllowanceMTokPerMonth;
   const entry = allPlans
     .filter(
       (candidate) =>
@@ -569,8 +674,7 @@ export function premiumPlanScrutiny(
     };
   }
   const actualUsageRatio =
-    planAllowanceMTokPerMonth(plan) /
-    Math.max(0.001, planAllowanceMTokPerMonth(entry));
+    allowanceOf(plan) / Math.max(0.001, allowanceOf(entry));
   return {
     applies: true,
     entryPlanName: entry.name,
@@ -603,12 +707,21 @@ export function createPlan(
     pricePerMonth: number;
     usageMultiplier: number;
     modelIds?: string[];
+    /** Authoritative fixed monthly allowance. */
+    includedMTokPerMonth?: number;
+    /** Legacy/display-only API-equivalent value. */
+    monthlyApiValueSubsidyGbp?: number;
   },
 ): SimState {
   let modelIds = input.modelIds ? [...input.modelIds] : [];
   if (modelIds.length === 0 && state.player.pricing.activeModelId) {
     modelIds = [state.player.pricing.activeModelId];
   }
+  const usageMultiplier = clampMultiplier(input.usageMultiplier);
+  const includedMTokPerMonth = clampAllowanceMTokPerMonth(
+    input.includedMTokPerMonth ??
+      ECONOMY.basePlanUsageMTokPerDay * usageMultiplier * ECONOMY.daysPerMonth,
+  );
   const plan: SubPlan = {
     id: seededId(
       "plan",
@@ -619,11 +732,11 @@ export function createPlan(
     ),
     name: input.name.trim() || "New plan",
     pricePerMonth: clampPlanPrice(input.pricePerMonth),
-    usageMultiplier: clampMultiplier(input.usageMultiplier),
-    includedMTokPerMonth:
-      ECONOMY.basePlanUsageMTokPerDay *
-      clampMultiplier(input.usageMultiplier) *
-      ECONOMY.daysPerMonth,
+    usageMultiplier,
+    includedMTokPerMonth,
+    monthlyApiValueSubsidyGbp: sanitizeSubsidyGbp(
+      input.monthlyApiValueSubsidyGbp,
+    ),
     usageRate: null,
     modelIds,
     computePriority: defaultPlanComputePriority({
@@ -638,6 +751,7 @@ export function createPlan(
       : "fp16",
     servePrecisionByModel: {},
     steadyUsageTarget: defaultSteadyPlanUsage(input.pricePerMonth),
+    dataCollectionRate: defaultPlanDataCollectionRate(input.pricePerMonth),
     modalityRoutes: {},
     demandShocks: [],
     enabled: true,
@@ -691,6 +805,12 @@ export function updatePlan(
 ): SimState {
   const plans = state.player.pricing.plans.map((p) => {
     if (p.id !== planId) return p;
+    // The legacy advertised value is presentation only. It never derives or
+    // mutates the physical allowance.
+    const subsidy =
+      patch.monthlyApiValueSubsidyGbp !== undefined
+        ? sanitizeSubsidyGbp(patch.monthlyApiValueSubsidyGbp)
+        : p.monthlyApiValueSubsidyGbp;
     const usageMultiplier =
       patch.includedMTokPerMonth !== undefined
         ? clampMultiplier(
@@ -727,6 +847,7 @@ export function updatePlan(
           : p.pricePerMonth,
       usageMultiplier,
       includedMTokPerMonth,
+      monthlyApiValueSubsidyGbp: subsidy,
       usageRate: null,
       computePriority:
         patch.computePriority !== undefined
@@ -749,6 +870,20 @@ export function updatePlan(
             defaultSteadyPlanUsage(patch.pricePerMonth ?? p.pricePerMonth)),
       name: patch.name !== undefined ? patch.name.trim() || p.name : p.name,
     };
+    const nextPrice = next.pricePerMonth;
+    const prevCap = maxPlanDataCollectionShare(p.pricePerMonth);
+    const nextCap = maxPlanDataCollectionShare(nextPrice);
+    next.dataCollectionRate = clampPlanDataCollectionRate(
+      nextPrice,
+      patch.dataCollectionRate !== undefined
+        ? patch.dataCollectionRate
+        : nextCap <= 0
+          ? 0
+          : prevCap <= 0 && patch.pricePerMonth !== undefined
+            ? defaultPlanDataCollectionRate(nextPrice)
+            : (p.dataCollectionRate ??
+              defaultPlanDataCollectionRate(nextPrice)),
+    );
     const requestedPrecisions =
       patch.servePrecisionByModel !== undefined
         ? patch.servePrecisionByModel
@@ -948,6 +1083,266 @@ export function planAllowanceMTokPerMonth(plan: SubPlan): number {
   );
 }
 
+/** Bounds for the plan's physical monthly text entitlement. */
+export function clampAllowanceMTokPerMonth(value: number): number {
+  const min = ECONOMY.basePlanUsageMTokPerDay * 0.1 * ECONOMY.daysPerMonth;
+  const max = ECONOMY.basePlanUsageMTokPerDay * 500 * ECONOMY.daysPerMonth;
+  if (!Number.isFinite(value)) return min;
+  return Math.max(min, Math.min(max, value));
+}
+
+/** True when a legacy plan retains an advertised API-equivalent value. */
+export function planHasApiValueSubsidy(plan: SubPlan): boolean {
+  return (
+    Number.isFinite(plan.monthlyApiValueSubsidyGbp) &&
+    (plan.monthlyApiValueSubsidyGbp ?? 0) > 0
+  );
+}
+
+function sanitizeSubsidyGbp(value: number | undefined): number | undefined {
+  if (value == null || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.min(250_000, value);
+}
+
+/**
+ * Current API-equivalent customer value. It is always derived from the fixed
+ * physical allowance and the supplied market reference price; a stale legacy
+ * subsidy field cannot manufacture entitlement or attractiveness.
+ */
+export function planMonthlyApiValueSubsidy(
+  plan: SubPlan,
+  fallbackBlendedApiPrice: number,
+): number {
+  return (
+    planAllowanceMTokPerMonth(plan) *
+    Math.max(API_PRICE_EPSILON, fallbackBlendedApiPrice)
+  );
+}
+
+/**
+ * Fixed plan allowance. The price argument remains for source compatibility,
+ * but changing an API list price intentionally cannot change subscription use.
+ */
+export function planModelEntitlementMTok(
+  plan: SubPlan,
+  _blendedApiPricePerMTok: number,
+): number {
+  return planAllowanceMTokPerMonth(plan);
+}
+
+/**
+ * Effective plan-level allowance is the configured resource promise. Model
+ * routing changes its PF cost and attainable service, not the advertised use.
+ */
+export function planEffectiveAllowanceMTokPerMonth(
+  _state: SimState,
+  plan: SubPlan,
+): number {
+  return planAllowanceMTokPerMonth(plan);
+}
+
+export interface PlanModelEntitlement {
+  modelId: string;
+  name: string;
+  kind: CommercialModelKind;
+  /** Share of the plan's traffic routed to this model. */
+  trafficShare: number;
+  /** Blended public API list price: input × expected input share + output × expected output share. */
+  blendedApiPricePerMTok: number;
+  /** Fixed plan MTok allocated to this model by its routing share. */
+  includedMTokPerMonth: number;
+  /** Expected tokens per interaction for this model's workload. */
+  tokensPerInteraction: number;
+  /** Approximate daily interactions = included tokens ÷ interaction size ÷ 30. */
+  interactionsPerDay: number;
+  /** Band-based expected allowance utilization for the plan. */
+  expectedUtilization: number;
+  /** API-equivalent value of traffic routed to this model (£/mo, full use). */
+  apiEquivalentValuePerMonth: number;
+  /** Raw serving cost of traffic routed to this model (£/mo, expected use). */
+  rawServingCostPerMonth: number | null;
+}
+
+/**
+ * Per-model allocation table for a plan. A fixed plan entitlement is divided
+ * by the actual routing mix; expensive models consume more PF but cannot make
+ * the allowance disappear when their public API price changes.
+ */
+export function planModelEntitlements(
+  state: SimState,
+  plan: SubPlan,
+  opts?: {
+    modelCapability?: number;
+    frontierCapability?: number;
+    /** Raw serving £/MTok for a precision-adjusted model; enables cost rows. */
+    rawCostPerMTok?: (model: Model) => number;
+  },
+): PlanModelEntitlement[] {
+  const mix = planModelTrafficMix(state, plan);
+  const sota = sotaProximityLocal(
+    opts?.modelCapability ?? 40,
+    opts?.frontierCapability ?? 50,
+  );
+  const [low, high] = expectedUtilizationRange(plan.pricePerMonth);
+  const expectedUtilization = low + (high - low) * sota;
+  return mix.map((lane) => {
+    const blended = modelBlendedPublicApiPrice(
+      state.player.pricing,
+      lane.model,
+    );
+    const included = planModelEntitlementMTok(plan, blended) * lane.share;
+    const kind = commercialModelKind(lane.model);
+    const tokensPerInteraction = avgTokensPerInteraction(kind);
+    const rawCostPerMTok = opts?.rawCostPerMTok?.(lane.model);
+    return {
+      modelId: lane.model.id,
+      name: lane.model.name,
+      kind,
+      trafficShare: lane.share,
+      blendedApiPricePerMTok: blended,
+      includedMTokPerMonth: included,
+      tokensPerInteraction,
+      interactionsPerDay:
+        (included * 1_000_000) / tokensPerInteraction / ECONOMY.daysPerMonth,
+      expectedUtilization,
+      apiEquivalentValuePerMonth: included * blended,
+      rawServingCostPerMonth:
+        rawCostPerMTok != null
+          ? included * expectedUtilization * Math.max(0, rawCostPerMTok)
+          : null,
+    };
+  });
+}
+
+/** £500+ tiers must advertise at least this multiple of price in API value. */
+export const ENTERPRISE_PLAN_MIN_PRICE = 500;
+export const ENTERPRISE_SUBSIDY_PRICE_MULTIPLE = 5;
+
+export interface EnterpriseSubsidyExpectation {
+  applies: boolean;
+  requiredSubsidyGbp: number;
+  subsidyGbp: number;
+  /** 0 = clears the 5× rule; 1 = no meaningful advertised subsidy at all. */
+  shortfall: number;
+}
+
+/**
+ * Enterprise/near-unlimited tiers (£500+/mo) are judged on advertised value:
+ * monthly API-value subsidy ≥ 5× price. Configured lower, customers see a bad
+ * deal (value warning) and enterprise demand falls.
+ */
+export function enterpriseSubsidyExpectation(
+  plan: SubPlan,
+  subsidyGbp: number,
+): EnterpriseSubsidyExpectation {
+  if (plan.pricePerMonth < ENTERPRISE_PLAN_MIN_PRICE) {
+    return {
+      applies: false,
+      requiredSubsidyGbp: 0,
+      subsidyGbp: Math.max(0, subsidyGbp),
+      shortfall: 0,
+    };
+  }
+  const requiredSubsidyGbp =
+    plan.pricePerMonth * ENTERPRISE_SUBSIDY_PRICE_MULTIPLE;
+  const actual = Math.max(0, subsidyGbp);
+  return {
+    applies: true,
+    requiredSubsidyGbp,
+    subsidyGbp: actual,
+    shortfall: Math.max(
+      0,
+      Math.min(1, 1 - actual / Math.max(1, requiredSubsidyGbp)),
+    ),
+  };
+}
+
+export interface PlanUpgradePressure {
+  /** 0–1: how close the plan's model is to the public frontier. */
+  sotaLead: number;
+  /** 0–1: how much the plan's customer band cares about the model's workload. */
+  relevance: number;
+  /** 0–1: entitlement improvement over the lab's cheaper paid tiers. */
+  entitlementImprovement: number;
+  /** 0–1: how reachable the price is from the next cheaper paid tier. */
+  affordability: number;
+  /** 0–1: model reliability gate. */
+  reliability: number;
+  /** Final upgrade pressure: product of the five factors (0–1). */
+  pressure: number;
+}
+
+/**
+ * SOTA-driven upgrade pressure for one plan: SOTA lead × relevance to the
+ * customer band × entitlement improvement × affordability × reliability.
+ * Coders move for coding/reasoning models, creative users for image/video,
+ * power users toward high-subsidy tiers; value customers stay unless the
+ * value difference is large — so SOTA never pushes everyone into the top tier.
+ */
+export function planUpgradePressure(input: {
+  pricePerMonth: number;
+  subsidyGbp: number;
+  modelCapability: number;
+  modelReliability: number;
+  kind: CommercialModelKind;
+  frontierCapability: number;
+  cheaperPlans: readonly { pricePerMonth: number; subsidyGbp: number }[];
+}): PlanUpgradePressure {
+  const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+  const band = customerBandForPrice(input.pricePerMonth);
+  const sotaLead = sotaProximityLocal(
+    input.modelCapability,
+    input.frontierCapability,
+  );
+  const relevance = clamp01(band.relevance[input.kind] ?? 0.7);
+  const price = Math.max(1, input.pricePerMonth);
+  const ownValue = Math.max(0, input.subsidyGbp) / price;
+  const cheaperPaid = input.cheaperPlans.filter(
+    (candidate) =>
+      candidate.pricePerMonth > 0 &&
+      candidate.pricePerMonth < input.pricePerMonth,
+  );
+  const cheaperBestValue = cheaperPaid.reduce(
+    (best, candidate) =>
+      Math.max(
+        best,
+        Math.max(0, candidate.subsidyGbp) /
+          Math.max(1, candidate.pricePerMonth),
+      ),
+    0,
+  );
+  // Value-conscious customers need a clearly better deal to move upward.
+  const valueRatio =
+    cheaperBestValue > 0 ? ownValue / cheaperBestValue : 1 + ownValue;
+  const threshold = input.pricePerMonth > 40 ? 1.25 : 1;
+  const entitlementImprovement =
+    valueRatio >= threshold
+      ? clamp01(Math.log2(Math.max(1, valueRatio / threshold)) / 2 + 0.3)
+      : 0;
+  const cheaperMaxPrice = cheaperPaid.reduce(
+    (max, candidate) => Math.max(max, candidate.pricePerMonth),
+    0,
+  );
+  const affordability =
+    cheaperMaxPrice > 0
+      ? clamp01(
+          Math.pow(3 / Math.max(1, input.pricePerMonth / cheaperMaxPrice), 1.1),
+        )
+      : clamp01(Math.pow(40 / Math.max(10, input.pricePerMonth), 0.8));
+  const reliability = clamp01(input.modelReliability / 100);
+  const pressure = clamp01(
+    sotaLead * relevance * entitlementImprovement * affordability * reliability,
+  );
+  return {
+    sotaLead,
+    relevance,
+    entitlementImprovement,
+    affordability,
+    reliability,
+    pressure,
+  };
+}
+
 export interface PlanAllowanceExpectation {
   minimumMTok: number;
   recommendedMTok: number;
@@ -960,30 +1355,64 @@ export interface PlanAllowanceExpectation {
  * Customer allowance expectations scale roughly with monthly price. Free
  * products still need at least 1M tokens/month to feel like a real product;
  * paid tiers are judged at roughly 1–1.5M tokens per monthly dollar.
+ *
+ * Heavy workloads (reasoning ≈ 5.7× language tokens/interaction) raise the
+ * MTok bar so the same allowance feels stingier when interactions burn faster.
+ *
+ * Stingy gate (opts.valueRatio / opts.rivalValueRatio): a paid plan is only
+ * judged stingy when it actually loses on value — less advertised API value
+ * than the nearest rival tier, or a subsidy below its own monthly price.
+ * Plans that beat rivals on value never accrue allowance dissatisfaction.
  */
 export function planAllowanceExpectation(
   plan: SubPlan,
+  /** Subsidy-derived effective allowance; falls back to the stored fields. */
+  allowanceMTokOverride?: number,
+  opts?: {
+    /** Avg tokens per interaction for the plan's backing model. */
+    tokensPerInteraction?: number;
+    /** Our advertised API value ÷ monthly price (stingy gate). */
+    valueRatio?: number;
+    /** Rival nearest tier advertised API value ÷ price (stingy gate). */
+    rivalValueRatio?: number;
+  },
 ): PlanAllowanceExpectation {
-  const allowance = planAllowanceMTokPerMonth(plan);
+  const allowance = allowanceMTokOverride ?? planAllowanceMTokPerMonth(plan);
   const free = isFreePlan(plan);
-  const minimumMTok = free ? 1 : Math.max(1, plan.pricePerMonth);
-  const recommendedMTok = free
-    ? 10
-    : Math.max(minimumMTok, plan.pricePerMonth * 1.25);
-  const maximumMTok = free
-    ? 25
-    : Math.max(recommendedMTok, plan.pricePerMonth * 1.5);
+  const languageTokens = avgTokensPerInteraction("language");
+  const burnMult = Math.max(
+    1,
+    (opts?.tokensPerInteraction ?? languageTokens) / languageTokens,
+  );
+  const minimumMTok = (free ? 1 : Math.max(1, plan.pricePerMonth)) * burnMult;
+  const recommendedMTok =
+    (free ? 10 : Math.max(plan.pricePerMonth, plan.pricePerMonth * 1.25)) *
+    burnMult;
+  const maximumMTok =
+    (free
+      ? 25
+      : Math.max(plan.pricePerMonth * 1.25, plan.pricePerMonth * 1.5)) *
+    burnMult;
   const shortfall =
     Math.max(0, minimumMTok - allowance) / Math.max(1, minimumMTok);
-  const dissatisfaction =
-    shortfall <= 0 ? 0 : Math.min(1, 0.2 + shortfall * 0.8);
+  let dissatisfaction =
+    shortfall <= 1e-9 ? 0 : Math.min(1, 0.2 + shortfall * 0.8);
+  // Stingy gate — only judge paid plans that lose the value comparison.
+  if (
+    !free &&
+    opts?.valueRatio != null &&
+    opts?.rivalValueRatio != null &&
+    !planStinginessApplies(opts.valueRatio, opts.rivalValueRatio)
+  ) {
+    dissatisfaction = 0;
+  }
   return {
     minimumMTok,
     recommendedMTok,
     maximumMTok,
     dissatisfaction,
     label: free
-      ? "Free users expect at least 1M tokens/month."
+      ? `Free users expect at least ${minimumMTok.toFixed(0)}M tokens/month.`
       : `$${plan.pricePerMonth.toFixed(0)} plans are judged against ${minimumMTok.toFixed(0)}–${maximumMTok.toFixed(0)}M tokens/month.`,
   };
 }
@@ -1009,11 +1438,89 @@ export function planStabilityDissatisfaction(
 export type FreeTierDemandBand =
   "popular" | "semi_popular" | "cost_constrained";
 
+/** Legacy display band; demand itself is continuous across this rank. */
+export const FREE_TIER_TOP_MODEL_RANK = 40;
+
+/**
+ * Rank every released model across player + rivals by capability (1 = best).
+ * Ties break by model id for stable ordering.
+ */
+export function releasedModelCapabilityRanks(
+  state: SimState,
+): Map<string, number> {
+  const released: { id: string; capability: number }[] = [];
+  for (const model of state.player.models) {
+    if (model.release === "released" || model.shipped) {
+      released.push({ id: model.id, capability: model.capability });
+    }
+  }
+  for (const rival of state.rivals) {
+    for (const model of rival.models) {
+      if (model.release === "released" || model.shipped) {
+        released.push({ id: model.id, capability: model.capability });
+      }
+    }
+  }
+  released.sort(
+    (a, b) =>
+      b.capability - a.capability || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+  const ranks = new Map<string, number>();
+  for (let i = 0; i < released.length; i += 1) {
+    ranks.set(released[i]!.id, i + 1);
+  }
+  return ranks;
+}
+
+/** 1-based capability rank for a model, or null if not released. */
+export function modelCapabilityRank(
+  state: SimState,
+  modelId: string,
+): number | null {
+  return releasedModelCapabilityRanks(state).get(modelId) ?? null;
+}
+
+/**
+ * Smooth free-tier audience factor from global model rank. Rank is a readable
+ * summary, never an admission gate: every adjacent rank changes demand by a
+ * small amount and there is no top-N cliff.
+ */
+export function freeTierRankDemandFactor(rank: number | null): {
+  audienceMultiplier: number;
+  utilityBonus: number;
+  minimumAudienceShareScale: number;
+  paidPopularityLeadScale: number;
+  inRank: boolean;
+} {
+  if (rank == null || !Number.isFinite(rank) || rank <= 0) {
+    return {
+      audienceMultiplier: 0.12,
+      utilityBonus: -22,
+      minimumAudienceShareScale: 0.15,
+      paidPopularityLeadScale: 0.45,
+      inRank: false,
+    };
+  }
+  const distance = Math.max(0, rank - 1);
+  const decay = 1 / (1 + Math.pow(distance / 55, 1.7));
+  return {
+    audienceMultiplier: 0.1 + 0.9 * decay,
+    utilityBonus: -24 * (1 - decay),
+    minimumAudienceShareScale: 0.12 + 0.88 * decay,
+    paidPopularityLeadScale: 0.4 + 0.6 * decay,
+    inRank: rank <= FREE_TIER_TOP_MODEL_RANK,
+  };
+}
+
 /**
  * Free-tier reach follows the allowance users actually experience. A message
  * is estimated at 2K tokens, matching the plan editor's friendly estimate.
+ * Pass {@link modelRank} to gate mass-market reach on global capability rank.
  */
-export function freeTierDemandProfile(plan: SubPlan): {
+export function freeTierDemandProfile(
+  plan: SubPlan,
+  opts?: { modelRank?: number | null; tokensPerInteraction?: number },
+): {
   band: FreeTierDemandBand;
   messagesPerDay: number;
   audienceMultiplier: number;
@@ -1021,41 +1528,70 @@ export function freeTierDemandProfile(plan: SubPlan): {
   utilityBonus: number;
   paidPopularityLead: number;
   label: string;
+  modelRank: number | null;
+  rankInTop: boolean;
 } {
+  const tokensPerMsg = Math.max(500, opts?.tokensPerInteraction ?? 2_000);
   const messagesPerDay =
     (planAllowanceMTokPerMonth(plan) * 1_000_000) /
     ECONOMY.daysPerMonth /
-    2_000;
-  if (messagesPerDay > 10) {
-    return {
-      band: "popular",
-      messagesPerDay,
-      audienceMultiplier: 2.4,
-      minimumAudienceShare: 0.32,
-      utilityBonus: 22,
-      paidPopularityLead: 2.4,
-      label: "Mass-market reach",
-    };
-  }
-  if (messagesPerDay >= 5) {
-    return {
-      band: "semi_popular",
-      messagesPerDay,
-      audienceMultiplier: 0.9,
-      minimumAudienceShare: 0.07,
-      utilityBonus: 5,
-      paidPopularityLead: 1.6,
-      label: "Semi-popular reach",
-    };
-  }
+    tokensPerMsg;
+  const base =
+    messagesPerDay > 10
+      ? {
+          band: "popular" as const,
+          messagesPerDay,
+          audienceMultiplier: 2.6,
+          minimumAudienceShare: 0.38,
+          utilityBonus: 28,
+          paidPopularityLead: 2.8,
+          label: "Mass-market reach",
+        }
+      : messagesPerDay >= 5
+        ? {
+            band: "semi_popular" as const,
+            messagesPerDay,
+            audienceMultiplier: 1.05,
+            minimumAudienceShare: 0.12,
+            utilityBonus: 10,
+            paidPopularityLead: 1.9,
+            label: "Semi-popular reach",
+          }
+        : {
+            band: "cost_constrained" as const,
+            messagesPerDay,
+            audienceMultiplier: 0.22,
+            minimumAudienceShare: 0.04,
+            utilityBonus: -12,
+            paidPopularityLead: 1.25,
+            label: "Cost-constrained reach",
+          };
+  // Rank gating is opt-in: omit modelRank to keep message-band reach unchanged.
+  const rankProvided = opts != null && "modelRank" in opts;
+  const rank = rankProvided ? (opts!.modelRank ?? null) : null;
+  const rankFactor = rankProvided
+    ? freeTierRankDemandFactor(rank)
+    : {
+        audienceMultiplier: 1,
+        utilityBonus: 0,
+        minimumAudienceShareScale: 1,
+        paidPopularityLeadScale: 1,
+        inRank: true,
+      };
   return {
-    band: "cost_constrained",
-    messagesPerDay,
-    audienceMultiplier: 0.16,
-    minimumAudienceShare: 0.02,
-    utilityBonus: -18,
-    paidPopularityLead: 1.12,
-    label: "Cost-constrained reach",
+    ...base,
+    audienceMultiplier: base.audienceMultiplier * rankFactor.audienceMultiplier,
+    minimumAudienceShare:
+      base.minimumAudienceShare * rankFactor.minimumAudienceShareScale,
+    utilityBonus: base.utilityBonus + rankFactor.utilityBonus,
+    paidPopularityLead:
+      base.paidPopularityLead * rankFactor.paidPopularityLeadScale,
+    label:
+      rankProvided && !rankFactor.inRank
+        ? `${base.label} (model outside top ${FREE_TIER_TOP_MODEL_RANK})`
+        : base.label,
+    modelRank: rankProvided ? rank : null,
+    rankInTop: rankFactor.inRank,
   };
 }
 
@@ -1107,6 +1643,85 @@ export function offeringBreadthMultiplier(segmentId: SegmentId): number {
   if (segmentId === "indie_api" || segmentId === "startup_api") return 0.4;
   if (segmentId === "enterprise") return 0.2;
   return 0.1;
+}
+
+/**
+ * How consumer-style price-sensitive a segment is when judging plans (0–1).
+ * High-ARPU segments (enterprise/legal/healthcare/science) weigh a £200 tier
+ * against their own willingness-to-pay and organizational needs; the consumer
+ * instincts (cheaper-is-better scoring, premium-tier value scrutiny,
+ * tokens-per-pound allowance expectations) apply at full strength only to
+ * consumer/hobby audiences. This is what lets enterprise demand reach £100+
+ * tiers instead of every segment collapsing onto the £20 SKU.
+ */
+export function planSegmentPriceSensitivity(segmentId: SegmentId): number {
+  const anchor = SEGMENTS.find((s) => s.id === segmentId)?.arpuHint ?? 20;
+  return Math.max(0.15, Math.min(1, 20 / Math.max(20, anchor)));
+}
+
+/**
+ * Daily message volume a segment's subscribers expect their plan to cover
+ * (≈2K tokens/message, matching the plan editor's friendly estimate).
+ * Pro and enterprise workloads are heavy: those users need ≥100 msg/day, so
+ * they skip cheap low-allowance tiers in favor of higher paid plans.
+ */
+export const PLAN_PRO_WORKLOAD_MESSAGES_PER_DAY = 100;
+
+export function segmentExpectedMessagesPerDay(segmentId: SegmentId): number {
+  switch (segmentId) {
+    case "enterprise":
+    case "legal":
+    case "healthcare":
+      return PLAN_PRO_WORKLOAD_MESSAGES_PER_DAY;
+    case "science":
+      return 80;
+    case "startup_api":
+      return 60;
+    case "creative":
+      return 40;
+    case "indie_api":
+      return 25;
+    case "consumer":
+      return 15;
+    default:
+      return 5; // hobby
+  }
+}
+
+export interface PlanWorkloadExpectation {
+  expectedMessagesPerDay: number;
+  offeredMessagesPerDay: number;
+  /** 0 = plan covers the segment's workload; 1 = plan covers none of it. */
+  shortfall: number;
+  label: string;
+}
+
+/** Segment workload fit for a plan's derived monthly allowance. */
+export function planWorkloadExpectation(input: {
+  segmentId: SegmentId;
+  allowanceMTokPerMonth: number;
+  /** Avg tokens per interaction for the plan's backing model (default 2K). */
+  tokensPerInteraction?: number;
+}): PlanWorkloadExpectation {
+  const expected = segmentExpectedMessagesPerDay(input.segmentId);
+  const tokens = Math.max(500, input.tokensPerInteraction ?? 2_000);
+  const offered =
+    (Math.max(0, input.allowanceMTokPerMonth) * 1_000_000) /
+    ECONOMY.daysPerMonth /
+    tokens;
+  const shortfall =
+    expected <= 0
+      ? 0
+      : Math.max(0, Math.min(1, (expected - offered) / expected));
+  return {
+    expectedMessagesPerDay: expected,
+    offeredMessagesPerDay: offered,
+    shortfall,
+    label:
+      shortfall <= 0
+        ? `Covers the ~${expected} msg/day this audience expects.`
+        : `Below the ~${expected} msg/day this audience expects — those users pick higher tiers.`,
+  };
 }
 
 /** Quality-gated portfolio value from generation models included in a plan. */
@@ -1161,7 +1776,7 @@ function playerBlendedApi(state: SimState): number {
   if (p.apiPriceInPerMTok != null && p.apiPriceOutPerMTok != null) {
     return blendApiPrice(p.apiPriceInPerMTok, p.apiPriceOutPerMTok);
   }
-  return Math.max(0.05, p.apiPricePerMTok);
+  return Math.max(0, p.apiPricePerMTok);
 }
 
 /**
@@ -1175,7 +1790,7 @@ export function planApiEquivalentValue(
 ): number {
   const mtokMo =
     planAllowanceMTokPerMonth(plan) * Math.max(0.1, Math.min(1, utilization));
-  return mtokMo * Math.max(0.01, apiPricePerMTok);
+  return mtokMo * Math.max(API_PRICE_EPSILON, apiPricePerMTok);
 }
 
 /**
@@ -1231,14 +1846,132 @@ export function planPriceTooHighScore(
   );
 }
 
-/** Headline rival sub price (cheapest paid rival tier as competitive anchor). */
+/** Paid rival SKU prices from live labs (plans first, then Plus/Pro fallbacks). */
+export function rivalPaidTierPrices(state: SimState): number[] {
+  const prices: number[] = [];
+  for (const rival of state.rivals) {
+    if (!rival.models.some((m) => m.shipped || m.release === "released")) {
+      continue;
+    }
+    const planPrices = (rival.pricing.plans ?? [])
+      .filter((plan) => plan.enabled && plan.pricePerMonth > 0)
+      .map((plan) => plan.pricePerMonth);
+    if (planPrices.length > 0) {
+      prices.push(...planPrices);
+      continue;
+    }
+    if (rival.pricing.subPlusPrice > 0) prices.push(rival.pricing.subPlusPrice);
+    if (rival.pricing.subProPrice > 0) prices.push(rival.pricing.subProPrice);
+  }
+  return prices;
+}
+
+/**
+ * Nearest rival paid tier to {@link planPrice}. Prefer tier-vs-tier anchors
+ * over the global cheapest Plus price.
+ */
+export function rivalNearestSubPrice(
+  state: SimState,
+  planPrice: number,
+): number {
+  const prices = rivalPaidTierPrices(state);
+  if (prices.length === 0) return Math.max(1, planPrice > 0 ? planPrice : 20);
+  let best = prices[0]!;
+  let bestDist = Math.abs(best - planPrice);
+  for (let i = 1; i < prices.length; i += 1) {
+    const price = prices[i]!;
+    const dist = Math.abs(price - planPrice);
+    if (dist < bestDist) {
+      best = price;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
+/** @deprecated Prefer {@link rivalNearestSubPrice} for tier-vs-tier scoring. */
 export function rivalHeadlineSubPrice(state: SimState): number {
-  const prices = state.rivals
-    .filter((r) => r.models.some((m) => m.shipped || m.release === "released"))
-    .map((r) => r.pricing.subPlusPrice)
-    .filter((p) => p > 0);
+  const prices = rivalPaidTierPrices(state);
   if (prices.length === 0) return 20;
   return Math.min(...prices);
+}
+
+/** Rival allowance (MTok/mo) at the nearest paid SKU to {@link planPrice}. */
+export function rivalNearestAllowanceMTok(
+  state: SimState,
+  planPrice: number,
+): number {
+  let bestAllowance = ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const rival of state.rivals) {
+    if (!rival.models.some((m) => m.shipped || m.release === "released")) {
+      continue;
+    }
+    const plans = (rival.pricing.plans ?? []).filter(
+      (plan) => plan.enabled && plan.pricePerMonth > 0,
+    );
+    if (plans.length > 0) {
+      for (const plan of plans) {
+        const dist = Math.abs(plan.pricePerMonth - planPrice);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestAllowance = planAllowanceMTokPerMonth(plan);
+        }
+      }
+      continue;
+    }
+    const plus = rival.pricing.subPlusPrice;
+    const pro = rival.pricing.subProPrice;
+    if (plus > 0) {
+      const dist = Math.abs(plus - planPrice);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestAllowance =
+          rival.pricing.plusIncludedMTok ??
+          ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth;
+      }
+    }
+    if (pro > 0) {
+      const dist = Math.abs(pro - planPrice);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestAllowance =
+          rival.pricing.proIncludedMTok ??
+          ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth * 5;
+      }
+    }
+  }
+  return bestAllowance;
+}
+
+/**
+ * Advertised value ÷ price of the rival SKU nearest to {@link planPrice} —
+ * the value-for-money benchmark a player plan is judged against.
+ */
+export function rivalNearestValueRatio(
+  state: SimState,
+  planPrice: number,
+  apiPricePerMTok: number,
+): number {
+  const rivalPrice = rivalNearestSubPrice(state, planPrice);
+  const rivalAllowance = rivalNearestAllowanceMTok(state, planPrice);
+  return (
+    (rivalAllowance * Math.max(API_PRICE_EPSILON, apiPricePerMTok)) /
+    Math.max(1, rivalPrice)
+  );
+}
+
+/**
+ * Stingy gate: a paid plan only counts as stingy when it genuinely loses on
+ * value — its advertised API value is below the nearest rival tier's, or its
+ * subsidy doesn't even cover the monthly price (valueRatio < 1). Plans that
+ * beat rivals on value and give back at least their price are never stingy.
+ */
+export function planStinginessApplies(
+  valueRatio: number,
+  rivalValueRatio: number,
+): boolean {
+  return valueRatio < 1 || valueRatio + 1e-9 < rivalValueRatio;
 }
 
 export function rivalBestCapability(state: SimState): number {
@@ -1253,13 +1986,218 @@ export function rivalBestCapability(state: SimState): number {
 }
 
 /**
+ * Soft audience mass by price band. Remnant prior so cheaper tiers stay
+ * slightly larger; quality/value carry most of the demand signal.
+ */
+export function planPriceTierMassPrior(pricePerMonth: number): number {
+  if (pricePerMonth <= 0) return 18;
+  if (pricePerMonth <= 10) return 12;
+  if (pricePerMonth <= 40) return 6;
+  if (pricePerMonth <= 120) return 1;
+  if (pricePerMonth <= 500) return -6;
+  return -12;
+}
+
+/**
+ * Log-normal affinity of a segment's willingness-to-pay around its ARPU anchor
+ * (consumer ≈ £20, enterprise ≈ £120, legal ≈ £200, healthcare ≈ £250). The
+ * freemium funnel audience is scored with the indie_api profile (anchor £4,
+ * σ 1.2). Returns 1 at the anchor, clamped to [0.02, 1] so far-off tiers keep
+ * a trickle of demand instead of rounding to zero.
+ */
+export function planSegmentPriceAffinity(
+  pricePerMonth: number,
+  segmentId: SegmentId,
+): number {
+  const anchor = SEGMENTS.find((s) => s.id === segmentId)?.arpuHint ?? 20;
+  const sigma =
+    segmentId === "consumer"
+      ? 1.0
+      : segmentId === "enterprise" ||
+          segmentId === "legal" ||
+          segmentId === "healthcare"
+        ? 1.3
+        : 1.2;
+  const z =
+    (Math.log(Math.max(0, pricePerMonth) + 1) - Math.log(anchor + 1)) / sigma;
+  return Math.max(0.02, Math.min(1, Math.exp(-0.5 * z * z)));
+}
+
+/**
+ * Softmax weight of the ARPU affinity term in the per-segment plan split.
+ * High-ARPU segments need the affinity to dominate the consumer-tuned
+ * cheap-favoring base terms (an enterprise buyer must actually end up on the
+ * £120–£500 tiers); at the £20 consumer anchor it stays at the base weight.
+ */
+export function planSegmentAffinityWeight(segmentId: SegmentId): number {
+  const anchor = SEGMENTS.find((s) => s.id === segmentId)?.arpuHint ?? 20;
+  return 7 * (1 + Math.max(0, Math.log(anchor / 20)));
+}
+
+/**
+ * How ready a paid tier is to convert: brand, model quality vs frontier, and
+ * reliability. Entry/value tiers convert without much brand; £40+ needs it.
+ */
+export function planPremiumReadiness(input: {
+  pricePerMonth: number;
+  brandTrust: number;
+  modelCapability: number;
+  frontierCapability: number;
+  modelReliability: number;
+}): number {
+  if (input.pricePerMonth <= 0) return 1;
+  const brand = Math.max(0, Math.min(1, input.brandTrust / 100));
+  const sota = sotaProximityLocal(
+    input.modelCapability,
+    input.frontierCapability,
+  );
+  const reliability = Math.max(0, Math.min(1, input.modelReliability / 100));
+  const readiness = brand * 0.45 + sota * 0.4 + reliability * 0.15;
+  if (input.pricePerMonth <= 10) return 0.55 + readiness * 0.45;
+  if (input.pricePerMonth <= 40) return 0.35 + readiness * 0.65;
+  if (input.pricePerMonth <= 120) return readiness;
+  if (input.pricePerMonth <= 500) return Math.pow(readiness, 1.15);
+  return Math.pow(readiness, 1.35);
+}
+
+/**
+ * Soft minimum lead of a cheaper paid plan over the next dearer one.
+ * Softened so exceptional value can approach (not massively exceed) the
+ * tier below; price elasticity still keeps most users on cheaper plans.
+ * 1.25 is an anti-inversion guard, not a demand cap — per-segment ARPU
+ * affinity decides how large each tier can grow.
+ */
+export const PAID_PLAN_PYRAMID_LEAD = 1.25;
+
+/** EMA blend of yesterday's seats vs today's target (stickiness / teleporting). */
+export const PLAN_SEAT_STICKINESS = 0.6;
+
+/** Utilization at/above which seats try to migrate to the next paid tier. */
+export const PLAN_UPTIER_UTILIZATION = 0.8;
+
+/** Fraction of allowance-constrained seats that attempt an up-tier each tick. */
+export const PLAN_UPTIER_MIGRATE_FRAC = 0.15;
+
+/** Next-tier valueRatio must clear this floor to accept up-tier migrants. */
+export const PLAN_UPTIER_VALUE_FLOOR = 0.7;
+
+/**
+ * Enforce cheap ≥ mid ≥ expensive by shrinking dearer tiers until each
+ * cheaper SKU leads the next by {@link PAID_PLAN_PYRAMID_LEAD}.
+ * Mutates subscriber counts in place; returns the same array.
+ */
+export function enforcePlanSubscriberPyramid<
+  T extends { plan: Pick<SubPlan, "pricePerMonth">; subscribers: number },
+>(buckets: T[]): T[] {
+  const paid = buckets
+    .filter((bucket) => bucket.plan.pricePerMonth > 0)
+    .sort((a, b) => a.plan.pricePerMonth - b.plan.pricePerMonth);
+  // Cheap → expensive: each dearer tier is capped by the already-final cheaper
+  // count so the lead cascades (Plus ≥ Pro×lead ≥ Team×lead²).
+  for (let i = 1; i < paid.length; i += 1) {
+    const dearer = paid[i]!;
+    const cheaper = paid[i - 1]!;
+    const maxDearer = cheaper.subscribers / PAID_PLAN_PYRAMID_LEAD;
+    if (dearer.subscribers > maxDearer) {
+      dearer.subscribers = Math.max(0, maxDearer);
+    }
+  }
+  return buckets;
+}
+
+/**
+ * Move a fraction of high-utilization seats up one paid tier when the next
+ * tier's valueRatio is acceptable. Mutates subscriber counts in place.
+ */
+export function applyPlanUptierMigration<
+  T extends {
+    plan: Pick<SubPlan, "pricePerMonth" | "id">;
+    subscribers: number;
+    usageRate: number;
+    valueRatio: number;
+  },
+>(buckets: T[]): T[] {
+  const paid = buckets
+    .filter((bucket) => bucket.plan.pricePerMonth > 0)
+    .sort((a, b) => a.plan.pricePerMonth - b.plan.pricePerMonth);
+  for (let i = 0; i < paid.length - 1; i += 1) {
+    const from = paid[i]!;
+    const to = paid[i + 1]!;
+    if (from.usageRate + 1e-9 < PLAN_UPTIER_UTILIZATION) continue;
+    if (to.valueRatio + 1e-9 < PLAN_UPTIER_VALUE_FLOOR) continue;
+    const pressure = Math.min(
+      1,
+      (from.usageRate - PLAN_UPTIER_UTILIZATION) /
+        Math.max(1e-6, 1 - PLAN_UPTIER_UTILIZATION),
+    );
+    const migrate =
+      from.subscribers * PLAN_UPTIER_MIGRATE_FRAC * (0.35 + 0.65 * pressure);
+    if (migrate <= 1e-9) continue;
+    from.subscribers = Math.max(0, from.subscribers - migrate);
+    to.subscribers += migrate;
+  }
+  return buckets;
+}
+
+/**
+ * Blend today's unconstrained seat target with yesterday's seats so demand
+ * does not teleport between ticks.
+ */
+export function blendPlanSeatStickiness(
+  targetSubscribers: number,
+  priorSubscribers: number | undefined,
+  stickiness = PLAN_SEAT_STICKINESS,
+): number {
+  const inertia = Math.max(0, Math.min(0.95, stickiness));
+  if (priorSubscribers == null || !Number.isFinite(priorSubscribers)) {
+    return Math.max(0, targetSubscribers);
+  }
+  return Math.max(
+    0,
+    priorSubscribers * inertia + targetSubscribers * (1 - inertia),
+  );
+}
+
+/**
+ * Advertised usage value ÷ price. Canonical value-for-money for paid tiers:
+ * allowance MTok/mo × blended API list (or the stored subsidy).
+ */
+export function planAdvertisedValueRatio(
+  plan: SubPlan,
+  blendedApiPrice: number,
+  allowanceMTokOverride?: number,
+): number {
+  if (plan.pricePerMonth <= 0) return Number.POSITIVE_INFINITY;
+  const subsidy = planMonthlyApiValueSubsidy(plan, blendedApiPrice);
+  // When an explicit allowance override is supplied (traffic-weighted
+  // entitlement), rebuild advertised value from that allowance × API list.
+  const advertised =
+    allowanceMTokOverride != null && Number.isFinite(allowanceMTokOverride)
+      ? Math.max(0, allowanceMTokOverride) *
+        Math.max(API_PRICE_EPSILON, blendedApiPrice)
+      : subsidy;
+  return advertised / Math.max(0.01, plan.pricePerMonth);
+}
+
+/**
  * Softmax-friendly score for plan demand.
- * More tokens + smarter model at same price beats stingy rivals.
+ * Quality + advertised valueRatio dominate; a soft mass prior and priceScore
+ * keep cheaper tiers naturally larger without freezing the pyramid.
+ *
+ * `opts.referenceApiPricePerMTok` swaps the lab's own blended list price for a
+ * market reference when judging value PERCEPTION (too-high score, advertised
+ * value ratio, subsidy-driven upgrade/enterprise expectations) so raising your
+ * own API price cannot make your plans look like better deals. Entitlement
+ * mechanics (how many tokens a subsidy buys) still settle at the lab's own
+ * list price. `opts.includeMassPrior === false` drops the global price-tier
+ * mass prior (per-segment ARPU affinity replaces it in the market split).
+ * Without opts the behavior is exactly the legacy one.
  */
 export function planAttractiveness(
   state: SimState,
   plan: SubPlan,
   segmentId: SegmentId = "consumer",
+  opts?: { referenceApiPricePerMTok?: number; includeMassPrior?: boolean },
 ): number {
   if (!plan.enabled) return -50;
   const baseModel = bestModelOnPlan(state, plan);
@@ -1280,9 +2218,23 @@ export function planAttractiveness(
   );
   const gap = Math.max(0, frontier - model.capability);
   const sota = Math.max(0, Math.min(1, 1 - gap / 28));
-  const api = playerBlendedApi(state);
-  const rivalSub = rivalHeadlineSubPrice(state);
+  // Value perception is judged at the market reference API price when the
+  // caller provides one; entitlement mechanics below keep the lab's own list.
+  const api = opts?.referenceApiPricePerMTok ?? playerBlendedApi(state);
+  const rivalSub = rivalNearestSubPrice(state, plan.pricePerMonth);
+  const rivalAllow = rivalNearestAllowanceMTok(state, plan.pricePerMonth);
   const rivalCap = rivalBestCapability(state) || frontier;
+  const modelRank = modelCapabilityRank(state, baseModel.id);
+  // Smooth prestige premium: rank 5 is not a magic eligibility boundary.
+  const rankStrength =
+    modelRank == null ? 0 : 1 / (1 + Math.max(0, modelRank - 1) / 4);
+  const readiness = planPremiumReadiness({
+    pricePerMonth: plan.pricePerMonth,
+    brandTrust: state.player.brandTrust,
+    modelCapability: model.capability,
+    frontierCapability: frontier,
+    modelReliability: model.quality.reliability,
+  });
 
   const quality =
     model.capability * 0.42 +
@@ -1290,18 +2242,21 @@ export function planAttractiveness(
     model.quality.chat * 0.12 +
     sota * 30;
 
-  // Explicit token offer (log of monthly MTok)
-  const allowMo = planAllowanceMTokPerMonth(plan);
+  // Explicit token offer (log of monthly MTok). Subsidy plans derive their
+  // effective allowance from the per-model entitlements. The 72 cap leaves
+  // headroom differentiation between a 20 MTok Plus and a 200 MTok premium
+  // tier — saturating at 52 made every allowance above ~25 MTok identical.
+  const allowMo = planEffectiveAllowanceMTokPerMonth(state, plan);
   const tokenOfferScore = Math.min(
-    52,
+    72,
     8 + Math.log10(allowMo * 1000 + 10) * 12,
   );
 
-  // Price: free attractive for lagging; SOTA can charge more if tokens justify
+  // Price score: cheaper tiers attract more seats; free stays mass-market.
   const priceScore =
     plan.pricePerMonth <= 0
-      ? 48 + (1 - sota) * 16
-      : Math.max(0, 72 - Math.log10(plan.pricePerMonth + 1) * 22);
+      ? 56 + (1 - sota) * 18
+      : Math.max(0, 88 - Math.log10(plan.pricePerMonth + 1) * 34);
 
   const tooHigh = planPriceTooHighScore(plan, {
     apiPricePerMTok: api,
@@ -1309,58 +2264,157 @@ export function planAttractiveness(
     frontierCapability: frontier,
   });
 
-  // Value vs rival: more tokens @ same/lower price, or smarter model
+  // Tier-vs-nearest-rival-tier: tokens and price relative to that SKU.
   const tokenVsRival =
     plan.pricePerMonth <= 0
       ? 0
       : Math.min(
-          24,
-          Math.log2(
-            1 + allowMo / Math.max(0.01, ECONOMY.basePlanUsageMTokPerDay * 30),
-          ) *
+          28,
+          Math.log2(1 + allowMo / Math.max(0.01, rivalAllow)) *
             (rivalSub / Math.max(1, plan.pricePerMonth)) *
-            4,
+            5.5,
         );
   const smarterAtPrice =
-    plan.pricePerMonth > 0 && plan.pricePerMonth <= rivalSub * 1.15
-      ? Math.max(0, model.capability - rivalCap) * 0.85
-      : Math.max(0, model.capability - rivalCap) * 0.35;
+    plan.pricePerMonth > 0 && plan.pricePerMonth <= rivalSub * 1.25
+      ? Math.max(0, model.capability - rivalCap) * 0.95
+      : Math.max(0, model.capability - rivalCap) * 0.4;
 
-  const valueRatio =
+  // Canonical value-for-money: advertised API-value subsidy ÷ seat price.
+  const rawValueRatio = planAdvertisedValueRatio(plan, api, allowMo);
+  // Frontier-ranked models can sell below value=1; weaker models need clearer
+  // value, with no hard rank cutoff.
+  const valueScore =
     plan.pricePerMonth <= 0
       ? tokenOfferScore * 0.3 * (1.1 - sota * 0.35)
-      : Math.min(
-          32,
-          ((quality + tokenOfferScore) / plan.pricePerMonth) *
-            (1.8 + (1 - sota) * 2.5),
-        );
+      : (() => {
+          const softFloor = 0.7 - rankStrength * 0.25;
+          const excess = Math.max(0, rawValueRatio - softFloor);
+          const base =
+            4 +
+            rankStrength * 6 +
+            Math.min(36, Math.log2(1 + excess * 2.4) * 14) +
+            Math.min(10, Math.max(0, rawValueRatio) * 3.5);
+          return base * (0.85 + readiness * 0.25 + sota * 0.15);
+        })();
+  const valueFloor = 0.7 - rankStrength * 0.25;
+  const valueDeficit =
+    plan.pricePerMonth <= 0
+      ? 0
+      : Math.max(0, valueFloor - rawValueRatio) / Math.max(0.1, valueFloor);
 
-  const sotaPull = Math.pow(sota, 1.35) * 20;
+  // SOTA pulls upgrades within a tier's readiness — it does not hand expensive
+  // SKUs a mass-market crowd when brand/quality are weak.
+  const sotaBand =
+    plan.pricePerMonth <= 0
+      ? 10
+      : plan.pricePerMonth <= 40
+        ? 14
+        : plan.pricePerMonth <= 120
+          ? 10
+          : 7;
+  const sotaPull = Math.pow(sota, 1.35) * sotaBand * readiness;
   const pricePenalty = tooHigh * 38;
   const premiumPenalty =
-    premiumPlanScrutiny(plan, state.player.pricing.plans).shortfall * 52;
-  const allowancePenalty = planAllowanceExpectation(plan).dissatisfaction * 72;
+    premiumPlanScrutiny(plan, state.player.pricing.plans, (candidate) =>
+      planEffectiveAllowanceMTokPerMonth(state, candidate),
+    ).shortfall * 52;
+  const tokensPerInteraction = avgTokensPerInteraction(
+    commercialModelKind(model),
+  );
+  const allowancePenalty =
+    planAllowanceExpectation(plan, allowMo, {
+      tokensPerInteraction,
+      valueRatio: rawValueRatio,
+      rivalValueRatio:
+        (rivalAllow * Math.max(API_PRICE_EPSILON, api)) / Math.max(1, rivalSub),
+    }).dissatisfaction * 72;
+  // SOTA launches move suitable customers upward; enterprise tiers must
+  // advertise ≥5× price in API value or lose enterprise demand.
+  const subsidyGbp = planMonthlyApiValueSubsidy(plan, api);
+  const upgrade = planUpgradePressure({
+    pricePerMonth: plan.pricePerMonth,
+    subsidyGbp,
+    modelCapability: model.capability,
+    modelReliability: model.quality.reliability,
+    kind: commercialModelKind(model),
+    frontierCapability: frontier,
+    cheaperPlans: state.player.pricing.plans
+      .filter((candidate) => candidate.id !== plan.id && candidate.enabled)
+      .map((candidate) => ({
+        pricePerMonth: candidate.pricePerMonth,
+        subsidyGbp: planMonthlyApiValueSubsidy(candidate, api),
+      })),
+  });
+  const upgradePull = upgrade.pressure * 12 * readiness;
+  const enterprisePenalty =
+    enterpriseSubsidyExpectation(plan, subsidyGbp).shortfall * 46;
   const priorDissatisfaction =
     state.lastMarket.planStats.find((stat) => stat.planId === plan.id)
       ?.dissatisfaction ?? 0;
+  // Dissatisfaction should cause churn and aversion, not an irreversible
+  // 50-point softmax underflow. The bounded curve still punishes a bad product
+  // while letting a repriced/reworked tier recover on subsequent days.
+  const instabilityCeiling = isFreePlan(plan) ? 10 : 14;
   const instabilityPenalty =
-    priorDissatisfaction * (isFreePlan(plan) ? 34 : 58);
+    instabilityCeiling *
+    ((1 - Math.exp(-Math.min(1, priorDissatisfaction) * 2.2)) /
+      (1 - Math.exp(-2.2)));
   const breadth =
     planOfferingBreadth(state, plan).score *
     offeringBreadthMultiplier(segmentId);
+  const massPrior =
+    opts?.includeMassPrior === false
+      ? 0
+      : planPriceTierMassPrior(plan.pricePerMonth);
+  const priceSensitivity = planSegmentPriceSensitivity(segmentId);
+  // Workload fit: pro/enterprise users expect ≥100 msg/day from a paid plan.
+  // Low-allowance cheap tiers miss that bar and lose those audiences to
+  // higher paid plans; the miss hurts more the heavier the segment's ARPU.
+  const workload = planWorkloadExpectation({
+    segmentId,
+    allowanceMTokPerMonth: allowMo,
+    tokensPerInteraction,
+  });
+  const workloadPenalty = workload.shortfall * 48 * (2 - priceSensitivity);
+  // Brand/marketing unlock for mid/premium conversion. The negative premium
+  // skepticism is a consumer instinct — high-ARPU segments weigh value and
+  // entitlement over brand polish, so the whole term scales with the
+  // segment's price sensitivity.
+  const brand = Math.max(0, Math.min(1, state.player.brandTrust / 100));
+  const readinessUnlockRaw =
+    plan.pricePerMonth <= 0
+      ? 0
+      : plan.pricePerMonth <= 40
+        ? readiness * 8 + brand * 4
+        : readiness * 24 - (1 - readiness) * 14 + brand * 8;
+  const readinessUnlock = readinessUnlockRaw * priceSensitivity;
+
+  // Quality + value dominate; mass prior is a soft remnant. Consumer-style
+  // price sensitivity (cheap-is-better scoring, premium-tier value scrutiny,
+  // tokens-per-pound allowance expectations) scales with the segment's ARPU —
+  // enterprise/legal/healthcare judge tiers against their own willingness-to-pay.
+  const qualityWeight =
+    plan.pricePerMonth <= 0 ? 0.28 : 0.32 + readiness * 0.14;
+  const valueDeficitPenalty = valueDeficit * 18 * priceSensitivity;
 
   return (
-    quality * 0.34 +
-    priceScore * (0.14 + (1 - sota) * 0.16) +
-    tokenOfferScore * 0.22 +
-    valueRatio * 0.1 +
+    quality * qualityWeight +
+    priceScore * (0.2 + (1 - sota) * 0.08) * priceSensitivity +
+    tokenOfferScore * 0.14 +
+    valueScore * 0.24 +
     tokenVsRival * 0.12 +
-    smarterAtPrice * 0.08 +
+    smarterAtPrice * 0.07 +
     breadth +
-    sotaPull -
+    massPrior +
+    readinessUnlock +
+    sotaPull +
+    upgradePull -
+    valueDeficitPenalty -
     pricePenalty -
-    premiumPenalty -
-    allowancePenalty -
+    premiumPenalty * priceSensitivity -
+    allowancePenalty * priceSensitivity -
+    enterprisePenalty -
+    workloadPenalty -
     instabilityPenalty
   );
 }
@@ -1385,6 +2439,8 @@ export function maxSeatsForPlan(
     subPoolShare?: number;
     /** When true, capacityUnits is MTok/day (token path); else inference PF */
     capacityIsMTok?: boolean;
+    /** Subsidy-derived effective allowance; falls back to the stored fields. */
+    allowanceMTokPerMonth?: number;
   },
 ): number {
   if (!model || capacityUnits <= 1e-9) return 0;
@@ -1395,8 +2451,12 @@ export function maxSeatsForPlan(
   const free = isFreePlan(plan);
   const eng = free ? 0.4 + sota * 0.8 : 0.55 + Math.pow(sota, 1.3) * 2.2;
   const perUserMTok =
-    planActualMTokPerUser(plan, ECONOMY.basePlanUsageMTokPerDay, usageRate) *
-    eng;
+    planActualMTokPerUser(
+      plan,
+      ECONOMY.basePlanUsageMTokPerDay,
+      usageRate,
+      opts?.allowanceMTokPerMonth,
+    ) * eng;
   if (perUserMTok <= 1e-12) return plan.subscriberCap ?? 1e9;
   const subShare =
     opts?.subPoolShare ?? 1 - (ECONOMY.defaultApiVsSubPriority ?? 0.68);

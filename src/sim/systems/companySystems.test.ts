@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { ECONOMY } from '../balance/economy'
 import { createGame } from '../createGame'
 import { emptyStaff } from '../balance/staff'
 import {
@@ -8,7 +9,10 @@ import {
   capitalSnapshot,
 } from './capital'
 import { bankCreditSnapshot } from './loans'
+import { placeBuilding } from './map'
 import { ensureCityTalent, hireStaff, playerStaff } from './staff'
+import { usesCompactWorld } from './worldAccess'
+import { tileCoords } from '../world/ids'
 import {
   marketingBudgetCeiling,
   marketingReach,
@@ -22,6 +26,25 @@ import { tickVictory } from './victory'
 describe('company systems', () => {
   it('hires local candidates immediately without a next-day talent order', () => {
     let state = createGame(9101)
+    // HQ-first: seats require a completed HQ (starter grant places one for free).
+    if (usesCompactWorld(state) && state.map.world) {
+      let placed = false
+      for (const pad of state.map.world.staticWorld.starterPads) {
+        const { x, y } = tileCoords(pad, state.map.world.descriptor.width)
+        const next = placeBuilding(state, x, y, 'hq')
+        if (!next.player.starterHqGrant) {
+          state = next
+          placed = true
+          break
+        }
+      }
+      expect(placed).toBe(true)
+    } else {
+      const empty = state.map.tiles.find((t) => t.kind === 'empty' && t.owner === 'neutral')
+      expect(empty).toBeDefined()
+      state = placeBuilding(state, empty!.x, empty!.y, 'hq')
+    }
+    expect(state.player.starterHqGrant).toBe(false)
     const city = ensureCityTalent(state.map.cities![0]!)
     state = {
       ...state,
@@ -173,6 +196,25 @@ describe('company systems', () => {
     const next = tickVictory(state)
     expect(next.victory.outcome).toBe('lost')
     expect(next.victory.reason).toContain('no longer yours')
+  })
+
+  it('ends the run when cash falls below the shared bankrupt floor', () => {
+    const state = createGame(9104)
+    const bankrupt = {
+      ...state,
+      player: {
+        ...state.player,
+        cash: ECONOMY.victory.bankruptCash - 1,
+        finance: {
+          ...state.player.finance,
+          cash: ECONOMY.victory.bankruptCash - 1,
+        },
+      },
+    }
+    const next = tickVictory(bankrupt)
+    expect(ECONOMY.victory.bankruptCash).toBe(-500_000_000)
+    expect(next.victory.outcome).toBe('lost')
+    expect(next.paused).toBe(true)
   })
 
   it('scales venture banking capacity and rates with company value', () => {

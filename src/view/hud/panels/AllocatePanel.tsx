@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { useGameStore } from '../../../store/gameStore'
 import { computeSnapshot } from '../../../sim/tick'
 import { fleetHostSnapshot } from '../../../sim/systems/hosting'
+import { hostedModelOpexDay } from '../../../sim/balance/hostingOpex'
 import { formatParams } from '../../../sim/balance/training'
 import { gb, money, num, pct, pf, people } from '../format'
 import { EmptyState, HudButton, MetricTile, PanelScaffold } from '../ui/HudPrimitives'
@@ -14,6 +15,10 @@ export function AllocatePanel() {
   const autoBalanceHosting = useGameStore((s) => s.autoBalanceHosting)
   const snap = computeSnapshot(state)
   const host = fleetHostSnapshot(state)
+  // Per-model hosting residency + endpoint upkeep (load term shown in finance).
+  const hostOpex = hostedModelOpexDay(state, 0)
+  const hostOpexByModel = new Map(hostOpex.models.map((m) => [m.modelId, m]))
+  const serveMemFit = snap.serveMemFit ?? 1
   const a = state.player.allocation
 
   const setSplit = (key: 'training' | 'inference' | 'research', v: number) => {
@@ -84,7 +89,24 @@ export function AllocatePanel() {
               value={pct(state.lastMarket.unservedRatio, 0)}
               tone={state.lastMarket.unservedRatio > 0.08 ? 'danger' : 'positive'}
             />
+            <StatRow
+              label="Memory fit"
+              value={pct(serveMemFit, 0)}
+              tone={serveMemFit < 0.999 ? 'danger' : 'positive'}
+            />
+            <StatRow
+              label="Hosting opex"
+              value={`${money(state.player.finance.dayHostingOpex ?? 0)}/d`}
+              tone={(state.player.finance.dayHostingOpex ?? 0) > 0 ? 'warning' : 'neutral'}
+            />
           </div>
+          {serveMemFit < 0.999 ? (
+            <p className="mt-1.5 text-[0.75rem] text-amber">
+              Hosted model does not fit fleet memory — serving degraded, not stopped.
+              Throughput runs at {pct(serveMemFit, 0)} while weights stream from slower
+              tiers. Add HBM or ship a smaller deployment to restore full speed.
+            </p>
+          ) : null}
           <div className="mt-2">
             <MeterBar
               label="Pool util"
@@ -106,9 +128,14 @@ export function AllocatePanel() {
         >
           <div className="space-y-0.5">
             <StatRow
-              label="VRAM have / need"
+              label="HBM have / need"
               value={`${gb(host.vramHave)} / ${gb(host.vramNeed)}`}
               tone={host.vramHave < host.vramNeed ? 'danger' : 'positive'}
+            />
+            <StatRow
+              label="Host RAM have / need"
+              value={`${gb(host.systemRamHave)} / ${gb(host.systemRamNeed)}`}
+              tone={host.systemRamHave < host.systemRamNeed ? 'danger' : 'positive'}
             />
             <StatRow
               label="Serve PF have / need"
@@ -116,34 +143,34 @@ export function AllocatePanel() {
               tone={host.pfServe < host.pfNeed * 0.75 ? 'warning' : 'neutral'}
             />
             <StatRow
-              label="Compute util"
-              value={pct(Math.min(host.computeUtil, 2), 0)}
-              tone={
-                host.computeUtil < 0.65
-                  ? 'warning'
-                  : host.computeUtil > 1.05
-                    ? 'danger'
-                    : 'positive'
-              }
+              label="Compute coverage"
+              value={pct(Math.min(host.computeCoverage, 2), 0)}
+              tone={host.computeCoverage < 0.85 ? 'warning' : 'positive'}
             />
             <StatRow
-              label="Short on"
+              label="Bottleneck"
               value={host.shortOn === 'ok' ? 'balanced' : host.shortOn}
               tone={host.shortOn === 'ok' ? 'positive' : 'danger'}
             />
           </div>
           <div className="mt-2 space-y-1.5">
             <MeterBar
-              label="VRAM cover"
-              value={Math.min(1, host.vramUtil)}
-              detail={`${Math.min(120, host.vramUtil * 100).toFixed(0)}%`}
-              tone={host.vramUtil >= 0.95 ? 'positive' : 'warning'}
+              label="HBM cover"
+              value={Math.min(1, host.vramCoverage)}
+              detail={`${Math.min(120, host.vramCoverage * 100).toFixed(0)}%`}
+              tone={host.vramCoverage >= 0.95 ? 'positive' : 'warning'}
             />
             <MeterBar
-              label="Compute util"
-              value={Math.min(1, host.computeUtil)}
-              detail={`${Math.min(120, host.computeUtil * 100).toFixed(0)}%`}
-              tone={host.computeUtil >= 0.7 && host.computeUtil <= 1.05 ? 'positive' : 'warning'}
+              label="Host RAM cover"
+              value={Math.min(1, host.systemRamCoverage)}
+              detail={`${Math.min(120, host.systemRamCoverage * 100).toFixed(0)}%`}
+              tone={host.systemRamCoverage >= 1 ? 'positive' : 'warning'}
+            />
+            <MeterBar
+              label="Compute coverage"
+              value={Math.min(1, host.computeCoverage)}
+              detail={`${Math.min(120, host.computeCoverage * 100).toFixed(0)}%`}
+              tone={host.computeCoverage >= 0.85 ? 'positive' : 'warning'}
             />
           </div>
 
@@ -166,6 +193,12 @@ export function AllocatePanel() {
                   </div>
                   <p className="mt-0.5 font-mono text-[0.75rem] tabular-nums text-muted">
                     {gb(m.vramGb)} · {pf(m.hostPf)} · compute {pct(m.computeBias, 0)}
+                    {hostOpexByModel.has(m.modelId)
+                      ? ` · host ${money(
+                          (hostOpexByModel.get(m.modelId)!.residencyDay +
+                            hostOpexByModel.get(m.modelId)!.endpointDay),
+                        )}/d`
+                      : ''}
                   </p>
                 </div>
               ))}

@@ -38,11 +38,11 @@ function RangeBar({
   );
   return (
     <div className="rounded-lg border border-line/60 bg-void/35 px-3 py-2.5">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-col gap-1 min-[420px]:flex-row min-[420px]:items-center min-[420px]:justify-between">
         <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
           {label}
         </div>
-        <div className="font-mono text-[0.8125rem] tabular-nums text-bone">
+        <div className="font-mono text-[0.8125rem] tabular-nums text-bone min-[420px]:text-right">
           {format(min)} – {format(max)}
         </div>
       </div>
@@ -169,7 +169,7 @@ export function RivalIntelPanel() {
                   type="button"
                   aria-pressed={selected}
                   onClick={() => setSelectedRivalId(entry.id)}
-                  className={`flex min-h-11 w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left transition ${
+                  className={`flex min-h-12 w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition sm:min-h-11 sm:gap-3 ${
                     selected
                       ? "bg-research/10 ring-1 ring-research/35"
                       : isPlayer
@@ -188,7 +188,7 @@ export function RivalIntelPanel() {
                   >
                     {entry.name}
                   </span>
-                  <div className="w-[42%] min-w-[7rem]">
+                  <div className="w-[46%] min-w-[7rem] sm:w-[42%]">
                     <MeterBar
                       value={entry.share}
                       tone={
@@ -201,17 +201,6 @@ export function RivalIntelPanel() {
                       detail={pct(entry.share, 0)}
                     />
                   </div>
-                  <span
-                    className={`w-14 shrink-0 text-right font-mono text-lg font-semibold tabular-nums ${
-                      isPlayer
-                        ? "text-mint"
-                        : selected
-                          ? "text-research"
-                          : "text-bone"
-                    }`}
-                  >
-                    {pct(entry.share, 0)}
-                  </span>
                 </button>
               );
             })}
@@ -418,6 +407,15 @@ export function RivalIntelPanel() {
                 <RangeBar label="Cash" values={estimate?.cash} format={money} />
               </div>
               <div className="mt-3 space-y-0.5">
+                <StatRow label="Focus" value={estimate?.focus ?? rival.archetype.replaceAll("_", " ")} />
+                <StatRow
+                  label={
+                    estimate?.currentBetConfidence == null
+                      ? "Current bet"
+                      : `Current bet (${pct(estimate.currentBetConfidence, 0)} conf.)`
+                  }
+                  value={estimate?.currentBet ?? "Undisclosed"}
+                />
                 <StatRow
                   label="Debt"
                   value={
@@ -480,11 +478,11 @@ export function RivalIntelPanel() {
               title="Released models & API"
               tone="infer"
             >
-              <div className="overflow-x-auto rounded-lg border border-line/60">
+              <div className="overflow-x-auto overscroll-x-contain rounded-lg border border-line/60">
                 <table className="w-full min-w-[42rem] text-left text-[0.8125rem]">
                   <thead className="bg-void/60 font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
                     <tr>
-                      <th className="px-3 py-2.5">Model</th>
+                      <th className="sticky left-0 z-10 bg-void px-3 py-2.5">Model</th>
                       <th className="px-3 py-2.5">Capability</th>
                       <th className="px-3 py-2.5">Price in / out</th>
                       <th className="px-3 py-2.5">Speed</th>
@@ -504,7 +502,7 @@ export function RivalIntelPanel() {
                           key={model.id}
                           className="border-t border-line/70 text-bone"
                         >
-                          <td className="px-3 py-3">
+                          <td className="sticky left-0 z-10 bg-panel-2 px-3 py-3">
                             <strong className="text-[0.875rem]">
                               {model.name}
                             </strong>

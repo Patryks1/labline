@@ -52,6 +52,7 @@ describe('chip architecture design', () => {
   it('freezes the selected architecture when a completed fab starts a campaign', () => {
     let state = createGame({
       seed: 7_202,
+      legacyMapFixture: true,
       advanced: { mapWidth: 24, mapHeight: 24, cityCount: 2, rivalCount: 1 },
     })
     state = {

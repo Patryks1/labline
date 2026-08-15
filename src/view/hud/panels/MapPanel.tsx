@@ -15,6 +15,7 @@ import {
   fastTrackConstruction,
   sellPlayerBuilding,
 } from '../../../sim/systems/facilities'
+import { quoteFacilityDemolition } from '../../../sim/systems/facilityMarket'
 import { useGameStore } from '../../../store/gameStore'
 import { money, num } from '../format'
 import { BuildingNameField } from '../ui/BuildingNameField'
@@ -226,9 +227,13 @@ export function MapPanel() {
                 type="button"
                 variant="ghost"
                 className="mt-3 w-full text-mint"
-                onClick={() => useGameStore.getState().openFleet()}
+                onClick={() =>
+                  useGameStore
+                    .getState()
+                    .openHallEditor(tile.campusId ?? `facility:${tile.x},${tile.y}`)
+                }
               >
-                Order racks →
+                Open hall editor →
               </HudButton>
             ) : null}
 
@@ -269,6 +274,13 @@ export function BuildingDisposeButtons({
   const state = useGameStore((s) => s.state)
   const setState = (next: typeof state) => useGameStore.setState({ state: next })
   const requestConfirm = useUiStore((s) => s.requestConfirm)
+  const demolishFacility = useGameStore((s) => s.demolishFacility)
+  const tile = mapTileAtAny(state, x, y)
+  const isCompletedDc = Boolean(
+    tile && isDcKind(tile.kind) && !constructing && tile.buildingProgress >= tile.buildingTarget,
+  )
+  const facilityId = tile?.campusId ?? `facility:${x},${y}`
+  const demolitionCost = isCompletedDc ? quoteFacilityDemolition(state, facilityId) : 0
   const refund = constructing
     ? estimateCancelRefund(state, x, y)
     : estimateBuildingSaleValue(state, x, y)
@@ -296,7 +308,7 @@ export function BuildingDisposeButtons({
               variant="primary"
               disabled={fastTrackBlocked}
               title={fastTrackReason ?? 'Pay 50% extra capex to halve the remaining schedule.'}
-              className={compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full'}
+              className={compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full !min-h-11'}
               onClick={(e) => {
                 e.stopPropagation()
                 setState(fastTrackConstruction(state, x, y))
@@ -313,7 +325,7 @@ export function BuildingDisposeButtons({
         <HudButton
           type="button"
           variant="secondary"
-          className={`${compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full'} border border-amber/30 text-amber`}
+          className={`${compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full !min-h-11'} border border-amber/30 text-amber`}
           onClick={(e) => {
             e.stopPropagation()
             requestConfirm({
@@ -332,22 +344,45 @@ export function BuildingDisposeButtons({
   }
 
   return (
-    <HudButton
-      type="button"
-      variant="danger"
-      className={compact ? 'px-2 py-1 text-[0.75rem]' : 'mt-2 w-full'}
-      onClick={(e) => {
-        e.stopPropagation()
-        requestConfirm({
-          title: 'Sell this building?',
-          body: `Estimated recovery is ${money(refund)}. Multi-tile campuses clear fully and installed racks sell with data halls.`,
-          actionLabel: 'Sell building',
-          tone: 'danger',
-          onConfirm: () => setState(sellPlayerBuilding(state, x, y)),
-        })
-      }}
-    >
-      Sell · ~{money(refund)}
-    </HudButton>
+    <div className={isCompletedDc ? 'grid grid-cols-2 gap-1.5' : ''}>
+      <HudButton
+        type="button"
+        variant="danger"
+        className={compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full !min-h-11'}
+        onClick={(e) => {
+          e.stopPropagation()
+          requestConfirm({
+            title: 'Sell this building?',
+            body: `Estimated recovery is ${money(refund)}. Multi-tile campuses clear fully and installed racks sell with data halls.`,
+            actionLabel: 'Sell building',
+            tone: 'danger',
+            onConfirm: () => setState(sellPlayerBuilding(useGameStore.getState().state, x, y)),
+          })
+        }}
+      >
+        Sell · ~{money(refund)}
+      </HudButton>
+      {isCompletedDc ? (
+        <HudButton
+          type="button"
+          variant="ghost"
+          disabled={state.player.cash < demolitionCost}
+          title={state.player.cash < demolitionCost ? `Need ${money(demolitionCost)} to demolish` : undefined}
+          className={`${compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full !min-h-11'} border border-amber/30 text-amber`}
+          onClick={(e) => {
+            e.stopPropagation()
+            requestConfirm({
+              title: 'Demolish this data centre?',
+              body: `Demolition costs ${money(demolitionCost)}, removes the full campus and all installed racks, and returns no sale proceeds.`,
+              actionLabel: 'Demolish facility',
+              tone: 'danger',
+              onConfirm: () => demolishFacility(facilityId),
+            })
+          }}
+        >
+          Demolish · {money(demolitionCost)}
+        </HudButton>
+      ) : null}
+    </div>
   )
 }

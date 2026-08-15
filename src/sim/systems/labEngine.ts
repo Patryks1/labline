@@ -16,21 +16,31 @@ import type {
   WorldMarkets,
 } from '../types'
 import { RACK_SKU_CATALOG } from '../balance/rackSkus'
+import { RESEARCH_NODES } from '../balance/research'
 import { labContractCapacityPf } from './computeContracts'
 import { resolveRackSku } from './racks'
 import { campusBonusesForLab } from './campus'
+import { fleetPowerDraw, powerDerateForSupply } from './computePower'
 import {
   labFacilityEnergyTotals,
   isDcAnchor,
   isDcKind,
   resolveLabPowerMw,
 } from './map'
-import { mapTileAtAny } from './worldAccess'
+import { mapTileAtAny, usesCompactWorld } from './worldAccess'
 import {
   hardwareTokPerSecFromPf,
   labInferCapacityWorkPf,
 } from './labCompute'
 import { HISTORY_LIMITS } from './history'
+import { ensureRackUnitIds } from './dataHallLayouts'
+import {
+  estimateServingMemory,
+  pfPerMTokForModel,
+  residentMemoryFit,
+} from '../balance/tokenServe'
+import { servingPlacementNeedForLab } from './servingPlacement'
+import { activeBalanceTuning } from '../balance/tuning'
 
 const EMPTY_STAFF: StaffHeadcount = {
   researcher: 0,
@@ -406,7 +416,7 @@ export function createWorldMarkets(): WorldMarkets {
         regionId: 'global-cloud',
         baselinePf: 1_200,
         availablePf: 1_176,
-        basePricePerPfDay: 480,
+        basePricePerPfDay: 120,
         reliability: 0.997,
         spotVolatility: 0.22,
         acceleratorGeneration: 2,
@@ -737,6 +747,12 @@ export interface LabComputeSnapshot {
   outboundCommittedPf: number
   chipCount: number
   vramGb: number
+  systemRamGb: number
+  localVramGb: number
+  remoteVramGb: number
+  localSystemRamGb: number
+  remoteSystemRamGb: number
+  localServingMemoryReady: boolean
   /** Available hardware throughput before util/allocation/model conversion. */
   hardwareTokPerSec: number
   /** Capacity in the same reference PF-work units used by inference demand. */
@@ -791,8 +807,10 @@ export function computeLabSnapshot(state: SimState, labId: LabId): LabComputeSna
   let installedLocalPf = Math.max(0, lab.abstractFlopsPf)
   let installedChipCount = Math.max(0, lab.abstractChipCount)
   let installedVramGb = Math.max(0, lab.abstractChipCount) * 80
+  let installedSystemRamGb = Math.max(0, lab.abstractChipCount) * 128
   let installedTokPerSec = hardwareTokPerSecFromPf(lab.abstractFlopsPf)
-  let installedPowerMw = Math.max(0, lab.abstractFlopsPf) * 0.011 * pue
+  let installedFullLoadMw = Math.max(0, lab.abstractFlopsPf) * 0.011
+  let installedIdleMw = installedFullLoadMw * 0.3
   let rackUnitsUsed = 0
   for (const install of lab.rackFleet) {
     if (install.status !== 'live' || install.count <= 0) continue
@@ -807,12 +825,24 @@ export function computeLabSnapshot(state: SimState, labId: LabId): LabComputeSna
       // Invalid imported blueprints contribute no capacity until validation.
       continue
     }
-    installedLocalPf += sku.flopsPf * install.count
-    installedChipCount += install.count
-    installedVramGb += sku.vramGb * install.count
-    installedTokPerSec += sku.tokPerSec * install.count
-    installedPowerMw += sku.mw * install.count * pue
-    rackUnitsUsed += (install.rackUnits || sku.rackUnits) * install.count
+    const normalized = ensureRackUnitIds(install)
+    const facilityId = install.facilityId ?? hall?.campusId
+    const layout = facilityId ? state.dataHallLayouts?.[facilityId] : undefined
+    const operational = layout ? new Set(layout.analysis.operationalRackUnitIds) : null
+    const placed = layout ? new Set(layout.objects.flatMap((object) => object.rackUnitId ? [object.rackUnitId] : [])) : null
+    const activeCount = operational ? (normalized.unitIds ?? []).filter((unitId) => operational.has(unitId)).length : install.count
+    const placedCount = placed ? (normalized.unitIds ?? []).filter((unitId) => placed.has(unitId)).length : install.count
+    const throughput = layout?.analysis.throughputMultiplier ?? 1
+    installedLocalPf += sku.flopsPf * activeCount * throughput
+    installedChipCount += activeCount
+    installedVramGb += sku.vramGb * activeCount
+    installedSystemRamGb += (sku.systemRamGb ?? sku.vramGb * 4) * activeCount
+    installedTokPerSec += sku.tokPerSec * activeCount * throughput
+    const layoutPue = layout?.analysis.pueMultiplier ?? 1
+    installedFullLoadMw += sku.mw * activeCount * layoutPue
+    installedIdleMw +=
+      (sku.accelerator?.idleMw ?? sku.mw * 0.3) * activeCount * layoutPue
+    rackUnitsUsed += (install.rackUnits || sku.rackUnits) * placedCount
   }
   const providerContracts = labContractCapacityPf(state, labId)
   const legacyLeases = legacyLeaseCapacityForLab(state, labId)
@@ -825,19 +855,21 @@ export function computeLabSnapshot(state: SimState, labId: LabId): LabComputeSna
     providerContracts.outboundPf + legacyLeases.outboundPf,
   )
 
-  const power = resolveLabPowerMw(state, labId, installedPowerMw)
-  const powerDerateRaw =
-    installedPowerMw > power.mwAvailable
-      ? power.mwAvailable / Math.max(1e-6, installedPowerMw)
-      : 1
-  const powerDerate = Math.max(0.22, Math.min(1, powerDerateRaw))
-  const rackCap = labFacilityEnergyTotals(state, labId).rackCap
-  const rackDerate =
-    rackUnitsUsed <= 0
-      ? 1
-      : rackCap > 0
-        ? Math.max(0.2, Math.min(1, rackCap / rackUnitsUsed))
-        : 0.2
+  const installedPower = fleetPowerDraw({
+    fullLoadMw: installedFullLoadMw,
+    idleMw: installedIdleMw,
+    dutyCycle: 1,
+    pue,
+  })
+  const power = resolveLabPowerMw(state, labId, installedPower.demandMw)
+  const powerDerate = powerDerateForSupply(
+    installedPower.demandMw,
+    power.mwAvailable,
+  ).derate
+  // Layout analysis is the physical admission boundary. Operational rack IDs
+  // already encode geometry, utilities, and access, so a second abstract shell
+  // ratio must not throttle them.
+  const rackDerate = 1
   const localHostDerate = powerDerate * rackDerate
   const hostedLocalPf = installedLocalPf * localHostDerate
   // Contracts transfer effective hosted capacity. Deducting nominal PF before
@@ -852,7 +884,66 @@ export function computeLabSnapshot(state: SimState, labId: LabId): LabComputeSna
   const rawFlopsPf = Math.max(0, availableLocalPf + remoteInboundPf)
   const remoteGpuEquivalent = remoteInboundPf / 0.7
   const chipCount = installedChipCount * localKeep + remoteGpuEquivalent
-  const vramGb = installedVramGb * localKeep + remoteGpuEquivalent * 80
+  const localVramGb = installedVramGb * localKeep
+  const remoteVramGb = remoteGpuEquivalent * 80
+  const localSystemRamGb = installedSystemRamGb * localKeep
+  const remoteSystemRamGb = remoteGpuEquivalent * 512
+  const vramGb = localVramGb + remoteVramGb
+  const systemRamGb = localSystemRamGb + remoteSystemRamGb
+
+  const activeServeModel = lab.models.find(
+    (model) =>
+      model.id === lab.pricing.activeModelId &&
+      (model.release === 'released' || model.shipped),
+  )
+  const rivalDemandPf =
+    labId === state.playerLabId
+      ? state.lastMarket?.demandPf ?? 0
+      : state.rivals.find((rival) => rival.id === labId)?.lastDemandPf ?? 0
+  const demandMTok = activeServeModel
+    ? rivalDemandPf /
+      Math.max(
+        1e-9,
+        pfPerMTokForModel(activeServeModel, lab.servingEfficiency),
+      )
+    : 0
+  const placement = servingPlacementNeedForLab({
+    models: lab.models,
+    pricing: lab.pricing,
+    demandMTok,
+  })
+  // Admission needs one live request per routed endpoint. Offered-load
+  // concurrency is constrained later by the PF/queue settlement; sizing KV
+  // for every requested call here would make higher demand erase capacity.
+  const residentPlacement = placement.placements.map((hosted) =>
+    estimateServingMemory({
+      model: hosted.model,
+      precision: hosted.precision,
+      concurrentRequests: 1,
+      avgInputTokens: hosted.contextTokens,
+    }),
+  )
+  const residentHbmNeedGb = residentPlacement.reduce(
+    (sum, memory) => sum + memory.residentMemoryGb,
+    0,
+  )
+  const residentSystemRamNeedGb = residentPlacement.reduce(
+    (sum, memory) => sum + memory.requiredSystemRamGb,
+    0,
+  )
+  const localHbm = Math.max(0, installedVramGb * localKeep)
+  const localRam = Math.max(0, installedSystemRamGb * localKeep)
+  // There is no implicit expert/weight offload policy. Each location either
+  // holds the complete promised deployment or contributes no inference PF.
+  const localServeMem = Math.min(
+    residentMemoryFit(residentHbmNeedGb, localHbm),
+    residentMemoryFit(residentSystemRamNeedGb, localRam),
+  )
+  const remoteServeMem = Math.min(
+    residentMemoryFit(residentHbmNeedGb, remoteVramGb),
+    residentMemoryFit(residentSystemRamNeedGb, remoteSystemRamGb),
+  )
+  const localServingMemoryReady = localServeMem === 1
 
   const engineers = Math.max(0, lab.staff.engineer ?? 0)
   const engineerUtil = Math.min(0.14, engineers * 0.012)
@@ -864,12 +955,17 @@ export function computeLabSnapshot(state: SimState, labId: LabId): LabComputeSna
   )
   const allocation = normalizedComputeAllocation(lab.allocation)
   const base = rawFlopsPf * effectiveUtil
+  // Only locations with a fully resident endpoint contribute inference work.
+  const inferenceFlopsPf =
+    (availableLocalPf * localServeMem + remoteInboundPf * remoteServeMem) *
+    activeBalanceTuning().serveCapacityMult
+  const inferenceBase = inferenceFlopsPf * effectiveUtil
   const dataGenShare = Math.max(
     0,
     Math.min(0.85, lab.data.dataGenResearchShare ?? 0),
   )
   const inferenceWorkPf = labInferCapacityWorkPf({
-    flopsPf: rawFlopsPf,
+    flopsPf: inferenceFlopsPf,
     hardwareTokPerSec,
     utilCap: effectiveUtil,
     allocation,
@@ -884,11 +980,17 @@ export function computeLabSnapshot(state: SimState, labId: LabId): LabComputeSna
     outboundCommittedPf,
     chipCount,
     vramGb,
+    systemRamGb,
+    localVramGb,
+    remoteVramGb,
+    localSystemRamGb,
+    remoteSystemRamGb,
+    localServingMemoryReady,
     hardwareTokPerSec,
     inferenceWorkPf,
     // A seller still hosts and powers resold capacity. Outbound contracts
     // reduce its usable pools, not the physical electricity bill.
-    powerMw: installedPowerMw * powerDerate,
+    powerMw: installedPower.demandMw * powerDerate,
     spotPowerMw: Math.max(0, power.mwGridImport - power.mwContractImport),
     powerDerate,
     rackDerate,
@@ -898,9 +1000,78 @@ export function computeLabSnapshot(state: SimState, labId: LabId): LabComputeSna
         allocation.training *
         (1 + engineerTrain) *
         (1 + campus.trainEffBonus),
-      inference: base * allocation.inference * (1 + engineerServe),
+      inference: inferenceBase * allocation.inference * (1 + engineerServe),
       research: base * allocation.research * (1 - dataGenShare),
     },
+  }
+}
+
+export interface LabInfrastructureSnapshot {
+  compute: LabComputeSnapshot
+  /** Commissioned interconnect + site firm capacity (MW). */
+  mwInterconnect: number
+  /** Commissioned owned generation (MW). */
+  mwGeneration: number
+  rackCap: number
+  racksUsed: number
+  /** Capacity still under construction (arrives with the build queue). */
+  pendingRackCap: number
+  pendingMwInterconnect: number
+  pendingMwGeneration: number
+  /** Current inference demand vs serving capacity (1 = saturated). */
+  hostingUtilization: number
+}
+
+/**
+ * One planning view over computeLabSnapshot plus campus energy totals. Rival
+ * scale/infrastructure planning reads this so projections consume the same
+ * physical accounting as the live simulation.
+ */
+export function labInfrastructureSnapshot(
+  state: SimState,
+  labId: LabId,
+): LabInfrastructureSnapshot {
+  const compute = computeLabSnapshot(state, labId)
+  const totals = labFacilityEnergyTotals(state, labId)
+  let pendingRackCap = 0
+  let pendingMwInterconnect = 0
+  let pendingMwGeneration = 0
+  if (usesCompactWorld(state)) {
+    for (const facility of state.map.world!.queryFacilities({
+      ownerId: labId,
+      underConstruction: true,
+    })) {
+      pendingRackCap += facility.stats?.rackCapacity ?? 0
+      pendingMwInterconnect += facility.stats?.mwCapacity ?? 0
+      pendingMwGeneration += facility.stats?.mwGeneration ?? 0
+    }
+  } else {
+    for (const tile of state.map.tiles) {
+      if (tile.owner !== labId) continue
+      if (tile.buildingTarget <= 0 || tile.buildingProgress >= tile.buildingTarget) continue
+      pendingRackCap += isDcAnchor(tile) ? tile.rackCapacity : 0
+      pendingMwInterconnect += tile.mwCapacity
+      pendingMwGeneration += tile.mwGeneration
+    }
+  }
+  const demandPf =
+    labId === state.playerLabId
+      ? state.lastMarket?.demandPf ?? 0
+      : state.rivals.find((rival) => rival.id === labId)?.lastDemandPf ?? 0
+  const hostingUtilization = Math.max(
+    0,
+    Math.min(2, demandPf / Math.max(1e-9, compute.inferenceWorkPf)),
+  )
+  return {
+    compute,
+    mwInterconnect: totals.mwInterconnect,
+    mwGeneration: totals.mwGeneration,
+    rackCap: totals.rackCap,
+    racksUsed: totals.racksUsed,
+    pendingRackCap,
+    pendingMwInterconnect,
+    pendingMwGeneration,
+    hostingUtilization,
   }
 }
 
@@ -940,6 +1111,61 @@ export function buildRivalPublicEstimate(state: SimState, labId: LabId): RivalPu
   }
   const debt = lab.loans.reduce((sum, loan) => sum + loan.remaining, 0)
   const processed = Object.values(lab.data.stocks).reduce((sum, stock) => sum + stock.processed, 0)
+  const activeJob = lab.trainingJob
+  const productPreset = activeJob && 'productPreset' in activeJob ? activeJob.productPreset : undefined
+  const backbone = activeJob && 'backbone' in activeJob ? activeJob.backbone : undefined
+  const focus =
+    lab.archetype === 'multimodal' ? 'Multimodal products' :
+      lab.archetype === 'efficiency' ? 'Efficient serving' :
+        lab.archetype === 'open_weights' ? 'Open-weight models' :
+          lab.archetype === 'safety' ? 'Trusted enterprise AI' : 'Frontier scaling'
+  const activeResearchId =
+    typeof lab.activeResearch === 'string'
+      ? lab.activeResearch
+      : lab.activeResearch?.nodeId
+  const disclosedProgram = activeResearchId
+    ? lab.researchPrograms?.find(
+        (program) =>
+          program.methodId === activeResearchId && program.disclosure !== 'secret',
+      )
+    : undefined
+  const disclosedNode = disclosedProgram
+    ? RESEARCH_NODES.find((node) => node.id === disclosedProgram.methodId)
+    : undefined
+  const researchEvidenceConfidence = disclosedProgram
+    ? Math.max(0.82, ...disclosedProgram.evidence.map((evidence) => evidence.strength))
+    : 0
+  const trainingProduct = productPreset?.replaceAll('_', ' ') ??
+    (activeJob?.family === 'diffusion' || activeJob?.family === 'video'
+      ? 'media generation'
+      : activeJob?.family === 'omni'
+        ? 'multimodal product'
+        : 'language model')
+  const currentBetConfidence = activeJob
+    ? Math.max(0.45, Math.min(0.88, confidence - 0.06))
+    : activeResearchId
+      ? disclosedProgram
+        ? researchEvidenceConfidence
+        : 0.25
+      : 0.95
+  const currentBet = activeJob
+    ? currentBetConfidence >= 0.78
+      ? `Likely ${trainingProduct}${backbone ? ` using a ${backbone.toUpperCase()} backbone` : ''}`
+      : `Likely ${focus.toLowerCase()} model training`
+    : activeResearchId
+      ? disclosedProgram && disclosedNode
+        ? `${disclosedProgram.disclosure === 'published' ? 'Published' : 'Licensed'}: ${disclosedNode.name}`
+        : 'Undisclosed research program'
+      : 'Serving the current fleet'
+  const researchDisclosure = disclosedProgram?.disclosure === 'published' ||
+    disclosedProgram?.disclosure === 'licensed'
+    ? disclosedProgram.disclosure
+    : undefined
+  const announcedProject = activeJob
+    ? 'Model training'
+    : disclosedProgram && disclosedNode
+      ? `${disclosedProgram.disclosure === 'published' ? 'Published research' : 'Licensed research'}: ${disclosedNode.name}`
+      : null
   return {
     labId,
     day: state.day,
@@ -948,7 +1174,11 @@ export function buildRivalPublicEstimate(state: SimState, labId: LabId): RivalPu
     cash: band(Math.max(0, lab.cash), 0.15),
     debt: band(debt, 0.18),
     runwayDays: band(Number.isFinite(lab.finance.runwayDays) ? Math.max(0, lab.finance.runwayDays) : 999, 0.2),
-    announcedProject: lab.trainingJob ? 'Model training' : lab.activeResearch ? 'Research program' : null,
+    announcedProject,
+    focus,
+    currentBet,
+    currentBetConfidence,
+    researchDisclosure,
     confidence,
   }
 }

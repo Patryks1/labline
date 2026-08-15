@@ -10,6 +10,10 @@ import {
   TERRAIN_KIND,
   WORLD_CHANGE_FLAGS,
   WORLD_FORMAT_VERSION,
+  WORLD_GENERATOR_VERSION_V4,
+  WORLD_GENERATOR_VERSION_V5,
+  WORLD_GENERATOR_VERSION_V6,
+  WORLD_GENERATOR_VERSION_V7,
   type ChunkId,
   type CityRuntimeState,
   type DynamicWorldSnapshotV2,
@@ -27,6 +31,13 @@ import {
   type WorldMetrics,
   type WorldOwnerId,
 } from './types'
+import {
+  getBiome as staticBiome,
+  getCornerElevation as staticCornerElevation,
+  getTileElevation as staticTileElevation,
+  getTileSlope as staticTileSlope,
+  getWaterElevation as staticWaterElevation,
+} from './generator'
 
 type MutableAggregate = {
   count: number
@@ -130,6 +141,12 @@ function validateTerrainOverride(override: TerrainOverride, world: StaticWorld):
   ) {
     throw new RangeError('terrain variant mask must be a uint8')
   }
+  if (
+    override.transport !== undefined &&
+    (!Number.isInteger(override.transport) || override.transport < 0 || override.transport > 0xffff)
+  ) {
+    throw new RangeError('terrain transport must be a uint16')
+  }
   return Object.freeze({ ...override })
 }
 
@@ -139,6 +156,7 @@ function isNoopOverride(override: TerrainOverride, world: StaticWorld): boolean 
     (override.kind === undefined || override.kind === world.kind[id]) &&
     (override.feature === undefined || override.feature === world.feature[id]) &&
     (override.variantMask === undefined || override.variantMask === world.variantMask[id]) &&
+    (override.transport === undefined || override.transport === (world.transport?.[id] ?? 0)) &&
     (override.ownerId === undefined || override.ownerId === 'neutral')
   )
 }
@@ -196,6 +214,7 @@ export class DynamicWorld {
   private readonly listeners = new Set<WorldMetricsListener>()
   private readonly journal: WorldChangeJournal
   private revisionValue = 0
+  private roadRevisionValue = 0
   private metricsValue: WorldMetrics
 
   constructor(staticWorld: StaticWorld, options: CreateDynamicWorldOptions = {}) {
@@ -205,7 +224,17 @@ export class DynamicWorld {
       staticWorld.kind.length !== size ||
       staticWorld.region.length !== size ||
       staticWorld.feature.length !== size ||
-      staticWorld.variantMask.length !== size
+      staticWorld.variantMask.length !== size ||
+      (staticWorld.transport !== undefined && staticWorld.transport.length !== size) ||
+      (staticWorld.elevation !== undefined && staticWorld.elevation.length !==
+        (staticWorld.descriptor.width + 1) * (staticWorld.descriptor.height + 1)) ||
+      (staticWorld.biome !== undefined && staticWorld.biome.length !== size) ||
+      (staticWorld.district !== undefined && staticWorld.district.length !== size) ||
+      ((staticWorld.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V4 ||
+        staticWorld.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V5 ||
+        staticWorld.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V6 ||
+        staticWorld.descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7) &&
+        (staticWorld.elevation === undefined || staticWorld.biome === undefined))
     ) {
       throw new Error('static world layer lengths do not match its descriptor')
     }
@@ -247,8 +276,33 @@ export class DynamicWorld {
     return this.revisionValue
   }
 
+  /** Changes only when the effective packed transport layer changes. */
+  get roadRevision(): number {
+    return this.roadRevisionValue
+  }
+
   get sequence(): number {
     return this.journal.sequence
+  }
+
+  getCornerElevation(x: number, y: number): number {
+    return staticCornerElevation(this.staticWorld, x, y)
+  }
+
+  getTileElevation(x: number, y: number): number {
+    return staticTileElevation(this.staticWorld, x, y)
+  }
+
+  getWaterElevation(x: number, y: number): number {
+    return staticWaterElevation(this.staticWorld, x, y)
+  }
+
+  getTileSlope(x: number, y: number): number {
+    return staticTileSlope(this.staticWorld, x, y)
+  }
+
+  getBiome(x: number, y: number) {
+    return staticBiome(this.staticWorld, x, y)
   }
 
   get metrics(): WorldMetrics {
@@ -302,6 +356,11 @@ export class DynamicWorld {
     return high | mask
   }
 
+  getTransport(id: TileId): number {
+    this.requireTile(id)
+    return this.terrainOverrides.get(id)?.transport ?? this.staticWorld.transport?.[id] ?? 0
+  }
+
   getFacilityAt(id: TileId): Facility | undefined {
     this.requireTile(id)
     const facilityId = this.occupancy.get(id)
@@ -321,6 +380,7 @@ export class DynamicWorld {
       regionIndex: this.staticWorld.region[id]!,
       feature: this.getFeature(id),
       variantMask: this.getVariantMask(id),
+      transport: this.getTransport(id),
       ownerId: this.getOwner(id),
       facility: this.getFacilityAt(id),
     }
@@ -496,9 +556,11 @@ export class DynamicWorld {
     tileIds: Set<TileId>,
     facilityIds: Set<string>,
     cityIndexes: Set<number>,
+    roadChanged = false,
   ): WorldBatchCommit {
     if (flags === 0) return { committed: false, revision: this.revisionValue }
     this.revisionValue++
+    if (roadChanged) this.roadRevisionValue++
     const sortedTiles = [...tileIds].sort((a, b) => a - b)
     const chunks = new Set<ChunkId>()
     for (const id of sortedTiles) chunks.add(chunkIdForTile(id, this.descriptor))
@@ -662,6 +724,7 @@ export class WorldMutationBatch {
     const changedTiles = new Set<TileId>()
     const changedFacilities = new Set<string>()
     const changedCities = new Set<number>()
+    let roadChanged = false
 
     for (const [id, next] of this.facilityWrites) {
       const previous = world.facilitiesById.get(id)
@@ -679,12 +742,15 @@ export class WorldMutationBatch {
 
     for (const [id, next] of this.terrainWrites) {
       const previous = world.terrainOverrides.get(id)
+      const previousTransport = previous?.transport ?? world.staticWorld.transport?.[id] ?? 0
+      const nextTransport = next?.transport ?? world.staticWorld.transport?.[id] ?? 0
       if (next) world.terrainOverrides.set(id, next)
       else world.terrainOverrides.delete(id)
       if (previous === next || (previous === undefined && next === null)) continue
       changedTiles.add(id)
       for (const neighbor of cardinalNeighborIds(id, world.descriptor)) changedTiles.add(neighbor)
       flags |= WORLD_CHANGE_FLAGS.terrain | WORLD_CHANGE_FLAGS.metrics
+      if (previousTransport !== nextTransport) roadChanged = true
     }
 
     for (const [index, state] of this.cityWrites) {
@@ -693,7 +759,7 @@ export class WorldMutationBatch {
       flags |= WORLD_CHANGE_FLAGS.city
     }
 
-    return world.finishCommit(flags, changedTiles, changedFacilities, changedCities)
+    return world.finishCommit(flags, changedTiles, changedFacilities, changedCities, roadChanged)
   }
 
   private currentFacility(id: string): Facility | undefined {

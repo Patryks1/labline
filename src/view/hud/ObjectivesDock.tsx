@@ -65,7 +65,7 @@ export function ObjectivesDock() {
           type="button"
           aria-label="Close objectives"
           onClick={() => setOpen(false)}
-          className="flex h-8 w-8 items-center justify-center rounded-lg text-muted hover:bg-panel-2 hover:text-bone"
+          className="flex min-h-11 min-w-11 items-center justify-center rounded-lg text-muted hover:bg-panel-2 hover:text-bone"
         >
           <X size="1rem" />
         </button>
@@ -77,7 +77,7 @@ export function ObjectivesDock() {
             key={objective.id}
             type="button"
             onClick={() => activate(objective)}
-            className="objective-row group w-full rounded-lg border border-line/70 bg-panel-2/70 p-3 text-left hover:border-mint/35 hover:bg-panel-2"
+            className="objective-row group min-h-11 w-full rounded-lg border border-line/70 bg-panel-2/70 p-3 text-left hover:border-mint/35 hover:bg-panel-2"
           >
             <div className="flex items-start gap-2.5">
               <span className={`mt-0.5 ${objective.severity === 'danger' ? 'text-danger' : objective.severity === 'warning' ? 'text-amber' : 'text-mint'}`}>
@@ -107,7 +107,7 @@ export function ObjectivesDock() {
         <button
           type="button"
           onClick={() => setOnboardingDismissed(!state.onboardingDismissed)}
-          className="text-[0.75rem] font-medium text-mint hover:underline"
+          className="min-h-11 px-2 text-[0.75rem] font-medium text-mint hover:underline"
         >
           {state.onboardingDismissed ? 'Enable' : 'Hide'}
         </button>

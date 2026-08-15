@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { inferenceCapacityMTok, inferencePfDemand } from '../balance/serveCompute'
 import { createGame } from '../createGame'
-import type { ComputeContract, RackInstall } from '../types'
+import type { ComputeContract, Model, RackInstall } from '../types'
 import { computeSnapshot } from './compute'
 import { labInferCapacityWorkPf } from './labCompute'
 import { computeLabSnapshot, syncLabIndex } from './labEngine'
@@ -19,17 +19,6 @@ describe('controller-neutral compute yield', () => {
   it('uses one token-calibrated work unit for player and abstract serving', () => {
     const state = createGame(9_101)
     const snapshot = computeSnapshot(state)
-    const playerMTok = inferenceCapacityMTok(
-      snapshot,
-      REFERENCE_MODEL,
-      state.player.servingEfficiency,
-      state.player.allocation.inference,
-    )
-    const playerWorkPf = inferencePfDemand(
-      playerMTok,
-      REFERENCE_MODEL,
-      state.player.servingEfficiency,
-    )
     const sharedWorkPf = labInferCapacityWorkPf({
       flopsPf: snapshot.rawFlopsPf,
       hardwareTokPerSec:
@@ -40,10 +29,26 @@ describe('controller-neutral compute yield', () => {
       derate: snapshot.powerDerate,
       engineerServeBonus: snapshot.engineerServeBonus,
     })
+    const playerMTok = inferenceCapacityMTok(
+      {
+        ...snapshot,
+        pools: { ...snapshot.pools, inference: sharedWorkPf },
+        vramDerateServe: 1,
+      },
+      REFERENCE_MODEL,
+      state.player.servingEfficiency,
+      state.player.allocation.inference,
+    )
+    const playerWorkPf = inferencePfDemand(
+      playerMTok,
+      REFERENCE_MODEL,
+      state.player.servingEfficiency,
+    )
 
-    expect(sharedWorkPf).toBeCloseTo(playerWorkPf, 8)
-    // A raw PF is not one serving-work PF under the calibrated token economy.
-    expect(sharedWorkPf).toBeGreaterThan(snapshot.rawFlopsPf * 10)
+    // The token-facing path holds 25% installed headroom; raw shared work is
+    // settled before that reserve is applied.
+    expect(playerWorkPf).toBeCloseTo(sharedWorkPf / 1.25, 8)
+    expect(sharedWorkPf).toBeLessThanOrEqual(snapshot.rawFlopsPf)
   })
 
   it('applies snapshot power/rack throttling on the precise player token path', () => {
@@ -110,7 +115,7 @@ describe('controller-neutral compute yield', () => {
     expect(sellerAfter.powerMw).toBeCloseTo(sellerBefore.powerMw, 8)
   })
 
-  it('preserves inference-optimized rack throughput for rivals', () => {
+  it('does not give inference-labelled racks a hidden controller yield bonus', () => {
     let state = createGame(9_104)
     const [denseRival, inferRival] = state.rivals
     const install = (
@@ -173,9 +178,61 @@ describe('controller-neutral compute yield', () => {
     const denseWorkPerPf = rivalInferCapacityPf(dense, state) / denseSnapshot.rawFlopsPf
     const inferWorkPerPf = rivalInferCapacityPf(infer, state) / inferSnapshot.rawFlopsPf
 
-    expect(inferSnapshot.hardwareTokPerSec).toBeGreaterThan(
-      denseSnapshot.hardwareTokPerSec,
-    )
-    expect(inferWorkPerPf).toBeGreaterThan(denseWorkPerPf * 3)
+    expect(inferSnapshot.hardwareTokPerSec).toBeGreaterThan(0)
+    expect(inferSnapshot.rawFlopsPf).toBeLessThan(denseSnapshot.rawFlopsPf)
+    expect(inferWorkPerPf).toBeCloseTo(denseWorkPerPf, 8)
+  })
+
+  it('gives a rival zero inference capacity when endpoint weights cannot reside', () => {
+    let state = createGame(9_105)
+    const rival = state.rivals[0]!
+    const model = {
+      id: 'rival-405b-nonresident',
+      name: 'Rival 405B',
+      family: 'dense',
+      backbone: 'dense',
+      paramsB: 405,
+      activeParamsB: 405,
+      capability: 75,
+      inferCostMult: 1,
+      tokPerSecMult: 1,
+      release: 'released',
+      shipped: true,
+    } as Model
+    state = syncLabIndex({
+      ...state,
+      rivals: state.rivals.map((candidate) =>
+        candidate.id === rival.id
+          ? {
+              ...candidate,
+              // Eight abstract accelerators expose 640 GB HBM and 1 TB host
+              // RAM. Host RAM is not an implicit weight-offload deployment.
+              flopsPf: 8,
+              chips: 8,
+              models: [model],
+              allocation: { training: 0.1, inference: 0.8, research: 0.1 },
+              pricing: {
+                ...candidate.pricing,
+                activeModelId: model.id,
+                apiModelIds: [model.id],
+                apiServePrecisionByModel: { [model.id]: 'fp16' },
+                plans: candidate.pricing.plans.map((plan) => ({
+                  ...plan,
+                  enabled: false,
+                  modelIds: [],
+                })),
+              },
+            }
+          : candidate,
+      ),
+    })
+
+    const snapshot = computeLabSnapshot(state, rival.id)
+    expect(snapshot.localVramGb).toBe(640)
+    expect(snapshot.localSystemRamGb).toBe(1_024)
+    expect(snapshot.rawFlopsPf).toBeGreaterThan(0)
+    expect(snapshot.localServingMemoryReady).toBe(false)
+    expect(snapshot.pools.inference).toBe(0)
+    expect(snapshot.inferenceWorkPf).toBe(0)
   })
 })

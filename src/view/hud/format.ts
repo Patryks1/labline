@@ -87,6 +87,12 @@ export function pf(n: number): string {
   return `${n.toFixed(2)} PF`
 }
 
+/** PF with thousands separators — pairs with `pf()` so EF-scale values stay readable. */
+export function pfLong(n: number): string {
+  if (!Number.isFinite(n)) return '—'
+  return `${Math.round(n).toLocaleString('en-US')} PF`
+}
+
 /** MW of compute capacity corresponding to PF (shared ECONOMY.mwPerPfProxy). */
 export const MW_PER_PF_PROXY = ECONOMY.mwPerPfProxy ?? 0.011
 

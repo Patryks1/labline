@@ -34,12 +34,65 @@ export const TERRAIN_KIND_NAME: readonly TerrainKindName[] = [
   'warehouse',
 ]
 
-export const WORLD_FORMAT_VERSION = 2 as const
-export const WORLD_GENERATOR_VERSION = 2 as const
+/** Clockwise topology bits stored in the low byte of a transport cell. */
+export const TRANSPORT_DIRECTION = {
+  north: 1 << 0,
+  northEast: 1 << 1,
+  east: 1 << 2,
+  southEast: 1 << 3,
+  south: 1 << 4,
+  southWest: 1 << 5,
+  west: 1 << 6,
+  northWest: 1 << 7,
+} as const
 
-export interface WorldDescriptor {
+export const TRANSPORT_TOPOLOGY_MASK = 0x00ff
+export const TRANSPORT_CLASS_SHIFT = 8
+export const TRANSPORT_CLASS_MASK = 0x0700
+export const TRANSPORT_ROAD_CLASS = {
+  none: 0,
+  local: 1,
+  collector: 2,
+  arterial: 3,
+  highway: 4,
+} as const
+export type TransportRoadClass = (typeof TRANSPORT_ROAD_CLASS)[keyof typeof TRANSPORT_ROAD_CLASS]
+export const TRANSPORT_FLAGS = {
+  bridge: 1 << 11,
+  settlement: 1 << 12,
+  regional: 1 << 13,
+} as const
+
+export const WORLD_FORMAT_VERSION = 2 as const
+/** The original generator version. Kept as the default for source/save compatibility. */
+export const WORLD_GENERATOR_VERSION = 2 as const
+export const WORLD_GENERATOR_VERSION_V3 = 3 as const
+export const WORLD_GENERATOR_VERSION_V4 = 4 as const
+export const WORLD_GENERATOR_VERSION_V5 = 5 as const
+export const WORLD_GENERATOR_VERSION_V6 = 6 as const
+export const WORLD_GENERATOR_VERSION_V7 = 7 as const
+/** High variant bit reserved for V7 river water; low nibble remains NESW connectivity. */
+export const TERRAIN_VARIANT_RIVER = 0x80
+export const WATER_VARIANT_VISUAL_MASK = 0x70
+
+export function isRiverVariant(variantMask: number): boolean {
+  return (variantMask & TERRAIN_VARIANT_RIVER) !== 0
+}
+
+/** Decode the remaining three visual-variant bits from a V7 water tile. */
+export function waterVisualVariant(variantMask: number): number {
+  return (variantMask & WATER_VARIANT_VISUAL_MASK) >>> 4
+}
+export type WorldGeneratorVersion =
+  | typeof WORLD_GENERATOR_VERSION
+  | typeof WORLD_GENERATOR_VERSION_V3
+  | typeof WORLD_GENERATOR_VERSION_V4
+  | typeof WORLD_GENERATOR_VERSION_V5
+  | typeof WORLD_GENERATOR_VERSION_V6
+  | typeof WORLD_GENERATOR_VERSION_V7
+
+interface WorldDescriptorBase {
   readonly formatVersion: typeof WORLD_FORMAT_VERSION
-  readonly generatorVersion: typeof WORLD_GENERATOR_VERSION
   readonly seed: number
   readonly width: number
   readonly height: number
@@ -53,7 +106,98 @@ export interface WorldDescriptor {
   readonly waterCoverage: number
 }
 
+export interface WorldDescriptorV2 extends WorldDescriptorBase {
+  readonly generatorVersion: typeof WORLD_GENERATOR_VERSION
+}
+
+export interface WorldDescriptorV3 extends WorldDescriptorBase {
+  readonly generatorVersion: typeof WORLD_GENERATOR_VERSION_V3
+}
+
+/** All V4 generation constants are persisted so regeneration never follows changed defaults. */
+export interface WorldDescriptorV4 extends WorldDescriptorBase {
+  readonly generatorVersion: typeof WORLD_GENERATOR_VERSION_V4
+  readonly elevationScale: number
+  readonly seaLevel: number
+  readonly terrainAlgorithmVersion: 1
+  readonly biomeVersion: 1
+}
+
+/** V5 keeps V4 terrain stable while revising settlement and regional transport hierarchy. */
+export interface WorldDescriptorV5 extends WorldDescriptorBase {
+  readonly generatorVersion: typeof WORLD_GENERATOR_VERSION_V5
+  readonly elevationScale: number
+  readonly seaLevel: number
+  readonly terrainAlgorithmVersion: 1
+  readonly biomeVersion: 1
+  readonly transportAlgorithmVersion: 2
+}
+
+/** V6 persists every algorithm boundary that can affect regenerated saves. */
+export interface WorldDescriptorV6 extends WorldDescriptorBase {
+  readonly generatorVersion: typeof WORLD_GENERATOR_VERSION_V6
+  readonly elevationScale: number
+  readonly seaLevel: number
+  readonly terrainAlgorithmVersion: 1
+  readonly biomeVersion: 1
+  readonly transportAlgorithmVersion: 2
+  readonly settlementAlgorithmVersion: 2 | 3 | 4 | 5
+  readonly municipalCampusAlgorithmVersion: 2
+  readonly cityStatsModelVersion: 1
+}
+
+/** V7 adds compact, deterministic drainage while retaining every V6 system version. */
+export interface WorldDescriptorV7 extends WorldDescriptorBase {
+  readonly generatorVersion: typeof WORLD_GENERATOR_VERSION_V7
+  readonly elevationScale: number
+  readonly seaLevel: number
+  readonly terrainAlgorithmVersion: 1
+  readonly biomeVersion: 1
+  readonly transportAlgorithmVersion: 2
+  /** 5 = original V7 urban lot carve; 6 = roomier in-city office lots. Old saves keep 5. */
+  readonly settlementAlgorithmVersion: 5 | 6
+  readonly municipalCampusAlgorithmVersion: 2
+  readonly cityStatsModelVersion: 1
+  readonly riverAlgorithmVersion: 1
+}
+
+export type WorldDescriptor = WorldDescriptorV2 | WorldDescriptorV3 | WorldDescriptorV4 | WorldDescriptorV5 | WorldDescriptorV6 | WorldDescriptorV7
+
+export const BIOME_KIND = {
+  plains: 0,
+  forest: 1,
+  arid: 2,
+  wetland: 3,
+  alpine: 4,
+  coast: 5,
+  meadow: 6,
+  boreal: 7,
+  scrubland: 8,
+} as const
+export type BiomeKindName = keyof typeof BIOME_KIND
+export type BiomeKind = (typeof BIOME_KIND)[BiomeKindName]
+export const BIOME_KIND_NAME: readonly BiomeKindName[] = [
+  'plains', 'forest', 'arid', 'wetland', 'alpine', 'coast', 'meadow', 'boreal', 'scrubland',
+]
+
 export type CityIndustry = 'tech' | 'industrial' | 'port' | 'finance' | 'mixed'
+export type CityTier = 'metro' | 'satellite' | 'town' | 'village'
+
+export interface CityPalette {
+  readonly primary: number
+  readonly secondary: number
+  readonly accent: number
+}
+
+export interface CityGrowthMetadata {
+  /** Relative long-term population/footprint growth rate. */
+  readonly rate: number
+  /** Preferred expansion direction, expressed as a unit-ish vector. */
+  readonly directionX: number
+  readonly directionY: number
+  /** Organic edge variation in the range 0..1. */
+  readonly irregularity: number
+}
 
 export interface StaticCity {
   readonly index: number
@@ -68,6 +212,12 @@ export interface StaticCity {
   readonly powerBuyPriceMult: number
   readonly industry: CityIndustry
   readonly talentWageMult: number
+  /** V3 settlement metadata. Omitted by v2 worlds and old fixtures/saves. */
+  readonly tier?: CityTier
+  readonly parentCityIndex?: number
+  readonly regionIndex?: number
+  readonly palette?: CityPalette
+  readonly growth?: CityGrowthMetadata
 }
 
 export interface StaticRegion {
@@ -94,10 +244,47 @@ export interface StaticLake {
   readonly tileCount: number
 }
 
+export type MunicipalPowerPlantKind = 'coal' | 'wind' | 'solar' | 'nuclear'
+
+/** Stable district codes shared by generation, rendering, and inspection. */
+export const DISTRICT_KIND = {
+  none: 0,
+  suburb: 1,
+  municipalCampus: 2,
+  core: 3,
+  mixed: 4,
+  greenBuffer: 5,
+} as const
+
+/** Renderer-independent placement metadata for an authored municipal campus. */
+export interface MunicipalPowerCampusLayout {
+  readonly version: 1
+  readonly orientationQuarterTurns: 0 | 1 | 2 | 3
+  readonly equipmentTileId: TileId
+  readonly panelTileIds: readonly TileId[]
+}
+
+/** Immutable, generator-owned utility campus serving one V5 settlement. */
+export interface MunicipalPowerPlant {
+  readonly index: number
+  readonly id: string
+  readonly cityIndex: number
+  readonly kind: MunicipalPowerPlantKind
+  readonly cx: number
+  readonly cy: number
+  readonly footprint: readonly TileId[]
+  /** Present on V6 campuses; omitted by the frozen V5 generator. */
+  readonly layout?: MunicipalPowerCampusLayout
+  /** Nameplate output; nuclear > coal > wind > solar for equivalent demand. */
+  readonly capacityMw: number
+  readonly animationPhase: number
+}
+
 /**
  * Five bytes per logical tile. Coordinates are implicit: id = y * width + x.
  * feature uses 0 for none, 1..0x7fff for city index + 1, and bit 15 for lakes.
  * variantMask uses NESW in its low nibble and a deterministic variant in its high nibble.
+ * V7 water reserves bit 7 as a river marker, leaving bits 4..6 for water variation.
  */
 export interface StaticWorld {
   readonly descriptor: WorldDescriptor
@@ -105,9 +292,19 @@ export interface StaticWorld {
   readonly region: Uint8Array
   readonly feature: Uint16Array
   readonly variantMask: Uint8Array
+  /** V3 road layer. Low byte is 8-way topology; high byte is class/flags. */
+  readonly transport?: Uint16Array
+  /** V4 shared-corner height lattice, indexed as y * (width + 1) + x. */
+  readonly elevation?: Int16Array
+  /** V4 deterministic biome classification, one byte per logical tile. */
+  readonly biome?: Uint8Array
+  /** District layer: 0 none, 1 suburb, 2 utility, 3 core, 4 mixed, 5 green buffer. */
+  readonly district?: Uint8Array
   readonly cities: readonly StaticCity[]
   readonly regions: readonly StaticRegion[]
   readonly lakes: readonly StaticLake[]
+  /** V5-only immutable utility metadata. Empty/omitted for compatibility worlds. */
+  readonly municipalPowerPlants?: readonly MunicipalPowerPlant[]
   readonly starterPads: readonly TileId[]
   readonly staticHash: string
   readonly coverage: {
@@ -123,6 +320,7 @@ export interface TerrainOverride {
   readonly kind?: TerrainKind
   readonly feature?: number
   readonly variantMask?: number
+  readonly transport?: number
   readonly ownerId?: WorldOwnerId
 }
 
@@ -223,6 +421,7 @@ export interface TileView {
   readonly regionIndex: number
   readonly feature: number
   readonly variantMask: number
+  readonly transport: number
   readonly ownerId: WorldOwnerId
   readonly facility: Facility | undefined
 }
@@ -249,4 +448,3 @@ export interface WorldBatchCommit {
   readonly revision: number
   readonly change?: WorldChange
 }
-

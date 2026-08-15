@@ -3,6 +3,7 @@ import gsap from 'gsap'
 import { useGameStore } from '../../store/gameStore'
 import { money, pct } from './format'
 import { continueEndless } from '../../sim/systems/progression'
+import { ConsoleDialog } from './ui/ConsoleDialog'
 
 export function VictoryOverlay() {
   const victory = useGameStore((s) => s.state.victory)
@@ -24,25 +25,47 @@ export function VictoryOverlay() {
   if (victory.outcome === 'playing' && !showReport) return null
 
   const won = victory.outcome === 'won'
+  const eyebrow = showReport ? '2036 decade report' : won ? 'Scenario complete' : 'Run over'
+  const title = showReport
+    ? `${report!.score.toFixed(0)} / 100`
+    : won
+      ? 'You scaled the lab'
+      : 'Out of the race'
+  const description = showReport
+    ? 'The first decade is complete. Titles remain on the record; the same deterministic market can continue into an endless speculative era.'
+    : victory.reason
 
   return (
-    <div className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-void/80 p-6 backdrop-blur-md">
-      <div ref={ref} className="glass max-w-lg rounded-3xl p-10 text-center">
-        <p
-          className={`font-mono text-[0.8125rem] uppercase tracking-[0.25em] ${won ? 'text-mint' : 'text-danger'}`}
-        >
-          {showReport ? '2036 decade report' : won ? 'Scenario complete' : 'Run over'}
-        </p>
-        <h1 className="mt-4 text-4xl font-semibold tracking-tight text-bone">
-          {showReport ? `${report!.score.toFixed(0)} / 100` : won ? 'You scaled the lab' : 'Out of the race'}
-        </h1>
-        <p className="mx-auto mt-4 max-w-md text-sm leading-relaxed text-muted">
-          {showReport
-            ? 'The first decade is complete. Titles remain on the record; the same deterministic market can continue into an endless speculative era.'
-            : victory.reason}
-        </p>
+    <ConsoleDialog
+      open
+      titleId="victory-dialog-title"
+      eyebrow={<span className={won || showReport ? 'text-mint' : 'text-danger'}>{eyebrow}</span>}
+      title={title}
+      description={description}
+      onClose={() => undefined}
+      canClose={false}
+      maxWidthClass="max-w-2xl"
+      footer={(
+        <div className="flex justify-end">
+          {showReport ? (
+            <button
+              type="button"
+              className="btn-primary w-full px-8 py-3 sm:w-auto"
+              onClick={() => useGameStore.setState({ state: continueEndless(state) })}
+            >
+              Continue endlessly
+            </button>
+          ) : (
+            <button type="button" className="btn-primary w-full px-8 py-3 sm:w-auto" onClick={() => void newGame()}>
+              New run
+            </button>
+          )}
+        </div>
+      )}
+    >
+      <div ref={ref}>
         {showReport ? (
-          <div className="mt-8 grid grid-cols-4 gap-2 text-left">
+          <div className="grid grid-cols-2 gap-2 text-left sm:grid-cols-4">
             <Stat label="Research" value={report!.researchImpact.toFixed(0)} />
             <Stat label="Capability" value={report!.capability.toFixed(0)} />
             <Stat label="Affordability" value={report!.affordability.toFixed(0)} />
@@ -53,27 +76,14 @@ export function VictoryOverlay() {
             <Stat label="Ownership" value={`${report!.founderOwnership.toFixed(0)}%`} />
           </div>
         ) : (
-          <div className="mt-8 grid grid-cols-3 gap-3 text-left">
+          <div className="grid grid-cols-3 gap-2 text-left sm:gap-3">
             <Stat label="Day" value={String(state.day)} />
             <Stat label="Share" value={pct(state.player.finance.totalShare, 1)} />
             <Stat label="Valuation" value={money(state.player.finance.valuation)} />
           </div>
         )}
-        {showReport ? (
-          <button
-            type="button"
-            className="btn-primary mt-10 px-8 py-3"
-            onClick={() => useGameStore.setState({ state: continueEndless(state) })}
-          >
-            Continue endlessly
-          </button>
-        ) : (
-          <button type="button" className="btn-primary mt-10 px-8 py-3" onClick={() => void newGame()}>
-            New run
-          </button>
-        )}
       </div>
-    </div>
+    </ConsoleDialog>
   )
 }
 

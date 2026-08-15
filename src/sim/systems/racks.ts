@@ -18,10 +18,11 @@ import {
   dataHallComputeMultiplier,
   isDcKind,
   isDcAnchor,
-  mapEnergy,
   mapTileAt,
 } from './map'
 import { seededId } from '../rng'
+import { ensureRackUnitIds } from './dataHallLayouts'
+import { servingPlacementNeed } from './servingPlacement'
 
 /** Blueprint → orderable custom SKU (kept here to avoid rackSkus ↔ racks cycle). */
 export function designToSku(design: RackDesign): RackSku | null {
@@ -36,6 +37,9 @@ export function designToSku(design: RackDesign): RackSku | null {
     rackUnits: chassis.rackUnits,
     flopsPf: st.flopsPf,
     vramGb: st.vramGb,
+    systemRamGb: st.systemRamGb,
+    cpuScore: st.cpuScore,
+    networkGbps: st.networkGbps,
     mw: st.mw,
     tokPerSec: st.tokPerSec,
     accelerator: {
@@ -47,7 +51,7 @@ export function designToSku(design: RackDesign): RackSku | null {
       fp4TfPerDevice: 0,
       hbmGbPerDevice: st.vramGb / Math.max(1, st.gpuCount),
       hbmBandwidthTbPerSecPerDevice: 3,
-      interconnectGbps: 400,
+      interconnectGbps: st.networkGbps,
       idleMw: st.mw * 0.3,
       maxMw: st.mw,
       hostOverheadMw: st.mw * 0.08,
@@ -161,19 +165,6 @@ export function deployRacks(state: SimState, designId: string, count: number): S
   if (!stats.valid) return alert(state, 'warn', stats.errors[0] ?? 'Fix design first')
 
   const chassis = getChassis(design.chassisId)
-  const energy = mapEnergy(state)
-  // rack usage from map DC + already deployed custom racks
-  const fleet = fleetStats(state)
-  const free = Math.max(0, energy.rackCap - fleet.rackUnitsUsed)
-  const unitsNeeded = chassis.rackUnits * count
-  if (unitsNeeded > free) {
-    return alert(
-      state,
-      'warn',
-      `Need ${unitsNeeded} DC rack units, only ${free} free. Expand data halls.`,
-    )
-  }
-
   const need = new Map<string, number>()
   for (const p of design.placements) {
     need.set(p.moduleId, (need.get(p.moduleId) ?? 0) + count)
@@ -292,29 +283,48 @@ export function fleetStats(state: SimState): FleetStats {
     if (hall && (isDcKind(hall.kind) && isDcAnchor(hall)) && hall.powered === false) continue
     const sku = resolveRackSku(r.skuId, blueprints)
     const hallCompute = hall ? dataHallComputeMultiplier(hall) : 1
+    const normalized = ensureRackUnitIds(r)
+    const facilityId = r.facilityId ?? hall?.campusId
+    const layout = facilityId ? state.dataHallLayouts?.[facilityId] : undefined
+    const operational = layout ? new Set(layout.analysis.operationalRackUnitIds) : null
+    const placed = layout ? new Set(layout.objects.flatMap((object) => object.rackUnitId ? [object.rackUnitId] : [])) : null
+    const unitIds = normalized.unitIds ?? []
+    const activeCount = operational
+      ? unitIds.filter((unitId) => operational.has(unitId)).length
+      : r.count
+    const placedCount = placed
+      ? unitIds.filter((unitId) => placed.has(unitId)).length
+      : r.count
+    // A persisted layout is authoritative: disconnected or inaccessible racks
+    // never resurrect at partial throughput. Legacy layouts are repaired during
+    // save migration before this aggregation runs.
+    const environmentThroughput = layout?.analysis.throughputMultiplier ?? 1
+    if (activeCount <= 0) continue
     const ram = sku.systemRamGb ?? sku.vramGb * 4
     const cpu = sku.cpuScore ?? Math.max(8, sku.flopsPf * 50)
-    flopsPf += sku.flopsPf * r.count * hallCompute
-    vramGb += sku.vramGb * r.count
-    systemRamGb += ram * r.count
-    cpuScore += cpu * r.count
-    mw += sku.mw * r.count
-    idleMw += (sku.accelerator?.idleMw ?? sku.mw * 0.3) * r.count
-    tokPerSec += sku.tokPerSec * r.count * hallCompute
-    gpuCount += (sku.accelerator?.deviceCount ?? 1) * r.count
-    rackUnitsUsed += (r.rackUnits || sku.rackUnits) * r.count
+    flopsPf += sku.flopsPf * activeCount * hallCompute * environmentThroughput
+    vramGb += sku.vramGb * activeCount
+    systemRamGb += ram * activeCount
+    cpuScore += cpu * activeCount
+    mw += sku.mw * activeCount
+    idleMw += (sku.accelerator?.idleMw ?? sku.mw * 0.3) * activeCount
+    tokPerSec += sku.tokPerSec * activeCount * hallCompute * environmentThroughput
+    gpuCount += (sku.accelerator?.deviceCount ?? 1) * activeCount
+    rackUnitsUsed += (r.rackUnits || sku.rackUnits) * Math.max(placedCount, activeCount)
     const existing = designRows.find((d) => d.designId === r.skuId)
     if (existing) {
-      existing.count += r.count
+      existing.count += activeCount
     } else {
       designRows.push({
         designId: r.skuId,
         name: sku.name,
-        count: r.count,
+        count: activeCount,
         stats: {
           flopsPf: sku.flopsPf,
           vramGb: sku.vramGb,
           systemRamGb: ram,
+          cpuScore: cpu,
+          networkGbps: sku.networkGbps ?? sku.accelerator?.interconnectGbps ?? 0,
           mw: sku.mw,
           coolingMw: sku.mw * 0.3,
           psuMw: sku.mw * 1.1,
@@ -417,7 +427,15 @@ export function clearSlot(design: RackDesign, slotId: string): RackDesign {
 export function vramPressure(
   state: SimState,
   mode: 'train' | 'serve',
-): { needGb: number; haveGb: number; derate: number; modelName?: string } {
+): {
+  needGb: number
+  haveGb: number
+  derate: number
+  systemRamNeedGb?: number
+  systemRamHaveGb?: number
+  systemRamDerate?: number
+  modelName?: string
+} {
   const fleet = fleetStats(state)
   if (mode === 'train') {
     const listed = state.player.trainingJobs ?? []
@@ -472,30 +490,27 @@ export function vramPressure(
           : `${residentNames[0]} + ${residentNames.length - 1} more`,
     }
   }
-  const model =
-    (() => {
-          const m = state.player.models.find(
-            (x) =>
-              x.id === state.player.pricing.activeModelId &&
-              (x.release === 'released' || x.shipped),
-          )
-          return m
-            ? {
-                name: m.name,
-                paramsB: m.paramsB,
-                activeParamsB: m.activeParamsB,
-                family: m.family,
-              }
-            : null
-        })()
-
-  if (!model) {
-    return { needGb: 0, haveGb: fleet.vramGb, derate: 1 }
-  }
-  const need = modelVramGb(model.paramsB, model.activeParamsB, model.family)
+  const placement = servingPlacementNeed(state)
+  const need = placement.hbmNeedGb
   const have = fleet.vramGb
+  const systemRamNeed = placement.systemRamNeedGb
+  const systemRamHave = fleet.systemRamGb
   const derate = need <= 0 ? 1 : Math.min(1, have / need)
-  return { needGb: need, haveGb: have, derate, modelName: model.name }
+  return {
+    needGb: need,
+    haveGb: have,
+    derate,
+    systemRamNeedGb: systemRamNeed,
+    systemRamHaveGb: systemRamHave,
+    systemRamDerate:
+      systemRamNeed <= 0 ? 1 : Math.min(1, systemRamHave / systemRamNeed),
+    modelName:
+      placement.placements.length === 1
+        ? placement.placements[0]!.model.name
+        : placement.placements.length > 1
+          ? `${placement.placements[0]!.model.name} + ${placement.placements.length - 1} more`
+          : undefined,
+  }
 }
 
 function alert(state: SimState, severity: 'info' | 'warn' | 'danger', message: string): SimState {

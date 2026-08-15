@@ -3,10 +3,10 @@ import { useGameStore } from '../../store/gameStore'
 import type { Speed } from '../../sim/types'
 import {
   COMMAND_VIEWS,
+  panelForFunctionKey,
   NAV_GROUPS,
   defaultPanelForGroup,
   groupForPanel,
-  type CommandViewId,
 } from './navConfig'
 
 const SPEEDS: Speed[] = [0, 1, 2, 5]
@@ -24,13 +24,11 @@ function isTypingTarget(t: EventTarget | null): boolean {
  *
  * Space — pause / play
  * 0–3  — speed (0 pause, 1=1×, 2=2×, 3=5×)
- * +/=  — step one day
- * Q E F R T Y U — Strategy / Lab / Infra / Build / Market / Marketing / Company
  * Shift+1–7 — same workspaces
  * [    — toggle left drawer
  * ]    — toggle command dock
  * Tab  — cycle command dock view (shift reverse)
- * F1–F4 — P&L / Trends / Rivals / Feed
+ * F1–F12 — visible panels from Demand through Market
  * ? / H — hotkey help overlay via custom event
  * Esc  — close pause menu / help / clear build mode
  * Ctrl/Cmd+S — quick save (autosave)
@@ -84,13 +82,6 @@ export function useHotkeys() {
         }
       }
 
-      // Step day
-      if (k === '+' || k === '=' || k === '.') {
-        e.preventDefault()
-        st.stepDay()
-        return
-      }
-
       // Left rail collapse
       if (k === '[') {
         e.preventDefault()
@@ -117,26 +108,13 @@ export function useHotkeys() {
         return
       }
 
-      // F1–F4 command views
-      if (k === 'F1' || k === 'F2' || k === 'F3' || k === 'F4') {
+      // Function row opens the twelve visible information panels. Q/E remain
+      // unhandled here so the map camera listener can rotate the view.
+      const functionPanel = panelForFunctionKey(k)
+      if (functionPanel) {
         e.preventDefault()
-        const idx = Number(k.slice(1)) - 1
-        const view = COMMAND_VIEWS[idx]?.id as CommandViewId | undefined
-        if (view) {
-          st.setCommandView(view)
-          st.setCommandDockOpen(true)
-        }
-        return
-      }
-
-      // Workspace letters from navConfig (Q E F R T Y …)
-      const letterHit = NAV_GROUPS.find(
-        (g) => g.letter.toLowerCase() === k.toLowerCase(),
-      )
-      if (letterHit) {
-        e.preventDefault()
-        if (letterHit.id === 'infrastructure') st.openSites()
-        else st.setPanel(defaultPanelForGroup(letterHit.id))
+        if (functionPanel === 'map') st.openSites()
+        else st.setPanel(functionPanel)
         return
       }
 

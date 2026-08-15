@@ -6,6 +6,8 @@ import type {
   DataSellerKind,
   DomainStock,
   LabData,
+  ModelBackbone,
+  ModelFamily,
   SegmentId,
   TrainingDataPlan,
 } from '../types'
@@ -133,8 +135,9 @@ export const DATA_DOMAIN_META: Record<
     audio: 0,
     safety: 0,
     capability: 1,
-    processCostPerMTok: 1100,
-    processHard: 1.15,
+    // Decode, perceptual dedup, caption alignment, and safety classification.
+    processCostPerMTok: 3500,
+    processHard: 2.6,
     synthMTokPerPfDay: 6,
   },
   video: {
@@ -151,8 +154,9 @@ export const DATA_DOMAIN_META: Record<
     audio: 2,
     safety: -1,
     capability: 1.5,
-    processCostPerMTok: 2000,
-    processHard: 1.5,
+    // Frame decode + temporal/caption checks make video the costly outlier.
+    processCostPerMTok: 14000,
+    processHard: 9,
     synthMTokPerPfDay: 3,
   },
   audio: {
@@ -169,8 +173,9 @@ export const DATA_DOMAIN_META: Record<
     audio: 12,
     safety: 0,
     capability: 0.5,
-    processCostPerMTok: 1000,
-    processHard: 1.1,
+    // Transcription, segmentation, speaker/music tagging, and rights checks.
+    processCostPerMTok: 4200,
+    processHard: 3.5,
     synthMTokPerPfDay: 10,
   },
   math: {
@@ -298,7 +303,13 @@ export const DATA_CASH_PER_MTOK: Record<DataQualityBand, number> = {
   curated: 55_000,
 }
 
-const DOMAIN_PRICE_MULT: Record<DataDomain, number> = {
+/**
+ * Per-domain $ multiplier on top of the quality-band rate. Media listings are
+ * far pricier than text: the typical text-domain multiplier averages ≈1.45,
+ * so video (4.5) lands ≈3× and audio (3.0) ≈2× that rate — licensing, storage,
+ * and labeling for AV data are genuinely expensive.
+ */
+export const DOMAIN_PRICE_MULT: Record<DataDomain, number> = {
   code: 1.25,
   math: 1.7,
   science: 1.9,
@@ -306,8 +317,25 @@ const DOMAIN_PRICE_MULT: Record<DataDomain, number> = {
   health: 1.55,
   chat: 0.85,
   image: 1.1,
-  video: 1.35,
-  audio: 1.05,
+  video: 4.5,
+  audio: 3.0,
+}
+
+/**
+ * Listing-frequency weight per domain for open-market generation. Audio and
+ * video each get 20% of listings (≈40% together) — they're a big part of the
+ * internet — while the seven text/image domains share the remaining 60%.
+ */
+export const DOMAIN_LISTING_WEIGHT: Record<DataDomain, number> = {
+  code: 0.12,
+  math: 0.07,
+  science: 0.08,
+  law: 0.07,
+  health: 0.06,
+  chat: 0.12,
+  image: 0.08,
+  video: 0.2,
+  audio: 0.2,
 }
 
 export function emptyDataMarket(): DataMarketState {
@@ -363,6 +391,24 @@ const OFFER_TEMPLATES: OfferTemplate[] = [
     volumeW: 1.4,
     source: 'scrap',
   },
+  {
+    domain: 'audio',
+    sellerKind: 'web_scrape',
+    qualityBand: 'scrap',
+    name: 'Podcast archive torrent',
+    blurb: 'Thousands of hours of rips. Auto-transcribed, noisy segments.',
+    volumeW: 2.0,
+    source: 'scrap',
+  },
+  {
+    domain: 'video',
+    sellerKind: 'web_scrape',
+    qualityBand: 'scrap',
+    name: 'Video crawl torrent',
+    blurb: 'Scraped clips with weak metadata. Huge volume, rough labels.',
+    volumeW: 2.2,
+    source: 'scrap',
+  },
   // Brokers — mid market
   {
     domain: 'chat',
@@ -410,6 +456,24 @@ const OFFER_TEMPLATES: OfferTemplate[] = [
     source: 'licensed',
   },
   {
+    domain: 'audio',
+    sellerKind: 'broker',
+    qualityBand: 'premium',
+    name: 'Call-center voice logs',
+    blurb: 'Consent-cleared support calls with aligned transcripts.',
+    volumeW: 0.6,
+    source: 'licensed',
+  },
+  {
+    domain: 'video',
+    sellerKind: 'broker',
+    qualityBand: 'premium',
+    name: 'Licensed footage library',
+    blurb: 'B-roll + documentary footage with cleared rights.',
+    volumeW: 0.65,
+    source: 'licensed',
+  },
+  {
     domain: 'chat',
     sellerKind: 'broker',
     qualityBand: 'standard',
@@ -453,6 +517,24 @@ const OFFER_TEMPLATES: OfferTemplate[] = [
     name: 'Bug-fix + review traces',
     blurb: 'PR discussions with outcomes. Agent gold.',
     volumeW: 0.45,
+    source: 'licensed',
+  },
+  {
+    domain: 'audio',
+    sellerKind: 'enterprise',
+    qualityBand: 'curated',
+    name: 'Studio stems license',
+    blurb: 'Multi-track studio sessions — music, foley, voice. Priced per hour.',
+    volumeW: 0.4,
+    source: 'licensed',
+  },
+  {
+    domain: 'video',
+    sellerKind: 'enterprise',
+    qualityBand: 'curated',
+    name: 'Studio rushes license',
+    blurb: 'Raw shoots with scene logs and releases. Premium video fuel.',
+    volumeW: 0.42,
     source: 'licensed',
   },
   // Research labs
@@ -532,13 +614,48 @@ const OFFER_TEMPLATES: OfferTemplate[] = [
   },
 ]
 
+/** Templates grouped per domain so generation can weight domains, not templates. */
+const OFFER_TEMPLATES_BY_DOMAIN: Record<DataDomain, OfferTemplate[]> =
+  DATA_DOMAINS.reduce(
+    (acc, domain) => {
+      acc[domain] = OFFER_TEMPLATES.filter((tmpl) => tmpl.domain === domain)
+      return acc
+    },
+    {} as Record<DataDomain, OfferTemplate[]>,
+  )
+
+/**
+ * Pick a listing template: first roll a domain from DOMAIN_LISTING_WEIGHT
+ * (audio + video ≈ 40% of listings), then a uniform template within it.
+ */
+function pickOfferTemplate(r: () => number): OfferTemplate {
+  const roll = r()
+  let acc = 0
+  // Fallback covers the roll === 1.0 edge; weights sum to 1 otherwise.
+  let domain: DataDomain = DATA_DOMAINS[DATA_DOMAINS.length - 1]!
+  for (const candidate of DATA_DOMAINS) {
+    acc += DOMAIN_LISTING_WEIGHT[candidate]
+    if (roll < acc) {
+      domain = candidate
+      break
+    }
+  }
+  const pool = OFFER_TEMPLATES_BY_DOMAIN[domain]
+  return pool[Math.min(pool.length - 1, Math.floor(r() * pool.length))]!
+}
+
 /** Deterministic PRNG from seed+day+i */
 function marketRng(seed: number, day: number, i: number): () => number {
   let s = (seed ^ (day * 7919) ^ (i * 104729)) >>> 0
-  return () => {
+  const next = () => {
     s = (Math.imul(s, 1664525) + 1013904223) >>> 0
     return s / 0xffffffff
   }
+  // Burn two rounds: the first LCG outputs stay correlated with small seeds,
+  // which would silently starve weighted domain picks of whole domains.
+  next()
+  next()
+  return next
 }
 
 function pickQuality(band: DataQualityBand, r: () => number): number {
@@ -549,6 +666,8 @@ function pickQuality(band: DataQualityBand, r: () => number): number {
 /**
  * Build a fresh slate of market offers.
  * Volumes vary: some listings nearly empty, some flood the market.
+ * As the game progresses the shared pool deepens — much larger lots become
+ * available, and the going $/MTok rate climbs with it.
  */
 export function generateDataMarketOffers(
   seed: number,
@@ -558,9 +677,12 @@ export function generateDataMarketOffers(
 ): DataMarketOffer[] {
   const offers: DataMarketOffer[] = []
   const n = Math.max(6, Math.min(14, count))
+  // Late-game market: deeper supply (up to 9×) at higher prices (up to 6×).
+  const volumeMult = 1 + Math.min(Math.max(0, day), 2400) / 300
+  const priceMult = 1 + Math.min(Math.max(0, day), 3000) / 600
   for (let i = 0; i < n; i++) {
     const r = marketRng(seed, day, i + 3)
-    const tmpl = OFFER_TEMPLATES[Math.floor(r() * OFFER_TEMPLATES.length)]!
+    const tmpl = pickOfferTemplate(r)
     // Volume: log-uniform-ish — thin → flood
     const volRoll = r()
     let mTokTotal: number
@@ -581,6 +703,7 @@ export function generateDataMarketOffers(
     if (tmpl.qualityBand === 'scrap') mTokTotal = Math.round(mTokTotal * (1.4 + r() * 0.8))
     // Curated bias smaller
     if (tmpl.qualityBand === 'curated') mTokTotal = Math.round(mTokTotal * (0.35 + r() * 0.35))
+    mTokTotal = Math.round(mTokTotal * volumeMult)
 
     // 8% chance sold out / no inventory this refresh
     const soldOut = r() < 0.08
@@ -594,11 +717,12 @@ export function generateDataMarketOffers(
         : tmpl.qualityBand === 'curated'
           ? Math.round(25 + r() * 60)
           : Math.round(40 + r() * 140)
-    lotMTok = Math.max(10, Math.min(lotMTok, Math.max(10, mTokTotal)))
+    lotMTok = Math.max(10, Math.min(Math.round(lotMTok * volumeMult), Math.max(10, mTokTotal)))
 
     const pricePer =
       DATA_CASH_PER_MTOK[tmpl.qualityBand] *
       (DOMAIN_PRICE_MULT[tmpl.domain] ?? 1) *
+      priceMult *
       (0.85 + r() * 0.35)
     const lotForPrice = mTokLeft > 0 ? Math.min(lotMTok, mTokLeft) : lotMTok
     const cash = Math.max(50_000, Math.round(lotForPrice * pricePer))
@@ -649,6 +773,59 @@ export function generateDataMarketOffers(
 export function minDataMTokForParams(paramsB: number): number {
   // paramsB is billions of parameters → need paramsB * 1e9 tokens = paramsB * 1000 MTok
   return Math.max(1, paramsB * 1000)
+}
+
+export interface TrainingDataTargetSpec {
+  paramsB: number
+  activeParamsB?: number
+  family: ModelFamily
+  backbone?: ModelBackbone
+  /** Share of the selected corpus used for optimization; the rest is held out. */
+  trainShare?: number
+}
+
+/**
+ * Parameter capacity that must receive useful training coverage.
+ *
+ * Dense models exercise every parameter on every token. MoE routes only the
+ * active path, while the inactive expert bank still needs partial coverage so
+ * routing does not leave most experts cold. The 20% bank weight matches the
+ * sparse-capacity assumption used by the legacy MoE training curve; memory
+ * requirements continue to use total parameters.
+ */
+export function trainingDataParameterBasisB(
+  spec: Pick<
+    TrainingDataTargetSpec,
+    'paramsB' | 'activeParamsB' | 'family' | 'backbone'
+  >,
+): number {
+  const total = Math.max(0.001, spec.paramsB)
+  const sparse = spec.backbone === 'moe' || (spec.backbone == null && spec.family === 'moe')
+  if (!sparse) return total
+  const active = Math.max(0.001, Math.min(total, spec.activeParamsB ?? total * 0.1))
+  return active + (total - active) * 0.2
+}
+
+function trainingTargetMTok(
+  spec: TrainingDataTargetSpec,
+  tokensPerParameter: number,
+): number {
+  const trainShare = Math.max(0.4, Math.min(0.95, spec.trainShare ?? 0.82))
+  const optimizationTokens =
+    trainingDataParameterBasisB(spec) * 1000 * Math.max(0, tokensPerParameter)
+  return Math.round(optimizationTokens / trainShare)
+}
+
+/** Raw corpus floor including the verification holdout. */
+export function minimumTrainingDataMTok(spec: TrainingDataTargetSpec): number {
+  const isOmni = spec.family === 'omni'
+  return trainingTargetMTok(spec, isOmni ? 10 : 1)
+}
+
+/** Strong raw-corpus target including routed MoE capacity and verification. */
+export function recommendedTrainingDataMTok(spec: TrainingDataTargetSpec): number {
+  const isOmni = spec.family === 'omni'
+  return trainingTargetMTok(spec, isOmni ? 10 : 6)
 }
 
 /**
@@ -709,17 +886,16 @@ export function createEmptyLabData(): LabData {
   const stocks = {} as Record<DataDomain, DomainStock>
   for (const d of DATA_DOMAINS) stocks[d] = emptyDomainStock()
 
-  // 500 MTok starter as web crawl, weighted toward chat/code
+  // 500 MTok public foundation — less chat-heavy, more code/math/science,
+  // with small regulated-domain seeds. Audio/video must still be earned.
   const seed: Partial<Record<DataDomain, number>> = {
-    chat: 190,
-    code: 100,
-    math: 40,
-    science: 35,
+    chat: 80,
+    code: 180,
+    math: 90,
+    science: 80,
     image: 40,
-    law: 25,
-    health: 20,
-    audio: 30,
-    video: 20,
+    law: 15,
+    health: 15,
   }
   let total = 0
   for (const d of DATA_DOMAINS) {
@@ -767,15 +943,15 @@ export function createEmptyLabData(): LabData {
 
 export function defaultDataWeights(family: string): Record<DataDomain, number> {
   const w: Record<DataDomain, number> = {
-    code: 0.18,
-    math: 0.09,
-    science: 0.08,
+    code: 0.22,
+    math: 0.12,
+    science: 0.1,
     law: 0.04,
     health: 0.04,
-    chat: 0.39,
+    chat: 0.32,
     image: 0.08,
-    video: 0.04,
-    audio: 0.06,
+    video: 0.03,
+    audio: 0.05,
   }
   if (family === 'diffusion') {
     return { code: 0.04, math: 0.02, science: 0.03, law: 0.01, health: 0.02, chat: 0.13, image: 0.54, video: 0.15, audio: 0.06 }

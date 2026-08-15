@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import * as THREE from 'three'
+import type { DirectedLane, RoadNetworkSnapshot, RoadSegment, TileId } from '../../../sim/world'
+import { ArchetypeRegistry } from './archetypes'
 import { ViewportChunkManager } from './chunks'
 import { TrafficLayer } from './trafficLayer'
 import {
@@ -32,7 +34,7 @@ describe('TrafficLayer', () => {
     second.dispose()
   })
 
-  it('animates through shader time without rebuilding or updating instance matrices per frame', () => {
+  it('interpolates fixed-step endpoints without rebuilding meshes every frame', () => {
     const chunks = new ViewportChunkManager(8, 4, 4, 4)
     const fixture = roadSource()
     const traffic = new TrafficLayer()
@@ -45,6 +47,8 @@ describe('TrafficLayer', () => {
     const matrices = meshes.map((mesh) => Array.from(mesh.instanceMatrix.array))
     const meshIdentities = [...meshes]
     const readsAfterProjection = fixture.readSurface.mock.calls.length
+    const rebuildsAfterProjection = traffic.stats.rebuilds
+    const uploadsAfterProjection = traffic.stats.uploadBytes
 
     traffic.setFrame(1.25)
     traffic.setFrame(9.5)
@@ -56,19 +60,318 @@ describe('TrafficLayer', () => {
       matrices,
     )
     expect(fixture.readSurface).toHaveBeenCalledTimes(readsAfterProjection)
+    expect(traffic.stats.rebuilds).toBe(rebuildsAfterProjection)
+    expect(traffic.stats.uploadBytes).toBe(uploadsAfterProjection)
     for (const mesh of meshes) {
       expect(mesh.instanceMatrix.usage).toBe(THREE.StaticDrawUsage)
-      expect(mesh.geometry.getAttribute('trafficPhase')).toBeInstanceOf(
+      expect(mesh.geometry.getAttribute('trafficDelta')).toBeInstanceOf(
         THREE.InstancedBufferAttribute,
       )
-      expect(mesh.geometry.getAttribute('trafficSpeed')).toBeInstanceOf(
+      expect(mesh.geometry.getAttribute('trafficYawDelta')).toBeInstanceOf(
         THREE.InstancedBufferAttribute,
       )
     }
 
     traffic.dispose()
   })
+
+  it('favors major v3 roads and aligns vehicles to diagonal topology tangents', () => {
+    const chunks = new ViewportChunkManager(8, 4, 4, 4)
+    const local = new TrafficLayer()
+    const highway = new TrafficLayer()
+    const diagonal = new TrafficLayer()
+    const visible = new Set<ChunkId>([0, 1])
+
+    local.update(visible, chunks, transportSource(0x01_44))
+    highway.update(visible, chunks, transportSource(0x04_44))
+    diagonal.update(visible, chunks, transportSource(0x03_22))
+
+    expect(local.stats.vehicles).toBeGreaterThan(0)
+    expect(highway.stats.vehicles).toBeGreaterThan(local.stats.vehicles)
+    const body = trafficMeshes(diagonal).find((mesh) => mesh.name === 'traffic-bodies')!
+    expect(body.frustumCulled).toBe(false)
+    const first = new THREE.Matrix4()
+    body.getMatrixAt(0, first)
+    const elements = first.elements
+    const forwardScale = Math.hypot(elements[0]!, elements[2]!)
+    expect(Math.abs(elements[0]!) / forwardScale).toBeCloseTo(Math.SQRT1_2, 4)
+    expect(Math.abs(elements[2]!) / forwardScale).toBeCloseTo(Math.SQRT1_2, 4)
+
+    local.dispose()
+    highway.dispose()
+    diagonal.dispose()
+  })
+
+  it('batches deterministic authored variants without mutating registry geometry', () => {
+    const fallback = new THREE.BoxGeometry(1, 1, 1)
+    const authored = new THREE.TetrahedronGeometry(0.3)
+    authored.setAttribute('color', new THREE.Float32BufferAttribute(
+      new Array(authored.getAttribute('position').count * 3).fill(0),
+      3,
+    ))
+    const registry = geometryRegistry([
+      [5, fallback],
+      [300, fallback],
+      [473, authored],
+    ])
+    const chunks = new ViewportChunkManager(8, 4, 4, 4)
+    const first = new TrafficLayer(registry)
+    const second = new TrafficLayer(registry)
+    const visible = new Set<ChunkId>([0, 1])
+    const source = transportSource(0x04_44)
+    first.update(visible, chunks, source)
+    second.update(visible, chunks, source)
+
+    expect(first.stats.instances).toBe(first.stats.vehicles)
+    expect(first.stats.drawCalls).toBe(1)
+    expect(trafficMeshes(first).map((mesh) => mesh.name)).toEqual(['traffic-authored-473'])
+    expect(trafficSnapshot(first)).toEqual(trafficSnapshot(second))
+    const mesh = trafficMeshes(first)[0]!
+    expect((mesh.material as THREE.MeshStandardMaterial).vertexColors).toBe(false)
+    expect(mesh.instanceColor).not.toBeNull()
+    expect(Math.max(...mesh.instanceColor!.array)).toBeGreaterThan(0.1)
+    expect(mesh.geometry).not.toBe(authored)
+    expect(authored.getAttribute('trafficDelta')).toBeUndefined()
+    const registryDisposed = vi.fn()
+    authored.addEventListener('dispose', registryDisposed)
+
+    first.dispose()
+    second.dispose()
+    expect(registryDisposed).not.toHaveBeenCalled()
+  })
+
+  it('keeps procedural cars when catalog entries still alias fallback geometry', () => {
+    const fallback = new THREE.BoxGeometry(1, 1, 1)
+    const registry = geometryRegistry([
+      [5, fallback],
+      [300, fallback],
+      [473, fallback],
+    ])
+    const traffic = new TrafficLayer(registry)
+    traffic.update(
+      new Set<ChunkId>([0, 1]),
+      new ViewportChunkManager(8, 4, 4, 4),
+      transportSource(0x04_44),
+    )
+
+    expect(trafficMeshes(traffic).map((mesh) => mesh.name)).toEqual([
+      'traffic-bodies',
+      'traffic-cabins',
+    ])
+    expect(traffic.stats.instances).toBe(traffic.stats.vehicles * 2)
+    traffic.dispose()
+  })
+
+  it('uses varied procedural body proportions, glass tints, and paint colors', () => {
+    const width = 32
+    const height = 16
+    const source: ViewportRenderSource = {
+      width,
+      height,
+      tileSize: 1.05,
+      readSurface(_tileId, out) {
+        out.kind = SurfaceKind.road
+        out.neighborMask = 0b1010
+        out.region = 0
+        out.flags = 0
+        out.transport = undefined
+      },
+      getChunkInstances: () => [],
+      getChunkRevision: () => 1,
+    }
+    const traffic = new TrafficLayer()
+    traffic.update(
+      new Set<ChunkId>([0, 1]),
+      new ViewportChunkManager(width, height, 16, 8),
+      source,
+    )
+    const body = trafficMeshes(traffic).find((mesh) => mesh.name === 'traffic-bodies')!
+    const cabin = trafficMeshes(traffic).find((mesh) => mesh.name === 'traffic-cabins')!
+    const uniqueColors = (mesh: THREE.InstancedMesh) => {
+      const colors = mesh.instanceColor!.array
+      const values = new Set<string>()
+      for (let index = 0; index < mesh.count; index++) {
+        values.add(Array.from(colors.slice(index * 3, index * 3 + 3)).map((value) => value.toFixed(3)).join(':'))
+      }
+      return values.size
+    }
+    const proportions = new Set<string>()
+    const matrix = new THREE.Matrix4()
+    const position = new THREE.Vector3()
+    const quaternion = new THREE.Quaternion()
+    const scale = new THREE.Vector3()
+    for (let index = 0; index < body.count; index++) {
+      body.getMatrixAt(index, matrix)
+      matrix.decompose(position, quaternion, scale)
+      proportions.add(`${scale.x.toFixed(2)}:${scale.y.toFixed(2)}:${scale.z.toFixed(2)}`)
+    }
+
+    expect(body.count).toBeGreaterThan(100)
+    expect(uniqueColors(body)).toBeGreaterThan(10)
+    expect(uniqueColors(cabin)).toBeGreaterThanOrEqual(5)
+    expect(proportions.size).toBeGreaterThanOrEqual(6)
+    traffic.dispose()
+  })
+
+  it('reconciles daily utilization density into stable mesh slots', () => {
+    const network = trafficNetwork(24)
+    let transport = transportLoads(network, 1, 0)
+    const source: ViewportRenderSource = {
+      width: network.width,
+      height: network.height,
+      tileSize: 1,
+      getRoadNetwork: () => network,
+      getTransportRuntimeState: () => transport,
+      readSurface: () => undefined,
+      getChunkInstances: () => [],
+      getChunkRevision: () => 1,
+      getSurfaceRevision: () => 1,
+    }
+    const traffic = new TrafficLayer()
+    const chunks = new ViewportChunkManager(network.width, network.height, 32, 1)
+    const visible = new Set<ChunkId>([0])
+    traffic.update(visible, chunks, source)
+    const meshes = trafficMeshes(traffic)
+    const rebuilds = traffic.stats.rebuilds
+    const lowDensity = traffic.stats.vehicles
+    const firstRoute = (meshes.find((mesh) => mesh.name === 'traffic-bodies')!
+      .userData.trafficVehicles[0].state as { route: number[] }).route
+
+    transport = transportLoads(network, 2, 2)
+    traffic.update(visible, chunks, source)
+
+    expect(traffic.stats.vehicles).toBeGreaterThan(lowDensity)
+    expect(trafficMeshes(traffic)).toEqual(meshes)
+    expect(traffic.stats.rebuilds).toBe(rebuilds)
+    const retained = trafficMeshes(traffic).find((mesh) => mesh.name === 'traffic-bodies')!
+      .userData.trafficVehicles.find((vehicle: { state?: { route: number[] } }) =>
+        vehicle.state?.route === firstRoute)
+    expect(retained).toBeDefined()
+    traffic.dispose()
+  })
 })
+
+function geometryRegistry(entries: readonly (readonly [number, THREE.BufferGeometry])[]): ArchetypeRegistry {
+  const registry = new ArchetypeRegistry()
+  const material = new THREE.MeshBasicMaterial()
+  for (const [id, geometry] of entries) {
+    registry.register({
+      id,
+      name: `test-${id}`,
+      geometry: { near: geometry, mid: geometry, far: geometry },
+      material: { near: material, mid: material, far: material },
+    })
+  }
+  return registry
+}
+
+function transportLoads(network: RoadNetworkSnapshot, day: number, utilization: number) {
+  return {
+    version: 1 as const,
+    day,
+    networkRevision: network.revision,
+    segmentLoads: network.segments.map((segment) => ({
+      segmentId: segment.index,
+      flow: 0,
+      capacity: 1,
+      utilization,
+      travelTimeMult: 1,
+    })),
+    junctionLoads: [],
+    regionCongestion: {},
+    cityAccess: {},
+    facilityAccess: {},
+  }
+}
+
+function trafficNetwork(count: number): RoadNetworkSnapshot {
+  const segments: RoadSegment[] = []
+  const lanes: DirectedLane[] = []
+  for (let index = 0; index < count; index++) {
+    const points = [
+      { tileId: index as TileId, x: index + 0.5, y: 0.5, elevation: 0 },
+      { tileId: (index + 1) as TileId, x: index + 1.5, y: 0.5, elevation: 0 },
+    ]
+    segments.push({
+      index,
+      id: `segment:${index}`,
+      fromJunctionId: `junction:${index}`,
+      toJunctionId: `junction:${index + 1}`,
+      tileIds: [index as TileId, (index + 1) as TileId],
+      points,
+      roadClass: 4,
+      flags: 0,
+      bridge: false,
+      length: 1,
+      profile: {
+        roadClass: 4,
+        lanesPerDirection: 2,
+        speedLimit: 110,
+        capacityPerDay: 5_600,
+        halfWidth: 0.42,
+        shoulderWidth: 0.08,
+      },
+    })
+    lanes.push({
+      index,
+      id: `lane:${index}`,
+      segmentId: `segment:${index}`,
+      direction: 'forward',
+      laneIndex: 0,
+      fromJunctionId: `junction:${index}`,
+      toJunctionId: `junction:${index + 1}`,
+      lateralOffset: 0.1,
+      speedLimit: 110,
+      points,
+    })
+  }
+  return {
+    revision: 7,
+    width: count + 1,
+    height: 1,
+    chunkSize: 32,
+    chunksWide: 1,
+    drivingSide: 'left',
+    profiles: {} as RoadNetworkSnapshot['profiles'],
+    segments,
+    junctions: [],
+    lanes,
+    connectors: lanes.slice(0, -1).map((lane, index) => ({
+      id: `connector:${index}`,
+      junctionId: `junction:${index + 1}`,
+      fromLaneId: lane.id,
+      toLaneId: lanes[index + 1]!.id,
+      turn: 'straight',
+      signalGroup: null,
+    })),
+    terminals: [],
+    chunks: new Map([[0, {
+      segmentIds: segments.map((segment) => segment.id),
+      junctionIds: [],
+      terminalIds: [],
+    }]]),
+    nearestSegmentByTile: new Int32Array(count + 1),
+    accessDistanceByTile: new Uint16Array(count + 1),
+  }
+}
+
+function transportSource(packedTransport: number): ViewportRenderSource {
+  return Object.freeze({
+    width: 8,
+    height: 4,
+    tileSize: 1.05,
+    readSurface: (_tileId: number, out: SurfaceTexel) => {
+      out.kind = SurfaceKind.grass
+      out.neighborMask = packedTransport & 0xff
+      out.region = 0
+      out.flags = 0
+      out.transport = packedTransport
+    },
+    getChunkInstances: () => Object.freeze([]),
+    getChunkRevision: () => 1,
+    getSurfaceRevision: () => 1,
+  })
+}
 
 function roadSource(): {
   source: ViewportRenderSource
@@ -110,7 +413,7 @@ function trafficSnapshot(traffic: TrafficLayer): unknown {
     name: mesh.name,
     matrices: Array.from(mesh.instanceMatrix.array),
     colors: Array.from(mesh.instanceColor?.array ?? []),
-    phases: Array.from(mesh.geometry.getAttribute('trafficPhase').array),
-    speeds: Array.from(mesh.geometry.getAttribute('trafficSpeed').array),
+    deltas: Array.from(mesh.geometry.getAttribute('trafficDelta').array),
+    yawDeltas: Array.from(mesh.geometry.getAttribute('trafficYawDelta').array),
   }))
 }

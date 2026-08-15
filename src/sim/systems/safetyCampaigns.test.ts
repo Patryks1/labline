@@ -131,7 +131,7 @@ describe('repeatable safety campaigns', () => {
     expect(advanced.player.trainingJobs?.[0]?.progressPfDays ?? 0).toBeLessThan(soloProgress)
   })
 
-  it('updates the same model id as a new revision', () => {
+  it('creates an internal child revision without mutating deployed weights', () => {
     let state = startSafetyCampaign(campaignState(), {
       modelId: 'safe-model', intensity: 'targeted', researchers: 8,
     })
@@ -142,9 +142,54 @@ describe('repeatable safety campaigns', () => {
       state = tickSafetyCampaign({ ...state, day: state.day + 1 })
     }
     expect(state.player.safetyCampaign).toBeNull()
+    expect(state.player.models).toHaveLength(2)
     expect(state.player.models[0]!.id).toBe(originalId)
-    expect(state.player.models[0]!.revision).toBe(originalRevision + 1)
-    expect(state.player.models[0]!.benchmarks.safety).toBeGreaterThan(originalSafety)
-    expect(state.player.models[0]!.safetyTraining?.revisions).toHaveLength(1)
+    expect(state.player.models[0]!.revision ?? 1).toBe(originalRevision)
+    expect(state.player.models[0]!.benchmarks.safety).toBe(originalSafety)
+    const child = state.player.models[1]!
+    expect(child).toMatchObject({
+      parentModelId: originalId,
+      revision: originalRevision + 1,
+      versionLabel: `0.${originalRevision + 1}`,
+      release: 'internal',
+      shipped: false,
+      checkpointEvaluations: [],
+      trainingBenchmarkSnapshots: [],
+    })
+    expect(child.id).not.toBe(originalId)
+    expect(child.benchmarks.safety).toBeGreaterThan(originalSafety)
+    expect(child.safetyTraining?.revisions).toHaveLength(1)
+    expect(state.player.pricing.activeModelId).toBe(originalId)
+  })
+
+  it('accepts a public source while keeping the deployed model immutable', () => {
+    const base = campaignState()
+    const publicSource = {
+      ...base.player.models[0]!,
+      release: 'released' as const,
+      shipped: true,
+      checkpointEvaluations: [{ id: 'source-only-report' } as never],
+    }
+    let state: SimState = {
+      ...base,
+      player: { ...base.player, models: [publicSource] },
+    }
+    expect(safetyCampaignEstimate(state, publicSource.id, 'targeted').ok).toBe(true)
+    state = startSafetyCampaign(state, {
+      modelId: publicSource.id,
+      intensity: 'targeted',
+      researchers: 8,
+    })
+    for (let day = 0; day < 120 && state.player.safetyCampaign; day += 1) {
+      state = tickSafetyCampaign({ ...state, day: state.day + 1 })
+    }
+    expect(state.player.models[0]).toEqual(publicSource)
+    expect(state.player.models[1]).toMatchObject({
+      parentModelId: publicSource.id,
+      release: 'internal',
+      shipped: false,
+      checkpointEvaluations: [],
+    })
+    expect(state.player.pricing.activeModelId).toBe(publicSource.id)
   })
 })

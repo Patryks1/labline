@@ -90,6 +90,35 @@ export interface BenchmarkMetricDef {
   short: string
 }
 
+export type EvaluationMarket = 'language' | 'image' | 'video' | 'audio'
+
+export const EVALUATION_MARKETS: ReadonlyArray<{
+  id: EvaluationMarket
+  label: string
+  suite: BenchmarkSuiteId
+}> = [
+  { id: 'language', label: 'Language', suite: 'language' },
+  { id: 'image', label: 'Image', suite: 'image_generation' },
+  { id: 'video', label: 'Video', suite: 'video_generation' },
+  { id: 'audio', label: 'Audio', suite: 'audio_generation' },
+]
+
+/** Public eval markets are based on products a checkpoint can actually output. */
+export function evaluationMarketsForModel(model: Model): EvaluationMarket[] {
+  const markets: EvaluationMarket[] = []
+  if (model.family !== 'diffusion' && model.family !== 'video' && outputEnabled(model, 'text')) {
+    markets.push('language')
+  }
+  if (outputEnabled(model, 'image')) markets.push('image')
+  if (outputEnabled(model, 'video')) markets.push('video')
+  if (outputEnabled(model, 'audio')) markets.push('audio')
+  return markets
+}
+
+export function suiteForEvaluationMarket(market: EvaluationMarket): BenchmarkSuiteId {
+  return EVALUATION_MARKETS.find((candidate) => candidate.id === market)!.suite
+}
+
 export const SUITE_METRICS: Record<BenchmarkSuiteId, readonly BenchmarkMetricDef[]> = {
   language: [
     ['mmlu', 'General knowledge', 'Knowledge'],

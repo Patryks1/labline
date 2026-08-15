@@ -4,14 +4,22 @@ import type { MapTile } from '../../../sim/types'
 import { createBuildingKit, type KitDetail } from '../buildingKits'
 import type { Neighbors } from '../tileNeighbors'
 import {
+  MUNICIPAL_POWER_BY_KIND,
+  type MunicipalCampusDescriptor,
+  type MunicipalStructureDescriptor,
+} from '../assets/municipalPowerLayouts'
+import {
   ArchetypeRegistry,
   DefaultArchetype,
   LodTier,
-  installDitherTransition,
   type ArchetypeDefinition,
 } from '../v2'
 
 type Rgb = readonly [number, number, number]
+
+function range(first: number, last: number): number[] {
+  return Array.from({ length: last - first + 1 }, (_, index) => first + index)
+}
 
 const WHITE_HEX = 0xffffff
 const WHITE: Rgb = [1, 1, 1]
@@ -55,7 +63,200 @@ export const SceneryArchetype = {
   lakeEdge: 208,
   lakeInterior: 209,
   roadLamp: 210,
+  houseCourtyard: 211,
+  houseGarden: 212,
+  houseTownhome: 213,
+  houseStilt: 214,
+  houseRow: 215,
+  houseCorner: 216,
+  cityPodium: 217,
+  cityArcade: 218,
+  cityCivicHall: 219,
+  cityLibrary: 220,
+  cityMarket: 221,
+  cityHotel: 222,
+  cityTransitHub: 223,
+  warehouseSawtooth: 224,
+  warehouseColdStore: 225,
+  warehouseDepot: 226,
+  warehouseSilos: 227,
+  warehouseFreight: 228,
+  forestConiferTall: 229,
+  forestAspen: 230,
+  forestOak: 231,
+  forestScrub: 232,
+  forestDeadwood: 233,
+  forestRocky: 234,
+  groundScrub: 235,
+  groundRock: 236,
+  groundLog: 237,
+  hillMound: 238,
 } as const
+
+/**
+ * Stable IDs exported by the committed World V4 asset manifest. Keeping the
+ * renderer projection on these IDs means an authored bundle can replace each
+ * silhouette independently; their procedural definitions deliberately share
+ * family geometry so loading failures and the pre-load frame remain batched.
+ */
+export const AuthoredSceneryArchetype = {
+  grassTufts: 400,
+  meadowFlowers: 401,
+  dryScrub: 402,
+  fernCluster: 403,
+  pebbleGroup: 404,
+  graniteOutcrop: 405,
+  sandstoneOutcrop: 406,
+  fallenPine: 407,
+  fallenBirch: 408,
+  shoreReeds: 409,
+  cattailClump: 410,
+  mushroomRing: 411,
+  wildGrass: 412,
+  hillBoulders: 413,
+  scotsPine: 414,
+  spruceTall: 415,
+  firYoung: 416,
+  cedarWide: 417,
+  birchWhite: 418,
+  aspenColumn: 419,
+  mapleRed: 420,
+  beechRound: 421,
+  willowDroop: 422,
+  poplarTall: 423,
+  deadPine: 424,
+  deadOak: 425,
+  hawthornShrub: 426,
+  floweringShrub: 427,
+  juniperScrub: 428,
+  mixedGrove: 429,
+  pineGrove: 430,
+  birchGrove: 431,
+  houseDuplex: 432,
+  houseTerrace: 433,
+  houseTownhome: 434,
+  houseRow: 435,
+  houseCourtyard: 436,
+  houseGarden: 437,
+  houseStilt: 438,
+  houseCorner: 439,
+  houseCottage: 440,
+  houseModern: 441,
+  apartmentWalkup: 442,
+  apartmentBrick: 443,
+  apartmentCourtyard: 444,
+  officeGlass: 445,
+  officeStepped: 446,
+  mixedUsePodium: 447,
+  mixedUseCorner: 448,
+  civicHall: 449,
+  publicLibrary: 450,
+  coveredMarket: 451,
+  cityHotel: 452,
+  shoppingArcade: 453,
+  transitHub: 454,
+  clockTower: 455,
+  hospitalBlock: 456,
+  universityHall: 457,
+  broadcastTower: 458,
+  warehouseSawtooth: 459,
+  warehouseColdStore: 460,
+  warehouseDepot: 461,
+  warehouseFreight: 462,
+  containerYard: 463,
+  grainSilos: 464,
+  tankYard: 465,
+  lightIndustry: 466,
+  railTerminal: 467,
+  trainingCentre: 468,
+  networkOperations: 469,
+  constructionShell: 470,
+  utilityPlant: 471,
+  securityCentre: 472,
+} as const
+
+/** Stable authored road furniture IDs within the fixed 128-model catalog. */
+export const RoadPropArchetype = {
+  trafficLight: 490,
+  pedestrianSignal: 491,
+  roadSign: 492,
+  highwayGuardrail: 497,
+} as const
+
+export const MunicipalPowerArchetype = {
+  coal: MUNICIPAL_POWER_BY_KIND.coal.archetypeId,
+  wind: MUNICIPAL_POWER_BY_KIND.wind.archetypeId,
+  solar: MUNICIPAL_POWER_BY_KIND.solar.archetypeId,
+  nuclear: MUNICIPAL_POWER_BY_KIND.nuclear.archetypeId,
+} as const
+
+/**
+ * Stable, parcel-renderer-facing IDs for the deterministic one-building kits.
+ * These live above the authored World V4 catalog (which ends at 499), so the
+ * IDs can be persisted without colliding with streamed scenery assets.
+ */
+export const SingleBuildingArchetype = {
+  detachedHouse: 500,
+  smallShop: 501,
+  rowhouse: 502,
+  midRise: 503,
+  officeTower: 504,
+  skyscraper: 505,
+} as const
+
+export type SingleBuildingStyle = keyof typeof SingleBuildingArchetype
+export type ParcelSpan = readonly [width: 1 | 2, depth: 1 | 2]
+
+export interface SingleBuildingProfile {
+  readonly id: (typeof SingleBuildingArchetype)[SingleBuildingStyle]
+  /** Main building footprint inside the normalized one-tile lot. */
+  readonly footprint: readonly [width: number, depth: number]
+  readonly height: number
+  readonly parcelSpans: readonly ParcelSpan[]
+}
+
+export const SINGLE_BUILDING_PROFILES: Readonly<Record<SingleBuildingStyle, SingleBuildingProfile>> = {
+  detachedHouse: { id: 500, footprint: [0.52, 0.46], height: 0.53, parcelSpans: [[1, 1]] },
+  smallShop: { id: 501, footprint: [0.68, 0.54], height: 0.41, parcelSpans: [[1, 1]] },
+  rowhouse: { id: 502, footprint: [0.76, 0.48], height: 0.73, parcelSpans: [[1, 1]] },
+  midRise: { id: 503, footprint: [0.68, 0.62], height: 1.12, parcelSpans: [[1, 1]] },
+  officeTower: { id: 504, footprint: [0.62, 0.58], height: 1.61, parcelSpans: [[1, 1]] },
+  skyscraper: {
+    id: 505,
+    footprint: [0.58, 0.54],
+    height: 2.49,
+    parcelSpans: [[1, 1], [2, 1], [1, 2], [2, 2]],
+  },
+} as const
+
+export const SINGLE_BUILDING_ARCHETYPES = [
+  SingleBuildingArchetype.detachedHouse,
+  SingleBuildingArchetype.smallShop,
+  SingleBuildingArchetype.rowhouse,
+  SingleBuildingArchetype.midRise,
+  SingleBuildingArchetype.officeTower,
+  SingleBuildingArchetype.skyscraper,
+] as const
+
+export const AUTHORED_TERRAIN_ARCHETYPES = [
+  SceneryArchetype.groundRock,
+  SceneryArchetype.groundLog,
+  ...range(400, 413),
+] as const
+
+export const AUTHORED_VEGETATION_ARCHETYPES = [
+  DefaultArchetype.tree,
+  SceneryArchetype.forestOak,
+  ...range(414, 431),
+] as const
+
+export const AUTHORED_RESIDENTIAL_ARCHETYPES = [DefaultArchetype.house, ...range(432, 444)] as const
+export const AUTHORED_URBAN_ARCHETYPES = [DefaultArchetype.cityTowerA, DefaultArchetype.cityTowerB, ...range(445, 458)] as const
+export const AUTHORED_INDUSTRIAL_ARCHETYPES = [DefaultArchetype.warehouse, ...range(459, 467)] as const
+
+/** World V4 additions, excluding the original one-house/two-tower catalog. */
+export const ADDITIONAL_RESIDENTIAL_ARCHETYPES = range(432, 444) as readonly number[]
+export const ADDITIONAL_URBAN_ARCHETYPES = range(445, 458) as readonly number[]
 
 /**
  * Shared, close-up-readable archetypes. Near tiers use compound silhouettes
@@ -76,49 +277,81 @@ export function createArtDirectedArchetypeRegistry(): ArchetypeRegistry {
   const treePine = bakeLegacyKit('forest', 0.48, 0x2d6a3a, 2, 7, { stripBase: true })
   const treeBroadleaf = bakeLegacyKit('forest', 0.48, 0x3d7a42, 13, 5, { stripBase: true })
   const treeMixed = bakeLegacyKit('forest', 0.48, 0x357344, 29, 17, { stripBase: true })
-  const houseSingle = bakeLegacyKit('house', 0.36, 0xd4c4a8, 5, 11, { stripBase: true })
-  const houseDuplex = bakeLegacyKit('house', 0.36, 0xc8b8a0, 19, 3, { stripBase: true })
-  const houseTerrace = bakeLegacyKit('house', 0.36, 0xe8dcc8, 31, 23, { stripBase: true })
-  const cityA = bakeLegacyKit('city', 0.72, 0x6b5b95, 3, 7, { stripBase: true })
-  const cityB = bakeLegacyKit('city', 0.72, 0x52728a, 11, 13, { stripBase: true })
-  const cityC = bakeLegacyKit('city', 0.72, 0x806b92, 17, 5, { stripBase: true })
-  const cityD = bakeLegacyKit('city', 0.72, 0x65737e, 23, 29, { stripBase: true })
   const warehouse = bakeLegacyKit('warehouse', 0.42, 0x6a7080, 7, 3, { stripBase: true })
   const warehouseContainers = bakeLegacyKit('warehouse', 0.42, 0x756b61, 17, 19, { stripBase: true })
   // At map scale, variants share family silhouettes. InstancedChunk can batch
   // records by this shared geometry/material identity, reducing far draw calls
   // without removing any building.
   const forestFar = treeFar(0)
-  const residentialFar = houseFar(1)
-  const districtFar = cityFar(0)
   const industrialFar = warehouseFar(0)
+
+  const singleBuildings = Object.entries(SingleBuildingArchetype) as Array<
+    [SingleBuildingStyle, (typeof SingleBuildingArchetype)[SingleBuildingStyle]]
+  >
+  const singleBuildingGeometry = new Map<SingleBuildingStyle, Record<LodTier, THREE.BufferGeometry>>()
+  for (const [style, id] of singleBuildings) {
+    const geometry = {
+      near: createSingleBuildingGeometry(style, LodTier.near),
+      mid: createSingleBuildingGeometry(style, LodTier.mid),
+      far: createSingleBuildingGeometry(style, LodTier.far),
+    }
+    singleBuildingGeometry.set(style, geometry)
+    register(registry, materials, id, `single-building-${kebabCase(style)}`, geometry.near, geometry.mid, geometry.far)
+  }
+
+  const detached = singleBuildingGeometry.get('detachedHouse')!
+  const rowhouse = singleBuildingGeometry.get('rowhouse')!
+  const midRise = singleBuildingGeometry.get('midRise')!
+  const officeTower = singleBuildingGeometry.get('officeTower')!
+  const skyscraper = singleBuildingGeometry.get('skyscraper')!
 
   register(registry, materials, DefaultArchetype.tree, 'forest-pine', treePine, treePine, forestFar)
   register(registry, materials, SceneryArchetype.forestBroadleaf, 'forest-broadleaf', treeBroadleaf, treeBroadleaf, forestFar)
   register(registry, materials, SceneryArchetype.forestMixed, 'forest-mixed', treeMixed, treeMixed, forestFar)
-  register(registry, materials, DefaultArchetype.house, 'house-single', houseSingle, houseSingle, residentialFar)
-  register(registry, materials, SceneryArchetype.houseDuplex, 'house-duplex', houseDuplex, houseDuplex, residentialFar)
-  register(registry, materials, SceneryArchetype.houseTerrace, 'house-terrace', houseTerrace, houseTerrace, residentialFar)
+  const forestBiomes = [
+    [SceneryArchetype.forestConiferTall, 'forest-conifer-tall', forestBiomeGeometry('conifer')],
+    [SceneryArchetype.forestAspen, 'forest-aspen', forestBiomeGeometry('aspen')],
+    [SceneryArchetype.forestOak, 'forest-oak', forestBiomeGeometry('oak')],
+    [SceneryArchetype.forestScrub, 'forest-scrub', forestBiomeGeometry('scrub')],
+    [SceneryArchetype.forestDeadwood, 'forest-deadwood', forestBiomeGeometry('deadwood')],
+    [SceneryArchetype.forestRocky, 'forest-rocky', forestBiomeGeometry('rocky')],
+  ] as const
+  for (const [id, name, geometry] of forestBiomes) {
+    register(registry, materials, id, name, geometry, geometry, forestFar)
+  }
+
+  const scrub = groundScrubGeometry()
+  const rock = groundRockGeometry()
+  const log = groundLogGeometry()
+  const mound = hillMoundGeometry()
+  const groundFar = groundRockGeometry()
+  register(registry, materials, SceneryArchetype.groundScrub, 'ground-scrub', scrub, scrub, groundFar)
+  register(registry, materials, SceneryArchetype.groundRock, 'ground-rock', rock, rock, groundFar)
+  register(registry, materials, SceneryArchetype.groundLog, 'ground-log', log, log, groundFar)
+  register(registry, materials, SceneryArchetype.hillMound, 'hill-mound', mound, mound, groundFar)
+  register(registry, materials, DefaultArchetype.house, 'house-single', detached.near, detached.mid, detached.far)
+  register(registry, materials, SceneryArchetype.houseDuplex, 'house-duplex', rowhouse.near, rowhouse.mid, rowhouse.far)
+  register(registry, materials, SceneryArchetype.houseTerrace, 'house-terrace', rowhouse.near, rowhouse.mid, rowhouse.far)
   register(
     registry,
     materials,
     DefaultArchetype.cityTowerA,
     'city-district-a',
-    cityA,
-    cityA,
-    districtFar,
+    midRise.near,
+    midRise.mid,
+    midRise.far,
   )
   register(
     registry,
     materials,
     DefaultArchetype.cityTowerB,
     'city-district-b',
-    cityB,
-    cityB,
-    districtFar,
+    officeTower.near,
+    officeTower.mid,
+    officeTower.far,
   )
-  register(registry, materials, SceneryArchetype.cityDistrictC, 'city-district-c', cityC, cityC, districtFar)
-  register(registry, materials, SceneryArchetype.cityDistrictD, 'city-district-d', cityD, cityD, districtFar)
+  register(registry, materials, SceneryArchetype.cityDistrictC, 'city-district-c', skyscraper.near, skyscraper.mid, skyscraper.far)
+  register(registry, materials, SceneryArchetype.cityDistrictD, 'city-district-d', midRise.near, midRise.mid, midRise.far)
   register(
     registry,
     materials,
@@ -129,6 +362,47 @@ export function createArtDirectedArchetypeRegistry(): ArchetypeRegistry {
     industrialFar,
   )
   register(registry, materials, SceneryArchetype.warehouseContainers, 'warehouse-containers', warehouseContainers, warehouseContainers, industrialFar)
+
+  // Compatibility IDs now resolve to coherent single-building silhouettes.
+  // The stable 500-series IDs above are the preferred API for new renderers.
+  const residentialKits = [
+    [SceneryArchetype.houseCourtyard, 'house-courtyard', 37, 41],
+    [SceneryArchetype.houseGarden, 'house-garden', 43, 47],
+    [SceneryArchetype.houseTownhome, 'house-townhome', 53, 59],
+    [SceneryArchetype.houseStilt, 'house-stilt', 61, 67],
+    [SceneryArchetype.houseRow, 'house-row', 71, 73],
+    [SceneryArchetype.houseCorner, 'house-corner', 79, 83],
+  ] as const
+  for (const [id, name, seedA] of residentialKits) {
+    const geometry = seedA % 2 === 0 ? detached : rowhouse
+    register(registry, materials, id, name, geometry.near, geometry.mid, geometry.far)
+  }
+
+  const urbanKits = [
+    [SceneryArchetype.cityPodium, 'city-podium', 31, 37],
+    [SceneryArchetype.cityArcade, 'city-arcade', 41, 43],
+    [SceneryArchetype.cityCivicHall, 'city-civic-hall', 47, 53],
+    [SceneryArchetype.cityLibrary, 'city-library', 59, 61],
+    [SceneryArchetype.cityMarket, 'city-market', 67, 71],
+    [SceneryArchetype.cityHotel, 'city-hotel', 73, 79],
+    [SceneryArchetype.cityTransitHub, 'city-transit-hub', 83, 89],
+  ] as const
+  for (const [id, name, seedA] of urbanKits) {
+    const geometry = seedA % 3 === 0 ? midRise : seedA % 3 === 1 ? officeTower : skyscraper
+    register(registry, materials, id, name, geometry.near, geometry.mid, geometry.far)
+  }
+
+  const logisticsKits = [
+    [SceneryArchetype.warehouseSawtooth, 'warehouse-sawtooth', 23, 31],
+    [SceneryArchetype.warehouseColdStore, 'warehouse-cold-store', 37, 43],
+    [SceneryArchetype.warehouseDepot, 'warehouse-depot', 47, 59],
+    [SceneryArchetype.warehouseSilos, 'warehouse-silos', 61, 73],
+    [SceneryArchetype.warehouseFreight, 'warehouse-freight', 79, 89],
+  ] as const
+  for (const [id, name, seedA, seedB] of logisticsKits) {
+    const geometry = bakeLegacyKit('warehouse', 0.42, 0x6f747d, seedA, seedB, { stripBase: true })
+    register(registry, materials, id, name, geometry, geometry, industrialFar)
+  }
 
   const park = bakeLegacyKit('park', 0.22, 0x3d7a42, 7, 11, { stripBase: true })
   const lakeEdge = bakeLegacyKit('lake', 0.14, 0x1a7aad, 5, 13, {
@@ -251,7 +525,155 @@ export function createArtDirectedArchetypeRegistry(): ArchetypeRegistry {
     const detailed = bakeLegacyKit(kind, height, WHITE_HEX, 0, 0, { ownerTinted: true })
     register(registry, materials, id, name, detailed, detailed, facilityFar(kind))
   }
+  for (const campus of Object.values(MUNICIPAL_POWER_BY_KIND)) {
+    register(
+      registry,
+      materials,
+      campus.archetypeId,
+      campus.key,
+      municipalCampusGeometry(campus, LodTier.near),
+      municipalCampusGeometry(campus, LodTier.mid),
+      municipalCampusGeometry(campus, LodTier.far),
+    )
+  }
+  registerWorldCatalogFallbacks(registry)
   return registry
+}
+
+function municipalCampusGeometry(campus: MunicipalCampusDescriptor, tier: LodTier): THREE.BufferGeometry {
+  const parts = campus.structures.flatMap(structure => municipalStructureGeometry(structure, tier))
+  const geometry = compound(parts)
+  geometry.userData.municipalCampus = {
+    kind: campus.kind,
+    footprint: [2, 2],
+    solarClusterMerged: campus.kind === 'solar',
+  }
+  return geometry
+}
+
+function municipalStructureGeometry(
+  structure: MunicipalStructureDescriptor,
+  tier: LodTier,
+): THREE.BufferGeometry[] {
+  const [x, y, z] = structure.position
+  const [sx, sy, sz] = structure.scale
+  const color = hexRgb(structure.color)
+  const segments = tier === LodTier.near ? 16 : tier === LodTier.mid ? 10 : 7
+  if (structure.shape === 'box') return [box(sx, sy, sz, x, y, z, color)]
+  if (structure.shape === 'cylinder') return [cylinder(sx, sx * 0.84, sy, segments, x, y, z, color)]
+  if (structure.shape === 'sphere') {
+    const geometry = paint(new THREE.IcosahedronGeometry(0.5, tier === LodTier.near ? 1 : 0), color)
+    geometry.scale(sx * 2, sy * 2, sz * 2)
+    geometry.translate(x, y, z)
+    return [geometry]
+  }
+  if (structure.shape === 'coolingTower') {
+    const parts = [cylinder(sx * 0.72, sx, sy, segments, x, y, z, color)]
+    if (tier === LodTier.near) parts.push(cylinder(sx, sx * 0.72, sy * 0.3, segments, x, y + sy * 0.36, z, color))
+    return parts
+  }
+  const rows = tier === LodTier.near ? 4 : tier === LodTier.mid ? 3 : 2
+  const columns = rows
+  const panels: THREE.BufferGeometry[] = []
+  for (let row = 0; row < rows; row++) for (let column = 0; column < columns; column++) {
+    const panel = box(
+      sx / columns * 0.82, 0.025, sz / rows * 0.62,
+      x + (column - (columns - 1) / 2) * sx / columns,
+      y,
+      z + (row - (rows - 1) / 2) * sz / rows,
+      color,
+    )
+    panel.rotateX(-0.24)
+    panels.push(panel)
+  }
+  return panels
+}
+
+function hexRgb(hex: number): Rgb {
+  return [((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255]
+}
+
+function registerWorldCatalogFallbacks(registry: ArchetypeRegistry): void {
+  const aliases: Array<readonly [number, number]> = []
+  const add = (ids: readonly number[], fallbacks: readonly number[]) => {
+    for (let index = 0; index < ids.length; index++) {
+      aliases.push([ids[index]!, fallbacks[index % fallbacks.length]!])
+    }
+  }
+
+  add(range(400, 413), [
+    SceneryArchetype.groundScrub,
+    SceneryArchetype.groundRock,
+    SceneryArchetype.groundLog,
+  ])
+  add(range(414, 431), [
+    DefaultArchetype.tree,
+    SceneryArchetype.forestBroadleaf,
+    SceneryArchetype.forestMixed,
+    SceneryArchetype.forestConiferTall,
+    SceneryArchetype.forestAspen,
+    SceneryArchetype.forestOak,
+    SceneryArchetype.forestScrub,
+    SceneryArchetype.forestDeadwood,
+  ])
+  add(range(432, 444), [
+    SceneryArchetype.houseDuplex,
+    SceneryArchetype.houseTerrace,
+    SceneryArchetype.houseTownhome,
+    SceneryArchetype.houseRow,
+    SceneryArchetype.houseCourtyard,
+    SceneryArchetype.houseGarden,
+    SceneryArchetype.houseStilt,
+    SceneryArchetype.houseCorner,
+    DefaultArchetype.house,
+  ])
+  add(range(445, 458), [
+    DefaultArchetype.cityTowerA,
+    DefaultArchetype.cityTowerB,
+    SceneryArchetype.cityPodium,
+    SceneryArchetype.cityArcade,
+    SceneryArchetype.cityCivicHall,
+    SceneryArchetype.cityLibrary,
+    SceneryArchetype.cityMarket,
+    SceneryArchetype.cityHotel,
+    SceneryArchetype.cityTransitHub,
+  ])
+  add(range(459, 467), [
+    SceneryArchetype.warehouseSawtooth,
+    SceneryArchetype.warehouseColdStore,
+    SceneryArchetype.warehouseDepot,
+    SceneryArchetype.warehouseFreight,
+    SceneryArchetype.warehouseContainers,
+    SceneryArchetype.warehouseSilos,
+    DefaultArchetype.warehouse,
+  ])
+  aliases.push(
+    [AuthoredSceneryArchetype.trainingCentre, FacilityArchetype.lab],
+    [AuthoredSceneryArchetype.networkOperations, IntegrationArchetype.grid],
+    [AuthoredSceneryArchetype.constructionShell, DefaultArchetype.facilitySmall],
+    [AuthoredSceneryArchetype.utilityPlant, IntegrationArchetype.campusSupport],
+    [AuthoredSceneryArchetype.securityCentre, FacilityArchetype.office],
+  )
+  add([300, ...range(473, 483)], [DefaultArchetype.warehouse])
+  add([301, ...range(484, 487)], [SceneryArchetype.lakeInterior])
+  add([302, ...range(488, 489)], [DefaultArchetype.tree])
+  // Prop catalog entries are streamed after the first render.  Their fallback
+  // must preserve the semantic footprint of roadside furniture: using the
+  // full park kit here made traffic lights, signs and guardrails appear as a
+  // cluster of trees and benches directly on the road until the props bundle
+  // arrived (and permanently when that bundle failed).
+  add([303, ...range(490, 498)], [SceneryArchetype.roadLamp])
+
+  for (const [id, fallbackId] of aliases) {
+    if (registry.has(id)) continue
+    const fallback = registry.get(fallbackId)
+    registry.register({
+      id,
+      name: `world-v4-${id}`,
+      geometry: fallback.geometry,
+      material: fallback.material,
+    })
+  }
 }
 
 function register(
@@ -287,12 +709,10 @@ function createTierMaterial(tier: LodTier): THREE.MeshStandardMaterial {
     fog: true,
     transparent: false,
     depthWrite: true,
-    dithering: true,
+    // Three's display-space color dithering crawls across moving geometry.
+    dithering: false,
   })
-  installDitherTransition(material)
-  const installDither = material.onBeforeCompile
-  material.onBeforeCompile = (shader, renderer) => {
-    installDither(shader, renderer)
+  material.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nattribute float ownerMix;')
       .replace(
@@ -508,23 +928,24 @@ function facilityFar(kind: MapTile['kind']): THREE.BufferGeometry {
       ])
     case 'office':
       return compound([
-        box(0.74, 0.62, 0.58, 0, 0.31, 0, LIGHT_METAL),
-        box(0.58, 0.18, 0.03, 0, 0.36, 0.305, GLASS),
+        box(0.62, 0.88, 0.5, 0, 0.44, 0, LIGHT_METAL),
+        box(0.5, 0.12, 0.03, 0, 0.5, 0.26, GLASS),
       ])
     case 'hq':
       return compound([
-        box(0.72, 0.62, 0.56, -0.08, 0.31, 0, LIGHT_METAL),
-        box(0.24, 0.4, 0.42, 0.34, 0.2, 0.05, DARK_METAL),
+        box(0.62, 0.88, 0.5, 0, 0.44, 0, LIGHT_METAL),
+        box(0.5, 0.12, 0.03, 0, 0.5, 0.26, GLASS),
       ])
     case 'hq_m':
       return compound([
-        box(0.42, 0.78, 0.7, -0.22, 0.39, 0, LIGHT_METAL),
-        box(0.42, 0.64, 0.7, 0.22, 0.32, 0, LIGHT_METAL),
+        box(0.85, 0.55, 0.8, 0, 0.275, 0, DARK_METAL),
+        box(0.42, 2.2, 0.42, -0.08, 1.1, -0.04, LIGHT_METAL),
       ])
     case 'hq_l':
       return compound([
-        box(0.82, 0.58, 0.7, 0, 0.29, 0, LIGHT_METAL),
-        box(0.32, 1.05, 0.34, 0.2, 0.525, -0.08, DARK_METAL),
+        box(0.9, 0.55, 0.86, 0, 0.275, 0, DARK_METAL),
+        box(0.36, 4.0, 0.36, 0, 2.0, 0, LIGHT_METAL),
+        box(0.22, 0.35, 0.22, 0, 4.2, 0, DARK_METAL),
       ])
     case 'lab':
       return compound([
@@ -545,30 +966,218 @@ function treeFar(variant: number): THREE.BufferGeometry {
   ])
 }
 
-function houseFar(variant: number): THREE.BufferGeometry {
-  const bodies: THREE.BufferGeometry[] = []
-  const count = variant + 1
-  for (let index = 0; index < count; index++) {
-    const x = (index - (count - 1) / 2) * 0.3
-    bodies.push(box(0.3, 0.25, 0.28, x, 0.125, 0, WHITE))
-    const roof = paint(new THREE.ConeGeometry(0.24, 0.18, 4), ROOF)
-    roof.rotateY(Math.PI / 4)
-    roof.translate(x, 0.34, 0)
-    bodies.push(roof)
-  }
-  return compound(bodies)
-}
-
-function cityFar(variant: number): THREE.BufferGeometry {
-  const heights = [0.58, 0.82, 1.06, 0.7]
+function forestBiomeGeometry(
+  biome: 'conifer' | 'aspen' | 'oak' | 'scrub' | 'deadwood' | 'rocky',
+): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = []
-  for (let index = 0; index < 3; index++) {
-    const height = heights[(index + variant) % heights.length]!
-    const x = (index - 1) * 0.27
-    const z = index === 1 ? -0.16 : 0.14
-    parts.push(box(0.24, height, 0.26, x, height / 2, z, index % 2 ? LIGHT_METAL : WHITE))
+  const addTrunk = (x: number, z: number, height: number, pale = false) => {
+    parts.push(cylinder(0.025, 0.035, height, 5, x, height / 2, z, pale ? [0.78, 0.76, 0.68] : TRUNK))
+  }
+  if (biome === 'conifer') {
+    for (const [x, z, height] of [[-0.24, -0.12, 0.82], [0.12, 0.08, 1.08], [0.3, -0.2, 0.72]] as const) {
+      addTrunk(x, z, height * 0.44)
+      parts.push(cone(height * 0.2, height * 0.78, 6, x, height * 0.58, z, FOLIAGE_DARK))
+    }
+  } else if (biome === 'aspen') {
+    for (const [x, z, height] of [[-0.28, 0.04, 0.74], [-0.02, -0.18, 0.9], [0.25, 0.12, 0.8]] as const) {
+      addTrunk(x, z, height * 0.72, true)
+      const crown = paint(new THREE.IcosahedronGeometry(height * 0.19, 0), [0.55, 0.72, 0.3], 0)
+      crown.scale(0.8, 1.35, 0.8)
+      crown.translate(x, height * 0.82, z)
+      parts.push(crown)
+    }
+  } else if (biome === 'oak') {
+    for (const [x, z, height] of [[-0.18, -0.08, 0.68], [0.22, 0.12, 0.78]] as const) {
+      addTrunk(x, z, height * 0.58)
+      const crown = paint(new THREE.DodecahedronGeometry(height * 0.3, 0), [0.24, 0.48, 0.18], 0)
+      crown.scale(1.25, 0.8, 1.1)
+      crown.translate(x, height * 0.72, z)
+      parts.push(crown)
+    }
+  } else if (biome === 'scrub') {
+    for (const [x, z, radius] of [[-0.3, -0.12, 0.18], [0.02, 0.18, 0.24], [0.3, -0.08, 0.15]] as const) {
+      const shrub = paint(new THREE.IcosahedronGeometry(radius, 0), [0.3, 0.5, 0.2], 0)
+      shrub.scale(1.3, 0.62, 1.1)
+      shrub.translate(x, radius * 0.5, z)
+      parts.push(shrub)
+    }
+  } else if (biome === 'deadwood') {
+    const standing = cylinder(0.035, 0.055, 0.62, 5, -0.2, 0.31, -0.04, [0.42, 0.31, 0.2])
+    const fallen = cylinder(0.04, 0.055, 0.72, 6, 0.12, 0.08, 0.12, [0.38, 0.28, 0.18])
+    fallen.rotateZ(Math.PI / 2)
+    parts.push(standing, fallen)
+    parts.push(cone(0.2, 0.55, 5, 0.28, 0.275, -0.2, FOLIAGE_DARK))
+  } else {
+    parts.push(groundRockGeometry())
+    addTrunk(0.24, 0.12, 0.46)
+    parts.push(cone(0.18, 0.58, 5, 0.24, 0.35, 0.12, FOLIAGE_DARK))
   }
   return compound(parts)
+}
+
+function groundScrubGeometry(): THREE.BufferGeometry {
+  return compound([
+    cone(0.11, 0.18, 6, -0.16, 0.09, 0.03, [0.38, 0.5, 0.2]),
+    cone(0.09, 0.14, 6, 0.08, 0.07, -0.09, [0.46, 0.55, 0.22]),
+    cone(0.07, 0.11, 5, 0.22, 0.055, 0.11, [0.3, 0.43, 0.16]),
+  ])
+}
+
+function groundRockGeometry(): THREE.BufferGeometry {
+  const a = paint(new THREE.DodecahedronGeometry(0.13, 0), [0.43, 0.42, 0.38], 0)
+  a.scale(1.4, 0.65, 1)
+  a.translate(-0.11, 0.07, 0.02)
+  const b = paint(new THREE.DodecahedronGeometry(0.08, 0), [0.52, 0.49, 0.42], 0)
+  b.scale(1, 0.72, 1.2)
+  b.translate(0.14, 0.045, -0.08)
+  return compound([a, b])
+}
+
+function groundLogGeometry(): THREE.BufferGeometry {
+  const log = cylinder(0.035, 0.045, 0.48, 6, 0, 0.055, 0, [0.38, 0.27, 0.17])
+  log.rotateZ(Math.PI / 2)
+  return compound([log, cone(0.07, 0.12, 5, -0.16, 0.06, 0.12, [0.34, 0.46, 0.18])])
+}
+
+function hillMoundGeometry(): THREE.BufferGeometry {
+  const mound = paint(new THREE.SphereGeometry(0.5, 10, 5, 0, Math.PI * 2, 0, Math.PI / 2), [0.3, 0.45, 0.22], 0)
+  mound.scale(1.9, 0.28, 1.5)
+  return compound([mound])
+}
+
+type BuildingLod = typeof LodTier.near | typeof LodTier.mid | typeof LodTier.far
+
+const BUILDING_PALETTE = {
+  lawn: [0.26, 0.43, 0.22] as Rgb,
+  paving: [0.55, 0.54, 0.5] as Rgb,
+  cream: [0.82, 0.72, 0.58] as Rgb,
+  brick: [0.58, 0.25, 0.18] as Rgb,
+  stone: [0.62, 0.64, 0.64] as Rgb,
+  concrete: [0.46, 0.5, 0.54] as Rgb,
+  darkGlass: [0.12, 0.28, 0.38] as Rgb,
+  blueGlass: [0.28, 0.55, 0.68] as Rgb,
+  warmWindow: [0.95, 0.72, 0.35] as Rgb,
+} as const
+
+/** Build one connected architectural mass per lot; detail only decorates it. */
+function createSingleBuildingGeometry(style: SingleBuildingStyle, lod: BuildingLod): THREE.BufferGeometry {
+  const profile = SINGLE_BUILDING_PROFILES[style]
+  const [width, depth] = profile.footprint
+  const parts: THREE.BufferGeometry[] = []
+  const detail = lod === LodTier.near ? 2 : lod === LodTier.mid ? 1 : 0
+  const addLot = (surface: Rgb, depthSize = 0.9) => {
+    if (detail === 0) return
+    parts.push(tintedBox(0.94, 0.025, depthSize, 0, 0.0125, 0, surface, 0.08))
+  }
+  const addFacadeGrid = (
+    columns: number,
+    rows: number,
+    facadeWidth: number,
+    baseY: number,
+    rowGap: number,
+    z: number,
+    color: Rgb,
+  ) => {
+    if (detail === 0) return
+    const visibleRows = detail === 1 ? Math.ceil(rows / 2) : rows
+    for (let row = 0; row < visibleRows; row++) {
+      const sourceRow = detail === 1 ? row * 2 : row
+      for (let column = 0; column < columns; column++) {
+        const x = columns === 1 ? 0 : -facadeWidth / 2 + (facadeWidth * column) / (columns - 1)
+        parts.push(tintedBox(0.075, 0.07, 0.012, x, baseY + sourceRow * rowGap, z, color, 0.12))
+      }
+    }
+  }
+
+  if (style === 'detachedHouse') {
+    addLot(BUILDING_PALETTE.lawn)
+    parts.push(tintedBox(width, 0.3, depth, 0, 0.175, 0.04, BUILDING_PALETTE.cream, 0.35))
+    const roof = paint(new THREE.ConeGeometry(0.43, 0.2, 4), [0.36, 0.16, 0.12], 0.15)
+    roof.scale(1, 1, 0.82)
+    roof.rotateY(Math.PI / 4)
+    roof.translate(0, 0.43, 0.04)
+    parts.push(roof)
+    if (detail > 0) {
+      parts.push(tintedBox(0.1, 0.2, 0.015, 0, 0.15, 0.278, [0.29, 0.15, 0.08], 0.1))
+      parts.push(tintedBox(0.13, 0.1, 0.014, -0.17, 0.22, 0.279, BUILDING_PALETTE.blueGlass, 0.1))
+      parts.push(tintedBox(0.13, 0.1, 0.014, 0.17, 0.22, 0.279, BUILDING_PALETTE.blueGlass, 0.1))
+    }
+    if (detail === 2) {
+      parts.push(tintedBox(0.12, 0.025, 0.24, 0, 0.025, 0.36, BUILDING_PALETTE.paving, 0.05))
+      parts.push(cylinder(0.075, 0.085, 0.12, 7, -0.37, 0.075, -0.23, FOLIAGE_DARK))
+    }
+  } else if (style === 'smallShop') {
+    addLot(BUILDING_PALETTE.paving, 0.82)
+    parts.push(tintedBox(width, 0.33, depth, 0, 0.19, -0.04, BUILDING_PALETTE.brick, 0.3))
+    parts.push(tintedBox(width + 0.04, 0.055, depth + 0.04, 0, 0.3825, -0.04, [0.22, 0.24, 0.25], 0.1))
+    if (detail > 0) {
+      parts.push(tintedBox(0.43, 0.16, 0.015, -0.07, 0.16, 0.238, BUILDING_PALETTE.darkGlass, 0.08))
+      parts.push(tintedBox(0.12, 0.23, 0.016, 0.25, 0.125, 0.239, [0.18, 0.22, 0.24], 0.08))
+      parts.push(tintedBox(0.56, 0.055, 0.16, -0.02, 0.29, 0.29, [0.75, 0.57, 0.22], 0.16))
+    }
+    if (detail === 2) parts.push(tintedBox(0.36, 0.06, 0.025, -0.06, 0.34, 0.247, BUILDING_PALETTE.cream, 0.08))
+  } else if (style === 'rowhouse') {
+    addLot(BUILDING_PALETTE.paving, 0.86)
+    parts.push(tintedBox(width, 0.56, depth, 0, 0.305, -0.04, BUILDING_PALETTE.brick, 0.3))
+    const roof = paint(new THREE.ConeGeometry(0.48, 0.15, 4), [0.3, 0.18, 0.14], 0.12)
+    roof.scale(1.2, 1, 0.72)
+    roof.rotateY(Math.PI / 4)
+    roof.translate(0, 0.655, -0.04)
+    parts.push(roof)
+    addFacadeGrid(3, 2, 0.48, 0.27, 0.2, 0.207, BUILDING_PALETTE.warmWindow)
+    if (detail > 0) parts.push(tintedBox(0.11, 0.22, 0.014, 0, 0.14, 0.208, [0.2, 0.25, 0.23], 0.1))
+  } else if (style === 'midRise') {
+    addLot(BUILDING_PALETTE.paving)
+    parts.push(tintedBox(width, 0.92, depth, 0, 0.485, -0.02, BUILDING_PALETTE.stone, 0.3))
+    parts.push(tintedBox(width * 0.72, 0.12, depth * 0.72, 0, 1.005, -0.02, BUILDING_PALETTE.concrete, 0.18))
+    addFacadeGrid(4, 4, 0.48, 0.22, 0.18, 0.297, BUILDING_PALETTE.darkGlass)
+    if (detail === 2) parts.push(tintedBox(0.2, 0.055, 0.18, 0.18, 1.0925, -0.03, DARK_METAL, 0.1))
+  } else if (style === 'officeTower') {
+    addLot(BUILDING_PALETTE.paving)
+    parts.push(tintedBox(width + 0.14, 0.18, depth + 0.14, 0, 0.1025, 0, BUILDING_PALETTE.concrete, 0.2))
+    parts.push(tintedBox(width, 1.3, depth, 0, 0.83, 0, BUILDING_PALETTE.blueGlass, 0.22))
+    parts.push(tintedBox(width + 0.035, 0.055, depth + 0.035, 0, 1.5075, 0, LIGHT_METAL, 0.12))
+    addFacadeGrid(4, 6, 0.43, 0.35, 0.19, depth / 2 + 0.007, [0.68, 0.82, 0.86])
+    if (detail === 2) parts.push(tintedBox(0.12, 0.07, 0.2, -0.16, 1.57, 0, DARK_METAL, 0.08))
+  } else {
+    addLot(BUILDING_PALETTE.paving)
+    // A centered podium, shaft and crown stay legible and proportionate when
+    // the parcel renderer scales this archetype to 2x1, 1x2, or 2x2 lots.
+    parts.push(tintedBox(width + 0.18, 0.2, depth + 0.18, 0, 0.1125, 0, BUILDING_PALETTE.concrete, 0.18))
+    parts.push(tintedBox(width, 1.72, depth, 0, 1.075, 0, BUILDING_PALETTE.darkGlass, 0.2))
+    parts.push(tintedBox(width * 0.72, 0.28, depth * 0.72, 0, 2.075, 0, BUILDING_PALETTE.blueGlass, 0.18))
+    addFacadeGrid(4, 8, 0.39, 0.42, 0.2, depth / 2 + 0.007, [0.62, 0.78, 0.84])
+    if (detail > 0) parts.push(tintedBox(0.035, 0.28, 0.035, 0, 2.35, 0, LIGHT_METAL, 0.08))
+  }
+
+  const geometry = compound(parts)
+  geometry.userData.singleBuilding = {
+    style,
+    buildingCount: 1,
+    footprint: [...profile.footprint],
+    lotSize: [0.94, style === 'smallShop' ? 0.82 : style === 'rowhouse' ? 0.86 : 0.9],
+    lod,
+  }
+  return geometry
+}
+
+function kebabCase(value: string): string {
+  return value.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)
+}
+
+function tintedBox(
+  width: number,
+  height: number,
+  depth: number,
+  x: number,
+  y: number,
+  z: number,
+  color: Rgb,
+  mix: number,
+): THREE.BufferGeometry {
+  const geometry = paint(new THREE.BoxGeometry(width, height, depth), color, mix)
+  geometry.translate(x, y, z)
+  return geometry
 }
 
 function warehouseFar(variant: number): THREE.BufferGeometry {
@@ -685,8 +1294,17 @@ function paint<T extends THREE.BufferGeometry>(geometry: T, color: Rgb, mix = 1)
 }
 
 function compound(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
-  const geometry = mergeGeometries(parts, false)
-  for (const part of parts) part.dispose()
+  // Three's primitive families disagree on index layout (polyhedra are flat,
+  // boxes/cylinders are indexed). Normalize once so mixed natural props can be
+  // merged into the same instancing-ready archetype.
+  const normalized = parts.map((part) => {
+    if (!part.index) return part
+    const flat = part.toNonIndexed()
+    part.dispose()
+    return flat
+  })
+  const geometry = mergeGeometries(normalized, false)
+  for (const part of normalized) part.dispose()
   if (!geometry) throw new Error('Unable to merge archetype geometry')
   geometry.computeBoundingBox()
   const minY = geometry.boundingBox?.min.y ?? 0

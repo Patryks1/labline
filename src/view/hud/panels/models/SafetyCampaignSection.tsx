@@ -47,7 +47,7 @@ export function SafetyCampaignSection({
         }
       >
         <p className="mb-2 font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-research">
-          {campaign.intensity} · deployed revision stays live
+          {campaign.intensity} · source revision stays live · new checkpoint in progress
         </p>
         <div className="space-y-2">
           <MeterBar
@@ -89,9 +89,10 @@ export function SafetyCampaignSection({
       }
     >
       <p className="mb-2 text-[0.8125rem] text-muted">
-        Safer revision for this checkpoint — deployed weights stay live.
+        Creates a new safety-trained checkpoint/version. The source model stays
+        unchanged and can remain public while this revision trains.
       </p>
-      <div className="grid grid-cols-3 gap-1.5">
+      <div className="grid gap-1.5 min-[420px]:grid-cols-3">
         {(['targeted', 'standard', 'frontier'] as SafetyCampaignIntensity[]).map((option) => (
           <button
             key={option}
@@ -135,7 +136,7 @@ export function SafetyCampaignSection({
           onClick={onStart}
           className="w-full !bg-research !text-void"
         >
-          Start {intensity} campaign
+          Create {intensity} safety checkpoint
         </HudButton>
       </div>
     </GameCard>

@@ -5,12 +5,13 @@ import { isDcKind, isDcAnchor } from "./map";
  * Giant models → memory-heavy (weights dominate; FLOPS scales sublinearly).
  */
 import { getRackSku } from "../balance/rackSkus";
-import { modelVramGb } from "../balance/racks";
-import type { Model, SimState } from "../types";
+import { estimateServingMemory } from "../balance/tokenServe";
+import type { Model, ServePrecision, SimState } from "../types";
 import { fleetStats, resolveRackSku } from "./racks";
-import { dcBayUsage, orderRacksIntoDc } from "./dcRacks";
+import { orderRacksIntoDc } from "./dcRacks";
 import { computeSnapshot } from "./compute";
 import { facilityAnchorTiles } from "./worldAccess";
+import { servingPlacementNeed } from "./servingPlacement";
 
 export interface ModelHostNeed {
   modelId: string;
@@ -20,6 +21,11 @@ export interface ModelHostNeed {
   activeParamsB: number;
   /** GB of fleet VRAM needed to host (serve) — MoE includes expert residency */
   vramGb: number;
+  systemRamGb: number;
+  weightMemoryGb: number;
+  kvCacheGb: number;
+  workspaceGb: number;
+  precision: ServePrecision;
   /** PF of fleet needed for healthy serve latency — MoE scales with *active* only */
   hostPf: number;
   /** 0–1: bias toward compute (high when active path is large) */
@@ -38,13 +44,39 @@ export interface RackDeploymentQuote {
   skuId: string;
   rackUnits: number;
   selectedHalls: number;
-  freeBays: number;
-  fillAllRacks: number;
+  /** Collision-valid empty cabinet footprints explicitly drawn in layouts. */
+  plannedCabinets: number;
   marketAvailable: number;
   affordableRacks: number;
   maxRacks: number;
-  canFillAll: boolean;
+  canFillPlanned: boolean;
   reservePerRack: number;
+}
+
+function plannedCabinetsForSku(
+  state: SimState,
+  hall: { x: number; y: number; campusId?: string },
+  rackUnits: number,
+): number {
+  const facilityId = hall.campusId ?? `facility:${hall.x},${hall.y}`;
+  const layout = state.dataHallLayouts?.[facilityId];
+  if (!layout) return 0;
+  return layout.objects.filter((object) => {
+    if (object.kind !== "rack" || !object.reserved) return false;
+    try {
+      return (
+        Math.max(
+          1,
+          resolveRackSku(
+            object.catalogId,
+            state.player.rackDesigns,
+          ).rackUnits,
+        ) >= rackUnits
+      );
+    } catch {
+      return rackUnits <= 1;
+    }
+  }).length;
 }
 
 /** Aggregate quote for a multi-hall order. Supply and cash are capped once for the whole batch. */
@@ -55,8 +87,7 @@ export function quoteRackDeployment(
 ): RackDeploymentQuote {
   const sku = resolveRackSku(skuId, state.player.rackDesigns);
   const rackUnits = Math.max(1, sku.rackUnits);
-  let freeBays = 0;
-  let fillAllRacks = 0;
+  let plannedCabinets = 0;
   let selectedHalls = 0;
   for (const target of targets) {
     const hall = facilityAnchorTiles(state, { ownerId: "player" }).find(
@@ -69,15 +100,13 @@ export function quoteRackDeployment(
       hall.buildingProgress < hall.buildingTarget
     )
       continue;
-    const free = dcBayUsage(state, hall.x, hall.y).free;
     selectedHalls += 1;
-    freeBays += free;
-    fillAllRacks += Math.floor(free / rackUnits);
+    plannedCabinets += plannedCabinetsForSku(state, hall, rackUnits);
   }
   const supply = state.worldMarkets.accelerators[skuId];
   const marketAvailable = Math.max(
     0,
-    Math.floor(supply?.available ?? fillAllRacks),
+    Math.floor(supply?.available ?? plannedCabinets),
   );
   const reservePerRack = Math.max(
     1,
@@ -89,18 +118,18 @@ export function quoteRackDeployment(
   );
   const maxRacks = Math.max(
     0,
-    Math.min(fillAllRacks, marketAvailable, affordableRacks),
+    Math.min(plannedCabinets, marketAvailable, affordableRacks),
   );
   return {
     skuId,
     rackUnits,
     selectedHalls,
-    freeBays,
-    fillAllRacks,
+    plannedCabinets,
     marketAvailable,
     affordableRacks,
     maxRacks,
-    canFillAll: fillAllRacks > 0 && maxRacks >= fillAllRacks,
+    canFillPlanned:
+      plannedCabinets > 0 && maxRacks >= plannedCabinets,
     reservePerRack,
   };
 }
@@ -121,26 +150,37 @@ export function deployRackBatchAcrossHalls(
   let next = state;
   for (const target of targets) {
     if (remaining <= 0) break;
-    const free = dcBayUsage(next, target.x, target.y).free;
-    const count = Math.min(remaining, Math.floor(free / quote.rackUnits));
+    const hall = facilityAnchorTiles(next, { ownerId: "player" }).find(
+      (tile) => tile.x === target.x && tile.y === target.y,
+    );
+    if (!hall) continue;
+    const count = Math.min(
+      remaining,
+      plannedCabinetsForSku(next, hall, quote.rackUnits),
+    );
     if (count <= 0) continue;
-    const before = next.worldMarkets.orders.length;
+    const cashBefore = next.player.cash;
     next = orderRacksIntoDc(next, target.x, target.y, skuId, count);
-    if (next.worldMarkets.orders.length <= before) break;
+    if (next.player.cash >= cashBefore) break; // blocked or unaffordable
     remaining -= count;
   }
   return next;
 }
 
 /** Hosting shape from model size — used for UI + auto-balance. */
-export function modelHostNeed(m: Model): ModelHostNeed {
-  const vramGb = modelVramGb(
-    m.paramsB,
-    m.activeParamsB,
-    m.family,
-    m.trainingNumerics?.computeFormat?.includes("fp32") ? "fp32" : "fp16",
-  );
-  const isMoe = m.family === "moe";
+export function modelHostNeed(
+  m: Model,
+  opts?: { precision?: ServePrecision; concurrentRequests?: number; contextTokens?: number },
+): ModelHostNeed {
+  const precision = opts?.precision ?? "fp16";
+  const memory = estimateServingMemory({
+    model: m,
+    precision,
+    concurrentRequests: opts?.concurrentRequests,
+    avgInputTokens: opts?.contextTokens,
+  });
+  const vramGb = memory.residentMemoryGb;
+  const isMoe = m.backbone === "moe" || (m.backbone == null && m.family === "moe");
   // Serve FLOPS: active path only for MoE; full size for dense
   const activeB = Math.max(
     0.01,
@@ -160,11 +200,11 @@ export function modelHostNeed(m: Model): ModelHostNeed {
       Math.min(0.88, 0.45 + Math.log10(totalB / activeB) * 0.22),
     );
   }
-  // Base PF to run the *active* path well (game units)
+  // Minimum low-latency replica floor. Work per token is linear in active
+  // parameters; live traffic below remains the authoritative incremental load.
   const hostPf =
-    Math.pow(activeB, 0.55) *
-    0.85 *
-    (0.55 + computeBias * 0.9) *
+    activeB *
+    0.45 *
     Math.max(0.5, m.inferCostMult ?? 1) *
     (isMoe ? 0.92 : 1);
 
@@ -190,6 +230,11 @@ export function modelHostNeed(m: Model): ModelHostNeed {
     paramsB: m.paramsB,
     activeParamsB: activeB,
     vramGb,
+    systemRamGb: memory.requiredSystemRamGb,
+    weightMemoryGb: memory.weightMemoryGb,
+    kvCacheGb: memory.kvCacheGb,
+    workspaceGb: memory.workspaceGb,
+    precision,
     hostPf,
     computeBias,
     ramBias,
@@ -200,55 +245,42 @@ export function modelHostNeed(m: Model): ModelHostNeed {
 export interface FleetHostSnapshot {
   vramHave: number;
   vramNeed: number;
+  systemRamHave: number;
+  systemRamNeed: number;
   pfHave: number;
   pfServe: number;
   pfNeed: number;
-  /** compute utilization for serve (target ~0.8) */
-  computeUtil: number;
-  vramUtil: number;
-  shortOn: "ok" | "vram" | "compute" | "both";
+  /** Available serving PF / required PF. This is coverage, not utilization. */
+  computeCoverage: number;
+  /** Available VRAM / required resident VRAM. This is coverage, not utilization. */
+  vramCoverage: number;
+  systemRamCoverage: number;
+  shortOn: "ok" | "hbm" | "system_ram" | "compute" | "multiple";
   models: ModelHostNeed[];
   /** SKU id best for filling the shortfall */
   recommendedSkuId: string;
   recommendedSkuReason: string;
 }
 
-function publicModels(state: SimState): Model[] {
-  return state.player.models.filter(
-    (m) => m.release === "released" || m.shipped,
-  );
-}
-
-function activeServeModels(state: SimState): Model[] {
-  const pub = publicModels(state);
-  if (pub.length === 0) return [];
-  const active = pub.find((m) => m.id === state.player.pricing.activeModelId);
-  // Host active + any plan-attached models (unique)
-  const ids = new Set<string>();
-  if (active) ids.add(active.id);
-  for (const id of state.player.pricing.apiModelIds ?? []) ids.add(id);
-  for (const plan of state.player.pricing.plans) {
-    if (!plan.enabled) continue;
-    for (const id of plan.modelIds) ids.add(id);
-  }
-  const list = pub.filter((m) => ids.has(m.id));
-  return list.length > 0 ? list : active ? [active] : pub.slice(0, 1);
-}
-
 export function fleetHostSnapshot(state: SimState): FleetHostSnapshot {
-  const models = activeServeModels(state).map(modelHostNeed);
-  // Parallel host: sum VRAM; compute need is max + 0.35 * rest (shared batching)
-  let vramNeed = 0;
+  const placement = servingPlacementNeed(state);
+  const models = placement.placements.map((row) =>
+    modelHostNeed(row.model, {
+      precision: row.precision,
+      concurrentRequests: row.concurrentRequests,
+      contextTokens: row.contextTokens,
+    }),
+  );
+  // Each simultaneously hosted model needs a minimum replica. Batching can
+  // amortize weight reads within one model, but cannot share work or weights
+  // across different models.
+  let vramNeed = placement.hbmNeedGb;
   let pfNeed = 0;
+  let systemRamNeed = placement.systemRamNeedGb;
   if (models.length === 1) {
-    vramNeed = models[0]!.vramGb;
     pfNeed = models[0]!.hostPf;
   } else if (models.length > 1) {
-    const sorted = [...models].sort((a, b) => b.hostPf - a.hostPf);
-    vramNeed = models.reduce((s, m) => s + m.vramGb, 0);
-    pfNeed =
-      sorted[0]!.hostPf +
-      sorted.slice(1).reduce((s, m) => s + m.hostPf * 0.35, 0);
+    pfNeed = models.reduce((s, m) => s + m.hostPf, 0);
   }
 
   // Align with computeSnapshot: power/VRAM/RAM/CPU derates, not raw fleet PF
@@ -256,6 +288,7 @@ export function fleetHostSnapshot(state: SimState): FleetHostSnapshot {
   const pfHave = snap.rawFlopsPf;
   const pfServe = snap.pools.inference;
   const vramHave = snap.vramGb;
+  const systemRamHave = snap.systemRamGb;
   // Hosting plans against admitted load, not every request rejected by the
   // dominant-lab sales ceiling. Latent demand remains visible in Market.
   const trafficPf =
@@ -265,21 +298,25 @@ export function fleetHostSnapshot(state: SimState): FleetHostSnapshot {
       state.lastMarket?.capacityPf ?? 0,
     );
   const effectivePfNeed = Math.max(pfNeed, trafficPf);
-  const computeUtil = effectivePfNeed > 0.01 ? pfServe / effectivePfNeed : 0;
-  const vramUtil = vramNeed > 0.01 ? vramHave / vramNeed : 1;
+  const computeCoverage = effectivePfNeed > 0.01 ? pfServe / effectivePfNeed : 0;
+  const vramCoverage = vramNeed > 0.01 ? vramHave / vramNeed : 1;
+  const systemRamCoverage = systemRamNeed > 0.01 ? systemRamHave / systemRamNeed : 1;
 
-  const shortVram = vramNeed > 0 && vramHave < vramNeed * 0.95;
+  const shortVram = vramNeed > 0 && vramHave + 1e-9 < vramNeed;
+  const shortSystemRam = systemRamNeed > 0 && systemRamHave + 1e-9 < systemRamNeed;
   const shortCompute =
     effectivePfNeed > 0.01 && pfServe < effectivePfNeed * 0.85;
+  const shortages = Number(shortVram) + Number(shortSystemRam) + Number(shortCompute);
   let shortOn: FleetHostSnapshot["shortOn"] = "ok";
-  if (shortVram && shortCompute) shortOn = "both";
-  else if (shortVram) shortOn = "vram";
+  if (shortages > 1) shortOn = "multiple";
+  else if (shortVram) shortOn = "hbm";
+  else if (shortSystemRam) shortOn = "system_ram";
   else if (shortCompute) shortOn = "compute";
 
   // Recommend SKU from catalog biases
   let recommendedSkuId = "rack_h100";
   let recommendedSkuReason = "Balanced H-Node for general serve.";
-  if (shortOn === "vram" || (models[0] && models[0].ramBias > 0.55)) {
+  if (shortOn === "hbm" || shortOn === "multiple" || (models[0] && models[0].ramBias > 0.55)) {
     recommendedSkuId = "rack_h200";
     recommendedSkuReason =
       "High-VRAM H2-Node — better for large weight residency.";
@@ -304,11 +341,14 @@ export function fleetHostSnapshot(state: SimState): FleetHostSnapshot {
   return {
     vramHave,
     vramNeed,
+    systemRamHave,
+    systemRamNeed,
     pfHave,
     pfServe,
     pfNeed: effectivePfNeed,
-    computeUtil,
-    vramUtil,
+    computeCoverage,
+    vramCoverage,
+    systemRamCoverage,
     shortOn,
     models,
     recommendedSkuId,
@@ -317,7 +357,8 @@ export function fleetHostSnapshot(state: SimState): FleetHostSnapshot {
 }
 
 /**
- * Auto-balance toward ~80% compute util on the serve pool + enough VRAM.
+ * Auto-balance toward the existing ~80% minimum compute-coverage policy plus
+ * enough resident VRAM.
  * - Tweaks train/serve/research split
  * - Orders recommended racks into halls with free bays (if cash allows)
  */
@@ -350,7 +391,7 @@ export function autoBalanceHosting(state: SimState): SimState {
   );
   let inferShare = Math.min(0.88, Math.max(0.15, targetServePf / pfHave));
   // If VRAM short, still keep some train but prioritize serve less if can't load model
-  if (host.shortOn === "vram" || host.shortOn === "both") {
+  if (host.shortOn === "hbm" || host.shortOn === "multiple") {
     inferShare = Math.min(0.55, inferShare);
   }
   const trainShare = Math.max(0.1, (1 - inferShare) * 0.55);
@@ -387,9 +428,9 @@ export function autoBalanceHosting(state: SimState): SimState {
   if (
     sku &&
     halls.length > 0 &&
-    (host.shortOn !== "ok" || host.computeUtil < 0.65)
+    (host.shortOn !== "ok" || host.computeCoverage < 0.65)
   ) {
-    // How many bays to order: close gap toward 80% util / VRAM cover
+    // How many bays to order: close gap toward 80% compute/VRAM coverage
     let needBays = 0;
     if (host.vramNeed > host.vramHave) {
       const vramGap = host.vramNeed * 1.05 - host.vramHave;
@@ -398,7 +439,7 @@ export function autoBalanceHosting(state: SimState): SimState {
         Math.ceil(vramGap / Math.max(1, sku.vramGb)),
       );
     }
-    if (host.pfNeed > 0 && host.computeUtil < 0.8) {
+    if (host.pfNeed > 0 && host.computeCoverage < 0.8) {
       const pfGap = host.pfNeed * 0.85 - host.pfServe;
       if (pfGap > 0) {
         needBays = Math.max(
@@ -409,14 +450,12 @@ export function autoBalanceHosting(state: SimState): SimState {
     }
     needBays = Math.min(48, Math.max(0, needBays));
 
-    // Fill halls with free capacity
-    // `needBays` is a bay count; orders are expressed in complete rack SKUs.
+    // Fill only explicit empty cabinet footprints. Hardware without a drawn
+    // destination remains staged rather than consuming an abstract shell bay.
     let remainingRacks = Math.ceil(needBays / Math.max(1, sku.rackUnits));
     for (const h of halls) {
       if (remainingRacks <= 0) break;
-      const free = dcBayUsage(s, h.x, h.y).free;
-      if (free < sku.rackUnits) continue;
-      const can = Math.floor(free / sku.rackUnits);
+      const can = plannedCabinetsForSku(s, h, Math.max(1, sku.rackUnits));
       const buy = Math.min(can, remainingRacks);
       if (buy <= 0) continue;
       const before = s.player.cash;
@@ -427,7 +466,7 @@ export function autoBalanceHosting(state: SimState): SimState {
   }
 
   const after = fleetHostSnapshot(s);
-  const msg = `Auto-balance: serve ${(s.player.allocation.inference * 100).toFixed(0)}% · VRAM ${after.vramHave.toFixed(0)}/${after.vramNeed.toFixed(0)} GB · compute util ${(after.computeUtil * 100).toFixed(0)}% · ${after.recommendedSkuReason}`;
+  const msg = `Auto-balance: serve ${(s.player.allocation.inference * 100).toFixed(0)}% · VRAM ${after.vramHave.toFixed(0)}/${after.vramNeed.toFixed(0)} GB · compute coverage ${(after.computeCoverage * 100).toFixed(0)}% · ${after.recommendedSkuReason}`;
 
   return {
     ...s,
@@ -443,11 +482,7 @@ export function autoBalanceHosting(state: SimState): SimState {
   };
 }
 
-/**
- * Reserve every free bay in every completed player data hall in one action.
- * The rack screen uses this explicit capacity command; the separate hosting
- * auto-balancer remains demand-based and targets roughly 80% utilization.
- */
+/** Fill every explicit empty cabinet footprint across completed halls. */
 export function fillAllAvailableRackBays(state: SimState): SimState {
   const host = fleetHostSnapshot(state);
   const skuId = host.recommendedSkuId;
@@ -478,11 +513,12 @@ export function fillAllAvailableRackBays(state: SimState): SimState {
     )
     .toSorted((a, b) => a.y - b.y || a.x - b.x);
 
-  const freeAtStart = halls.reduce(
-    (sum, hall) => sum + dcBayUsage(state, hall.x, hall.y).free,
+  const spacesAtStart = halls.reduce(
+    (sum, hall) =>
+      sum + plannedCabinetsForSku(state, hall, Math.max(1, sku.rackUnits)),
     0,
   );
-  if (freeAtStart <= 0) {
+  if (spacesAtStart <= 0) {
     return {
       ...state,
       alerts: [
@@ -490,7 +526,8 @@ export function fillAllAvailableRackBays(state: SimState): SimState {
           id: `fill-halls-full-${state.day}`,
           day: state.day,
           severity: "info" as const,
-          message: "All completed data-hall bays are already committed.",
+          message:
+            "No compatible empty cabinet footprints are planned. Add physical rack placements in the hall editor first.",
         },
         ...state.alerts.filter((entry) => !entry.id.startsWith("fill-halls-")),
       ].slice(0, 40),
@@ -499,25 +536,27 @@ export function fillAllAvailableRackBays(state: SimState): SimState {
 
   let next = state;
   let racksQueued = 0;
-  let baysCommitted = 0;
+  let rackWidthsCommitted = 0;
   let hallsFilled = 0;
   for (const hall of halls) {
-    const free = dcBayUsage(next, hall.x, hall.y).free;
-    const count = Math.floor(free / Math.max(1, sku.rackUnits));
+    const count = plannedCabinetsForSku(
+      next,
+      hall,
+      Math.max(1, sku.rackUnits),
+    );
     if (count <= 0) continue;
-    const ordersBefore = next.worldMarkets.orders.length;
-    const candidate = orderRacksIntoDc(next, hall.x, hall.y, skuId, count);
-    next = candidate;
-    if (candidate.worldMarkets.orders.length <= ordersBefore) break;
+    const cashBefore = next.player.cash;
+    next = orderRacksIntoDc(next, hall.x, hall.y, skuId, count);
+    if (next.player.cash >= cashBefore) break; // blocked or unaffordable
     racksQueued += count;
-    baysCommitted += count * Math.max(1, sku.rackUnits);
+    rackWidthsCommitted += count * Math.max(1, sku.rackUnits);
     hallsFilled += 1;
   }
 
-  const completelyFilled = baysCommitted >= freeAtStart;
+  const completelyFilled = racksQueued >= spacesAtStart;
   const message =
-    baysCommitted > 0
-      ? `Fill halls: queued ${racksQueued}× ${sku.name} across ${hallsFilled} halls · ${baysCommitted}/${freeAtStart} free bays committed${completelyFilled ? "." : " (cash or market access limited)."}`
+    racksQueued > 0
+      ? `Fill plans: queued ${racksQueued}× ${sku.name} across ${hallsFilled} halls · ${racksQueued}/${spacesAtStart} physical cabinet footprints committed (${rackWidthsCommitted} rack-width units)${completelyFilled ? "." : " (cash or market access limited)."}`
       : "No racks were queued — check cash and market access.";
   return {
     ...next,
@@ -551,8 +590,10 @@ export function rackFitScore(
   const flopScore = sku.flopsPf * 80 * compB;
   const score = vramScore + flopScore;
   const label =
-    host.shortOn === "vram"
-      ? "Helps VRAM"
+    host.shortOn === "hbm"
+      ? "Helps HBM"
+      : host.shortOn === "system_ram"
+        ? "Helps host RAM"
       : host.shortOn === "compute"
         ? "Helps compute"
         : "Balanced fit";

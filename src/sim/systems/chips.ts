@@ -1,9 +1,8 @@
 import { getChipDef, buyableChips } from '../balance/chips'
 import { aggregateEffects } from './research'
 import type { SimState } from '../types'
-import { mapEnergy } from './map'
-import { fleetStats } from './racks'
 import { eventChipLeadMult, eventExportBanGen } from './events'
+import { transportDeliveryAccess } from './transport'
 
 export function buyChips(state: SimState, defId: string, count: number): SimState {
   const def = getChipDef(defId)
@@ -69,8 +68,6 @@ export function buyChips(state: SimState, defId: string, count: number): SimStat
   }
   inv.arriving.push({ daysLeft: lead, count })
 
-  const energy = mapEnergy(state)
-  const freeRacks = Math.max(0, energy.rackCap - fleetStats(state).rackUnitsUsed)
   const alerts = [
     {
       id: `chip-buy-${state.day}-${defId}`,
@@ -80,12 +77,13 @@ export function buyChips(state: SimState, defId: string, count: number): SimStat
     },
     ...state.alerts,
   ]
-  if (count > freeRacks) {
+  if (count > 0) {
     alerts.unshift({
       id: `chip-rack-${state.day}`,
       day: state.day,
-      severity: 'warn' as const,
-      message: `Only ${freeRacks} free racks — expand DCs or chips will throttle.`,
+      severity: 'info' as const,
+      message:
+        'Loose accelerators remain inventory until assembled into racks and placed in a valid data-hall layout.',
     })
   }
 
@@ -101,12 +99,13 @@ export function buyChips(state: SimState, defId: string, count: number): SimStat
 }
 
 export function tickChipDeliveries(state: SimState): SimState {
+  const dailyProgress = transportDeliveryAccess(state)
   const chips = state.player.chips.map((inv) => {
     const arriving: typeof inv.arriving = []
     let count = inv.count
     for (const a of inv.arriving) {
-      if (a.daysLeft <= 1) count += a.count
-      else arriving.push({ daysLeft: a.daysLeft - 1, count: a.count })
+      if (a.daysLeft <= dailyProgress) count += a.count
+      else arriving.push({ daysLeft: a.daysLeft - dailyProgress, count: a.count })
     }
     return { ...inv, count, arriving }
   })
