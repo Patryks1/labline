@@ -41,7 +41,7 @@ export function RadarChart({
     <figure className="rounded-xl border border-line/70 bg-void/35 p-2.5">
       <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_11rem]">
         <svg
-          viewBox="-20 -4 360 258"
+          viewBox="-55 -16 430 292"
           className="mx-auto w-full max-w-[28rem] overflow-visible"
           role="img"
           aria-label={`${suiteId.replaceAll('_', ' ')} radar chart`}
@@ -107,10 +107,10 @@ export function RadarChart({
                   strokeWidth="1.5"
                 />
                 <foreignObject
-                  x={axis.labelX - 58}
-                  y={axis.labelY - 12}
-                  width="116"
-                  height="29"
+                  x={axis.labelX - 78}
+                  y={axis.labelY - 14}
+                  width="156"
+                  height="34"
                 >
                   <button
                     type="button"

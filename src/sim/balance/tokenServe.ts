@@ -803,8 +803,8 @@ export function suggestApiFromUnitCost(opts: {
   const priceOut = Math.round(costOut * multiplier * 1000) / 1000
   const blend = (a: number, b: number) => a * 0.7 + b * 0.3
   return {
-    costIn: Math.round(costIn * 1000) / 1000,
-    costOut: Math.round(costOut * 1000) / 1000,
+    costIn,
+    costOut,
     priceIn,
     priceOut,
     blendedCost: blend(costIn, costOut),
