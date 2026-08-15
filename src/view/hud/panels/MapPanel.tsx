@@ -227,9 +227,13 @@ export function MapPanel() {
                 type="button"
                 variant="ghost"
                 className="mt-3 w-full text-mint"
-                onClick={() => useGameStore.getState().openFleet()}
+                onClick={() =>
+                  useGameStore
+                    .getState()
+                    .openHallEditor(tile.campusId ?? `facility:${tile.x},${tile.y}`)
+                }
               >
-                Order racks →
+                Open hall editor →
               </HudButton>
             ) : null}
 
@@ -304,7 +308,7 @@ export function BuildingDisposeButtons({
               variant="primary"
               disabled={fastTrackBlocked}
               title={fastTrackReason ?? 'Pay 50% extra capex to halve the remaining schedule.'}
-              className={compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full'}
+              className={compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full !min-h-11'}
               onClick={(e) => {
                 e.stopPropagation()
                 setState(fastTrackConstruction(state, x, y))
@@ -321,7 +325,7 @@ export function BuildingDisposeButtons({
         <HudButton
           type="button"
           variant="secondary"
-          className={`${compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full'} border border-amber/30 text-amber`}
+          className={`${compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full !min-h-11'} border border-amber/30 text-amber`}
           onClick={(e) => {
             e.stopPropagation()
             requestConfirm({
@@ -344,7 +348,7 @@ export function BuildingDisposeButtons({
       <HudButton
         type="button"
         variant="danger"
-        className={compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full'}
+        className={compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full !min-h-11'}
         onClick={(e) => {
           e.stopPropagation()
           requestConfirm({
@@ -364,7 +368,7 @@ export function BuildingDisposeButtons({
           variant="ghost"
           disabled={state.player.cash < demolitionCost}
           title={state.player.cash < demolitionCost ? `Need ${money(demolitionCost)} to demolish` : undefined}
-          className={`${compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full'} border border-amber/30 text-amber`}
+          className={`${compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full !min-h-11'} border border-amber/30 text-amber`}
           onClick={(e) => {
             e.stopPropagation()
             requestConfirm({

@@ -24,7 +24,6 @@ function isTypingTarget(t: EventTarget | null): boolean {
  *
  * Space — pause / play
  * 0–3  — speed (0 pause, 1=1×, 2=2×, 3=5×)
- * +/=  — step one day
  * Shift+1–7 — same workspaces
  * [    — toggle left drawer
  * ]    — toggle command dock
@@ -81,13 +80,6 @@ export function useHotkeys() {
           st.setSpeed(sp)
           return
         }
-      }
-
-      // Step day
-      if (k === '+' || k === '=' || k === '.') {
-        e.preventDefault()
-        st.stepDay()
-        return
       }
 
       // Left rail collapse

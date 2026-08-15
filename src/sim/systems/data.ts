@@ -24,7 +24,10 @@ import {
   totalSources,
   type DomainDataContract,
 } from "../balance/data";
+import { ECONOMY } from "../balance/economy";
+import { ioForPreset, presetFromFamily } from "../balance/trainingV3";
 import { createRng, hashSeed, seededId } from "../rng";
+import { chargeExpense, recordCashSpend } from "./financeLedger";
 import { queueDataOfferOrder } from "./sharedMarkets";
 import type {
   DataDomain,
@@ -37,7 +40,6 @@ import type {
   SyntheticFillRecord,
   SynthGenJob,
   TrainingDataPlan,
-  DataSupplierContract,
 } from "../types";
 import { computeSnapshot, normalizeAllocation } from "./compute";
 import { campusBonuses } from "./campus";
@@ -47,9 +49,20 @@ import {
   estimateSyntheticQuality,
   teacherCapabilityForDataDomain,
 } from "../balance/modelCapabilities";
-import { syntheticTrainingProfile } from "../balance/syntheticTraining";
-import { appendDatasetAsset, syntheticDatasetAsset } from "./dataAssets";
+import {
+  syntheticJobQuality,
+  syntheticTrainingProfile,
+  teacherDomainStrength,
+} from "../balance/syntheticTraining";
+import { activeBalanceTuning } from "../balance/tuning";
+import {
+  appendDatasetAsset,
+  pruneDatasetAssetsForDomain,
+  syntheticDatasetAsset,
+  type DatasetPruneBreakdown,
+} from "./dataAssets";
 import { playerStaff } from "./staff";
+import { energyPriceForState } from "./map";
 import {
   cloneLabData,
   collectTrafficData,
@@ -79,6 +92,44 @@ export {
   createEmptyLabData,
   type DomainDataContract,
 };
+
+// Marketplace buys and the supplier negotiation lifecycle live in
+// dataContracts; re-exported here so existing systems/data imports keep working.
+export {
+  DATA_BULK_BUY_PREMIUM,
+  DATA_CANCEL_FEE_MAX_SHARE,
+  DATA_CANCEL_FEE_MIN_SHARE,
+  DATA_CANCEL_FEE_MIN_DAYS,
+  DATA_CONCURRENT_CONTRACT_PREMIUM,
+  DATA_MAX_CONTRACTS_PER_SUPPLIER,
+  acceptDataSupplierCounter,
+  acceptDataSupplierOffer,
+  buyAllFilteredDataLots,
+  buyDataLotAmount,
+  buyEntireDataLot,
+  cancelDataSupplierContract,
+  counterDataSupplierOffer,
+  dataCancellationFee,
+  dataContractRemainingValue,
+  dataOfferDelivery,
+  dataOfferLotCost,
+  dataOfferPurchasableMTok,
+  dataOfferRights,
+  dataOfferUnitPrice,
+  dataSupplierContractPremium,
+  evaluateSupplierOffer,
+  listDataSupplierOffers,
+  liveSupplierContractCount,
+  previewDataPurchase,
+  proposeDataSupplierTerms,
+  rejectDataSupplierCounter,
+  supplierTermsFromOffer,
+  tickDataSupplierContracts,
+  type DataDeliveryState,
+  type DataPurchasePreview,
+  type DataSupplierOffer,
+  type SupplierOfferEvaluation,
+} from "./dataContracts";
 
 export function ensureLabData(state: SimState): LabData {
   const raw = state.player.data;
@@ -173,14 +224,17 @@ export function purchaseDataPruneAudit(state: SimState): SimState {
     );
   const data = cloneLabData(ensureLabData(state));
   data.pruneAuditValidUntilDay = state.day + audit.validDays;
-  const next = {
-    ...state,
-    player: {
-      ...state.player,
-      cash: state.player.cash - audit.cashCost,
-      data,
+  const next = chargeExpense(
+    {
+      ...state,
+      player: {
+        ...state.player,
+        data,
+      },
     },
-  };
+    audit.cashCost,
+    "data",
+  );
   return alert(
     next,
     "info",
@@ -416,15 +470,22 @@ export function synthTeacherFreshness(
   model: Model,
   domain: DataDomain,
 ): { freshness: number; capabilityGap: number; frontierName: string } {
+  // The player may use its own retained internal checkpoints. Rival internals
+  // are intentionally excluded: hidden weights must not leak through data
+  // routing, freshness labels, or serving-adjacent forecasts.
   const candidates = [
-    ...state.player.models,
-    ...state.rivals.flatMap((rival) => rival.models),
-  ].filter(
-    (candidate) =>
-      candidate.release === "released" ||
-      candidate.shipped ||
-      candidate.release === "internal",
-  );
+    ...state.player.models.filter(
+      (candidate) =>
+        candidate.release === "released" ||
+        candidate.shipped ||
+        candidate.release === "internal",
+    ),
+    ...state.rivals.flatMap((rival) =>
+      rival.models.filter(
+        (candidate) => candidate.release === "released" || candidate.shipped,
+      ),
+    ),
+  ];
   let frontier = model;
   let frontierCapability = teacherCapabilityForDataDomain(model, domain);
   for (const candidate of candidates) {
@@ -446,13 +507,26 @@ export function synthTeacherFreshness(
 export function collectFromTraffic(state: SimState): SimState {
   const flywheel =
     aggregateEffects(state.player.researchUnlocked).dataFlywheel ?? 0;
+  const servedByPlan = state.lastMarket.servedMTokByPlanId ?? {};
+  const planSlices = state.player.pricing.plans.map((plan) => ({
+    id: plan.id,
+    pricePerMonth: plan.pricePerMonth,
+    servedMTok:
+      servedByPlan[plan.id] ??
+      state.lastMarket.planStats.find((stat) => stat.planId === plan.id)
+        ?.dayMTok ??
+      0,
+    dataCollectionRate: plan.dataCollectionRate,
+  }));
   const result = collectTrafficData({
     data: ensureLabData(state),
-    servedMTok: state.lastMarket.servedMTok,
+    servedMTok:
+      state.lastMarket.servedMTok * activeBalanceTuning().dataCollectionMult,
     demandMTok: state.lastMarket.playerDemandMTok,
     brandTrust: state.player.brandTrust,
     dataFlywheel: flywheel,
     segments: state.segments,
+    planSlices,
   });
   return {
     ...state,
@@ -537,6 +611,8 @@ export function enqueueProcessAll(state: SimState): SimState {
 /**
  * Start AI data generation for a domain using a player model.
  * Burns a share of the research PF pool (slows tech research).
+ * Targeted jobs persist the full generation config: teacher model, target
+ * corpus, requested volume, tier, filtering intensity, and compute budget.
  */
 export function startSynthGen(
   state: SimState,
@@ -547,6 +623,10 @@ export function startSynthGen(
     researchShare: number;
     /** HQ needs data_synth + capable model; LQ is always noisier/faster */
     qualityTier?: "hq" | "lq";
+    /** Filtering intensity 0–1: raises per-token quality, slows throughput. */
+    filterIntensity?: number;
+    /** Total research PF-days the job may consume before stopping. */
+    computeBudgetPfDays?: number;
   },
 ): SimState {
   if (!state.player.researchUnlocked.includes("data_synth")) {
@@ -589,6 +669,14 @@ export function startSynthGen(
 
   const continuous = opts.targetMTok == null;
   const target = continuous ? 0 : Math.max(5, opts.targetMTok ?? 5);
+  const filterIntensity = Math.max(
+    0,
+    Math.min(1, opts.filterIntensity ?? (tier === "hq" ? 0.7 : 0.35)),
+  );
+  const computeBudgetPfDays =
+    opts.computeBudgetPfDays != null && opts.computeBudgetPfDays > 0
+      ? opts.computeBudgetPfDays
+      : undefined;
   const job: SynthGenJob = {
     id: seededId(
       "synth",
@@ -606,6 +694,9 @@ export function startSynthGen(
     continuous,
     researchShare: share,
     qualityTier: tier,
+    filterIntensity,
+    computeBudgetPfDays,
+    pfDaysSpent: 0,
   };
   data.synthQueue = [...(data.synthQueue ?? []), job];
   data.dataGenResearchShare = dataResearchReservationShare(data);
@@ -631,7 +722,7 @@ export function startSynthGen(
         id: job.id,
         day: state.day,
         severity: "info" as const,
-        message: `Continuous AI gen (${tier.toUpperCase()}): ${model.name} → ${DATA_DOMAIN_META[opts.domain].label} (~${Math.round(share * 100)}% research${estDays ? ` · ~${estDays}d` : ""}). Update the teacher when its frontier freshness falls.`,
+        message: `Continuous AI gen (${tier.toUpperCase()}): ${model.name} → ${DATA_DOMAIN_META[opts.domain].label} (~${Math.round(share * 100)}% research${estDays ? ` · ~${estDays}d` : ""}${computeBudgetPfDays ? ` · ${Math.round(computeBudgetPfDays)} PFd budget` : ""}). Update the teacher when its frontier freshness falls.`,
       },
       ...state.alerts,
     ].slice(0, 40),
@@ -644,84 +735,409 @@ export interface SynthBudgetEstimate {
   grossMTokPerDay: number;
   usefulChance: number;
   hqChance: number;
+  acceptedMTokPerDay: number;
+  powerMw: number;
+  energyMWhPerDay: number;
+  dailyComputeCost: number;
+  costPerAcceptedMTok: number;
+  kwhPerAcceptedMTok: number;
+  domains: SynthDomainBudgetEstimate[];
 }
 
-function synthBudgetTeacher(state: SimState): Model | null {
-  return (
-    state.player.models
-      .filter(
-        (model) =>
-          model.release === "released" ||
-          model.shipped ||
-          model.release === "internal",
-      )
-      .sort(
-        (left, right) =>
-          right.capability * 0.72 +
-          right.quality.reliability * 0.28 -
-          (left.capability * 0.72 + left.quality.reliability * 0.28),
-      )[0] ?? null
+export type SynthTeacherAssignment = "auto" | "assigned" | "fallback";
+
+export interface SynthDomainBudgetEstimate {
+  domain: DataDomain;
+  requestedTeacherId?: string;
+  teacher: Model | null;
+  autoTeacher: Model | null;
+  assignment: SynthTeacherAssignment;
+  validation?: string;
+  domainCapability: number;
+  modalityFit: number;
+  toolFit: number;
+  overallFit: number;
+  researchPf: number;
+  grossMTokPerDay: number;
+  usefulChance: number;
+  hqChance: number;
+  acceptedMTokPerDay: number;
+  powerMw: number;
+  energyMWhPerDay: number;
+  dailyComputeCost: number;
+  costPerAcceptedMTok: number;
+  kwhPerAcceptedMTok: number;
+  yieldDeltaMTokPerDay: number;
+  costDeltaPerAcceptedMTok: number;
+  powerDeltaKwhPerAcceptedMTok: number;
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
+}
+
+/** Only retained player weights can teach. Training candidates never leak here. */
+export function eligibleSynthTeachers(state: SimState): Model[] {
+  return state.player.models.filter(
+    (model) =>
+      model.release === "released" ||
+      model.shipped ||
+      model.release === "internal",
   );
+}
+
+export function eligibleSynthTeachersForDomain(
+  state: SimState,
+  domain: DataDomain,
+): Model[] {
+  return eligibleSynthTeachers(state).filter((model) =>
+    modelCanCurateDataDomain(model, domain),
+  );
+}
+
+function teacherIo(model: Model) {
+  return (
+    model.io ??
+    ioForPreset(
+      model.productPreset ?? presetFromFamily(model.family),
+      model.capability,
+    )
+  );
+}
+
+/** How well the actual model I/O and tool stack matches a generated corpus. */
+export function synthTeacherFit(
+  model: Model,
+  domain: DataDomain,
+): {
+  domainCapability: number;
+  modalityFit: number;
+  toolFit: number;
+  overallFit: number;
+} {
+  const io = teacherIo(model);
+  const domainCapability = Math.max(
+    0,
+    Math.min(100, teacherCapabilityForDataDomain(model, domain)),
+  );
+  const textOutput = clamp01((io.outputs.text ?? 0) / 100);
+  let modalityFit = textOutput;
+  if (domain === "image") {
+    modalityFit = clamp01(
+      ((io.outputs.image ?? 0) * 0.72 + (io.inputs.image ?? 0) * 0.28) / 100,
+    );
+  } else if (domain === "video") {
+    modalityFit = clamp01(
+      ((io.outputs.video ?? 0) * 0.78 +
+        (io.inputs.video ?? 0) * 0.16 +
+        (io.inputs.image ?? 0) * 0.06) /
+        100,
+    );
+  } else if (domain === "audio") {
+    modalityFit = clamp01(
+      ((io.outputs.audio ?? 0) * 0.74 + (io.inputs.audio ?? 0) * 0.26) / 100,
+    );
+  }
+  const rawToolFit = clamp01(
+    Math.max(io.tools ?? 0, model.capabilities?.domains.tools ?? 0) / 100,
+  );
+  const toolWeight =
+    domain === "code"
+      ? 0.18
+      : domain === "math"
+        ? 0.1
+        : domain === "science"
+          ? 0.05
+          : 0;
+  const toolFit = toolWeight > 0 ? rawToolFit : 1;
+  const overallFit = clamp01(
+    (domainCapability / 100) * (0.58 - toolWeight) +
+      clamp01(model.quality.reliability / 100) * 0.2 +
+      modalityFit * 0.22 +
+      toolFit * toolWeight,
+  );
+  return { domainCapability, modalityFit, toolFit, overallFit };
+}
+
+function synthTeacherWorkMultiplier(model: Model, domain: DataDomain): number {
+  const activeParams = Math.max(0.007, model.activeParamsB ?? model.paramsB);
+  const scaleBurden = 1 + Math.log10(1 + activeParams) * 0.38;
+  const modalityBurden =
+    domain === "video"
+      ? 1.75
+      : domain === "image"
+        ? 1.32
+        : domain === "audio"
+          ? 1.2
+          : 1;
+  const architectureBurden = model.family === "omni" ? 1.14 : 1;
+  return scaleBurden * modalityBurden * architectureBurden;
+}
+
+function synthTeacherRoutingScore(model: Model, domain: DataDomain): number {
+  const fit = synthTeacherFit(model, domain);
+  if (!modelCanCurateDataDomain(model, domain)) return -Infinity;
+  return (
+    fit.overallFit * 100 +
+    fit.domainCapability * 0.18 -
+    Math.log10(1 + Math.max(0.007, model.activeParamsB ?? model.paramsB)) * 2
+  );
+}
+
+export function autoSynthTeacher(
+  state: SimState,
+  domain: DataDomain,
+): Model | null {
+  return (
+    [...eligibleSynthTeachersForDomain(state, domain)].sort(
+      (left, right) =>
+        synthTeacherRoutingScore(right, domain) -
+        synthTeacherRoutingScore(left, domain),
+    )[0] ?? null
+  );
+}
+
+function resolveSynthTeacher(
+  state: SimState,
+  domain: DataDomain,
+  requestedTeacherId?: string,
+): {
+  teacher: Model | null;
+  autoTeacher: Model | null;
+  assignment: SynthTeacherAssignment;
+  validation?: string;
+} {
+  const autoTeacher = autoSynthTeacher(state, domain);
+  if (!requestedTeacherId) {
+    return { teacher: autoTeacher, autoTeacher, assignment: "auto" };
+  }
+  const requested = eligibleSynthTeachers(state).find(
+    (model) => model.id === requestedTeacherId,
+  );
+  if (!requested) {
+    return {
+      teacher: autoTeacher,
+      autoTeacher,
+      assignment: "fallback",
+      validation: "Assigned teacher is unavailable; Auto is active.",
+    };
+  }
+  if (!modelCanCurateDataDomain(requested, domain)) {
+    return {
+      teacher: autoTeacher,
+      autoTeacher,
+      assignment: "fallback",
+      validation: `${requested.name} cannot generate this corpus; Auto is active.`,
+    };
+  }
+  return {
+    teacher: requested,
+    autoTeacher,
+    assignment: "assigned",
+  };
+}
+
+function synthDomainBudget(
+  state: SimState,
+  domain: DataDomain,
+  researchPf: number,
+  powerMw: number,
+  requestedTeacherId?: string,
+  autoReference = false,
+): Omit<
+  SynthDomainBudgetEstimate,
+  | "yieldDeltaMTokPerDay"
+  | "costDeltaPerAcceptedMTok"
+  | "powerDeltaKwhPerAcceptedMTok"
+> {
+  const resolved = resolveSynthTeacher(
+    state,
+    domain,
+    autoReference ? undefined : requestedTeacherId,
+  );
+  const model = resolved.teacher;
+  if (!model) {
+    return {
+      domain,
+      requestedTeacherId,
+      ...resolved,
+      domainCapability: 0,
+      modalityFit: 0,
+      toolFit: 0,
+      overallFit: 0,
+      researchPf,
+      grossMTokPerDay: 0,
+      usefulChance: 0,
+      hqChance: 0,
+      acceptedMTokPerDay: 0,
+      powerMw,
+      energyMWhPerDay: powerMw * 24,
+      dailyComputeCost: 0,
+      costPerAcceptedMTok: 0,
+      kwhPerAcceptedMTok: 0,
+    };
+  }
+  const fit = synthTeacherFit(model, domain);
+  const computeSignal = researchPf / Math.max(2, researchPf + 8);
+  const workMultiplier = synthTeacherWorkMultiplier(model, domain);
+  const grossMTokPerDay = syntheticGenerationMTokPerDay({
+    domain,
+    teacherDomainCapability: fit.domainCapability,
+    teacherReliability: model.quality.reliability,
+    researchPf: researchPf / workMultiplier,
+    tier: "lq",
+  });
+  const usefulChance = Math.max(
+    0.04,
+    Math.min(
+      0.96,
+      0.06 +
+        fit.overallFit * 0.58 +
+        fit.modalityFit * 0.16 +
+        clamp01(model.quality.reliability / 100) * 0.12 +
+        computeSignal * 0.08,
+    ),
+  );
+  const verifierBonus =
+    domain === "code" || domain === "math" ? 0.08 * fit.toolFit : 0;
+  const hqChance = Math.max(
+    0.03,
+    Math.min(
+      0.94,
+      0.02 +
+        fit.overallFit * 0.55 +
+        (fit.domainCapability / 100) * 0.18 +
+        clamp01(model.quality.reliability / 100) * 0.13 +
+        computeSignal * 0.08 +
+        verifierBonus,
+    ),
+  );
+  const acceptedMTokPerDay = grossMTokPerDay * usefulChance;
+  const energyMWhPerDay = powerMw * 24;
+  const energyCost = energyMWhPerDay * energyPriceForState(state);
+  const researchComputeCost = researchPf * ECONOMY.researchCashPerPfDay * 0.55;
+  const dailyComputeCost = energyCost + researchComputeCost;
+  return {
+    domain,
+    requestedTeacherId,
+    ...resolved,
+    ...fit,
+    researchPf,
+    grossMTokPerDay,
+    usefulChance,
+    hqChance,
+    acceptedMTokPerDay,
+    powerMw,
+    energyMWhPerDay,
+    dailyComputeCost,
+    costPerAcceptedMTok:
+      acceptedMTokPerDay > 0 ? dailyComputeCost / acceptedMTokPerDay : 0,
+    kwhPerAcceptedMTok:
+      acceptedMTokPerDay > 0
+        ? (energyMWhPerDay * 1_000) / acceptedMTokPerDay
+        : 0,
+  };
 }
 
 /** Forecast an automatic synthetic portfolio from one player-facing compute budget. */
 export function estimateSynthBudget(
   state: SimState,
   researchShare: number,
+  teacherModelIds: Partial<Record<DataDomain, string>> = {},
 ): SynthBudgetEstimate {
-  const model = synthBudgetTeacher(state);
   const share = Math.max(0.05, Math.min(0.5, researchShare));
   const researchPf = grossResearchPoolPf(state) * share;
-  if (!model) {
-    return {
-      model: null,
-      researchPf,
-      grossMTokPerDay: 0,
-      usefulChance: 0,
-      hqChance: 0,
-    };
-  }
-
-  const intelligence = Math.max(
-    0,
-    Math.min(
-      1,
-      (model.capability * 0.72 + model.quality.reliability * 0.28) / 100,
-    ),
+  const snapshot = computeSnapshot(state);
+  // Local snapshots expose measured research draw. Remote/idle-to-active pools
+  // need a conservative accelerator-equivalent forecast so synthetic compute
+  // never appears power-free in previews.
+  const powerMw = Math.max(
+    snapshot.mwBreakdown.research * share,
+    researchPf * 0.0016 * Math.max(1, state.player.pue),
   );
-  const computeSignal = researchPf / Math.max(12, researchPf + 12);
-  const grossMTokPerDay = DATA_DOMAINS.reduce(
-    (sum, domain) =>
-      sum +
-      syntheticGenerationMTokPerDay({
-        domain,
-        teacherDomainCapability: teacherCapabilityForDataDomain(model, domain),
-        teacherReliability: model.quality.reliability,
-        researchPf: researchPf / DATA_DOMAINS.length,
-        tier: "lq",
-      }),
+  const domainPf = researchPf / DATA_DOMAINS.length;
+  const domainPowerMw = powerMw / DATA_DOMAINS.length;
+  const domains = DATA_DOMAINS.map((domain): SynthDomainBudgetEstimate => {
+    const selected = synthDomainBudget(
+      state,
+      domain,
+      domainPf,
+      domainPowerMw,
+      teacherModelIds[domain],
+    );
+    const automatic = teacherModelIds[domain]
+      ? synthDomainBudget(
+          state,
+          domain,
+          domainPf,
+          domainPowerMw,
+          undefined,
+          true,
+        )
+      : selected;
+    return {
+      ...selected,
+      yieldDeltaMTokPerDay:
+        selected.acceptedMTokPerDay - automatic.acceptedMTokPerDay,
+      costDeltaPerAcceptedMTok:
+        selected.costPerAcceptedMTok - automatic.costPerAcceptedMTok,
+      powerDeltaKwhPerAcceptedMTok:
+        selected.kwhPerAcceptedMTok - automatic.kwhPerAcceptedMTok,
+    };
+  });
+  const grossMTokPerDay = domains.reduce(
+    (sum, domain) => sum + domain.grossMTokPerDay,
+    0,
+  );
+  const acceptedMTokPerDay = domains.reduce(
+    (sum, domain) => sum + domain.acceptedMTokPerDay,
+    0,
+  );
+  const usefulChance =
+    grossMTokPerDay > 0 ? acceptedMTokPerDay / grossMTokPerDay : 0;
+  const hqChance =
+    acceptedMTokPerDay > 0
+      ? domains.reduce(
+          (sum, domain) => sum + domain.acceptedMTokPerDay * domain.hqChance,
+          0,
+        ) / acceptedMTokPerDay
+      : 0;
+  const dailyComputeCost = domains.reduce(
+    (sum, domain) => sum + domain.dailyComputeCost,
+    0,
+  );
+  const energyMWhPerDay = domains.reduce(
+    (sum, domain) => sum + domain.energyMWhPerDay,
     0,
   );
 
   return {
-    model,
+    model: domains.find((domain) => domain.domain === "chat")?.teacher ?? null,
     researchPf,
     grossMTokPerDay,
-    usefulChance: Math.max(
-      0.18,
-      Math.min(0.9, 0.2 + intelligence * 0.45 + computeSignal * 0.25),
-    ),
-    hqChance: Math.max(
-      0.12,
-      Math.min(0.88, 0.1 + intelligence * 0.58 + computeSignal * 0.2),
-    ),
+    usefulChance,
+    hqChance,
+    acceptedMTokPerDay,
+    powerMw,
+    energyMWhPerDay,
+    dailyComputeCost,
+    costPerAcceptedMTok:
+      acceptedMTokPerDay > 0 ? dailyComputeCost / acceptedMTokPerDay : 0,
+    kwhPerAcceptedMTok:
+      acceptedMTokPerDay > 0
+        ? (energyMWhPerDay * 1_000) / acceptedMTokPerDay
+        : 0,
+    domains,
   };
 }
 
 /** Start the simplified auto-routing generator used by the Data workspace. */
 export function startSynthBudget(
   state: SimState,
-  opts: { researchShare: number },
+  opts: {
+    researchShare: number;
+    teacherModelIds?: Partial<Record<DataDomain, string>>;
+  },
 ): SimState {
   if (!state.player.researchUnlocked.includes("data_synth")) {
     return alert(
@@ -730,7 +1146,11 @@ export function startSynthBudget(
       "Unlock Synthetic Generators (data tree: mix → clean → eval → synth) first.",
     );
   }
-  const estimate = estimateSynthBudget(state, opts.researchShare);
+  const estimate = estimateSynthBudget(
+    state,
+    opts.researchShare,
+    opts.teacherModelIds,
+  );
   if (!estimate.model)
     return alert(
       state,
@@ -761,7 +1181,13 @@ export function startSynthBudget(
       Math.min(0.5, availableShare, opts.researchShare),
     );
     data.synthQueue = data.synthQueue.map((job) =>
-      job.id === existing.id ? { ...job, researchShare: share } : job,
+      job.id === existing.id
+        ? {
+            ...job,
+            researchShare: share,
+            teacherModelIds: { ...(opts.teacherModelIds ?? {}) },
+          }
+        : job,
     );
     data.dataGenResearchShare = dataResearchReservationShare(data);
     return {
@@ -772,7 +1198,7 @@ export function startSynthBudget(
           id: `synth-budget-update-${state.day}`,
           day: state.day,
           severity: "info" as const,
-          message: `Synthetic compute budget updated to ${Math.round(share * 100)}% of research.`,
+          message: `Synthetic compute and corpus teacher routing updated: ${Math.round(share * 100)}% of research.`,
         },
         ...state.alerts,
       ].slice(0, 40),
@@ -806,6 +1232,7 @@ export function startSynthBudget(
     researchShare: share,
     qualityTier: "hq",
     autoPortfolio: true,
+    teacherModelIds: { ...(opts.teacherModelIds ?? {}) },
     hqMTok: 0,
     lqMTok: 0,
     wastedMTok: 0,
@@ -855,50 +1282,86 @@ export function estimateSynthMTokPerDay(
 function removeProcessedLowQuality(
   stock: LabData["stocks"][DataDomain],
   amount: number,
+  removedQualityMTok: number,
+  breakdown: DatasetPruneBreakdown,
 ): void {
   const oldProcessed = stock.processed;
   const removed = Math.min(oldProcessed, Math.max(0, amount));
   if (removed <= 0) return;
 
-  let sourceLeft = removed;
-  const takeLq = Math.min(stock.fromSynthLQ ?? 0, sourceLeft);
-  stock.fromSynthLQ = Math.max(0, (stock.fromSynthLQ ?? 0) - takeLq);
-  stock.fromSynth = Math.max(
-    stock.fromSynthHQ ?? 0,
-    (stock.fromSynth ?? 0) - takeLq,
-  );
-  sourceLeft -= takeLq;
-
-  // Older saves only retain aggregate source counts. Remove remaining inferred
-  // low-quality records proportionally so provenance remains conserved.
-  const sourceKeys = [
-    "fromWeb",
-    "fromUser",
-    "fromBought",
-    "fromSynth",
-  ] as const;
-  const sourceTotal = sourceKeys.reduce(
-    (sum, key) => sum + Math.max(0, stock[key] ?? 0),
+  const priorSynthOther = Math.max(
     0,
+    (stock.fromSynth ?? 0) -
+      (stock.fromSynthHQ ?? 0) -
+      (stock.fromSynthLQ ?? 0),
   );
+  const take = (
+    key: "fromWeb" | "fromUser" | "fromBought" | "fromSynthHQ" | "fromSynthLQ",
+    requested: number,
+  ): number => {
+    const actual = Math.min(
+      Math.max(0, stock[key] ?? 0),
+      Math.max(0, requested),
+    );
+    stock[key] = Math.max(0, (stock[key] ?? 0) - actual);
+    return actual;
+  };
+  let sourceRemoved = 0;
+  sourceRemoved += take("fromWeb", breakdown.webMTok);
+  sourceRemoved += take("fromUser", breakdown.userMTok);
+  sourceRemoved += take("fromBought", breakdown.boughtMTok);
+  sourceRemoved += take("fromSynthHQ", breakdown.synthHqMTok);
+  sourceRemoved += take("fromSynthLQ", breakdown.synthLqMTok);
+
+  // Older saves may have aggregate stock without complete backing assets.
+  // Remove any un-attributed remainder proportionally without double-counting
+  // the synthetic total and its HQ/LQ subcategories.
+  const sourceLeft = Math.max(0, removed - sourceRemoved);
+  const sourceTotal =
+    Math.max(0, stock.fromWeb ?? 0) +
+    Math.max(0, stock.fromUser ?? 0) +
+    Math.max(0, stock.fromBought ?? 0) +
+    Math.max(0, stock.fromSynthHQ ?? 0) +
+    Math.max(0, stock.fromSynthLQ ?? 0) +
+    priorSynthOther;
+  let nextSynthOther = priorSynthOther;
   if (sourceLeft > 0 && sourceTotal > 0) {
     const ratio = Math.min(1, sourceLeft / sourceTotal);
-    for (const key of sourceKeys)
-      stock[key] = Math.max(0, (stock[key] ?? 0) * (1 - ratio));
-    const synthTotal = (stock.fromSynthHQ ?? 0) + (stock.fromSynthLQ ?? 0);
-    stock.fromSynth = Math.max(synthTotal, stock.fromSynth ?? 0);
+    stock.fromWeb = Math.max(0, (stock.fromWeb ?? 0) * (1 - ratio));
+    stock.fromUser = Math.max(0, (stock.fromUser ?? 0) * (1 - ratio));
+    stock.fromBought = Math.max(0, (stock.fromBought ?? 0) * (1 - ratio));
+    stock.fromSynthHQ = Math.max(0, (stock.fromSynthHQ ?? 0) * (1 - ratio));
+    stock.fromSynthLQ = Math.max(0, (stock.fromSynthLQ ?? 0) * (1 - ratio));
+    nextSynthOther *= 1 - ratio;
   }
+  stock.fromSynth =
+    (stock.fromSynthHQ ?? 0) + (stock.fromSynthLQ ?? 0) + nextSynthOther;
 
   const nextProcessed = Math.max(0, oldProcessed - removed);
-  // Audits target records around Q22. Removing them raises the surviving
-  // corpus average without manufacturing any new high-quality tokens.
+  const assetBackedRemoved = Math.min(
+    removed,
+    Math.max(
+      0,
+      breakdown.webMTok +
+        breakdown.userMTok +
+        breakdown.boughtMTok +
+        breakdown.synthHqMTok +
+        breakdown.synthLqMTok,
+    ),
+  );
+  const fallbackRemoved = Math.max(0, removed - assetBackedRemoved);
+  const fallbackQuality = Math.min(stock.quality, 22);
+  const removedQualityMass =
+    Math.max(0, removedQualityMTok) + fallbackRemoved * fallbackQuality;
+  // Recompute the surviving weighted mean from the exact assets removed. This
+  // raises quality only when the discarded slice was actually below average.
   stock.quality =
     nextProcessed > 0
       ? Math.max(
           stock.quality,
           Math.min(
             95,
-            (stock.quality * oldProcessed - 22 * removed) / nextProcessed,
+            (stock.quality * oldProcessed - removedQualityMass) / nextProcessed,
           ),
         )
       : DATA_PRUNE_QUALITY_FLOOR;
@@ -909,10 +1372,11 @@ function processDataPruneJobs(
   state: SimState,
   dataInput: LabData,
   cashInput: number,
+  alertsInput?: SimState["alerts"],
 ): { data: LabData; cash: number; alerts: SimState["alerts"] } {
-  const data = cloneLabData(dataInput);
+  let data = cloneLabData(dataInput);
   let cash = cashInput;
-  let alerts = state.alerts;
+  let alerts = alertsInput ?? state.alerts;
   const researchers = playerStaff(state).researcher ?? 0;
   const grossResearchPf = grossResearchPoolPf({
     ...state,
@@ -965,9 +1429,20 @@ function processDataPruneJobs(
       step * (job.rawRemaining / totalLeft),
     );
     const processedStep = Math.min(job.processedRemaining, step - rawStep);
+    const assetPrune = pruneDatasetAssetsForDomain({
+      data,
+      domain: job.domain,
+      amountMTok: processedStep,
+    });
+    data = assetPrune.data;
     const stock = data.stocks[job.domain];
     stock.raw = Math.max(0, stock.raw - rawStep);
-    removeProcessedLowQuality(stock, processedStep);
+    removeProcessedLowQuality(
+      stock,
+      processedStep,
+      assetPrune.removedQualityMTok,
+      assetPrune.breakdown,
+    );
     cash -= (rawStep + processedStep) * job.cashPerMTok;
     const nextJob: DataPruneJob = {
       ...job,
@@ -990,7 +1465,9 @@ function processDataPruneJobs(
   }
   data.pruneQueue = queue;
   data.dataGenResearchShare = dataResearchReservationShare(data);
-  return { data, cash: Math.max(0, cash), alerts };
+  // Never clamp the company ledger here. A prune queue may pause when it
+  // cannot fund more work, but existing debt must survive into settlement.
+  return { data, cash, alerts };
 }
 
 export function tickData(state: SimState): SimState {
@@ -1006,37 +1483,48 @@ export function tickData(state: SimState): SimState {
   for (const job of data.synthQueue ?? []) {
     if (job.autoPortfolio) {
       const liveState = { ...state, player: { ...state.player, data } };
-      const estimate = estimateSynthBudget(liveState, job.researchShare);
-      const model = estimate.model;
-      if (!model || estimate.grossMTokPerDay <= 0) {
+      const estimate = estimateSynthBudget(
+        liveState,
+        job.researchShare,
+        job.teacherModelIds,
+      );
+      if (!estimate.model || estimate.grossMTokPerDay <= 0) {
         synthQueue.push(job);
         continue;
       }
+
+      // Synthetic inference shares the research pool and pays the same
+      // accelerator/lab PF-day burden as research. Electricity remains visible
+      // separately in the estimate but is already settled by fleet operations.
+      cash -= Math.max(
+        0,
+        estimate.dailyComputeCost -
+          estimate.energyMWhPerDay * energyPriceForState(state),
+      );
 
       let grossToday = 0;
       let hqToday = 0;
       let lqToday = 0;
       let wasteToday = 0;
       for (const domain of DATA_DOMAINS) {
+        const domainEstimate = estimate.domains.find(
+          (candidate) => candidate.domain === domain,
+        );
+        const model = domainEstimate?.teacher;
+        if (!domainEstimate || !model) continue;
         const rng = createRng(hashSeed(state.seed, state.day, job.id, domain));
-        const domainGross = syntheticGenerationMTokPerDay({
-          domain,
-          teacherDomainCapability: teacherCapabilityForDataDomain(
-            model,
-            domain,
-          ),
-          teacherReliability: model.quality.reliability,
-          researchPf: estimate.researchPf / DATA_DOMAINS.length,
-          tier: "lq",
-        });
-        const gross = domainGross * (0.82 + rng.next() * 0.36);
+        const gross =
+          domainEstimate.grossMTokPerDay * (0.82 + rng.next() * 0.36);
         const usefulFraction = Math.max(
           0.04,
-          Math.min(0.96, estimate.usefulChance * (0.68 + rng.next() * 0.64)),
+          Math.min(
+            0.96,
+            domainEstimate.usefulChance * (0.68 + rng.next() * 0.64),
+          ),
         );
         const hqFraction = Math.max(
           0.05,
-          Math.min(0.95, estimate.hqChance * (0.72 + rng.next() * 0.56)),
+          Math.min(0.95, domainEstimate.hqChance * (0.72 + rng.next() * 0.56)),
         );
         const useful = gross * usefulFraction;
         const hq = useful * hqFraction;
@@ -1052,7 +1540,7 @@ export function tickData(state: SimState): SimState {
         const priorProcessed = stock.processed;
         const freshness = synthTeacherFreshness(liveState, model, domain);
         const hqAssetSeed = syntheticDatasetAsset({
-          id: `dataset-${job.id}-${domain}-hq`,
+          id: `dataset-${job.id}-${domain}-${model.id}-hq`,
           name: `Auto ${DATA_DOMAIN_META[domain].label} synthetic · high quality`,
           domain,
           volumeMTok: hq,
@@ -1062,7 +1550,7 @@ export function tickData(state: SimState): SimState {
           day: state.day,
         });
         const lqAssetSeed = syntheticDatasetAsset({
-          id: `dataset-${job.id}-${domain}-lq`,
+          id: `dataset-${job.id}-${domain}-${model.id}-lq`,
           name: `Auto ${DATA_DOMAIN_META[domain].label} synthetic · low quality`,
           domain,
           volumeMTok: lq,
@@ -1133,12 +1621,13 @@ export function tickData(state: SimState): SimState {
       data.lifetimeCollected += hqToday + lqToday;
       synthQueue.push({
         ...job,
-        modelId: model.id,
-        modelName: model.name,
+        modelId: estimate.model.id,
+        modelName: estimate.model.name,
         progressMTok: job.progressMTok + grossToday,
         hqMTok: (job.hqMTok ?? 0) + hqToday,
         lqMTok: (job.lqMTok ?? 0) + lqToday,
         wastedMTok: (job.wastedMTok ?? 0) + wasteToday,
+        pfDaysSpent: (job.pfDaysSpent ?? 0) + estimate.researchPf,
       });
       continue;
     }
@@ -1149,16 +1638,41 @@ export function tickData(state: SimState): SimState {
       grossResearchPoolPf({ ...state, player: { ...state.player, data } }) *
       job.researchShare;
     const meta = DATA_DOMAIN_META[job.domain];
-    const gen = syntheticGenerationMTokPerDay({
-      domain: job.domain,
-      teacherDomainCapability: teacherCapabilityForDataDomain(
-        model,
-        job.domain,
-      ),
-      teacherReliability: model.quality.reliability,
-      researchPf: pf,
-      tier,
-    });
+    // Targeted jobs stop when their persisted compute budget is exhausted.
+    const budget = job.computeBudgetPfDays ?? Infinity;
+    const budgetLeft = Math.max(0, budget - (job.pfDaysSpent ?? 0));
+    if (budgetLeft <= 0) {
+      alerts = [
+        {
+          id: `synth-budget-done-${job.id}`,
+          day: state.day,
+          severity: "info" as const,
+          message: `Synth budget spent (${tier.toUpperCase()}): ${formatTokens(job.progressMTok)} ${meta.label} via ${job.modelName} used its ${Math.round(budget)} PF-day budget.`,
+        },
+        ...alerts,
+      ].slice(0, 40);
+      continue;
+    }
+    const pfScale = pf > 0 ? Math.min(1, budgetLeft / pf) : 0;
+    const filterIntensity = Math.max(
+      0,
+      Math.min(1, job.filterIntensity ?? 0.5),
+    );
+    const gen =
+      syntheticGenerationMTokPerDay({
+        domain: job.domain,
+        teacherDomainCapability: teacherCapabilityForDataDomain(
+          model,
+          job.domain,
+        ),
+        teacherReliability: model.quality.reliability,
+        researchPf: pf,
+        tier,
+      }) *
+      pfScale *
+      // Harder filtering rejects more candidates before deposit.
+      (1 - 0.3 * filterIntensity);
+    const pfDaysSpent = (job.pfDaysSpent ?? 0) + pf * pfScale;
     const continuous = job.continuous === true;
     const next = continuous
       ? job.progressMTok + gen
@@ -1187,35 +1701,26 @@ export function tickData(state: SimState): SimState {
         day: state.day,
         provenance: { generationDepth },
       });
-      const baseQuality = estimateSyntheticQuality({
-        domain: job.domain,
-        teacherDomainCapability: teacherCapabilityForDataDomain(
-          model,
-          job.domain,
-        ),
-        provenance: syntheticAsset.synthetic!,
-      }).quality;
+      // Synthetic quality = teacher strength × method quality × filtering
+      // quality × depth decay. A teacher weak in this domain cannot produce
+      // strong data from general capability alone (70% domain weight).
       const teacher = synthTeacherFreshness(state, model, job.domain);
-      const qIn = Math.max(18, baseQuality - teacher.capabilityGap * 0.45);
-      // Real packs keep quality; synth tracked separately for mix control
-      const real = Math.max(
-        0,
-        stock.processed - stock.fromSynthHQ - stock.fromSynthLQ,
-      );
+      const qIn = syntheticJobQuality({
+        teacherStrength: teacherDomainStrength({
+          domainBenchmark: teacherCapabilityForDataDomain(model, job.domain),
+          reliability: model.quality.reliability,
+          capability: model.capability,
+        }),
+        method: tier === "hq" ? "filtered" : "imitation",
+        filterIntensity,
+        generationDepth,
+      });
       stock.processed = stock.processed + step;
       stock.fromSynth = (stock.fromSynth ?? 0) + step;
       if (tier === "hq") stock.fromSynthHQ = (stock.fromSynthHQ ?? 0) + step;
       else stock.fromSynthLQ = (stock.fromSynthLQ ?? 0) + step;
       // Blended stock quality for display (real-weighted)
       const np = stock.processed;
-      stock.quality =
-        np > 0
-          ? (stock.quality * real +
-              qIn * step +
-              stock.quality * (stock.processed - real - step)) /
-            np
-          : qIn;
-      // Simpler stable blend:
       stock.quality =
         np > 0 ? (stock.quality * (np - step) + qIn * step) / np : qIn;
       data.stocks[job.domain] = stock;
@@ -1230,7 +1735,12 @@ export function tickData(state: SimState): SimState {
       data.lifetimeCollected += step;
     }
     if (continuous || next < job.targetMTok - 0.1) {
-      synthQueue.push({ ...job, progressMTok: next, qualityTier: tier });
+      synthQueue.push({
+        ...job,
+        progressMTok: next,
+        qualityTier: tier,
+        pfDaysSpent,
+      });
     } else {
       alerts = [
         {
@@ -1246,7 +1756,7 @@ export function tickData(state: SimState): SimState {
   data.synthQueue = synthQueue;
   data.dataGenResearchShare = dataResearchReservationShare(data);
 
-  const pruning = processDataPruneJobs(state, data, cash);
+  const pruning = processDataPruneJobs(state, data, cash, alerts);
   data = pruning.data;
   cash = pruning.cash;
   alerts = pruning.alerts;
@@ -1294,12 +1804,13 @@ export function tickData(state: SimState): SimState {
     ].slice(0, 40);
   }
   const dataQuality = updateDataQualityIndex(state.player.dataQuality, data);
-
-  return {
+  const spent = Math.max(0, state.player.cash - cash);
+  const next = {
     ...state,
     player: { ...state.player, cash, data, dataQuality },
     alerts,
   };
+  return spent > 0 ? recordCashSpend(next, spent, "data") : next;
 }
 
 export interface ConsumeResult {
@@ -1646,9 +2157,7 @@ export function consumeForTraining(
           ),
         ),
       );
-      const domainStock = normalizeDomainStock(
-        dataAttribution.stocks[domain],
-      );
+      const domainStock = normalizeDomainStock(dataAttribution.stocks[domain]);
       const realAnchor = Math.max(
         0,
         Math.min(
@@ -1867,251 +2376,6 @@ export function tickDataMarket(state: SimState): SimState {
   return {
     ...s,
     dataMarket: { offers, lastRefreshDay, nextRefreshDay },
-  };
-}
-
-/**
- * Buy one lot from a market listing (or remaining MTok if smaller).
- * Scrap is cheap/low quality; curated is expensive/high quality.
- */
-export function buyDomainContract(
-  state: SimState,
-  contractId: string,
-): SimState {
-  let s = ensureDataMarket(state);
-  const market = s.dataMarket!;
-  const idx = market.offers.findIndex((x) => x.id === contractId);
-  if (idx < 0)
-    return alert(s, "warn", "That listing is no longer on the market.");
-  const c = market.offers[idx]!;
-  if (c.mTokLeft <= 0) {
-    return alert(
-      s,
-      "warn",
-      `${c.name} is sold out — wait for the next market refresh.`,
-    );
-  }
-  const buyMTok = Math.min(c.lotMTok, c.mTokLeft);
-  const frac = buyMTok / Math.max(1, c.lotMTok);
-  const cash = Math.max(50_000, Math.round(c.cash * frac));
-  if (s.player.cash < cash) {
-    return alert(
-      s,
-      "warn",
-      `Need $${(cash / 1e6).toFixed(2)}M for ${buyMTok} MTok.`,
-    );
-  }
-  return queueDataOfferOrder(s, s.playerLabId, contractId);
-}
-
-const DATA_SUPPLIER_COMPANIES = [
-  {
-    id: "supplier-openweb",
-    name: "OpenWeb Harvest",
-    domains: {
-      chat: 0.35,
-      code: 0.2,
-      science: 0.15,
-      law: 0.05,
-      health: 0.05,
-      image: 0.1,
-      audio: 0.05,
-      video: 0.05,
-    },
-    quality: 58,
-    dailyDeliveryMTok: 420,
-    dailyPrice: 180_000,
-  },
-  {
-    id: "supplier-broker",
-    name: "BrokerLink Data",
-    domains: {
-      chat: 0.2,
-      code: 0.25,
-      science: 0.2,
-      law: 0.1,
-      health: 0.1,
-      image: 0.05,
-      audio: 0.05,
-      video: 0.05,
-    },
-    quality: 72,
-    dailyDeliveryMTok: 260,
-    dailyPrice: 310_000,
-  },
-  {
-    id: "supplier-enterprise",
-    name: "Enterprise Corpus Co",
-    domains: {
-      chat: 0.15,
-      code: 0.15,
-      science: 0.2,
-      law: 0.2,
-      health: 0.2,
-      image: 0.04,
-      audio: 0.03,
-      video: 0.03,
-    },
-    quality: 84,
-    dailyDeliveryMTok: 180,
-    dailyPrice: 540_000,
-  },
-] as const;
-
-export interface DataSupplierOffer {
-  id: string;
-  name: string;
-  domainMix: Partial<Record<DataDomain, number>>;
-  quality: number;
-  dailyDeliveryMTok: number;
-  dailyPrice: number;
-  termDays: number;
-}
-
-/** Three deterministic supplier negotiations for recurring data delivery. */
-export function listDataSupplierOffers(state: SimState): DataSupplierOffer[] {
-  const dayFactor = 1 + Math.min(0.35, state.day / 4000);
-  return DATA_SUPPLIER_COMPANIES.map((company) => ({
-    id: company.id,
-    name: company.name,
-    domainMix: { ...company.domains },
-    quality: company.quality,
-    dailyDeliveryMTok: Math.round(company.dailyDeliveryMTok * dayFactor),
-    dailyPrice: Math.round(company.dailyPrice * dayFactor),
-    termDays: 30,
-  }));
-}
-
-export function acceptDataSupplierOffer(
-  state: SimState,
-  offerId: string,
-  priceMultiplier = 1,
-): SimState {
-  const offer = listDataSupplierOffers(state).find(
-    (candidate) => candidate.id === offerId,
-  );
-  if (!offer)
-    return alert(state, "warn", "That supplier offer is no longer available.");
-  const existing = state.player.dataSupplierContracts ?? [];
-  if (
-    existing.some(
-      (contract) =>
-        contract.supplierId === offer.id && contract.daysRemaining > 0,
-    )
-  ) {
-    return alert(
-      state,
-      "warn",
-      `${offer.name} already has an active contract.`,
-    );
-  }
-  if (state.player.cash < offer.dailyPrice) {
-    return alert(
-      state,
-      "warn",
-      `Need $${(offer.dailyPrice / 1e6).toFixed(2)}M cash for the first day of ${offer.name}.`,
-    );
-  }
-  const contract: DataSupplierContract = {
-    id: `dsc-${state.seed}-${state.day}-${offer.id}`,
-    supplierId: offer.id,
-    supplierName: offer.name,
-    domainMix: offer.domainMix,
-    quality: offer.quality,
-    dailyDeliveryMTok: offer.dailyDeliveryMTok,
-    dailyPrice: offer.dailyPrice * Math.max(0.8, Math.min(1, priceMultiplier)),
-    termDays: offer.termDays,
-    daysRemaining: offer.termDays,
-    acceptedDay: state.day,
-    status: "active",
-  };
-  return alert(
-    {
-      ...state,
-      player: {
-        ...state.player,
-        cash: state.player.cash - offer.dailyPrice,
-        dataSupplierContracts: [...existing, contract],
-      },
-    },
-    "info",
-    `Signed ${offer.name}: ${offer.dailyDeliveryMTok} MTok/day for ${offer.termDays}d.`,
-  );
-}
-
-export function tickDataSupplierContracts(state: SimState): SimState {
-  const contracts = state.player.dataSupplierContracts ?? [];
-  if (!contracts.length) return state;
-
-  let cash = state.player.cash;
-  let data = cloneLabData(state.player.data);
-  let alerts = state.alerts;
-  const nextContracts: DataSupplierContract[] = [];
-
-  for (const contract of contracts) {
-    if (contract.status !== "active") {
-      nextContracts.push(contract);
-      continue;
-    }
-    if (cash < contract.dailyPrice) {
-      nextContracts.push({
-        ...contract,
-        status: "cancelled",
-      });
-      alerts = [
-        {
-          id: `supplier-cash-${contract.id}-${state.day}`,
-          day: state.day,
-          severity: "warn" as const,
-          message: `${contract.supplierName} paused — need $${(contract.dailyPrice / 1e6).toFixed(2)}M/day.`,
-        },
-        ...alerts,
-      ].slice(0, 40);
-      continue;
-    }
-
-    cash -= contract.dailyPrice;
-    const mixEntries = Object.entries(contract.domainMix).filter(
-      ([, w]) => (w ?? 0) > 0,
-    ) as Array<[DataDomain, number]>;
-    const weightSum =
-      mixEntries.reduce((sum, [, w]) => sum + Math.max(0, w), 0) || 1;
-    for (const [domain, weight] of mixEntries) {
-      const add =
-        (contract.dailyDeliveryMTok * Math.max(0, weight)) / weightSum;
-      if (add <= 0) continue;
-      const stock = data.stocks[domain];
-      data.stocks[domain] = {
-        ...stock,
-        raw: stock.raw + add,
-        quality:
-          (stock.quality * stock.raw + contract.quality * add) /
-          Math.max(1e-9, stock.raw + add),
-      };
-    }
-    data.lifetimeCollected =
-      (data.lifetimeCollected ?? 0) + contract.dailyDeliveryMTok;
-
-    const daysRemaining = Math.max(
-      0,
-      (contract.daysRemaining ?? contract.termDays) - 1,
-    );
-    nextContracts.push({
-      ...contract,
-      daysRemaining,
-      status: daysRemaining <= 0 ? "completed" : "active",
-    });
-  }
-
-  return {
-    ...state,
-    player: {
-      ...state.player,
-      cash,
-      data,
-      dataSupplierContracts: nextContracts,
-    },
-    alerts,
   };
 }
 

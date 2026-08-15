@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { inferenceCapacityMTok, inferencePfDemand } from '../balance/serveCompute'
 import { createGame } from '../createGame'
-import type { ComputeContract, RackInstall } from '../types'
+import type { ComputeContract, Model, RackInstall } from '../types'
 import { computeSnapshot } from './compute'
 import { labInferCapacityWorkPf } from './labCompute'
 import { computeLabSnapshot, syncLabIndex } from './labEngine'
@@ -181,5 +181,58 @@ describe('controller-neutral compute yield', () => {
     expect(inferSnapshot.hardwareTokPerSec).toBeGreaterThan(0)
     expect(inferSnapshot.rawFlopsPf).toBeLessThan(denseSnapshot.rawFlopsPf)
     expect(inferWorkPerPf).toBeCloseTo(denseWorkPerPf, 8)
+  })
+
+  it('gives a rival zero inference capacity when endpoint weights cannot reside', () => {
+    let state = createGame(9_105)
+    const rival = state.rivals[0]!
+    const model = {
+      id: 'rival-405b-nonresident',
+      name: 'Rival 405B',
+      family: 'dense',
+      backbone: 'dense',
+      paramsB: 405,
+      activeParamsB: 405,
+      capability: 75,
+      inferCostMult: 1,
+      tokPerSecMult: 1,
+      release: 'released',
+      shipped: true,
+    } as Model
+    state = syncLabIndex({
+      ...state,
+      rivals: state.rivals.map((candidate) =>
+        candidate.id === rival.id
+          ? {
+              ...candidate,
+              // Eight abstract accelerators expose 640 GB HBM and 1 TB host
+              // RAM. Host RAM is not an implicit weight-offload deployment.
+              flopsPf: 8,
+              chips: 8,
+              models: [model],
+              allocation: { training: 0.1, inference: 0.8, research: 0.1 },
+              pricing: {
+                ...candidate.pricing,
+                activeModelId: model.id,
+                apiModelIds: [model.id],
+                apiServePrecisionByModel: { [model.id]: 'fp16' },
+                plans: candidate.pricing.plans.map((plan) => ({
+                  ...plan,
+                  enabled: false,
+                  modelIds: [],
+                })),
+              },
+            }
+          : candidate,
+      ),
+    })
+
+    const snapshot = computeLabSnapshot(state, rival.id)
+    expect(snapshot.localVramGb).toBe(640)
+    expect(snapshot.localSystemRamGb).toBe(1_024)
+    expect(snapshot.rawFlopsPf).toBeGreaterThan(0)
+    expect(snapshot.localServingMemoryReady).toBe(false)
+    expect(snapshot.pools.inference).toBe(0)
+    expect(snapshot.inferenceWorkPf).toBe(0)
   })
 })

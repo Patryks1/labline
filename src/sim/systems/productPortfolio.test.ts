@@ -189,7 +189,7 @@ describe('authoritative demand segments', () => {
     const science = segments.find((segment) => segment.id === 'science')!
     expect(science.currentUsers).toBe(123_456)
     expect(science.usefulTaskDemandPerUserDay).toBe(7.5)
-    expect(science.priceSensitivity).toBe(0.6)
+    expect(science.priceSensitivity).toBe(0.55)
     expect(science.domainWeights.science).toBeGreaterThan(science.domainWeights.language ?? 0)
     expect(science.preferredChannels).toContain('reserved_throughput_api')
     expect(science.benchmarkWeights.science).toBeGreaterThan(0)

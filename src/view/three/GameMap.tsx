@@ -1180,7 +1180,14 @@ export function GameMap() {
           await new Promise<void>(resolve => setTimeout(resolve, 0))
         }
       }
-    })()
+    })().catch((error: unknown) => {
+      // React development mode deliberately mounts, disposes and remounts
+      // effects once. Aborting the first asset stream is expected and must not
+      // surface as an unhandled console error while the procedural world stays
+      // live. A genuine manifest failure is still observable.
+      if (disposed || (error instanceof DOMException && error.name === 'AbortError')) return
+      console.warn('Authored world assets unavailable; keeping procedural fallbacks.', error)
+    })
 
     return () => {
       disposed = true

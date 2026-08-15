@@ -12,6 +12,16 @@ function compactState(seed = 91_001) {
 }
 
 describe('derived city stats', () => {
+  it('starts every city with municipal surplus available to sell', () => {
+    const state = compactState(91_010)
+    const stats = deriveCityStats(state)
+    expect(stats.length).toBeGreaterThan(0)
+    for (const row of stats) {
+      expect(row.municipalCapacityMw).toBeGreaterThan(row.municipalDemandMw)
+      expect(row.reserveMw).toBeGreaterThan(0)
+    }
+  })
+
   it('uses compact city runtime population as the canonical value', () => {
     const state = compactState()
     const city = state.map.world!.staticWorld.cities[0]!
@@ -22,12 +32,46 @@ describe('derived city stats', () => {
     expect(state.map.cities![0]!.population).not.toBe(population)
     const stats = deriveCityStats(state)[0]!
     expect(stats.population).toBe(population)
+    // Demand is instantaneous MW: tier floor vs population load only.
     expect(stats.municipalDemandMw).toBe(Math.max(
       city.tier === 'metro' ? 220 : city.tier === 'satellite' ? 105 : city.tier === 'town' ? 52 : 24,
       population / 1_500,
-      city.powerBuyMw * 24,
     ))
     expect(cityStatsForIndex(state, city.index)).toEqual(stats)
+  })
+
+  it('never mixes powerBuyMw into instantaneous MW demand (no x24 energy term)', () => {
+    // A small city whose utility contract capacity (40 MW) would dominate
+    // demand if the historical powerBuyMw * 24 (MWh/day) term still existed.
+    const state = {
+      map: {
+        storage: 'legacy',
+        cities: [{
+          id: 'c0', name: 'Unit Mix', cx: 0, cy: 0, radius: 5,
+          population: 10_000, powerRadius: 8, powerBuyMw: 40,
+          powerBuyPriceMult: 0.7, industry: 'tech', tier: 'town',
+        }],
+        tiles: [], width: 0, height: 0, regions: [], energyPricePerMWh: 1, activeRegionId: '',
+      },
+      cityPowerContracts: [],
+      powerExportContracts: [],
+    } as unknown as Parameters<typeof deriveCityStats>[0]
+    const stats = deriveCityStats(state)[0]!
+    expect(stats.municipalDemandMw).toBe(Math.max(52, 10_000 / 1_500))
+    // The bug reported 40 * 24 = 960 MW of instantaneous demand here.
+    expect(stats.municipalDemandMw).not.toBe(40 * 24)
+    expect(stats.municipalDemandMw).toBeLessThan(40 * 24)
+  })
+
+  it('starts every city with at least 20 MW and 20% spare capacity across seeds', () => {
+    for (const seed of [91_010, 91_011, 91_012, 91_013, 91_014]) {
+      const stats = deriveCityStats(compactState(seed))
+      expect(stats.length).toBeGreaterThan(0)
+      for (const row of stats) {
+        expect(row.reserveMw, `seed ${seed} city ${row.cityId}`).toBeGreaterThanOrEqual(20)
+        expect(row.reserveMargin, `seed ${seed} city ${row.cityId}`).toBeGreaterThanOrEqual(0.2)
+      }
+    }
   })
 
   it('falls back to MapCity population for legacy maps', () => {

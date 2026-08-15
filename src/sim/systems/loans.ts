@@ -102,50 +102,124 @@ export function interestForDraw(
   const shareBump = share < 0.02 ? 0.03 : share < 0.08 ? 0.01 : 0
   const pain = state.player.servicePain ?? 0
   const painBump = pain > 0.25 ? 0.04 : pain > 0.1 ? 0.015 : 0
+  // Negative-cash labs pay distress pricing on any new credit.
+  const cash = state.player.cash
+  const distressBump = cash <= -100_000_000 ? 0.06 : cash < 0 ? 0.03 : 0
   return Math.min(
     cfg.maxInterest ?? 0.28,
-    Math.max(cfg.minInterest ?? 0.04, base + termBump + levBump + brandBump + shareBump + painBump),
+    Math.max(cfg.minInterest ?? 0.04, base + termBump + levBump + brandBump + shareBump + painBump + distressBump),
   )
 }
 
-/** Distressed cash / burn — emergency facility eligibility. */
-export function isBailoutEligible(state: SimState): boolean {
-  const cash = state.player.cash
-  const dayNet = state.player.finance.dayNet ?? 0
-  const hasBailout = (state.player.loans ?? []).some((l) => l.offerId === 'bailout')
-  if (hasBailout) return false
-  // Cash crisis or sustained burn with thin runway
-  if (cash < 12_000_000) return true
-  if (cash < 40_000_000 && dayNet < -500_000) return true
-  if (cash < 80_000_000 && dayNet < -2_000_000 && state.day > 20) return true
-  return false
+/**
+ * Trailing average daily cash burn from the finance history (default 14 days).
+ * Only days where closing cash fell count toward the burn; flat/up days count
+ * as zero-burn days in the average. Falls back to today's net outflow when
+ * there is no history yet.
+ */
+export function trailingDailyCashBurn(state: SimState, windowDays = 14): number {
+  const samples = state.financeHistory.slice(-windowDays)
+  let decreases = 0
+  let days = 0
+  for (let i = 1; i < samples.length; i++) {
+    decreases += Math.max(0, samples[i - 1]!.cash - samples[i]!.cash)
+    days += 1
+  }
+  const last = samples[samples.length - 1]
+  if (last && last.day !== state.day) {
+    // Today so far: from the last settled close to current cash.
+    decreases += Math.max(0, last.cash - state.player.cash)
+    days += 1
+  }
+  if (days === 0) return Math.max(0, -(state.player.finance.dayNet ?? 0))
+  return decreases / days
 }
 
-/** Size a one-shot emergency facility (expensive, short). */
+/**
+ * Liquidity runway: days of positive cash left at the trailing burn rate.
+ * Divisor floored at $1 so a non-burning lab reports an effectively
+ * unbounded runway instead of dividing by zero.
+ */
+export function liquidityRunwayDays(state: SimState): number {
+  const burn = Math.max(1, trailingDailyCashBurn(state))
+  return Math.max(0, state.player.cash) / burn
+}
+
+/** Cash level below which an emergency facility is always offered. */
+export const BAILOUT_CASH_TRIGGER = 12_000_000
+/** Runway (days) below which an emergency facility is offered. */
+export const BAILOUT_RUNWAY_TRIGGER = 20
+/** Hard ceiling on the emergency facility principal. */
+export const BAILOUT_MAX_PRINCIPAL = 120_000_000
+/** Smallest facility worth paperwork. */
+export const BAILOUT_MIN_PRINCIPAL = 15_000_000
+
+/** The lab can plausibly recover: assets cover debt, or revenue still flows. */
+function isRecoverableBusiness(state: SimState): boolean {
+  const snap = bankCreditSnapshot(state)
+  return (
+    snap.valuation > snap.outstanding ||
+    (state.player.finance.dayRevenue ?? 0) > 0
+  )
+}
+
+/**
+ * Emergency facility eligibility from liquidity, not one day's P&L:
+ * current cash, trailing cash burn, runway, debt vs valuation, and whether an
+ * emergency facility is already open.
+ */
+export function isBailoutEligible(state: SimState): boolean {
+  const cash = state.player.cash
+  const hasBailout = (state.player.loans ?? []).some((l) => l.offerId === 'bailout')
+  if (hasBailout) return false
+  if (cash >= 0) {
+    // Pre-negative triggers: thin absolute cash or a short liquidity runway.
+    return (
+      cash < BAILOUT_CASH_TRIGGER ||
+      liquidityRunwayDays(state) < BAILOUT_RUNWAY_TRIGGER
+    )
+  }
+  // Negative cash: rescue only a potentially recoverable business.
+  return isRecoverableBusiness(state)
+}
+
+/**
+ * Size a one-shot emergency facility (expensive, short). Principal restores
+ * ~30–45 days of runway: target runway cost + overdue obligations − current
+ * cash, floored at a minimum facility and capped at a hard maximum. The
+ * facility ADDS financing cash on take — it never resets the balance.
+ */
 export function bailoutOffer(state: SimState): LoanOffer | null {
   if (!isBailoutEligible(state)) return null
-  const snap = bankCreditSnapshot(state)
+  const cash = state.player.cash
+  const burn = Math.max(1, trailingDailyCashBurn(state))
+  // Deeper holes get the longer stabilization window (~30–45 days runway).
+  const targetDays = cash < 0 ? 45 : 30
+  const targetRunwayCost = burn * targetDays
+  const overdueObligations =
+    cash < 0
+      ? 7 *
+        (dailyLoanPayment(state.player.loans ?? []) +
+          (state.player.capital?.debt ?? []).reduce(
+            (sum, debt) => sum + debt.dailyPayment,
+            0,
+          ))
+      : 0
+  const required = targetRunwayCost + overdueObligations - cash
   const principal = Math.floor(
-    Math.min(
-      120_000_000,
-      Math.max(
-        18_000_000,
-        Math.abs(Math.min(0, state.player.finance.dayNet ?? 0)) * 25 + 25_000_000,
-        snap.valuation * 0.06,
-      ),
-    ),
+    Math.min(BAILOUT_MAX_PRINCIPAL, Math.max(BAILOUT_MIN_PRINCIPAL, required)),
   )
   // Steep interest — last resort, not free money
   const interestTotal = Math.min(
-    0.42,
-    Math.max(0.22, (LOAN_CFG().maxInterest ?? 0.28) + 0.08),
+    0.45,
+    Math.max(0.25, (LOAN_CFG().maxInterest ?? 0.28) + 0.1),
   )
   return {
     id: 'bailout',
     label: 'Emergency bailout',
-    blurb: `Distress facility · high interest · ${formatM(principal)} to keep the lights on.`,
+    blurb: `Distress facility · high interest · ${formatM(principal)} to restore ~${targetDays}d runway.`,
     principal,
-    termDays: 21,
+    termDays: 30,
     interestTotal,
   }
 }

@@ -1,7 +1,8 @@
-import type { TrainingComputeFormat, TrainingNumerics } from '../types'
+import type { NativeWeightPrecision, TrainingComputeFormat, TrainingNumerics } from '../types'
 
 export type {
   NativeWeightFormat,
+  NativeWeightPrecision,
   TrainingComputeFormat,
   TrainingNumerics,
 } from '../types'
@@ -33,16 +34,18 @@ export interface TrainingPrecisionProfile {
 /**
  * Conservative achieved-throughput calibration. Catalog rack PF is treated as
  * BF16-equivalent PF. Generation 1 is A100-class, 2 H100/H200-class, and 3+
- * Blackwell/custom-class. FP32 means real IEEE FP32, not TF32.
+ * Blackwell/custom-class. The fp32 profile is the starter recipe: FP32 master
+ * weights with TF32 tensor operations on compatible accelerators, so it lands
+ * near half of BF16 throughput rather than true IEEE FP32 (~7%).
  */
 export const TRAINING_PRECISION_PROFILES: Readonly<
   Record<TrainingComputeFormat, TrainingPrecisionProfile>
 > = {
   fp32: {
     format: 'fp32',
-    label: 'FP32',
+    label: 'FP32/TF32',
     minimumHardwareGeneration: 1,
-    throughputByGeneration: { 1: 0.065, 2: 0.07, 3: 0.08, 4: 0.09, 5: 0.1 },
+    throughputByGeneration: { 1: 0.45, 2: 0.5, 3: 0.5, 4: 0.55, 5: 0.55 },
     activationMemoryMultiplier: 2,
     trainingWorkMultiplier: 1.16,
     upfrontCashMultiplier: 1.22,
@@ -154,7 +157,7 @@ export function trainingNumericsEconomicsProfile(
 }
 
 export const DEFAULT_TRAINING_NUMERICS: TrainingNumerics = {
-  computeFormat: 'fp16_mixed',
+  computeFormat: 'fp32',
   nativeWeightFormat: 'float',
   recipeVersion: 1,
 }
@@ -164,6 +167,74 @@ export const LEGACY_TRAINING_NUMERICS: TrainingNumerics = {
   computeFormat: 'bf16_mixed',
   nativeWeightFormat: 'float',
   recipeVersion: 1,
+}
+
+/**
+ * Weight precision a checkpoint natively carries out of training. Mixed-
+ * precision recipes release weights in their tensor format; FP8/NVFP4 recipes
+ * release scaled low-precision weights (training-time FP32 masters are not
+ * part of the released artifact). Ternary overrides the compute format.
+ */
+export function nativeWeightPrecisionForNumerics(
+  numerics: TrainingNumerics = DEFAULT_TRAINING_NUMERICS,
+): NativeWeightPrecision {
+  if (numerics.nativeWeightFormat === 'ternary_1_58') return 'ternary_1_58'
+  switch (numerics.computeFormat) {
+    case 'fp32':
+      return 'fp32'
+    case 'fp16_mixed':
+      return 'fp16'
+    case 'fp8_hybrid':
+      return 'fp8'
+    case 'nvfp4':
+      return 'nvfp4'
+    case 'bf16_mixed':
+    default:
+      return 'bf16'
+  }
+}
+
+/** Packed weight bytes per parameter for a native precision (FP32=4 … NVFP4≈0.5). */
+export function nativeWeightBytesPerParam(precision: NativeWeightPrecision): number {
+  switch (precision) {
+    case 'fp32':
+      return 4
+    case 'fp16':
+    case 'bf16':
+      return 2
+    case 'fp8':
+      return 1
+    case 'nvfp4':
+      return 0.5
+    case 'ternary_1_58':
+      return 0.25
+  }
+}
+
+/** Packed scales, zero-points, and alignment kept beside low-precision weights. */
+export function nativeWeightStorageOverhead(precision: NativeWeightPrecision): number {
+  switch (precision) {
+    case 'fp8':
+      return 1.03
+    case 'nvfp4':
+      return 1.06
+    case 'ternary_1_58':
+      return 1.15
+    default:
+      return 1
+  }
+}
+
+/** GB of packed native weights for `paramsB` billion parameters. */
+export function nativeWeightMemoryGb(
+  paramsB: number,
+  precision: NativeWeightPrecision,
+): number {
+  return (
+    Math.max(0, paramsB) *
+    nativeWeightBytesPerParam(precision) *
+    nativeWeightStorageOverhead(precision)
+  )
 }
 
 export function supportsTrainingFormat(
@@ -219,6 +290,13 @@ export function validateTrainingNumerics(opts: {
   }
   const unlocked = new Set(opts.researchUnlocked ?? [])
   const enforceResearch = opts.enforceResearch ?? true
+  if (
+    enforceResearch &&
+    numerics.computeFormat === 'fp16_mixed' &&
+    !unlocked.has('opt_fp16')
+  ) {
+    return { ok: false, reason: 'FP16 training requires FP16 Mixed Precision research.' }
+  }
   if (
     enforceResearch &&
     numerics.computeFormat === 'bf16_mixed' &&
@@ -311,10 +389,10 @@ export function estimateTrainingMemoryGb(opts: {
   const activationWorkspaceGb =
     Math.max(4, activeB * 1.5) * precision.activationMemoryMultiplier * checkpointingMult
   const communicationBuffersGb = Math.max(2, activeB * (opts.family === 'moe' ? 0.35 : 0.2))
-  const packedCheckpointGb =
-    numerics.nativeWeightFormat === 'ternary_1_58'
-      ? totalB * (1.58 / 8)
-      : totalB * (numerics.computeFormat === 'fp32' ? 4 : 2)
+  const packedCheckpointGb = nativeWeightMemoryGb(
+    totalB,
+    nativeWeightPrecisionForNumerics(numerics),
+  )
 
   const requiredHbmGb = persistentStateGb + activationWorkspaceGb + communicationBuffersGb
   // Host memory is staging, not a second complete copy of cluster state. Keep

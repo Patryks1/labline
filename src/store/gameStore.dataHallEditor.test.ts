@@ -36,11 +36,11 @@ describe('data hall editor store integration', () => {
     expect(store.leftRailOpen).toBe(true)
   })
 
-  it('commits only revision-matched valid drafts', () => {
+  it('queues only revision-matched valid drafts without changing the live layout', () => {
     const facility = [...useGameStore.getState().state.map.world!.facilitiesById.values()].find((entry) => entry.kind === 'dc')!
     useGameStore.getState().openHallEditor(facility.id)
     const layout = useGameStore.getState().state.dataHallLayouts![facility.id]!
-    const wall = createWall('store-applied-wall', 40, 40, 48, 40)
+    const wall = createWall('store-applied-wall', 10, 10, 30, 10)
     const result = useGameStore.getState().applyHallEditorPlan({
       facilityId: facility.id,
       expectedRevision: layout.revision,
@@ -49,8 +49,11 @@ describe('data hall editor store integration', () => {
       doors: layout.doors,
     })
     expect(result.ok).toBe(true)
-    expect(useGameStore.getState().state.dataHallLayouts![facility.id]!.revision).toBe(layout.revision + 1)
-    expect(useGameStore.getState().state.dataHallLayouts![facility.id]!.walls).toContainEqual(wall)
+    const queued = useGameStore.getState().state.dataHallLayouts![facility.id]!
+    expect(queued.revision).toBe(layout.revision)
+    expect(queued.walls).not.toContainEqual(wall)
+    expect(queued.constructionProject?.targetRevision).toBe(layout.revision + 1)
+    expect(queued.constructionProject?.targetWalls).toContainEqual(wall)
     expect(useGameStore.getState().hallEditorFacilityId).toBe(facility.id)
     expect(useGameStore.getState().applyHallEditorPlan({
       facilityId: facility.id,
@@ -61,7 +64,7 @@ describe('data hall editor store integration', () => {
     }).ok).toBe(false)
   })
 
-  it('commits a visible staged rack placement as the live hall layout', () => {
+  it('persists a staged rack placement in the construction target', () => {
     const initial = useGameStore.getState().state
     const facility = [...initial.map.world!.facilitiesById.values()].find((entry) => entry.kind === 'dc')!
     const hall = facilityAnchorTiles(initial).find((entry) => entry.campusId === facility.id)!
@@ -92,7 +95,9 @@ describe('data hall editor store integration', () => {
       doors: layout.doors,
     })
     expect(result.ok).toBe(true)
-    expect(useGameStore.getState().state.dataHallLayouts![facility.id]!.objects).toContainEqual(placedRack)
+    const queued = useGameStore.getState().state.dataHallLayouts![facility.id]!
+    expect(queued.objects).not.toContainEqual(placedRack)
+    expect(queued.constructionProject?.targetObjects).toContainEqual(placedRack)
   })
 
   it('persists planned rack cabinets so capacity-plan models remain visible after Apply', () => {
@@ -111,6 +116,8 @@ describe('data hall editor store integration', () => {
       doors: layout.doors,
     })
     expect(result.ok).toBe(true)
-    expect(useGameStore.getState().state.dataHallLayouts![facility.id]!.objects).toContainEqual(plannedCabinet)
+    const queued = useGameStore.getState().state.dataHallLayouts![facility.id]!
+    expect(queued.objects).not.toContainEqual(plannedCabinet)
+    expect(queued.constructionProject?.targetObjects).toContainEqual(plannedCabinet)
   })
 })

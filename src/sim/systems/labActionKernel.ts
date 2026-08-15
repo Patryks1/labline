@@ -150,8 +150,8 @@ export function previewLabActionForTarget(
     const job = jobsForTarget(target).find((candidate) => candidate.id === action.jobId)
     if (!job) return invalid('Training job is not active for this lab.')
     if (action.kind === 'set_training_priority') {
-      if (!Number.isFinite(action.priority) || action.priority < 10 || action.priority > 100) {
-        return invalid('Training priority must be between 10 and 100.')
+      if (!Number.isFinite(action.priority) || action.priority < 0 || action.priority > 100) {
+        return invalid('Training priority must be between 0 and 100.')
       }
       if (
         action.reservedPf != null &&

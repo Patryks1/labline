@@ -14,7 +14,14 @@ import { seededId } from '../rng'
 import { isDcAnchor, isDcKind } from './map'
 import { resolveRackSku } from './racks'
 import { commitWorldBatch, facilityAnchorTiles, usesCompactWorld } from './worldAccess'
-import { hallInfrastructureValue, removeDataHallLayout, tickDataHallLayouts } from './dataHallLayouts'
+import {
+  analyzeHallLayout,
+  autoPlanHall,
+  hallInfrastructureValue,
+  rackUnitsForFacility,
+  removeDataHallLayout,
+  tickDataHallLayouts,
+} from './dataHallLayouts'
 
 export const TRANSFERABLE_SITE_POWER_VALUE_PER_MW = 30_000_000
 export const FACILITY_OFFER_EXPIRY_DAYS = 7
@@ -290,6 +297,33 @@ function transferredRackAssets(
   }
 }
 
+function reconcileTransferredHallRacks(
+  state: SimState,
+  facilityId: string,
+  buyerLabId: LabId,
+  rackCapacity: number,
+): SimState {
+  const layout = state.dataHallLayouts?.[facilityId]
+  if (!layout || layout.constructionProject) return state
+  const inventory = rackUnitsForFacility(state, facilityId, buyerLabId)
+  const planned = autoPlanHall(
+    layout,
+    inventory,
+    layout.preferredStrategy,
+    rackCapacity,
+    { provisionUtilities: false },
+  )
+  const reconciled = { ...planned, revision: layout.revision + 1 }
+  reconciled.analysis = analyzeHallLayout(reconciled, inventory, rackCapacity)
+  return {
+    ...state,
+    dataHallLayouts: {
+      ...(state.dataHallLayouts ?? {}),
+      [facilityId]: reconciled,
+    },
+  }
+}
+
 function transferAsset(state: SimState, offer: FacilityAcquisitionOffer, price: number): SimState {
   const asset = findAsset(state, offer.facilityId)
   if (!asset || asset.ownerId !== offer.sellerLabId) return releaseEscrow(state, offer)
@@ -307,7 +341,10 @@ function transferAsset(state: SimState, offer: FacilityAcquisitionOffer, price: 
   next = setFleet(
     next,
     offer.buyerLabId,
-    [...labFleet(next, offer.buyerLabId), ...transferred.racks],
+    [
+      ...labFleet(next, offer.buyerLabId),
+      ...transferred.racks.map((rack) => ({ ...rack, facilityId: offer.facilityId })),
+    ],
     transferred.designs,
   )
   if (usesCompactWorld(next)) {
@@ -317,6 +354,15 @@ function transferAsset(state: SimState, offer: FacilityAcquisitionOffer, price: 
     next = { ...next, map: { ...next.map, tiles } }
   }
   next = { ...next, siteCapacities: next.siteCapacities.map((site) => site.facilityId === asset.id ? { ...site, labId: offer.buyerLabId } : site) }
+  // The racks sold with the hall are already installed physical assets, not a
+  // new fit-out. Rebind their identities to the transferred live layout while
+  // preserving its existing utility equipment; never synthesize a free top-up.
+  next = reconcileTransferredHallRacks(
+    next,
+    asset.id,
+    offer.buyerLabId,
+    asset.tile.rackCapacity,
+  )
   next = withLabCash(next, offer.sellerLabId, cashOf(next, offer.sellerLabId) + price)
   return tickDataHallLayouts(next)
 }

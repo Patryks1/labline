@@ -3,7 +3,12 @@ import { createGame } from "../createGame";
 import { computeSnapshot, remoteAcceleratorRamGb } from "./compute";
 import { fleetHostSnapshot } from "./hosting";
 import {
+  computeContractCashReserve,
+  evaluateComputeProviderOffer,
   labContractCapacityPf,
+  PROVIDER_MIN_OFFER_PERCENT,
+  PROVIDER_RATE_MULTIPLIER,
+  providerContractActiveForLab,
   quoteComputeContract,
   signComputeContract,
   terminateComputeContract,
@@ -634,5 +639,213 @@ describe("remote compute integration", () => {
       remoteAcceleratorRamGb(14),
       6,
     );
+  });
+});
+
+describe("provider rate doubling", () => {
+  it("doubles the quoted rate across kinds and settles invoices at the doubled price", () => {
+    let state = endStarterContract(createGame(8_210));
+    const provider = providerCapacity(state, "cloud-northstar");
+    const base = provider.basePricePerPfDay;
+
+    const onDemand = quoteComputeContract(state, {
+      providerId: provider.id,
+      buyerLabId: state.playerLabId,
+      kind: "on_demand",
+      pf: 10,
+      termDays: 30,
+    });
+    expect(onDemand.contract.pricePerPfDay).toBeCloseTo(
+      base * PROVIDER_RATE_MULTIPLIER,
+      8,
+    );
+    expect(onDemand.dailyCost).toBeCloseTo(
+      10 * base * PROVIDER_RATE_MULTIPLIER,
+      8,
+    );
+
+    const reserved = quoteComputeContract(state, {
+      providerId: provider.id,
+      buyerLabId: state.playerLabId,
+      kind: "reserved",
+      pf: 10,
+      termDays: 120,
+    });
+    expect(reserved.contract.pricePerPfDay).toBeCloseTo(
+      base * PROVIDER_RATE_MULTIPLIER * 0.78,
+      8,
+    );
+
+    const colocation = quoteComputeContract(state, {
+      providerId: provider.id,
+      buyerLabId: state.playerLabId,
+      kind: "colocation",
+      pf: 10,
+      termDays: 180,
+    });
+    expect(colocation.contract.pricePerPfDay).toBeCloseTo(
+      base * PROVIDER_RATE_MULTIPLIER * 0.66,
+      8,
+    );
+
+    const spot = quoteComputeContract(state, {
+      providerId: "cloud-meridian",
+      buyerLabId: state.playerLabId,
+      kind: "spot",
+      pf: 10,
+      termDays: 20,
+    });
+    const spotBase = providerCapacity(state, "cloud-meridian").basePricePerPfDay;
+    expect(spot.contract.pricePerPfDay).toBeGreaterThanOrEqual(
+      spotBase * PROVIDER_RATE_MULTIPLIER * 0.65 - 1e-9,
+    );
+
+    state = signComputeContract(state, onDemand);
+    state = tickComputeContracts({
+      ...state,
+      player: { ...state.player, cloudCredits: 0, computeLeaseCostToday: 0 },
+    });
+    expect(state.player.computeLeaseCostToday).toBeCloseTo(
+      10 * base * PROVIDER_RATE_MULTIPLIER,
+      8,
+    );
+  });
+
+  it("keeps the locked price on existing contracts while fresh quotes double", () => {
+    const state = createGame(8_211);
+    const starter = state.computeContracts.find(
+      (contract) => contract.status === "active",
+    )!;
+    const provider = providerCapacity(state, starter.providerId);
+    const fresh = quoteComputeContract(state, {
+      providerId: starter.providerId,
+      buyerLabId: state.playerLabId,
+      kind: "on_demand",
+      pf: starter.pf,
+      termDays: 30,
+    });
+    expect(fresh.contract.pricePerPfDay).toBeCloseTo(
+      provider.basePricePerPfDay * PROVIDER_RATE_MULTIPLIER,
+      8,
+    );
+    expect(starter.pricePerPfDay).toBeLessThan(fresh.contract.pricePerPfDay);
+
+    const settled = tickComputeContracts({
+      ...state,
+      player: { ...state.player, cloudCredits: 0, computeLeaseCostToday: 0 },
+    });
+    expect(settled.player.computeLeaseCostToday).toBeCloseTo(
+      starter.pf * starter.pricePerPfDay,
+      8,
+    );
+  });
+
+  it("quotes and bills rival buyers at the doubled rate too", () => {
+    let state = endStarterContract(createGame(8_212));
+    const rivalId = state.rivals[0]!.id;
+    const provider = providerCapacity(state, "cloud-meridian");
+    const quote = quoteComputeContract(state, {
+      providerId: provider.id,
+      buyerLabId: rivalId,
+      kind: "on_demand",
+      pf: 5,
+      termDays: 30,
+    });
+    expect(quote.contract.pricePerPfDay).toBeCloseTo(
+      provider.basePricePerPfDay * PROVIDER_RATE_MULTIPLIER,
+      8,
+    );
+
+    state = signComputeContract(state, quote);
+    const cashBefore = state.rivals.find((rival) => rival.id === rivalId)!.cash;
+    state = tickComputeContracts(state);
+    const invoice = 5 * provider.basePricePerPfDay * PROVIDER_RATE_MULTIPLIER;
+    expect(state.rivals.find((rival) => rival.id === rivalId)!.cash).toBeCloseTo(
+      cashBefore - invoice,
+      8,
+    );
+  });
+});
+
+describe("compute provider negotiation kernel", () => {
+  const deskInputs = {
+    reliability: 0.95,
+    pf: 24,
+    availablePf: 400,
+    termDays: 90,
+  };
+
+  it("agrees at strong offers, counters close offers, and declines below the seller floor", () => {
+    const agreed = evaluateComputeProviderOffer({
+      ...deskInputs,
+      offerPercent: 100,
+    });
+    expect(agreed.outcome).toBe("agreed");
+    expect(agreed.belowFloor).toBe(false);
+
+    const countered = evaluateComputeProviderOffer({
+      ...deskInputs,
+      offerPercent: 88,
+    });
+    expect(countered.outcome).toBe("countered");
+    expect(countered.counter).toBeDefined();
+    expect(countered.counter!.offerPercent).toBeGreaterThan(88);
+    expect(countered.counter!.pf).toBeLessThanOrEqual(deskInputs.pf);
+    expect(countered.counter!.termDays).toBeGreaterThanOrEqual(
+      deskInputs.termDays,
+    );
+
+    const floored = evaluateComputeProviderOffer({
+      ...deskInputs,
+      offerPercent: PROVIDER_MIN_OFFER_PERCENT - 5,
+    });
+    expect(floored.outcome).toBe("declined");
+    expect(floored.belowFloor).toBe(true);
+    expect(floored.floorOfferPercent).toBe(PROVIDER_MIN_OFFER_PERCENT);
+  });
+
+  it("turns a negotiated agreement into a real active contract", () => {
+    let state = endStarterContract(createGame(8_213));
+    const provider = providerCapacity(state, "cloud-northstar");
+    const quote = quoteComputeContract(state, {
+      providerId: provider.id,
+      buyerLabId: state.playerLabId,
+      kind: "on_demand",
+      pf: 20,
+      termDays: 60,
+    });
+    expect(quote.canSign).toBe(true);
+
+    const evaluation = evaluateComputeProviderOffer({
+      reliability: provider.reliability,
+      pf: quote.contract.pf,
+      availablePf: Math.max(1, provider.availablePf),
+      termDays: quote.contract.daysTotal,
+      offerPercent: 100,
+    });
+    expect(evaluation.outcome).toBe("agreed");
+    expect(
+      providerContractActiveForLab(state, provider.id, state.playerLabId),
+    ).toBe(false);
+
+    state = signComputeContract(state, quote);
+    const active = state.computeContracts.find(
+      (contract) => contract.id === quote.contract.id,
+    )!;
+    expect(active.status).toBe("active");
+    expect(active.pricePerPfDay).toBeCloseTo(quote.contract.pricePerPfDay, 8);
+    expect(
+      providerContractActiveForLab(state, provider.id, state.playerLabId),
+    ).toBe(true);
+    expect(labContractCapacityPf(state, state.playerLabId).inboundPf).toBe(20);
+  });
+
+  it("caps the signing cash reserve at thirty days of billing", () => {
+    expect(
+      computeContractCashReserve({ pf: 10, pricePerPfDay: 240, daysTotal: 90 }),
+    ).toBe(10 * 240 * 30);
+    expect(
+      computeContractCashReserve({ pf: 10, pricePerPfDay: 240, daysTotal: 14 }),
+    ).toBe(10 * 240 * 14);
   });
 });

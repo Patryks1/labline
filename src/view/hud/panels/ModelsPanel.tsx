@@ -11,24 +11,30 @@ import type {
   ModelProductPreset,
   NativeWeightFormat,
   SafetyCampaignIntensity,
+  StartTrainingOpts,
   TrainMode,
   TrainingComputeFormat,
 } from "../../../sim/types";
 import {
   PARAM_PRESETS,
+  distillRetentionFor,
   formatParams,
   recommendedChips,
 } from "../../../sim/balance/training";
 import {
+  DEFAULT_TRAINING_NUMERICS,
   estimateTrainingMemoryGb,
   supportsTrainingFormat,
   TRAINING_PRECISION_PROFILES,
   trainingNumericsEconomicsProfile,
 } from "../../../sim/balance/trainingPrecision";
 import {
+  backboneFromFamily,
   familyFromSpec,
   forecastTrainingV3,
   ioForPreset,
+  migrateLegacyProductPreset,
+  presetFromFamily,
 } from "../../../sim/balance/trainingV3";
 import {
   capabilityCeiling,
@@ -37,22 +43,23 @@ import {
 import { aggregateEffects } from "../../../sim/systems/research";
 import {
   DATA_DOMAINS,
-  defaultDataWeights,
   formatTokens,
-  minDataMTokForParams,
-  recommendedDataMTok,
+  minimumTrainingDataMTok,
+  recommendedTrainingDataMTok,
 } from "../../../sim/balance/data";
 import {
   ensureLabData,
   newDataSinceModel,
   totalProcessed,
 } from "../../../sim/systems/data";
-import { serveInfraCost } from "../../../sim/balance/pricing";
+import { apiUnitCostPerMTok } from "../../../sim/balance/pricing";
 import { energyPriceForState } from "../../../sim/systems/map";
 import { computeSnapshot } from "../../../sim/tick";
 import {
+  defaultTrainingDataWeights,
   playerTrainingResourcePlan,
-  trainingMinimumStatus,
+  trainingArchitectureValidation,
+  trainingUnlockEligibility,
   trainingRamFitForNewJob,
 } from "../../../sim/systems/training";
 import { money, mw, num } from "../format";
@@ -75,7 +82,6 @@ import {
 import { normalizeModelEvaluations } from "../../../sim/balance/evaluationSuites";
 import { safetyCampaignEstimate } from "../../../sim/systems/safetyCampaigns";
 import { playerStaff } from "../../../sim/systems/staff";
-import { RadarChart } from "../ui/RadarChart";
 import { TrainingDataRadar } from "../ui/TrainingDataRadar";
 import {
   syntheticExpansionUnlocked,
@@ -91,15 +97,33 @@ import {
   type Blocker,
 } from "../ui/kit";
 import { ActiveTrainingCard } from "./models/ActiveTrainingCard";
+import type { TrainingLossCheckpointMarker } from "./models/TrainingLossChart";
 import { FleetTab } from "./models/FleetTab";
 import { SafetyCampaignSection } from "./models/SafetyCampaignSection";
+import { CheckpointWorkspace } from "./models/CheckpointWorkspace";
+import { CheckpointEvaluationDialog } from "./models/CheckpointEvaluationDialog";
+import {
+  checkpointUiRecordFromCandidate,
+  type CheckpointReviewMode,
+  type CheckpointUiRecord,
+} from "./models/checkpointUi";
+import {
+  hasHardTrainingStartNotice,
+  trainingDataGuidanceText,
+  trainingStartFailureMessage,
+} from "./models/trainingStartUi";
+import { TrainingStartFailureBanner } from "./models/TrainingStartFailureBanner";
+import {
+  directRunCheckpointRequest,
+  ensureCurrentRunCheckpoint,
+} from "./models/directRunCheckpointActions";
 
 const TRAINING_FORMAT_OPTIONS: ReadonlyArray<{
   value: TrainingComputeFormat;
   research?: string;
 }> = [
   { value: "fp32" },
-  { value: "fp16_mixed" },
+  { value: "fp16_mixed", research: "opt_fp16" },
   { value: "bf16_mixed", research: "opt_mixed" },
   { value: "fp8_hybrid", research: "opt_fp8_train" },
   { value: "nvfp4", research: "opt_nvfp4_train" },
@@ -125,7 +149,6 @@ const PRODUCT_OPTIONS: ReadonlyArray<{
   label: string;
 }> = [
   { value: "language", label: "Language · text + tools" },
-  { value: "vision_language", label: "Vision-language" },
   { value: "audio", label: "Audio" },
   { value: "image_generation", label: "Image generation" },
   { value: "video_generation", label: "Video generation" },
@@ -141,10 +164,11 @@ const BACKBONE_OPTIONS: ReadonlyArray<{ value: ModelBackbone; label: string }> =
 
 function bestRecipeWeights(
   family: ModelFamily,
+  productPreset: ModelProductPreset,
   dataMTok: number,
   labData: ReturnType<typeof ensureLabData>,
 ): Record<DataDomain, number> {
-  const ideal = defaultDataWeights(family);
+  const ideal = defaultTrainingDataWeights(family, productPreset);
   const adjusted = { ...ideal };
   for (const domain of DATA_DOMAINS) {
     const stock = labData.stocks[domain];
@@ -183,49 +207,49 @@ function applyParamsB(paramsB: number): { val: string; unit: "M" | "B" | "T" } {
   return { val: String(paramsB * 1000), unit: "M" };
 }
 
-function frontierForSuite(models: Model[], suiteId: BenchmarkSuiteId) {
-  const scores: Partial<
-    Record<import("../../../sim/types").BenchmarkMetricId, number>
-  > = {};
-  for (const model of models) {
-    for (const [id, score] of Object.entries(
-      model.benchmarkSuites?.[suiteId] ?? {},
-    )) {
-      scores[id as import("../../../sim/types").BenchmarkMetricId] = Math.max(
-        scores[id as import("../../../sim/types").BenchmarkMetricId] ?? 0,
-        score ?? 0,
-      );
-    }
-  }
-  return scores;
-}
-
 export function ModelsPanel() {
   const state = useGameStore((s) => s.state);
   const startTraining = useGameStore((s) => s.startTraining);
   const setTrainingPriority = useGameStore((s) => s.setTrainingPriority);
   const pauseTraining = useGameStore((s) => s.pauseTraining);
-  const extendTraining = useGameStore((s) => s.extendTraining);
   const cancelTraining = useGameStore((s) => s.cancelTraining);
   const selectPostTrain = useGameStore((s) => s.selectPostTrain);
-  const benchmarkTrainingJob = useGameStore((s) => s.benchmarkTrainingJob);
+  const promoteTrainingCheckpoint = useGameStore(
+    (s) => s.promoteTrainingCheckpoint,
+  );
+  const discardTrainingCheckpoint = useGameStore(
+    (s) => s.discardTrainingCheckpoint,
+  );
+  const scheduleCheckpointEvaluation = useGameStore(
+    (s) => s.scheduleCheckpointEvaluation,
+  );
+  const createManualTrainingCheckpoint = useGameStore(
+    (s) => s.createManualTrainingCheckpoint,
+  );
+  const forkTrainingCheckpoint = useGameStore(
+    (s) => s.forkTrainingCheckpoint,
+  );
+  const rollbackTrainingJobToCheckpoint = useGameStore(
+    (s) => s.rollbackTrainingJobToCheckpoint,
+  );
+  const recoverFailedPostTrainFromCheckpoint = useGameStore(
+    (s) => s.recoverFailedPostTrainFromCheckpoint,
+  );
   const keepInternal = useGameStore((s) => s.keepInternal);
   const releaseFromJob = useGameStore((s) => s.releaseFromJob);
   const releaseModel = useGameStore((s) => s.releaseModel);
   const deleteModel = useGameStore((s) => s.deleteModel);
   const setActiveModel = useGameStore((s) => s.setActiveModel);
-  const setModelApiInOut = useGameStore((s) => s.setModelApiInOut);
-  const applyModelApiMarkup = useGameStore((s) => s.applyModelApiMarkup);
   const startSafetyCampaign = useGameStore((s) => s.startSafetyCampaign);
   const cancelSafetyCampaign = useGameStore((s) => s.cancelSafetyCampaign);
-  const apiMarkupPct = useGameStore((s) => s.state.player.pricing.apiMarkupPct);
   const openResearchNode = useGameStore((s) => s.openResearchNode);
   const announceRelease = useUiStore((s) => s.announceRelease);
   const snap = computeSnapshot(state);
   const trainingResources = playerTrainingResourcePlan(state, snap);
-  const infra = serveInfraCost(state, snap, energyPriceForState(state));
+  const energyPrice = energyPriceForState(state);
 
-  const [panelTab, setPanelTab] = useState<"train" | "fleet">("train");
+  const [panelTab, setPanelTab] =
+    useState<"runs" | "checkpoints" | "fleet">("runs");
   const [name, setName] = useState("Spark");
   const [backbone, setBackbone] = useState<ModelBackbone>("dense");
   const [productPreset, setProductPreset] =
@@ -242,7 +266,7 @@ export function ModelsPanel() {
   const [syntheticMultiplier, setSyntheticMultiplier] = useState(0);
   const [trainShare, setTrainShare] = useState(0.82);
   const [weights, setWeights] = useState<Record<DataDomain, number>>(() =>
-    defaultDataWeights("dense"),
+    defaultTrainingDataWeights("dense", "language"),
   );
   const [allowSynthetic, setAllowSynthetic] = useState(true);
   const [includeSynthHQ, setIncludeSynthHQ] = useState(true);
@@ -253,17 +277,22 @@ export function ModelsPanel() {
   const [modelStack, setModelStack] = useState<string[]>(() =>
     defaultModelStack(state.player.researchUnlocked, "dense"),
   );
-  const [benchmarkSuite, setBenchmarkSuite] =
-    useState<BenchmarkSuiteId>("language");
   const [safetyIntensity, setSafetyIntensity] =
     useState<SafetyCampaignIntensity>("standard");
   const [safetyResearchers, setSafetyResearchers] = useState(1);
   const [trainingFormat, setTrainingFormat] =
-    useState<TrainingComputeFormat>("fp16_mixed");
+    useState<TrainingComputeFormat>(DEFAULT_TRAINING_NUMERICS.computeFormat);
   const [nativeWeightFormat, setNativeWeightFormat] =
     useState<NativeWeightFormat>("float");
   const [computePriority, setComputePriority] = useState(50);
   const [showPreviousCorpus, setShowPreviousCorpus] = useState(true);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [checkpointEvaluationId, setCheckpointEvaluationId] = useState<
+    string | null
+  >(null);
+  const [checkpointEvaluationMode, setCheckpointEvaluationMode] =
+    useState<CheckpointReviewMode>("internal");
+  const [startFailure, setStartFailure] = useState<string | null>(null);
 
   const paramsB = parseSizeInput(sizeVal, sizeUnit);
   const family = familyFromSpec(backbone, productPreset);
@@ -284,35 +313,134 @@ export function ModelsPanel() {
     () => modelStackModifiers(selectedStack, family),
     [selectedStack, family],
   );
-  const familyUnlocked = useMemo(() => {
-    return (f: ModelFamily): boolean => {
-      if (f === "dense" || f === "embedding") return true;
-      if (f === "moe") return unlocked.includes("moe_basics");
-      if (f === "diffusion")
-        return unlocked.includes("mm_vision") || unlocked.includes("mm_diff");
-      if (f === "video") return unlocked.includes("mm_video");
-      if (f === "omni") return unlocked.includes("mm_omni");
-      return true;
-    };
-  }, [unlocked]);
   const productUnlocked = useMemo(() => {
     return (preset: ModelProductPreset): boolean => {
-      if (preset === "language") return true;
-      if (preset === "vision_language" || preset === "audio")
-        return unlocked.includes("mm_vision");
-      if (preset === "image_generation") return unlocked.includes("mm_diff");
-      if (preset === "video_generation") return unlocked.includes("mm_video");
-      if (preset === "omni") return unlocked.includes("mm_omni");
-      return false;
+      const candidateBackbone =
+        preset === "image_generation" || preset === "video_generation"
+          ? "diffusion"
+          : backbone === "diffusion"
+            ? "dense"
+            : backbone;
+      return trainingUnlockEligibility({
+        family: familyFromSpec(candidateBackbone, preset),
+        backbone: candidateBackbone,
+        productPreset: preset,
+        researchUnlocked: unlocked,
+      }).ok;
     };
-  }, [unlocked]);
+  }, [backbone, unlocked]);
+  const selectedUnlockEligibility = useMemo(
+    () =>
+      trainingUnlockEligibility({
+        family,
+        backbone,
+        productPreset,
+        researchUnlocked: unlocked,
+      }),
+    [family, backbone, productPreset, unlocked],
+  );
   const mixUnlocked = unlocked.includes("data_mix");
   const synthUnlocked = unlocked.includes("data_synth");
+  const checkpointCandidates = useMemo(
+    () => state.player.trainingCheckpoints ?? [],
+    [state.player.trainingCheckpoints],
+  );
+  const checkpointUiByCandidateId = useMemo(() => {
+    const records = new Map<string, CheckpointUiRecord>();
+    for (const candidate of checkpointCandidates) {
+      const retained = candidate.promotedModelId
+        ? state.player.models.find(
+            (model) => model.id === candidate.promotedModelId,
+          )
+        : undefined;
+      records.set(
+        candidate.id,
+        checkpointUiRecordFromCandidate(candidate, {
+          promotedModelPublic:
+            retained?.release === "released" || retained?.shipped === true,
+          promotedModelId: retained?.id,
+          promotedModelName: retained?.name,
+          sourceJobActive: Boolean(
+            (state.player.trainingJobs ?? []).some(
+              (job) => job.id === candidate.sourceJobId,
+            ) || state.player.trainingJob?.id === candidate.sourceJobId,
+          ),
+          pendingEvaluations: (state.player.privateEvaluationJobs ?? []).flatMap(
+            (evaluation) =>
+              evaluation.kind === "checkpoint_evaluation" &&
+              evaluation.subjectId === candidate.id
+                ? [evaluation.pending]
+                : [],
+          ),
+        }),
+      );
+    }
+    return records;
+  }, [checkpointCandidates, state.player]);
+  const checkpointEvidenceByModelId = useMemo(() => {
+    const records: Record<string, CheckpointUiRecord> = {};
+    for (const candidate of checkpointCandidates) {
+      const modelId = candidate.promotedModelId;
+      const evidence = checkpointUiByCandidateId.get(candidate.id);
+      if (modelId && evidence) records[modelId] = evidence;
+    }
+    return records;
+  }, [checkpointCandidates, checkpointUiByCandidateId]);
+  const checkpointMarkersByJob = useMemo(() => {
+    const byJob = new Map<string, TrainingLossCheckpointMarker[]>();
+    for (const candidate of checkpointCandidates) {
+      const retained = candidate.promotedModelId
+        ? state.player.models.find(
+            (model) => model.id === candidate.promotedModelId,
+          )
+        : undefined;
+      const visibility: TrainingLossCheckpointMarker["visibility"] =
+        retained?.release === "released" || retained?.shipped
+          ? "released"
+          : candidate.status === "promoted"
+            ? "internal"
+            : "stealth";
+      const marker: TrainingLossCheckpointMarker = {
+        id: candidate.id,
+        day: candidate.capturedDay,
+        progress: candidate.telemetry.progress,
+        loss: candidate.telemetry.loss,
+        label:
+          candidate.kind === "manual"
+            ? candidate.customLabel?.trim() ||
+              `Manual checkpoint ${candidate.ordinal}`
+            : `C${Math.round(candidate.milestone * 100)}`,
+        detail:
+          visibility === "released"
+            ? `released as ${retained?.name ?? candidate.model.name}`
+            : visibility === "internal"
+              ? `kept internal as ${retained?.name ?? candidate.model.name}`
+              : "stealth weights",
+        kind: candidate.kind === "manual" ? "manual" : "milestone",
+        visibility,
+      };
+      const markers = byJob.get(candidate.sourceJobId) ?? [];
+      markers.push(marker);
+      byJob.set(candidate.sourceJobId, markers);
+    }
+    return byJob;
+  }, [checkpointCandidates, state.player.models]);
   const teachers = state.player.models;
   const distillTeacher =
     mode === "distill"
       ? teachers.find((model) => model.id === teacherId)
       : undefined;
+  /** Planning estimate shown in the distill UI (mid data/RNG, pre-run). */
+  const expectedDistillTransferPct = distillTeacher
+    ? Math.round(
+        distillRetentionFor({
+          teacherParamsB: distillTeacher.paramsB,
+          studentParamsB: paramsB,
+          dataFactor: 0.6,
+          rng01: 0.5,
+        }) * 100,
+      )
+    : 0;
   const synthExpansionUnlocked = syntheticExpansionUnlocked({
     synthResearchUnlocked: synthUnlocked,
     mode,
@@ -360,9 +488,43 @@ export function ModelsPanel() {
     mode === "continue"
       ? (teachers.find((t) => t.id === continueFromId)?.family ?? family)
       : family;
-  const minMTok = minDataMTokForParams(trainParamsB);
-  const recData = recommendedDataMTok(trainParamsB, trainFamily);
+  const trainProductPreset =
+    mode === "continue"
+      ? (() => {
+          const continuing = teachers.find((t) => t.id === continueFromId);
+          return continuing
+            ? migrateLegacyProductPreset(
+                continuing.productPreset ?? productPreset,
+                continuing.io,
+              )
+            : productPreset;
+        })()
+      : productPreset;
+  const trainingDataTargetSpec = {
+    paramsB: trainParamsB,
+    activeParamsB,
+    family: trainFamily,
+    backbone,
+    trainShare,
+  } as const;
+  const minMTok = minimumTrainingDataMTok(trainingDataTargetSpec);
+  const recData = recommendedTrainingDataMTok(trainingDataTargetSpec);
   const processedAvail = totalProcessed(labData);
+  /** Recommended recipe at recommended volume — the radar "Optimal" overlay. */
+  const optimalByDomainMTok = useMemo(() => {
+    const optimalWeights = bestRecipeWeights(
+      trainFamily,
+      trainProductPreset,
+      Math.max(1, recData),
+      labData,
+    );
+    return Object.fromEntries(
+      DATA_DOMAINS.map((domain) => [
+        domain,
+        (optimalWeights[domain] ?? 0) * recData,
+      ]),
+    ) as Record<DataDomain, number>;
+  }, [trainFamily, trainProductPreset, recData, labData]);
   const continueModel = teachers.find((t) => t.id === continueFromId);
   const previousCorpusWeights = useMemo(() => {
     if (mode !== "continue" || !continueModel?.dataPlan?.weights) return null;
@@ -446,6 +608,17 @@ export function ModelsPanel() {
       teachers,
     ],
   );
+  const dataGuidance = trainingForecast.dataGuidance
+    ? trainingDataGuidanceText({
+        selectedMTok: dataMTok,
+        rawStrongTargetMTok: trainingForecast.dataGuidance.rawStrongTargetMTok,
+        rawStrongTargetMet: trainingForecast.dataGuidance.rawStrongTargetMet,
+        effectiveDataRatio: trainingForecast.effectiveDataRatio,
+        qualityRetention: trainingForecast.dataGuidance.qualityRetention,
+        diversityRetention: trainingForecast.dataGuidance.diversityRetention,
+        holdoutRetention: trainingForecast.dataGuidance.holdoutRetention,
+      })
+    : null;
   const capabilityLimit = useMemo(() => {
     const effects = aggregateEffects(unlocked);
     const researchMult =
@@ -516,13 +689,30 @@ export function ModelsPanel() {
       setActiveVal(active.val);
       setActiveUnit(active.unit);
     }
-    if (continueModel.backbone) setBackbone(continueModel.backbone);
-    if (continueModel.productPreset)
-      setProductPreset(continueModel.productPreset);
+    setBackbone(continueModel.backbone ?? backboneFromFamily(continueModel.family));
+    setProductPreset(
+      migrateLegacyProductPreset(
+        continueModel.productPreset ?? presetFromFamily(continueModel.family),
+        continueModel.io,
+      ),
+    );
+    if (continueModel.trainingNumerics) {
+      setTrainingFormat(continueModel.trainingNumerics.computeFormat);
+      setNativeWeightFormat(continueModel.trainingNumerics.nativeWeightFormat);
+    }
+    if (continueModel.modelStack) {
+      setModelStack([...continueModel.modelStack]);
+    }
     setName(continueModel.name.replace(/\s+v\d+$/i, "") || continueModel.name);
     if (continueModel.dataPlan?.weights) {
       setWeights({
-        ...defaultDataWeights(continueModel.family),
+        ...defaultTrainingDataWeights(
+          continueModel.family,
+          migrateLegacyProductPreset(
+            continueModel.productPreset ?? "language",
+            continueModel.io,
+          ),
+        ),
         ...continueModel.dataPlan.weights,
       });
     }
@@ -534,12 +724,6 @@ export function ModelsPanel() {
   const dailyCost = trainingForecast.cashBurnPerDay;
   const upfront = trainingForecast.upfrontCash;
   const daysEst = trainingForecast.etaDays;
-  const calendarMinDays = trainingForecast.minCalendarDays ?? 0;
-  const computeDaysEst =
-    daysEst === Infinity
-      ? Infinity
-      : Math.max(0, Math.ceil(trainingForecast.targetPfDays / Math.max(0.001, snap.pools.training)));
-  const calendarBoundEta = calendarMinDays > 0 && daysEst !== Infinity && daysEst <= calendarMinDays + 1e-9;
   const hostWeightFormat = trainingFormat.includes("fp32")
     ? "fp32"
     : trainingFormat.includes("fp8") || trainingFormat.includes("nvfp4")
@@ -739,10 +923,6 @@ export function ModelsPanel() {
         : null,
     [distillTeacher, syntheticFrontierCapability],
   );
-  const evaluatedActive = useMemo(
-    () => (active ? normalizeModelEvaluations(active) : null),
-    [active],
-  );
   const safetyTarget = useMemo(() => {
     const campaign = state.player.safetyCampaign;
     if (campaign) {
@@ -753,29 +933,41 @@ export function ModelsPanel() {
     if (internal[0]) return normalizeModelEvaluations(internal[0]);
     return null;
   }, [state.player.safetyCampaign, state.player.models, active, internal]);
-  const availableSuites = useMemo(
-    () =>
-      evaluatedActive
-        ? (Object.keys(
-            evaluatedActive.benchmarkSuites ?? {},
-          ) as BenchmarkSuiteId[])
-        : [],
-    [evaluatedActive],
-  );
-  const activeSuite = availableSuites.includes(benchmarkSuite)
-    ? benchmarkSuite
-    : (availableSuites[0] ?? "language");
-  const allPublicModels = [
-    ...state.player.models.filter(
-      (model) => model.release === "released" || model.shipped,
-    ),
-    ...state.rivals.flatMap((rival) =>
-      rival.models.filter(
-        (model) => model.release === "released" || model.shipped,
-      ),
-    ),
-  ].map(normalizeModelEvaluations);
-  const frontierComparison = frontierForSuite(allPublicModels, activeSuite);
+  const checkpointEvaluationCandidate = checkpointEvaluationId
+    ? checkpointCandidates.find(
+        (candidate) => candidate.id === checkpointEvaluationId,
+      )
+    : undefined;
+  const checkpointArchiveEntries = checkpointCandidates.flatMap((candidate) => {
+    const checkpoint = checkpointUiByCandidateId.get(candidate.id);
+    return checkpoint
+      ? [{ sourceJobId: candidate.sourceJobId, checkpoint }]
+      : [];
+  });
+  const saveCurrentRunCheckpoint = (jobId: string): void => {
+    const request = directRunCheckpointRequest(
+      useGameStore.getState().state,
+      jobId,
+    );
+    if (request) createManualTrainingCheckpoint(request);
+  };
+  const benchmarkCurrentRun = (jobId: string): void => {
+    const checkpoint = ensureCurrentRunCheckpoint({
+      state: useGameStore.getState().state,
+      jobId,
+      createCheckpoint: createManualTrainingCheckpoint,
+      readState: () => useGameStore.getState().state,
+    });
+    if (!checkpoint || checkpoint.status === "discarded") return;
+    setCheckpointEvaluationMode("internal");
+    setCheckpointEvaluationId(checkpoint.id);
+  };
+  const modelEvidenceLabel = (model: Model): string => {
+    const evidence = checkpointEvidenceByModelId[model.id];
+    if (!evidence) return `cap ${model.capability.toFixed(0)}`;
+    const measured = evidence.evaluationScore.estimate;
+    return measured == null ? "eval unknown" : `eval ${measured.toFixed(1)}`;
+  };
   const researcherCount = playerStaff(state).researcher ?? 0;
   const safetyEstimate = useMemo(
     () =>
@@ -784,12 +976,6 @@ export function ModelsPanel() {
         : null,
     [state, safetyTarget, safetyIntensity],
   );
-
-  useEffect(() => {
-    if (availableSuites.length && !availableSuites.includes(benchmarkSuite)) {
-      setBenchmarkSuite(availableSuites[0]!);
-    }
-  }, [availableSuites, benchmarkSuite]);
 
   useEffect(() => {
     if (safetyEstimate) {
@@ -804,14 +990,23 @@ export function ModelsPanel() {
 
   const blockers = useMemo(() => {
     const items: Blocker[] = [];
-    if (!familyUnlocked(family)) {
+    if (!selectedUnlockEligibility.ok) {
       items.push({
-        text: "Backbone family is locked — research the required unlock first.",
+        text:
+          selectedUnlockEligibility.reason ??
+          "Research the selected model product first.",
       });
     }
-    if (!productUnlocked(productPreset)) {
+    const architecture = trainingArchitectureValidation({
+      backbone,
+      paramsB: trainParamsB,
+      activeParamsB,
+      mode,
+    });
+    if (!architecture.ok) {
       items.push({
-        text: "Product / I/O preset is locked — research the required unlock first.",
+        text: architecture.reason ?? "Invalid training architecture.",
+        tone: "danger",
       });
     }
     if (state.player.cash < upfront) {
@@ -839,8 +1034,17 @@ export function ModelsPanel() {
       });
     }
     if (snap.pools.training < 0.05) {
+      const stall =
+        snap.stallReason && snap.stallReason !== "ok" && snap.fullRawPool <= 0.05
+          ? snap.stallMessage
+          : snap.stallReason === "serve_reservation_starved_offline"
+            ? snap.stallMessage
+            : snap.fullRawPool <= 0.05
+              ? snap.stallMessage ||
+                "No workable compute capacity. Check power, halls, leases, and contracts."
+              : `No training PF allocated (${num(snap.pools.training, 2)} PF). Raise the Training allocation or add active compute.`;
       items.push({
-        text: `No training PF allocated (${num(snap.pools.training, 2)} PF). Raise the Training allocation or add active compute.`,
+        text: stall,
         tone: "danger",
       });
     }
@@ -895,14 +1099,18 @@ export function ModelsPanel() {
           !warning.toLowerCase().includes("compatible training hardware"),
       )
       .slice(0, 2)) {
-      items.push({ text: warning, tone: "warning" });
+      // Forecast/data findings are advisory — they never block starting a run.
+      items.push({
+        text: `Advisory: ${warning} (training can still start)`,
+        tone: "warning",
+      });
     }
     return items;
   }, [
-    familyUnlocked,
-    productUnlocked,
-    family,
-    productPreset,
+    selectedUnlockEligibility,
+    backbone,
+    trainParamsB,
+    activeParamsB,
     state.player.cash,
     upfront,
     mode,
@@ -911,6 +1119,9 @@ export function ModelsPanel() {
     teacherId,
     teachers.length,
     snap.pools.training,
+    snap.stallReason,
+    snap.fullRawPool,
+    snap.stallMessage,
     formatHardwareAvailable,
     trainingFormat,
     maxHardwareGeneration,
@@ -931,16 +1142,14 @@ export function ModelsPanel() {
   const blockersWithName: Blocker[] = nameTaken
     ? [{ text: MODEL_NAME_TAKEN_MESSAGE, tone: "danger" }, ...blockers]
     : blockers;
-  const hardBlocked =
-    blockersWithName.some((item) => item.tone !== "warning") || nameTaken;
+  const hardBlocked = hasHardTrainingStartNotice(blockersWithName) || nameTaken;
   const canStart =
     !hardBlocked &&
     !nameTaken &&
-    familyUnlocked(family) &&
-    productUnlocked(productPreset);
+    selectedUnlockEligibility.ok;
 
   const prefillContinue = (model: Model) => {
-    setPanelTab("train");
+    setPanelTab("runs");
     setMode("continue");
     setContinueFromId(model.id);
     setName(model.name.replace(/\s+v\d+$/i, "") || model.name);
@@ -949,8 +1158,34 @@ export function ModelsPanel() {
     setSizeUnit(next.unit);
   };
 
+  const handleStartTraining = (request: StartTrainingOpts) => {
+    const before = useGameStore.getState().state;
+    const beforeJobs = before.player.trainingJobs?.length
+      ? before.player.trainingJobs
+      : before.player.trainingJob
+        ? [before.player.trainingJob]
+        : [];
+    setStartFailure(null);
+    startTraining(request);
+    const after = useGameStore.getState().state;
+    const afterJobs = after.player.trainingJobs?.length
+      ? after.player.trainingJobs
+      : after.player.trainingJob
+        ? [after.player.trainingJob]
+        : [];
+    const failure = trainingStartFailureMessage({
+      beforeJobIds: beforeJobs.map((job) => job.id),
+      beforeAlertId: before.alerts[0]?.id,
+      alertChanged: after.alerts !== before.alerts,
+      jobs: afterJobs,
+      latestAlert: after.alerts[0],
+    });
+    setStartFailure(failure);
+    if (failure) useUiStore.getState().pushToast(failure, "danger");
+  };
+
   const prefillDistill = (model: Model) => {
-    setPanelTab("train");
+    setPanelTab("runs");
     setMode("distill");
     setTeacherId(model.id);
     setName(`${model.name.replace(/\s+v\d+$/i, "") || model.name}-d`);
@@ -959,21 +1194,71 @@ export function ModelsPanel() {
   const handleReleaseModel = (id: string) => {
     const model = state.player.models.find((m) => m.id === id);
     releaseModel(id);
-    if (model)
-      announceRelease({ name: model.name, capability: model.capability });
+    const released = useGameStore
+      .getState()
+      .state.player.models.find((candidate) => candidate.id === id) ?? model;
+    if (released) {
+      announceRelease({
+        modelId: released.id,
+        name: released.name,
+        capability: released.capability,
+        family: released.family,
+        productPreset: released.productPreset,
+        benchmarkSuiteIds: Object.keys(
+          normalizeModelEvaluations(released).benchmarkSuites ?? {},
+        ) as BenchmarkSuiteId[],
+        lossHistory: released.trainingLossHistory,
+        benchmarkSnapshots: released.trainingBenchmarkSnapshots,
+      });
+    }
   };
 
   const handleReleaseFromJob = (jobId: string) => {
     const job = jobs.find((j) => j.id === jobId);
-    const matched = job
-      ? state.player.models.find((m) => m.name === job.name)
-      : undefined;
+    const existingIds = new Set(state.player.models.map((model) => model.id));
+    // Copy this before releaseFromJob finalizes and removes the training job.
+    const telemetry = job
+      ? {
+          lossHistory: job.lossHistory?.map((point) => ({ ...point })),
+          benchmarkSnapshots: job.benchmarkSnapshots?.map((snapshot) => ({
+            ...snapshot,
+            suiteIds: snapshot.suiteIds ? [...snapshot.suiteIds] : undefined,
+            suiteResults: snapshot.suiteResults
+              ? { ...snapshot.suiteResults }
+              : undefined,
+          })),
+          energyMWh: job.energyMWh,
+          energyMwDays: job.energyMwDays,
+        }
+      : {};
     releaseFromJob(jobId);
     if (job) {
+      const nextState = useGameStore.getState().state;
+      const jobStillActive = (nextState.player.trainingJobs ?? []).some(
+        (candidate) => candidate.id === job.id,
+      );
+      if (jobStillActive) return;
+      const nextModels = nextState.player.models;
+      const released =
+        nextModels.find((model) => !existingIds.has(model.id)) ??
+        (job.continueFromId
+          ? nextModels.find((model) => model.id === job.continueFromId)
+          : undefined) ??
+        [...nextModels]
+          .filter((model) => model.name === job.name)
+          .sort((a, b) => (b.revision ?? 1) - (a.revision ?? 1))[0];
       announceRelease({
-        name: job.name,
-        capability:
-          matched?.capability ?? trainingForecast.expectedCapability ?? 0,
+        modelId: released?.id,
+        name: released?.name ?? job.name,
+        capability: released?.capability ?? 0,
+        family: released?.family ?? job.family,
+        productPreset: released?.productPreset ?? job.productPreset,
+        benchmarkSuiteIds: released
+          ? Object.keys(
+              normalizeModelEvaluations(released).benchmarkSuites ?? {},
+            ) as BenchmarkSuiteId[]
+          : job.benchmarkSnapshots?.at(-1)?.suiteIds,
+        ...telemetry,
       });
     }
   };
@@ -991,71 +1276,42 @@ export function ModelsPanel() {
   return (
     <PanelScaffold
       title="Models"
-      eyebrow="Training · Fleet"
-      description="Pick a mode, set the recipe, launch the run — then manage the fleet."
+      eyebrow="Runs · Checkpoints · Fleet"
+      description="Train weights, branch immutable checkpoints, then manage internal and public versions."
     >
-      {jobs.map((job) => (
-        <div key={job.id} className="mb-3">
-          <ActiveTrainingCard
-            job={job}
-            trainingPoolPf={snap.pools.training}
-            resources={trainingResources.jobs[job.id]}
-            jobs={jobs}
-            unlocked={unlocked}
-            day={state.day}
-            onPriority={(jobId, priority, reservedPf) =>
-              setTrainingPriority(jobId, priority, reservedPf)
-            }
-            onPause={(jobId, paused) => pauseTraining(jobId, paused)}
-            onExtend={(jobId) => extendTraining(jobId)}
-            onCancel={(jobId) => cancelTraining(jobId)}
-            onRelease={(jobId) => handleReleaseFromJob(jobId)}
-            onBenchmark={(jobId) => benchmarkTrainingJob(jobId)}
-            onKeepInternal={(jobId) => keepInternal(jobId)}
-            onSelectPostTrain={(jobId, stage) => selectPostTrain(jobId, stage)}
-            safetyProps={
-              trainingMinimumStatus(job).ok
-                ? {
-                    model:
-                      state.player.models.find((m) => m.name === job.name) ??
-                      safetyTarget,
-                    campaign:
-                      state.player.safetyCampaign?.modelName === job.name
-                        ? state.player.safetyCampaign
-                        : null,
-                    intensity: safetyIntensity,
-                    setIntensity: setSafetyIntensity,
-                    researchers: safetyResearchers,
-                    setResearchers: setSafetyResearchers,
-                    researcherCount,
-                    estimate: safetyEstimate,
-                    onStart: () => {
-                      const target =
-                        state.player.models.find((m) => m.name === job.name) ??
-                        safetyTarget;
-                      if (target) {
-                        startSafetyCampaign(
-                          target.id,
-                          safetyIntensity,
-                          safetyResearchers,
-                        );
-                      }
-                    },
-                    onCancel: cancelSafetyCampaign,
-                  }
-                : undefined
-            }
-          />
-        </div>
-      ))}
+      {checkpointEvaluationCandidate ? (
+        <CheckpointEvaluationDialog
+          open
+          candidate={checkpointEvaluationCandidate}
+          cash={state.player.cash}
+          initialMode={checkpointEvaluationMode}
+          onClose={() => setCheckpointEvaluationId(null)}
+          onSubmit={(request) => {
+            scheduleCheckpointEvaluation(
+              checkpointEvaluationCandidate.id,
+              request,
+            );
+            setCheckpointEvaluationId(null);
+          }}
+        />
+      ) : null}
 
       <div className="mb-3">
         <SegmentedTabs
           ariaLabel="Models views"
           active={panelTab}
-          onChange={(id) => setPanelTab(id as "train" | "fleet")}
+          onChange={(id) =>
+            setPanelTab(id as "runs" | "checkpoints" | "fleet")
+          }
           items={[
-            { id: "train", label: "Train" },
+            {
+              id: "runs",
+              label: `Runs (${jobs.length})`,
+            },
+            {
+              id: "checkpoints",
+              label: `Checkpoints (${checkpointCandidates.length})`,
+            },
             {
               id: "fleet",
               label: (
@@ -1072,8 +1328,36 @@ export function ModelsPanel() {
       </div>
 
       <div key={panelTab} className="panel-swap space-y-3">
-        {panelTab === "train" ? (
+        {panelTab === "runs" ? (
           <>
+            {jobs.map((job) => (
+              <ActiveTrainingCard
+                key={job.id}
+                job={job}
+                trainingPoolPf={snap.pools.training}
+                resources={trainingResources.jobs[job.id]}
+                jobs={jobs}
+                unlocked={unlocked}
+                day={state.day}
+                cash={state.player.cash}
+                onPriority={(jobId, priority, reservedPf) =>
+                  setTrainingPriority(jobId, priority, reservedPf)
+                }
+                onPause={(jobId, paused) => pauseTraining(jobId, paused)}
+                onCancel={(jobId) => cancelTraining(jobId)}
+                onRelease={(jobId) => handleReleaseFromJob(jobId)}
+                onKeepInternal={(jobId) => keepInternal(jobId)}
+                onBenchmark={benchmarkCurrentRun}
+                onSaveCheckpoint={saveCurrentRunCheckpoint}
+                checkpointMarkers={checkpointMarkersByJob.get(job.id) ?? []}
+                onRecoverFromCheckpoint={(jobId, checkpointId) =>
+                  recoverFailedPostTrainFromCheckpoint({ jobId, checkpointId })
+                }
+                onSelectPostTrain={(jobId, stage) =>
+                  selectPostTrain(jobId, stage)
+                }
+              />
+            ))}
             <GameCard
               eyebrow="1 · Mode"
               title="How do you want to train?"
@@ -1122,22 +1406,40 @@ export function ModelsPanel() {
             >
               <div className="space-y-2.5">
                 {mode === "continue" ? (
-                  <label className="block text-[0.8125rem] text-muted">
-                    Continue from
-                    <select
-                      value={continueFromId}
-                      onChange={(e) => setContinueFromId(e.target.value)}
-                      className="mt-1 w-full rounded-md border border-line bg-void px-2 py-1.5 text-sm text-bone outline-none"
-                    >
-                      <option value="">Select model…</option>
-                      {teachers.map((t) => (
-                        <option key={t.id} value={t.id}>
-                          {t.name} · {formatParams(t.paramsB)} · cap{" "}
-                          {t.capability.toFixed(0)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <div className="space-y-2">
+                    <label className="block text-[0.8125rem] text-muted">
+                      Continue from
+                      <select
+                        value={continueFromId}
+                        onChange={(e) => setContinueFromId(e.target.value)}
+                        className="mt-1 w-full rounded-md border border-line bg-void px-2 py-1.5 text-sm text-bone outline-none"
+                      >
+                        <option value="">Select model…</option>
+                        {teachers.map((t) => (
+                          <option key={t.id} value={t.id}>
+                            {t.name} · {formatParams(t.paramsB)} ·{" "}
+                            {modelEvidenceLabel(t)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {continueModel ? (
+                      <div className="rounded-lg border border-mint/30 bg-mint/5 p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <p className="hud-eyebrow text-mint">New checkpoint version</p>
+                            <strong className="mt-0.5 block text-sm text-bone">{modelIteration.name}</strong>
+                          </div>
+                          <span className="rounded-full border border-line/70 bg-void/45 px-2 py-1 font-mono text-[0.625rem] uppercase tracking-[0.1em] text-muted">
+                            weights inherited
+                          </span>
+                        </div>
+                        <p className="mt-2 text-[0.6875rem] leading-relaxed text-muted">
+                          Architecture, parameter topology, numerics and model stack are locked to {continueModel.name}. Add fresh data now, then apply SFT, RLHF, process or tools training before releasing this as a new version.
+                        </p>
+                      </div>
+                    ) : null}
+                  </div>
                 ) : null}
 
                 {mode === "distill" ? (
@@ -1154,7 +1456,7 @@ export function ModelsPanel() {
                           <option key={t.id} value={t.id}>
                             {t.name} · {formatParams(t.paramsB)} ·{" "}
                             {t.release === "internal" ? "internal" : "public"} ·
-                            cap {t.capability.toFixed(0)}
+                            {" "}{modelEvidenceLabel(t)}
                           </option>
                         ))}
                       </select>
@@ -1173,19 +1475,33 @@ export function ModelsPanel() {
                         className="mt-1 w-full"
                       />
                     </label>
+                    {distillTeacher ? (
+                      <p className="text-[0.6875rem] leading-snug text-muted">
+                        Expected transfer ≈{" "}
+                        <span className="font-mono text-mint">
+                          {expectedDistillTransferPct}%
+                        </span>{" "}
+                        of teacher capability (size gap{" "}
+                        {formatParams(distillTeacher.paramsB)} →{" "}
+                        {formatParams(paramsB)}, ±6% from data quality and
+                        run-to-run variance).
+                      </p>
+                    ) : null}
                   </div>
                 ) : null}
 
                 <div className="space-y-2.5">
                   <div className="grid items-end gap-2 lg:grid-cols-[minmax(12rem,1fr)_auto]">
                     <div className="block min-w-0 text-[0.8125rem] text-muted">
-                      <label htmlFor="model-family-name">Model name</label>
+                      <label htmlFor="model-family-name">
+                        {mode === "continue" ? "New version name" : "Model name"}
+                      </label>
                       <div className={`relative mt-1 flex rounded-md border bg-void focus-within:border-mint/50 ${nameTaken ? "border-danger/60" : "border-line"}`}>
                         <input
                           id="model-family-name"
                           value={name}
                           onChange={(event) => setName(event.target.value)}
-                          className="min-w-0 flex-1 bg-transparent px-2 py-1.5 pr-10 text-sm text-bone outline-none"
+                          className="min-w-0 flex-1 bg-transparent px-2 py-1.5 pr-12 text-sm text-bone outline-none"
                           aria-invalid={nameTaken}
                         />
                         <button
@@ -1195,7 +1511,7 @@ export function ModelsPanel() {
                             rivalModels: state.rivals.flatMap((rival) => rival.models),
                             jobs,
                           }))}
-                          className="absolute inset-y-0 right-0 grid w-9 place-items-center text-muted transition hover:bg-panel-2 hover:text-mint"
+                          className="absolute inset-y-0 right-0 grid w-11 place-items-center text-muted transition hover:bg-panel-2 hover:text-mint"
                           title="Generate a unique name"
                           aria-label="Generate unique model name"
                         >
@@ -1213,11 +1529,21 @@ export function ModelsPanel() {
                         aria-label="Backbone"
                       >
                         {BACKBONE_OPTIONS.map((option) => {
-                          const locked =
-                            (option.value === "moe" &&
-                              !familyUnlocked("moe")) ||
-                            (option.value === "diffusion" &&
-                              !unlocked.includes("mm_diff"));
+                          const candidatePreset =
+                            option.value === "diffusion" &&
+                            productPreset !== "image_generation" &&
+                            productPreset !== "video_generation"
+                              ? "image_generation"
+                              : productPreset;
+                          const locked = !trainingUnlockEligibility({
+                            family: familyFromSpec(
+                              option.value,
+                              candidatePreset,
+                            ),
+                            backbone: option.value,
+                            productPreset: candidatePreset,
+                            researchUnlocked: unlocked,
+                          }).ok;
                           const on = backbone === option.value;
                           return (
                             <button
@@ -1225,27 +1551,27 @@ export function ModelsPanel() {
                               type="button"
                               role="radio"
                               aria-checked={on}
-                              disabled={locked}
+                              disabled={locked || mode === "continue"}
                               title={
-                                locked ? "Research required" : option.label
+                                mode === "continue"
+                                  ? "Inherited from the source checkpoint"
+                                  : locked
+                                    ? "Research required"
+                                    : option.label
                               }
                               onClick={() => {
                                 setBackbone(option.value);
-                                const nextPreset =
-                                  option.value === "diffusion" &&
-                                  productPreset !== "image_generation" &&
-                                  productPreset !== "video_generation"
-                                    ? "image_generation"
-                                    : productPreset;
+                                const nextPreset = candidatePreset;
                                 if (nextPreset !== productPreset)
                                   setProductPreset(nextPreset);
                                 setWeights(
-                                  defaultDataWeights(
+                                  defaultTrainingDataWeights(
                                     familyFromSpec(option.value, nextPreset),
+                                    nextPreset,
                                   ),
                                 );
                               }}
-                              className={`rounded-md border px-2.5 py-1.5 text-[0.75rem] transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                              className={`min-h-11 rounded-md border px-2.5 py-1.5 text-[0.75rem] transition disabled:cursor-not-allowed disabled:opacity-40 sm:min-h-0 ${
                                 on
                                   ? "border-train/45 bg-train/15 text-train"
                                   : "border-line text-muted hover:text-bone"
@@ -1281,8 +1607,14 @@ export function ModelsPanel() {
                             type="button"
                             role="radio"
                             aria-checked={on}
-                            disabled={locked}
-                            title={locked ? "Research required" : option.label}
+                            disabled={locked || mode === "continue"}
+                            title={
+                              mode === "continue"
+                                ? "Inherited from the source checkpoint"
+                                : locked
+                                  ? "Research required"
+                                  : option.label
+                            }
                             onClick={() => {
                               setProductPreset(option.value);
                               const nextBackbone =
@@ -1298,15 +1630,29 @@ export function ModelsPanel() {
                                 nextBackbone,
                                 option.value,
                               );
-                              setWeights(defaultDataWeights(nextFamily));
+                              setWeights(
+                                defaultTrainingDataWeights(
+                                  nextFamily,
+                                  option.value,
+                                ),
+                              );
                               setRealDataMTok(
                                 Math.min(
                                   processedAvail,
-                                  recommendedDataMTok(paramsB, nextFamily),
+                                  recommendedTrainingDataMTok({
+                                    paramsB,
+                                    activeParamsB:
+                                      nextBackbone === "moe"
+                                        ? activeParamsB
+                                        : undefined,
+                                    family: nextFamily,
+                                    backbone: nextBackbone,
+                                    trainShare,
+                                  }),
                                 ),
                               );
                             }}
-                            className={`rounded-md border px-2.5 py-1.5 text-[0.75rem] transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                            className={`min-h-11 rounded-md border px-2.5 py-1.5 text-[0.75rem] transition disabled:cursor-not-allowed disabled:opacity-40 sm:min-h-0 ${
                               on
                                 ? "border-mint/45 bg-mint/15 text-mint"
                                 : "border-line text-muted hover:text-bone"
@@ -1424,6 +1770,20 @@ export function ModelsPanel() {
                       </>
                     )}
                   </p>
+                  {dataGuidance ? (
+                    <div className="mt-2 rounded-md border border-line/60 bg-void/35 px-2.5 py-2 text-[0.6875rem] leading-5">
+                      <p
+                        className={
+                          trainingForecast.dataGuidance?.rawStrongTargetMet
+                            ? "text-mint"
+                            : "text-amber"
+                        }
+                      >
+                        {dataGuidance.headline}
+                      </p>
+                      <p className="text-muted">{dataGuidance.reductions}</p>
+                    </div>
+                  ) : null}
                   {synthExpansionUnlocked ? (
                     <label className="mt-2 block text-[0.8125rem] text-muted">
                       Real corpus ·{" "}
@@ -1453,25 +1813,30 @@ export function ModelsPanel() {
                       />
                     </label>
                   ) : null}
-                  <label className="mt-2 block text-[0.8125rem] text-muted">
-                    Synthetic expansion ·{" "}
-                    {effectiveSyntheticMultiplier.toFixed(1)}×
-                    <input
-                      type="range"
-                      min={0}
-                      max={7}
-                      step={0.1}
-                      value={effectiveSyntheticMultiplier}
-                      disabled={!synthExpansionUnlocked || !strongestTeacher}
-                      onChange={(event) => {
-                        const value = Number(event.target.value);
-                        setSyntheticMultiplier(value);
-                        setAllowSynthetic(value > 0);
-                        if (value > 0) setIncludeSynthHQ(true);
-                      }}
-                      className="mt-1 w-full"
-                    />
-                  </label>
+                  <div className="mt-2 rounded-md border border-line/70 bg-void/40 px-2.5 py-2 text-[0.6875rem]">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-muted">Real / synthetic mix</span>
+                      <span className="font-mono tabular-nums text-bone">
+                        {formatTokens(realDataMTok)} real
+                        {effectiveSyntheticMultiplier > 0 ? (
+                          <span className="text-gold">
+                            {" "}
+                            + {formatTokens(
+                              Math.max(0, dataMTok - realDataMTok),
+                            )}{" "}
+                            synthetic ({effectiveSyntheticMultiplier.toFixed(1)}×)
+                          </span>
+                        ) : (
+                          <span> · no synthetic</span>
+                        )}
+                      </span>
+                    </div>
+                    <p className="mt-1 leading-snug text-muted">
+                      {synthExpansionUnlocked && strongestTeacher
+                        ? "Drag any radar domain past its usable stock to draw generated tokens; the real:synthetic ratio follows the chart. Hit Use all data to max out owned corpus first."
+                        : "Unlock Synthetic Generators (or distill from a teacher) to drag past owned stock with generated tokens."}
+                    </p>
+                  </div>
                   {!synthUnlocked && distillTeacher ? (
                     <p className="mt-1 text-[0.625rem] leading-snug text-muted">
                       {distillTeacher.name} is the generator — synthetic tokens
@@ -1517,6 +1882,9 @@ export function ModelsPanel() {
                   autoBalanceDisabled={!mixUnlocked}
                   syntheticUnlocked={synthUnlocked}
                   syntheticMultiplier={effectiveSyntheticMultiplier}
+                  syntheticExpansionAvailable={
+                    synthExpansionUnlocked && !!strongestTeacher
+                  }
                   syntheticHeadroomMTok={
                     distillSyntheticHeadroom ?? undefined
                   }
@@ -1530,15 +1898,50 @@ export function ModelsPanel() {
                   onTogglePreviousOverlay={() =>
                     setShowPreviousCorpus((v) => !v)
                   }
-                  onChange={(nextWeights, nextTotalMTok) => {
+                  optimalByDomainMTok={optimalByDomainMTok}
+                  onChange={(nextWeights, nextTotalMTok, meta) => {
                     setWeights(nextWeights);
-                    setRealDataMTok(
-                      nextTotalMTok /
-                        Math.max(1, 1 + effectiveSyntheticMultiplier),
-                    );
+                    if (!meta) {
+                      setRealDataMTok(
+                        nextTotalMTok /
+                          Math.max(1, 1 + effectiveSyntheticMultiplier),
+                      );
+                      return;
+                    }
+                    // Derive the real:synthetic ratio from the drag: real is
+                    // the coverage of owned usable stock; anything past it is
+                    // generated tokens. Keep real within the 8× expansion bound
+                    // so real × (1 + mult) reproduces the dragged total exactly.
+                    const expansionOn =
+                      synthExpansionUnlocked && !!strongestTeacher;
+                    let real = expansionOn
+                      ? Math.min(
+                          nextTotalMTok,
+                          Math.max(meta.realMTok, nextTotalMTok / 8),
+                        )
+                      : nextTotalMTok;
+                    if (real <= 1e-9) real = nextTotalMTok;
+                    const mult = expansionOn
+                      ? Math.max(
+                          0,
+                          Math.min(7, nextTotalMTok / Math.max(1e-9, real) - 1),
+                        )
+                      : 0;
+                    real = nextTotalMTok / (1 + mult);
+                    setSyntheticMultiplier(mult);
+                    setAllowSynthetic(mult > 0);
+                    if (mult > 0) setIncludeSynthHQ(true);
+                    setRealDataMTok(real);
                   }}
                   onAutoBalance={() =>
-                    setWeights(bestRecipeWeights(family, dataMTok, labData))
+                    setWeights(
+                      bestRecipeWeights(
+                        family,
+                        productPreset,
+                        dataMTok,
+                        labData,
+                      ),
+                    )
                   }
                   onTeacherChange={(domain, teacher) =>
                     setSyntheticTeacherIds((current) => ({
@@ -1558,13 +1961,30 @@ export function ModelsPanel() {
               </div>
             </GameCard>
 
-            <GameCard eyebrow="4 · Advanced" title="Numerics & model stack">
+            <GameCard
+              eyebrow="4 · Advanced"
+              title="Numerics & model stack"
+              actions={
+                <HudButton
+                  type="button"
+                  variant="ghost"
+                  className="!min-h-9 !px-2.5 !py-1 text-[0.75rem]"
+                  aria-expanded={advancedOpen}
+                  onClick={() => setAdvancedOpen((open) => !open)}
+                >
+                  {advancedOpen ? "Hide" : "Configure"}
+                </HudButton>
+              }
+            >
+              {advancedOpen ? (
               <div className="space-y-3">
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid gap-2 sm:grid-cols-2">
                   <label className="text-[0.8125rem] text-muted">
                     Compute format
                     <select
                       value={trainingFormat}
+                      disabled={mode === "continue"}
+                      title={mode === "continue" ? "Inherited from the source checkpoint" : undefined}
                       onChange={(event) => {
                         const next = event.target
                           .value as TrainingComputeFormat;
@@ -1576,7 +1996,7 @@ export function ModelsPanel() {
                           setNativeWeightFormat("float");
                         }
                       }}
-                      className="mt-1 w-full rounded-md border border-line bg-void px-2 py-1.5 text-sm text-bone outline-none"
+                      className="mt-1 w-full rounded-md border border-line bg-void px-2 py-1.5 text-sm text-bone outline-none disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       {TRAINING_FORMAT_OPTIONS.map((option) => {
                         const locked = Boolean(
@@ -1622,13 +2042,15 @@ export function ModelsPanel() {
                     Native weights
                     <select
                       value={nativeWeightFormat}
+                      disabled={mode === "continue"}
+                      title={mode === "continue" ? "Inherited from the source checkpoint" : undefined}
                       onChange={(event) => {
                         const next = event.target.value as NativeWeightFormat;
                         setNativeWeightFormat(next);
                         if (next === "ternary_1_58")
                           setTrainingFormat("bf16_mixed");
                       }}
-                      className="mt-1 w-full rounded-md border border-line bg-void px-2 py-1.5 text-sm text-bone outline-none"
+                      className="mt-1 w-full rounded-md border border-line bg-void px-2 py-1.5 text-sm text-bone outline-none disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       <option value="float">Float weights</option>
                       <option
@@ -1686,6 +2108,8 @@ export function ModelsPanel() {
                           key={module.id}
                           type="button"
                           aria-pressed={available ? selected : undefined}
+                          disabled={mode === "continue"}
+                          title={mode === "continue" ? "Inherited from the source checkpoint" : undefined}
                           onClick={() => {
                             if (!available) {
                               openResearchNode(module.id);
@@ -1697,7 +2121,7 @@ export function ModelsPanel() {
                                 : [...current, module.id],
                             );
                           }}
-                          className={`hover-lift rounded-md border p-2 text-left transition ${
+                          className={`hover-lift rounded-md border p-2 text-left transition disabled:cursor-not-allowed disabled:opacity-60 ${
                             selected
                               ? "border-mint/40 bg-mint/10"
                               : available
@@ -1732,6 +2156,26 @@ export function ModelsPanel() {
                   </CardGrid>
                 </div>
               </div>
+              ) : (
+                <button
+                  type="button"
+                  className="flex min-h-11 w-full items-center justify-between gap-3 rounded-md border border-line/55 bg-void/35 px-2.5 py-2 text-left"
+                  onClick={() => setAdvancedOpen(true)}
+                >
+                  <span className="min-w-0">
+                    <strong className="block truncate text-[0.8125rem] font-medium text-bone">
+                      {numericsEconomics.label} · {selectedStack.length} stack
+                      modules
+                    </strong>
+                    <span className="mt-0.5 block text-[0.6875rem] text-muted">
+                      Quality, memory, hosting and inference tradeoffs
+                    </span>
+                  </span>
+                  <span className="shrink-0 font-mono text-[0.6875rem] text-mint">
+                    Edit
+                  </span>
+                </button>
+              )}
             </GameCard>
 
             <GameCard
@@ -1744,7 +2188,7 @@ export function ModelsPanel() {
                   Compute priority · {computePriority}/100
                   <input
                     type="range"
-                    min={10}
+                    min={0}
                     max={100}
                     step={5}
                     value={computePriority}
@@ -1773,16 +2217,12 @@ export function ModelsPanel() {
                       detail={
                         daysEst === Infinity
                           ? "need training pool"
-                          : calendarBoundEta
-                            ? `${num(trainingForecast.targetPfDays, 1)} PF·d · calendar floor ${calendarMinDays}d`
-                            : `${num(trainingForecast.targetPfDays, 1)} PF·d · compute ~${computeDaysEst === Infinity ? "∞" : computeDaysEst}d`
+                          : `${num(trainingForecast.targetPfDays, 1)} PF·d · current allocation estimate`
                       }
                       tone={
                         daysEst === Infinity || daysEst > 120
                           ? "warning"
-                          : calendarBoundEta
-                            ? "warning"
-                            : "positive"
+                          : "positive"
                       }
                     />
                     <MetricTile
@@ -1858,7 +2298,7 @@ export function ModelsPanel() {
                     ].map((readiness) => (
                       <div
                         key={readiness.label}
-                        className="grid grid-cols-[4.5rem_1fr_auto] items-center gap-2 font-mono text-[0.625rem]"
+                        className="grid grid-cols-[4rem_minmax(0,1fr)] items-center gap-2 font-mono text-[0.625rem] sm:grid-cols-[4.5rem_1fr_auto]"
                         title={`${readiness.label}: ${readiness.text}`}
                       >
                         <span className="text-muted">{readiness.label}</span>
@@ -1871,7 +2311,7 @@ export function ModelsPanel() {
                           />
                         </span>
                         <span
-                          className={readiness.ready ? "text-mint" : "text-amber"}
+                          className={`col-span-2 text-right sm:col-span-1 ${readiness.ready ? "text-mint" : "text-amber"}`}
                         >
                           {readiness.text}
                         </span>
@@ -1882,20 +2322,27 @@ export function ModelsPanel() {
 
                 <BlockerList items={blockersWithName} />
 
+                <TrainingStartFailureBanner message={startFailure} />
+
                 <HudButton
                   type="button"
                   variant="primary"
                   disabled={!canStart}
                   title={
                     !canStart
-                      ? blockers[0]
-                        ? String(blockers[0].text)
-                        : "Cannot start"
+                      ? (() => {
+                          const firstHard = blockersWithName.find(
+                            (item) => item.tone !== "warning",
+                          );
+                          return firstHard
+                            ? String(firstHard.text)
+                            : "Cannot start";
+                        })()
                       : undefined
                   }
                   className="w-full"
                   onClick={() =>
-                    startTraining({
+                    handleStartTraining({
                       name:
                         modelIteration.name ||
                         `${family}-${formatParams(paramsB)}${
@@ -1942,86 +2389,40 @@ export function ModelsPanel() {
               </div>
             </GameCard>
 
-            {!jobs.length && safetyTarget ? (
-              <SafetyCampaignSection
-                model={safetyTarget}
-                campaign={state.player.safetyCampaign}
-                intensity={safetyIntensity}
-                setIntensity={setSafetyIntensity}
-                researchers={safetyResearchers}
-                setResearchers={setSafetyResearchers}
-                researcherCount={researcherCount}
-                estimate={safetyEstimate}
-                onStart={() =>
-                  safetyTarget &&
-                  startSafetyCampaign(
-                    safetyTarget.id,
-                    safetyIntensity,
-                    safetyResearchers,
-                  )
-                }
-                onCancel={cancelSafetyCampaign}
-              />
-            ) : null}
-
-            {evaluatedActive ? (
-              <GameCard
-                eyebrow="Evaluations"
-                title={evaluatedActive.name}
-                actions={
-                  <span className="font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">
-                    rev {evaluatedActive.revision ?? 1}
-                  </span>
-                }
-              >
-                <div
-                  className="mb-2 flex flex-wrap gap-1"
-                  role="tablist"
-                  aria-label="Evaluation suites"
-                >
-                  {availableSuites.map((suiteId) => (
-                    <button
-                      key={suiteId}
-                      type="button"
-                      role="tab"
-                      aria-selected={activeSuite === suiteId}
-                      onClick={() => setBenchmarkSuite(suiteId)}
-                      className={`rounded-md px-2 py-1 text-[0.6875rem] transition ${
-                        activeSuite === suiteId
-                          ? "bg-mint text-void"
-                          : "bg-void text-muted hover:text-bone"
-                      }`}
-                    >
-                      {suiteId
-                        .replace("_generation", "")
-                        .replace("omni_overview", "overview")
-                        .replaceAll("_", " ")}
-                    </button>
-                  ))}
-                </div>
-                <RadarChart
-                  suiteId={activeSuite}
-                  scores={evaluatedActive.benchmarkSuites?.[activeSuite] ?? {}}
-                  profile={evaluatedActive.evaluationProfile}
-                  comparison={frontierComparison}
-                />
-              </GameCard>
-            ) : null}
           </>
+        ) : panelTab === "checkpoints" ? (
+          <CheckpointWorkspace
+            entries={checkpointArchiveEntries}
+            jobs={jobs}
+            onCreateManual={createManualTrainingCheckpoint}
+            onBenchmark={(checkpointId) => {
+              setCheckpointEvaluationMode("internal");
+              setCheckpointEvaluationId(checkpointId);
+            }}
+            onReview={(checkpointId) => {
+              setCheckpointEvaluationMode("nda_external");
+              setCheckpointEvaluationId(checkpointId);
+            }}
+            onPromote={promoteTrainingCheckpoint}
+            onDiscard={discardTrainingCheckpoint}
+            onFork={forkTrainingCheckpoint}
+            onRollback={rollbackTrainingJobToCheckpoint}
+          />
         ) : (
           <FleetTab
             internal={internal}
             released={released}
+            checkpointEvidence={checkpointEvidenceByModelId}
             pricingId={pricing.activeModelId}
-            markupPct={apiMarkupPct}
             frontierCapability={publicFrontier}
-            unitCostActive={infra.costPerMTok}
-            activeModelRef={active ?? released[0] ?? null}
+            unitCostForModel={(model) =>
+              apiUnitCostPerMTok(state, snap, model, {
+                energyPricePerMWh: energyPrice,
+              }).blended
+            }
             onSelect={setActiveModel}
             onRelease={handleReleaseModel}
             onDelete={deleteModel}
-            onPriceInOut={setModelApiInOut}
-            onApplyMarkup={applyModelApiMarkup}
             onTrainFurther={prefillContinue}
             onDistill={prefillDistill}
             safetySlot={

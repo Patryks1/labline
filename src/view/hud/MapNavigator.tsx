@@ -557,7 +557,7 @@ export function MapNavigator() {
         type="button"
         aria-label="Close world navigator"
         onClick={closeNavigator}
-        className="map-navigator-compact-close absolute right-1.5 top-1.5 z-20 min-h-9 min-w-9 items-center justify-center rounded-md border border-line bg-void/90 text-muted hover:text-bone"
+        className="map-navigator-compact-close absolute right-1.5 top-1.5 z-20 min-h-11 min-w-11 items-center justify-center rounded-md border border-line bg-void/90 text-muted hover:text-bone"
       >
         <X size="0.95rem" />
       </button>

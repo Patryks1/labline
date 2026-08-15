@@ -142,10 +142,71 @@ describe('delayed evaluation and reviews', () => {
   it('decomposes value and penalizes a higher price', () => {
     const state = withReleasedModel()
     const cheap = evaluateMarket(state, 'model-eval', 'developers')!
-    state.player.models[0] = { ...state.player.models[0]!, apiPricePerMTok: 8 }
+    state.player.models[0] = {
+      ...state.player.models[0]!,
+      apiPricePerMTok: 8,
+      apiPriceInPerMTok: 8,
+      apiPriceOutPerMTok: 8,
+    }
     const expensive = evaluateMarket(state, 'model-eval', 'developers')!
     expect(expensive.capability).toBe(cheap.capability)
     expect(expensive.value).toBeLessThan(cheap.value)
     expect(expensive.factors.price).toBeLessThan(cheap.factors.price)
+  })
+
+  it('distinguishes sub-micro input/output list prices in review value', () => {
+    const micro = withReleasedModel()
+    micro.player.models[0] = {
+      ...micro.player.models[0]!,
+      apiPricePerMTok: 0.0000001,
+      apiPriceInPerMTok: 0.0000001,
+      apiPriceOutPerMTok: 0.0000001,
+      suggestedApiPrice: 0.000001,
+    }
+    const pricier = withReleasedModel()
+    pricier.player.models[0] = {
+      ...pricier.player.models[0]!,
+      apiPricePerMTok: 0.00001,
+      apiPriceInPerMTok: 0.00001,
+      apiPriceOutPerMTok: 0.00001,
+      suggestedApiPrice: 0.000001,
+    }
+
+    expect(
+      evaluateMarket(micro, 'model-eval', 'developers')!.factors.price,
+    ).toBeGreaterThan(
+      evaluateMarket(pricier, 'model-eval', 'developers')!.factors.price,
+    )
+  })
+
+  it('uses an explicit native media list instead of a stale token blend', () => {
+    const stateForImagePrice = (perImage: number) => {
+      const state = withReleasedModel()
+      state.player.models[0] = {
+        ...state.player.models[0]!,
+        family: 'diffusion',
+        productPreset: 'image_generation',
+        modalities: ['image'],
+        apiPricePerMTok: 2,
+        apiPriceInPerMTok: 1,
+        apiPriceOutPerMTok: 3,
+        apiPricePerImage: perImage,
+        suggestedApiPrice: 10,
+      }
+      return state
+    }
+    const cheap = evaluateMarket(
+      stateForImagePrice(0.04),
+      'model-eval',
+      'creators',
+    )!
+    const expensive = evaluateMarket(
+      stateForImagePrice(0.4),
+      'model-eval',
+      'creators',
+    )!
+
+    expect(cheap.factors.price).toBeGreaterThan(expensive.factors.price)
+    expect(cheap.value).toBeGreaterThan(expensive.value)
   })
 })

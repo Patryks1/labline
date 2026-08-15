@@ -1,4 +1,5 @@
 import { BENCHMARK_DEFS } from '../balance/benchmarks'
+import { API_PRICE_EPSILON } from '../balance/pricing'
 import { createRng, hashSeed } from '../rng'
 import type {
   BenchmarkScores,
@@ -12,6 +13,7 @@ import type {
 } from '../types'
 import { buildBenchmarkEvent } from './benchmarkEvent'
 import { HISTORY_LIMITS } from './history'
+import { modelOfferApiPrice } from './market'
 
 const clamp = (value: number, low = 0, high = 100) =>
   Math.max(low, Math.min(high, Number.isFinite(value) ? value : low))
@@ -41,6 +43,12 @@ function brandFor(state: SimState, labId: LabId): number {
   return labId === state.playerLabId
     ? state.player.brandTrust
     : (state.rivals.find((rival) => rival.id === labId)?.brandTrust ?? 0)
+}
+
+function pricingFor(state: SimState, labId: LabId) {
+  return labId === state.playerLabId
+    ? state.player.pricing
+    : state.rivals.find((rival) => rival.id === labId)?.pricing
 }
 
 function activeSeasonId(state: SimState): string {
@@ -165,8 +173,17 @@ export function evaluateMarket(
   if (!model) return null
   const overfit = Math.max(0, Math.min(1, model.benchmarkOverfit ?? 0))
   const capability = clamp(audienceCapability(model, audience) - overfit * 22)
-  const price = Math.max(0.01, model.apiPricePerMTok ?? model.suggestedApiPrice ?? 1)
-  const referencePrice = Math.max(0.01, model.suggestedApiPrice ?? price)
+  const pricing = pricingFor(state, labId)
+  const price = Math.max(
+    API_PRICE_EPSILON,
+    pricing
+      ? modelOfferApiPrice(pricing, model)
+      : (model.apiPricePerMTok ?? model.suggestedApiPrice ?? 1),
+  )
+  const referencePrice = Math.max(
+    API_PRICE_EPSILON,
+    model.suggestedApiPrice ?? price,
+  )
   const priceFactor = clamp(50 - Math.log(price / referencePrice) * 22)
   const speedFactor = clamp(42 + Math.log1p(Math.max(0.01, model.tokPerSecMult) * 4) * 20)
   const reliability = clamp(model.quality.reliability - overfit * 18)

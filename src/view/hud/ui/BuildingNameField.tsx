@@ -79,7 +79,7 @@ export function BuildingNameField({ tile, compact, className = '' }: Props) {
         />
         <button
           type="submit"
-          className="shrink-0 rounded-md px-1.5 py-1 text-[0.75rem] text-mint hover:bg-mint/10"
+          className="min-h-12 shrink-0 rounded-md px-2 py-1 text-[0.75rem] text-mint hover:bg-mint/10 lg:min-h-0"
           onMouseDown={(e) => e.preventDefault()}
         >
           Save
@@ -98,7 +98,7 @@ export function BuildingNameField({ tile, compact, className = '' }: Props) {
         setEditing(true)
       }}
       onPointerDown={(e) => e.stopPropagation()}
-      className={`group flex min-w-0 max-w-full items-center gap-1 rounded-md text-left hover:bg-line/30 ${className}`}
+      className={`group flex min-h-12 min-w-0 max-w-full items-center gap-1 rounded-md px-1 text-left hover:bg-line/30 lg:min-h-0 lg:px-0 ${className}`}
     >
       <span className={`truncate font-medium text-bone ${compact ? 'text-sm' : 'text-sm'}`}>
         {display}

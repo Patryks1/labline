@@ -70,7 +70,7 @@ function capacity(state: SimState): number {
   )
 }
 
-describe('hard local serving memory admission', () => {
+describe('local serving memory derating', () => {
   it('admits no local tokens until the full deployment fits in HBM', () => {
     const model = releasedModel('dense-100b', 100)
     const short = localServingState([model], 1)
@@ -78,12 +78,13 @@ describe('hard local serving memory admission', () => {
 
     expect(servingPlacementNeed(short).hbmNeedGb).toBeGreaterThan(80)
     expect(computeSnapshot(short).rawFlopsPf).toBeGreaterThan(0)
+    expect(computeSnapshot(short).serveMemFit).toBe(0)
     expect(capacity(short)).toBe(0)
     expect(capacity(fit)).toBeGreaterThan(0)
-    expect(capacity(fit)).toBeGreaterThanOrEqual(capacity(short))
+    expect(computeSnapshot(fit).serveMemFit).toBe(1)
   })
 
-  it('makes host RAM a separate hard constraint for many resident products', () => {
+  it('makes host RAM a separate derating constraint for many resident products', () => {
     const models = Array.from({ length: 20 }, (_, index) =>
       releasedModel(`small-${index}`, 0.1),
     )
@@ -94,9 +95,10 @@ describe('hard local serving memory admission', () => {
     expect(need.hbmNeedGb).toBeLessThanOrEqual(160)
     expect(need.systemRamNeedGb).toBeGreaterThan(256)
     expect(computeSnapshot(ramShort).vramDerateServe).toBe(1)
+    expect(computeSnapshot(ramShort).serveMemFit).toBe(0)
     expect(capacity(ramShort)).toBe(0)
     expect(capacity(ramFit)).toBeGreaterThan(0)
-    expect(capacity(ramFit)).toBeGreaterThanOrEqual(capacity(ramShort))
+    expect(computeSnapshot(ramFit).serveMemFit).toBe(1)
   })
 
   it('allows quantization to restore a deployment that cannot fit at FP16', () => {
@@ -108,7 +110,7 @@ describe('hard local serving memory admission', () => {
       servingPlacementNeed(fp16).hbmNeedGb,
     )
     expect(capacity(fp16)).toBe(0)
-    expect(capacity(int4)).toBeGreaterThan(0)
+    expect(capacity(int4)).toBeGreaterThan(capacity(fp16))
   })
 
   it('keeps off-site provider PF usable when the local deployment cannot fit', () => {
@@ -136,8 +138,10 @@ describe('hard local serving memory admission', () => {
       computeContracts: [contract],
     }
 
+    // Local weights cannot fit at all; the provider contract brings a
+    // separately provisioned accelerator-memory envelope that can host them.
     expect(capacity(localOnly)).toBe(0)
     expect(computeSnapshot(cloud).pools.inference).toBeGreaterThan(0)
-    expect(capacity(cloud)).toBeGreaterThan(0)
+    expect(capacity(cloud)).toBeGreaterThan(capacity(localOnly))
   })
 })

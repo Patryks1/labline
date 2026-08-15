@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   defaultServingKvShape,
+  estimateHardwareTokenRate,
+  estimateServingMemory,
   familyServeMult,
   estimateServingWorkload,
   kvCacheMemoryGb,
@@ -77,6 +79,93 @@ describe('tokenServe', () => {
     expect(modelServeCostMult(moe70)).toBeLessThan(modelServeCostMult(dense70))
   })
 
+  it('keeps total MoE weights resident while active parameters drive work', () => {
+    const sameTotalDense = { ...dense7, paramsB: 70, activeParamsB: 70 }
+    const moeMemory = estimateServingMemory({ model: moe70, precision: 'bf16' })
+    const denseMemory = estimateServingMemory({ model: sameTotalDense, precision: 'bf16' })
+    const moeWork = estimateServingWorkload({
+      model: moe70,
+      inputMTok: 1,
+      outputMTok: 1,
+      precision: 'bf16',
+    })
+    const denseWork = estimateServingWorkload({
+      model: sameTotalDense,
+      inputMTok: 1,
+      outputMTok: 1,
+      precision: 'bf16',
+    })
+
+    expect(moeMemory.weightMemoryGb).toBeCloseTo(denseMemory.weightMemoryGb, 12)
+    expect(moeMemory.weightMemoryGb).toBe(140)
+    expect(moeWork.physicalPfDays).toBeLessThan(denseWork.physicalPfDays * 0.2)
+  })
+
+  it('matches dense BF16 weight-memory goldens at 70B and 405B', () => {
+    const memory70 = estimateServingMemory({
+      model: { paramsB: 70, activeParamsB: 70, family: 'dense' },
+      precision: 'bf16',
+    })
+    const memory405 = estimateServingMemory({
+      model: { paramsB: 405, activeParamsB: 405, family: 'dense' },
+      precision: 'bf16',
+    })
+
+    expect(memory70.weightMemoryGb).toBe(140)
+    expect(memory405.weightMemoryGb).toBe(810)
+    expect(memory70.residentMemoryGb).toBeGreaterThan(memory70.weightMemoryGb)
+    expect(memory405.residentMemoryGb).toBeGreaterThan(memory405.weightMemoryGb)
+  })
+
+  it('uses extra resident replicas for throughput, not single-stream speed', () => {
+    const accelerator = {
+      deviceCount: 8,
+      fp32TfPerDevice: 67,
+      fp16Bf16TfPerDevice: 989,
+      fp8TfPerDevice: 1_979,
+      fp4TfPerDevice: 0,
+      hbmGbPerDevice: 80,
+      hbmBandwidthTbPerSecPerDevice: 3.35,
+    }
+    const eightDevices = estimateHardwareTokenRate({
+      accelerator,
+      model: dense7,
+      precision: 'bf16',
+    })
+    const fourDevices = estimateHardwareTokenRate({
+      accelerator: { ...accelerator, deviceCount: 4 },
+      model: dense7,
+      precision: 'bf16',
+    })
+
+    expect(eightDevices.devicesPerReplica).toBe(1)
+    expect(eightDevices.replicas).toBe(8)
+    expect(eightDevices.singleStreamTokPerSec)
+      .toBeCloseTo(fourDevices.singleStreamTokPerSec, 12)
+    expect(eightDevices.aggregateTokPerSec)
+      .toBeCloseTo(fourDevices.aggregateTokPerSec * 2, 12)
+  })
+
+  it('returns zero hardware rate when a complete resident replica cannot fit', () => {
+    const estimate = estimateHardwareTokenRate({
+      accelerator: {
+        deviceCount: 1,
+        fp32TfPerDevice: 67,
+        fp16Bf16TfPerDevice: 989,
+        fp8TfPerDevice: 1_979,
+        fp4TfPerDevice: 0,
+        hbmGbPerDevice: 80,
+        hbmBandwidthTbPerSecPerDevice: 3.35,
+      },
+      model: { ...dense7, paramsB: 70, activeParamsB: 70 },
+      precision: 'bf16',
+    })
+
+    expect(estimate.fitsHbm).toBe(false)
+    expect(estimate.singleStreamTokPerSec).toBe(0)
+    expect(estimate.aggregateTokPerSec).toBe(0)
+  })
+
   it('converts effective PF-days directly into model-specific capacity', () => {
     const cap = tokensPerDayCapacity({
       effectivePfDays: 96 * 0.989 * 0.7,
@@ -88,7 +177,7 @@ describe('tokenServe', () => {
     expect(cap).toBeLessThan(10_000_000)
   })
 
-  it('one H100-class device supports at least 2,000 full 20M-token users', () => {
+  it('one H100-class device supports thousands of full 20M-token users on a 1B model', () => {
     const capacityMTokPerDay = tokensPerDayCapacity({
       // H100 BF16 dense peak after a conservative 70% online efficiency.
       effectivePfDays: 0.989 * 0.7,
@@ -98,10 +187,13 @@ describe('tokenServe', () => {
     })
     const fullAllowanceUsers = capacityMTokPerDay / (20 / 30)
 
-    expect(fullAllowanceUsers).toBeGreaterThan(2_000)
+    // Decode-realism raises work/token vs the old 2N-only estimate, but a
+    // mature stack on a tiny model still clears several thousand full users.
+    expect(fullAllowanceUsers).toBeGreaterThan(8_000)
+    expect(fullAllowanceUsers).toBeLessThan(30_000)
   })
 
-  it('puts 70.6B daily tokens on a 1B model in single-digit PF', () => {
+  it('puts 70.6B daily tokens on a 1B model in low-single-digit PF', () => {
     const estimate = estimateServingWorkload({
       model: dense1,
       inputMTok: 70_600 * 0.7,
@@ -109,9 +201,10 @@ describe('tokenServe', () => {
       servingEfficiency: 1,
     })
 
-    expect(estimate.physicalPfDays).toBeGreaterThan(1.6)
-    expect(estimate.physicalPfDays).toBeLessThan(1.75)
-    expect(estimate.physicalPfDays / 0.35).toBeLessThan(5)
+    // Decode MFU plus mandatory end-to-end systems work lands just under 5 PF.
+    expect(estimate.physicalPfDays).toBeGreaterThan(4.7)
+    expect(estimate.physicalPfDays).toBeLessThan(5)
+    expect(estimate.effectivePfDays).toBeLessThan(5)
   })
 
   it('reports context, precision, and HBM constraints explicitly', () => {

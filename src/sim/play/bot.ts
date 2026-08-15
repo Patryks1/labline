@@ -9,12 +9,14 @@ import { orderRacksIntoDc } from '../systems/dcRacks'
 import {
   startTraining,
   advancePostTrain,
+  cancelTraining,
   releaseFromJob,
   keepInternal,
 } from '../systems/training'
 import { enqueueResearch, availableResearch } from '../systems/research'
 import { setModelApiInOut } from '../systems/training'
 import { computeSnapshot } from '../systems/compute'
+import { hireStaff, playerStaff } from '../systems/staff'
 import type { BuildableKind, MapTile, SimState } from '../types'
 import type { DifficultyId } from '../balance/gameConfig'
 import { tickSharedMarkets } from '../systems/sharedMarkets'
@@ -38,6 +40,7 @@ import {
   usesCompactWorld,
 } from '../systems/worldAccess'
 import { tileCoords } from '../world/ids'
+import { blendApiPrice, splitBlendedApiPrice } from '../balance/pricing'
 
 export interface Milestone {
   day: number
@@ -185,6 +188,20 @@ function tryPlace(state: SimState, kind: BuildableKind, region = 'west'): SimSta
 export function botAct(state: SimState): SimState {
   let s = state
   if (s.victory.outcome !== 'playing') return s
+
+  // HQ-first: place the free starter HQ, then hire researchers before training.
+  const hqKinds = () =>
+    countKind(s, 'hq') + countKind(s, 'hq_m') + countKind(s, 'hq_l') + countKind(s, 'office')
+  if (hqKinds() === 0 && !buildingInProgress(s, 'hq')) {
+    s = tryPlace(s, 'hq', 'west')
+  }
+  const researchers = playerStaff(s).researcher ?? 0
+  if (hqKinds() > 0 && researchers < 2) {
+    const cityId = (s.map.cities ?? [])[0]?.id
+    if (cityId) {
+      s = hireStaff(s, cityId, 'researcher', Math.min(2, 2 - researchers))
+    }
+  }
 
   const dcs = countKind(s, 'dc')
   const power =
@@ -352,13 +369,18 @@ export function botAct(state: SimState): SimState {
   // 5) Handle milestone pause, then post-train SFT / release.
   if (s.player.trainingJob) {
     const job = s.player.trainingJob
-    if (job.awaitingDecision) {
-      s = releaseFromJob(s)
+    if (job.failed) {
+      // Failed runs retain their sunk cash/data but must not deadlock the
+      // automated operator forever; clear the terminal job and let the next
+      // cadence attempt use a fresh outcome seed.
+      s = cancelTraining(s, job.id)
+    } else if (job.awaitingDecision) {
+      s = releaseFromJob(s, job.id)
     } else if (job.progressPfDays >= job.targetPfDays) {
       if (job.postTrain === 'none') {
-        s = advancePostTrain(s)
+        s = advancePostTrain(s, job.id)
       } else if (job.postTrainProgress >= job.postTrainTarget) {
-        s = releaseFromJob(s)
+        s = releaseFromJob(s, job.id)
       }
     }
   }
@@ -367,8 +389,9 @@ export function botAct(state: SimState): SimState {
   if (hasPublic) {
     const m = s.player.models.find((x) => x.release === 'released')
     if (m && (m.apiPriceInPerMTok == null || m.apiPriceOutPerMTok == null)) {
-      const pin = m.suggestedApiPriceIn ?? (m.suggestedApiPrice || 2.5) * 0.35
-      const pout = m.suggestedApiPriceOut ?? (m.suggestedApiPrice || 2.5) * 1.25
+      const fallback = splitBlendedApiPrice(m.suggestedApiPrice || 2.5)
+      const pin = m.suggestedApiPriceIn ?? fallback.priceIn
+      const pout = m.suggestedApiPriceOut ?? fallback.priceOut
       s = setModelApiInOut(s, m.id, pin, pout)
       s = {
         ...s,
@@ -379,7 +402,7 @@ export function botAct(state: SimState): SimState {
             activeModelId: m.id,
             apiPriceInPerMTok: pin,
             apiPriceOutPerMTok: pout,
-            apiPricePerMTok: Math.round((pin * 0.3 + pout * 0.7) * 1000) / 1000,
+            apiPricePerMTok: Math.round(blendApiPrice(pin, pout) * 1000) / 1000,
           },
         },
       }

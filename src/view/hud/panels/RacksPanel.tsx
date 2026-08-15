@@ -6,23 +6,19 @@ import {
   scoreDesign,
 } from '../../../sim/balance/racks'
 import {
+  RACK_COMMISSION_PER_DAY,
   dcBayUsage,
-  fullOrderCatalog,
-  racksOnDc,
 } from '../../../sim/systems/dcRacks'
 import {
   clearSlot,
   designToSku,
   emptyDesign,
   placeModule,
-  resolveRackSku,
   saveRackDesign,
 } from '../../../sim/systems/racks'
 import { useGameStore } from '../../../store/gameStore'
 import type { ModuleKind, RackDesign } from '../../../sim/types'
 import { money, num, mw } from '../format'
-import { RackOrderBlock } from './RackOrderBlock'
-import { aggregateEffects } from '../../../sim/systems/research'
 import { isDcAnchor, isDcKind } from '../../../sim/systems/map'
 import { BuildingNameField } from '../ui/BuildingNameField'
 import { mapTileAtAny } from '../../../sim/systems/worldAccess'
@@ -37,7 +33,6 @@ import {
 import {
   BlockerList,
   GameCard,
-  LiveDot,
   MeterBar,
   SegmentedTabs,
   StatRow,
@@ -51,12 +46,17 @@ import { facilityAcquisitionPresentation } from './hardware/facilityMarketPresen
 
 const KIND_ORDER: ModuleKind[] = ['gpu', 'ram', 'cpu', 'cooling', 'psu', 'nic']
 
+/** Gamified hall tier from live compute. */
+function hallTier(flopsLive: number): { label: string; tone: 'positive' | 'warning' | 'neutral' } {
+  if (flopsLive >= 300) return { label: 'Hyperscale', tone: 'positive' }
+  if (flopsLive >= 50) return { label: 'Production', tone: 'warning' }
+  if (flopsLive > 0) return { label: 'Starter', tone: 'neutral' }
+  return { label: 'Empty shell', tone: 'neutral' }
+}
+
 export function RacksPanel() {
   const state = useGameStore((s) => s.state)
   const selected = useGameStore((s) => s.selectedTile)
-  const orderRacks = useGameStore((s) => s.orderRacks)
-  const sellRacks = useGameStore((s) => s.sellRacks)
-  const cancelRackOrder = useGameStore((s) => s.cancelRackOrder)
   const tab = useGameStore((s) => s.rackWorkspaceTab)
   const setTab = useGameStore((s) => s.setRackWorkspaceTab)
   const submitFacilityOffer = useGameStore((s) => s.submitFacilityOffer)
@@ -66,27 +66,55 @@ export function RacksPanel() {
   const setState = (s: typeof state) => useGameStore.setState({ state: s })
   const focusMapTile = useGameStore((s) => s.focusMapTile)
   const openHallEditor = useGameStore((s) => s.openHallEditor)
-  const ownerFilter = useGameStore((s) => s.fleetOwnerFilter)
-  const discount = aggregateEffects(state.player.researchUnlocked).chipDiscount ?? 0
   const fleet = fleetStats(state)
 
-  const catalog = useMemo(() => fullOrderCatalog(state), [state])
   const tile = selected ? mapTileAtAny(state, selected.x, selected.y) : undefined
-  const tileX = tile?.x
-  const tileY = tile?.y
-  const isLiveDc =
-    tile &&
+  const isRivalDc =
+    tile != null &&
     isDcKind(tile.kind) &&
     isDcAnchor(tile) &&
-    tile.owner === 'player' &&
-    tile.buildingProgress >= tile.buildingTarget
-  const usage = isLiveDc ? dcBayUsage(state, tile.x, tile.y) : null
-  const installs = useMemo(
-    () => isLiveDc && tileX != null && tileY != null ? racksOnDc(state, tileX, tileY) : [],
-    [isLiveDc, state, tileX, tileY],
+    tile.owner !== 'player' &&
+    tile.owner !== 'neutral'
+
+  const hallCards = useMemo(
+    () =>
+      facilityAnchorTiles(state, { ownerId: 'player' })
+        .filter((hall) => isDcKind(hall.kind) && isDcAnchor(hall))
+        .map((hall) => {
+          const built = hall.buildingProgress >= hall.buildingTarget
+          const usage = built ? dcBayUsage(state, hall.x, hall.y) : null
+          const facilityId = hall.campusId ?? `facility:${hall.x},${hall.y}`
+          const offline =
+            state.dataHallLayouts?.[facilityId]?.analysis.offlineRackUnitIds
+              .length ?? 0
+          return { hall, built, usage, facilityId, offline }
+        })
+        .toSorted(
+          (a, b) =>
+            (b.usage?.flopsLive ?? 0) - (a.usage?.flopsLive ?? 0) ||
+            a.hall.name.localeCompare(b.hall.name),
+        ),
+    [state],
   )
-  const orderedCount = installs.filter((r) => r.status === 'ordered').reduce((s, r) => s + r.count, 0)
-  const liveCount = installs.filter((r) => r.status === 'live').reduce((s, r) => s + r.count, 0)
+  const totals = useMemo(() => {
+    let online = 0
+    let commissioning = 0
+    let offline = 0
+    for (const card of hallCards) {
+      online += card.usage?.live ?? 0
+      commissioning += card.usage?.ordered ?? 0
+      offline += card.offline
+    }
+    return {
+      online,
+      commissioning,
+      offline,
+      commissioningDays:
+        commissioning > 0
+          ? Math.ceil(commissioning / RACK_COMMISSION_PER_DAY)
+          : 0,
+    }
+  }, [hallCards])
 
   const [autoDesignGoal, setAutoDesignGoal] = useState<RackDesignGoal>('balanced')
   const [design, setDesign] = useState<RackDesign>(() => emptyDesign('case_8u', 'My Node'))
@@ -95,20 +123,13 @@ export function RacksPanel() {
   const [facilityBidMillions, setFacilityBidMillions] = useState('')
   const stats = useMemo(() => scoreDesign(design), [design])
   const chassis = CHASSIS_CATALOG.find((c) => c.id === design.chassisId)!
-  const halls = useMemo(
-    () => facilityAnchorTiles(state, ownerFilter ? { ownerId: ownerFilter } : undefined)
-      .filter((hall) => isDcKind(hall.kind) && isDcAnchor(hall))
-      .toSorted((a, b) => (a.owner === 'player' ? -1 : 1) - (b.owner === 'player' ? -1 : 1) || a.name.localeCompare(b.name)),
-    [ownerFilter, state],
-  )
-  const selectedOwner = tile?.owner === 'player' || tile?.owner === 'neutral' ? null : state.rivals.find((r) => r.id === tile?.owner)
-  const intelConfidence = selectedOwner?.publicEstimate?.confidence ?? 0
-  const intelLevel = intelConfidence < 0.28 ? 'unknown' : intelConfidence < 0.72 ? 'estimate' : 'exact'
-  const hallCapacity = tile && isDcKind(tile.kind) ? Math.max(0, tile.rackCapacity) : 0
   const autoDesigns = useMemo(
     () => recommendRackDesigns({ goal: autoDesignGoal, limit: 3 }),
     [autoDesignGoal],
   )
+  const selectedOwner = isRivalDc ? state.rivals.find((r) => r.id === tile?.owner) : null
+  const intelConfidence = selectedOwner?.publicEstimate?.confidence ?? 0
+  const intelLevel = intelConfidence < 0.28 ? 'unknown' : intelConfidence < 0.72 ? 'estimate' : 'exact'
   const selectedFacilityId = tile?.campusId ?? (tile ? `facility:${tile.x},${tile.y}` : '')
   const activeFacilityOffer = state.facilityMarket?.offers.find(
     (offer) =>
@@ -140,269 +161,206 @@ export function RacksPanel() {
     <PanelScaffold
       eyebrow="Hardware"
       title="Racks"
-      description="Order capacity into the selected hall, or save a custom blueprint."
+      description="Your data halls at a glance — open a hall editor to place racks, or design a custom blueprint."
     >
       <div className="space-y-3">
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <MetricTile label="Fleet PF" value={num(fleet.flopsPf, 1)} tone="positive" />
-          <MetricTile label="Live racks" value={num(liveCount || Math.round(fleet.rackUnitsUsed), 0)} />
-          <MetricTile label="On order" value={num(orderedCount, 0)} tone={orderedCount > 0 ? 'warning' : 'neutral'} />
+          <MetricTile label="Racks online" value={num(totals.online, 0)} />
+          <MetricTile
+            label="Commissioning"
+            value={num(totals.commissioning, 0)}
+            detail={
+              totals.commissioning > 0
+                ? `${RACK_COMMISSION_PER_DAY}/day · ~${totals.commissioningDays}d left`
+                : 'idle'
+            }
+            tone={totals.commissioning > 0 ? 'warning' : 'neutral'}
+          />
           <MetricTile label="Fleet draw" value={mw(fleet.mw)} detail={`${num(fleet.vramGb, 0)} GB VRAM`} />
         </div>
 
         <SegmentedTabs
           ariaLabel="Racks sections"
-          active={tab}
-          onChange={(id) => setTab(id as 'fleet' | 'hall' | 'blueprints')}
+          active={tab === 'blueprints' ? 'blueprints' : 'fleet'}
+          onChange={(id) => setTab(id as 'fleet' | 'blueprints')}
           items={[
-            { id: 'fleet', label: `Fleet (${halls.length})` },
-            { id: 'hall', label: 'Facility' },
+            { id: 'fleet', label: `Halls (${hallCards.length})` },
             { id: 'blueprints', label: `Blueprints (${state.player.rackDesigns.length})` },
           ]}
         />
 
-        <div key={tab} className="panel-swap">
-          {tab === 'fleet' ? (
-            halls.length > 0 ? (
-              <div className="anim-stagger space-y-2">
-                {halls.map((hall) => {
-                  const playerOwned = hall.owner === 'player'
-                  const rival = playerOwned || hall.owner === 'neutral' ? null : state.rivals.find((entry) => entry.id === hall.owner)
-                  const confidence = rival?.publicEstimate?.confidence ?? 0
-                  const intel = confidence < 0.28 ? 'Unknown' : confidence < 0.72 ? 'Estimated' : 'Verified'
-                  const used = playerOwned || confidence >= 0.72 ? `${hall.racksUsed}` : confidence >= 0.28 ? `~${Math.round(hall.racksUsed / 8) * 8}` : '—'
-                  const facilityId = hall.campusId ?? `facility:${hall.x},${hall.y}`
-                  return (
-                    <div
-                      key={`${hall.x},${hall.y}`}
-                      className="rounded-xl border border-line bg-panel-2 p-3 transition hover:border-mint/45 hover:bg-mint/[0.04]"
-                    >
-                      <button
-                        type="button"
-                        className="w-full text-left"
-                        onClick={() => {
-                          focusMapTile(hall.x, hall.y)
-                          setTab('hall')
-                        }}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div>
-                            <div className="text-sm font-medium text-bone">{hall.name || `${rival?.name ?? 'Data'} hall`}</div>
-                            <div className="mt-0.5 font-mono text-[0.6875rem] uppercase tracking-wider text-muted">{hall.dcSize ?? 'small'} · {playerOwned ? 'Owned' : rival?.name ?? hall.owner}</div>
-                          </div>
-                          <StatusChip tone={playerOwned ? 'positive' : confidence >= 0.72 ? 'neutral' : 'warning'}>{playerOwned ? `${hall.rackCapacity - hall.racksUsed} free` : intel}</StatusChip>
-                        </div>
-                        <div className="mt-2 grid grid-cols-3 gap-2 font-mono text-[0.75rem] text-muted">
-                          <span><b className="block text-bone">{used}</b> racks</span>
-                          <span><b className="block text-bone">{playerOwned || confidence >= 0.72 ? hall.rackCapacity : '—'}</b> capacity</span>
-                          <span><b className="block text-bone">{hall.powered === false ? 'OFF' : 'LIVE'}</b> plant</span>
-                        </div>
-                      </button>
-                      {playerOwned ? (
+        <div key={tab === 'blueprints' ? 'blueprints' : 'fleet'} className="panel-swap">
+          {tab !== 'blueprints' ? (
+            <div className="space-y-3">
+              {isRivalDc && tile ? (
+                <GameCard eyebrow={`${intelLevel} intelligence`} title={tile.name || `${selectedOwner?.name ?? 'Rival'} hall`} actions={<StatusChip tone={intelLevel === 'exact' ? 'positive' : 'warning'}>{Math.round(intelConfidence * 100)}% confidence</StatusChip>}>
+                  <StatRow label="Rack inventory" value={intelLevel === 'unknown' ? 'Unknown' : intelLevel === 'estimate' ? `~${Math.round(tile.racksUsed / 8) * 8}` : tile.racksUsed} />
+                  <StatRow label="Rack capacity" value={intelLevel === 'exact' ? tile.rackCapacity : intelLevel === 'estimate' ? `~${tile.rackCapacity || (tile.dcSize === 'large' ? 960 : tile.dcSize === 'medium' ? 288 : 96)}` : 'Unknown'} />
+                  <p className="mt-2 text-[0.75rem] text-muted">Competitive intelligence is non-operational. Higher confidence resolves chassis patterns and exact counts.</p>
+                  {activeFacilityOffer ? (
+                    <div className="mt-3 space-y-2 rounded-lg border border-amber/30 bg-amber/5 p-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <StatusChip tone="warning">
+                          {activeFacilityOffer.status === 'countered' ? 'Countered' : 'Offer pending'}
+                        </StatusChip>
+                        <span className="font-mono text-[0.75rem] text-bone">
+                          {money(activeFacilityOffer.counterAmount ?? activeFacilityOffer.amount)}
+                        </span>
+                      </div>
+                      <p className="text-[0.75rem] text-muted">
+                        {money(activeFacilityOffer.escrow)} held in escrow
+                        {activeFacilityOffer.status === 'pending'
+                          ? ` · response due by day ${activeFacilityOffer.respondDay}`
+                          : ' · seller counter awaiting your decision'}
+                      </p>
+                      <div className="flex gap-2">
                         <HudButton
                           type="button"
-                          variant="primary"
-                          className="mt-3 w-full"
-                          onClick={() => {
-                            focusMapTile(hall.x, hall.y)
-                            openHallEditor(facilityId)
-                          }}
+                          variant="ghost"
+                          className="flex-1"
+                          onClick={() => withdrawFacilityOffer(activeFacilityOffer.id)}
                         >
-                          Open floor planner
+                          Withdraw
                         </HudButton>
-                      ) : null}
-                    </div>
-                  )
-                })}
-              </div>
-            ) : <EmptyState title="No data halls" description="Build a hall from Sites, or select a rival in the map to inspect their facilities." />
-          ) : tab === 'hall' ? (
-            tile && isDcKind(tile.kind) && isDcAnchor(tile) ? (
-              <div className="space-y-3">
-                {tile.owner !== 'player' ? (
-                  <GameCard eyebrow={`${intelLevel} intelligence`} title={tile.name || `${selectedOwner?.name ?? 'Rival'} hall`} actions={<StatusChip tone={intelLevel === 'exact' ? 'positive' : 'warning'}>{Math.round(intelConfidence * 100)}% confidence</StatusChip>}>
-                    <StatRow label="Rack inventory" value={intelLevel === 'unknown' ? 'Unknown' : intelLevel === 'estimate' ? `~${Math.round(tile.racksUsed / 8) * 8}` : tile.racksUsed} />
-                    <StatRow label="Rack capacity" value={intelLevel === 'exact' ? tile.rackCapacity : intelLevel === 'estimate' ? `~${hallCapacity || (tile.dcSize === 'large' ? 960 : tile.dcSize === 'medium' ? 288 : 96)}` : 'Unknown'} />
-                    <p className="mt-2 text-[0.75rem] text-muted">Competitive intelligence is non-operational. Higher confidence resolves chassis patterns and exact counts.</p>
-                    {activeFacilityOffer ? (
-                      <div className="mt-3 space-y-2 rounded-lg border border-amber/30 bg-amber/5 p-2.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <StatusChip tone="warning">
-                            {activeFacilityOffer.status === 'countered' ? 'Countered' : 'Offer pending'}
-                          </StatusChip>
-                          <span className="font-mono text-[0.75rem] text-bone">
-                            {money(activeFacilityOffer.counterAmount ?? activeFacilityOffer.amount)}
-                          </span>
-                        </div>
-                        <p className="text-[0.75rem] text-muted">
-                          {money(activeFacilityOffer.escrow)} held in escrow
-                          {activeFacilityOffer.status === 'pending'
-                            ? ` · response due by day ${activeFacilityOffer.respondDay}`
-                            : ' · seller counter awaiting your decision'}
-                        </p>
-                        <div className="flex gap-2">
+                        {activeFacilityOffer.status === 'countered' ? (
                           <HudButton
                             type="button"
-                            variant="ghost"
+                            variant="primary"
                             className="flex-1"
-                            onClick={() => withdrawFacilityOffer(activeFacilityOffer.id)}
+                            disabled={state.player.cash < Math.max(0, (activeFacilityOffer.counterAmount ?? activeFacilityOffer.amount) - activeFacilityOffer.escrow)}
+                            onClick={() => acceptFacilityOffer(activeFacilityOffer.id)}
                           >
-                            Withdraw
+                            Accept counter
                           </HudButton>
-                          {activeFacilityOffer.status === 'countered' ? (
-                            <HudButton
-                              type="button"
-                              variant="primary"
-                              className="flex-1"
-                              disabled={state.player.cash < Math.max(0, (activeFacilityOffer.counterAmount ?? activeFacilityOffer.amount) - activeFacilityOffer.escrow)}
-                              onClick={() => acceptFacilityOffer(activeFacilityOffer.id)}
-                            >
-                              Accept counter
-                            </HudButton>
-                          ) : null}
-                        </div>
+                        ) : null}
                       </div>
-                    ) : facilityAcquisition.mode === 'listed' && tile.listPrice ? (
+                    </div>
+                  ) : facilityAcquisition.mode === 'listed' && tile.listPrice ? (
+                    <HudButton
+                      type="button"
+                      variant="primary"
+                      className="mt-3 w-full"
+                      disabled={state.player.cash < tile.listPrice}
+                      onClick={() => buyRivalDataCenter(tile.x, tile.y)}
+                    >
+                      Buy now · {money(tile.listPrice)}
+                    </HudButton>
+                  ) : (
+                    <div className="mt-3 space-y-2">
+                      <label className="block font-mono text-[0.6875rem] uppercase tracking-wider text-muted" htmlFor="facility-bid">
+                        Offer amount ($M)
+                      </label>
+                      <input
+                        id="facility-bid"
+                        type="number"
+                        min="0.01"
+                        step="0.1"
+                        value={facilityBidMillions}
+                        onChange={(event) => setFacilityBidMillions(event.target.value)}
+                        placeholder="Enter a positive bid"
+                        className="w-full rounded-lg border border-line bg-void/60 px-3 py-2 font-mono text-sm text-bone outline-none focus:border-mint/60"
+                      />
                       <HudButton
                         type="button"
                         variant="primary"
-                        className="mt-3 w-full"
-                        disabled={state.player.cash < tile.listPrice}
-                        onClick={() => buyRivalDataCenter(tile.x, tile.y)}
+                        className="w-full"
+                        disabled={!(Number(facilityBidMillions) > 0) || state.player.cash < Number(facilityBidMillions) * 1_000_000}
+                        onClick={() => {
+                          const amount = Math.floor(Number(facilityBidMillions) * 1_000_000)
+                          if (amount > 0) submitFacilityOffer(selectedFacilityId, amount)
+                        }}
                       >
-                        Buy now · {money(tile.listPrice)}
+                        Submit cash-backed offer
                       </HudButton>
-                    ) : (
-                      <div className="mt-3 space-y-2">
-                        <label className="block font-mono text-[0.6875rem] uppercase tracking-wider text-muted" htmlFor="facility-bid">
-                          Offer amount ($M)
-                        </label>
-                        <input
-                          id="facility-bid"
-                          type="number"
-                          min="0.01"
-                          step="0.1"
-                          value={facilityBidMillions}
-                          onChange={(event) => setFacilityBidMillions(event.target.value)}
-                          placeholder="Enter a positive bid"
-                          className="w-full rounded-lg border border-line bg-void/60 px-3 py-2 font-mono text-sm text-bone outline-none focus:border-mint/60"
-                        />
-                        <HudButton
-                          type="button"
-                          variant="primary"
-                          className="w-full"
-                          disabled={!(Number(facilityBidMillions) > 0) || state.player.cash < Number(facilityBidMillions) * 1_000_000}
-                          onClick={() => {
-                            const amount = Math.floor(Number(facilityBidMillions) * 1_000_000)
-                            if (amount > 0) submitFacilityOffer(selectedFacilityId, amount)
-                          }}
-                        >
-                          Submit cash-backed offer
-                        </HudButton>
-                      </div>
-                    )}
-                  </GameCard>
-                ) : null}
-                {isLiveDc && usage ? (
-              <div className="space-y-3">
-                <HudButton type="button" variant="primary" className="w-full" onClick={() => openHallEditor(selectedFacilityId)}>
-                  Open full data hall editor
-                </HudButton>
-                <GameCard
-                  tone="mint"
-                  live={orderedCount > 0}
-                  eyebrow="Selected hall"
-                  title={<BuildingNameField tile={tile} />}
-                  actions={
-                    orderedCount > 0 ? (
-                      <span className="inline-flex items-center gap-1.5">
-                        <LiveDot className="text-amber" />
-                        <StatusChip tone="warning">{orderedCount} inbound</StatusChip>
-                      </span>
-                    ) : (
-                      <StatusChip tone="positive">{usage.free} free</StatusChip>
-                    )
-                  }
-                >
-                  <StatRow label="Bays" value={`${usage.live} live + ${usage.ordered} ordered / ${usage.capacity}`} />
-                  <StatRow label="Free bays" value={String(usage.free)} tone="positive" strong />
-                  <StatRow label="Hall power" value={mw(usage.mwLive)} />
-                  <div className="mt-2">
-                    <MeterBar
-                      label="Bay fill"
-                      value={usage.used / Math.max(1, usage.capacity)}
-                      detail={`${usage.used}/${usage.capacity}`}
-                      tone="positive"
-                      live={orderedCount > 0}
-                    />
-                  </div>
-                </GameCard>
-
-                <RackOrderBlock
-                  catalog={catalog}
-                  usage={usage}
-                  cash={state.player.cash}
-                  pue={state.player.pue}
-                  discount={discount}
-                  onOrder={(id, q) => orderRacks(tile.x, tile.y, id, q)}
-                />
-
-                <GameCard eyebrow="Inventory" title="Installed / on order">
-                  {installs.length === 0 ? (
-                    <EmptyState title="Empty hall" description="Order racks above to fill free bays." />
-                  ) : (
-                    <div className="anim-stagger space-y-1.5">
-                      {installs.map((r) => {
-                        const sku = resolveRackSku(r.skuId, state.player.rackDesigns)
-                        return (
-                          <div
-                            key={r.id}
-                            className="flex items-center justify-between gap-2 rounded-lg border border-line/70 bg-void/40 px-2.5 py-2"
-                          >
-                            <div className="min-w-0">
-                              <div className="flex items-center gap-1.5 text-sm text-bone">
-                                {r.status === 'ordered' ? <LiveDot className="text-amber" /> : null}
-                                <span className="truncate">{sku.name}</span>
-                                <span className="font-mono text-[0.75rem] tabular-nums text-muted">×{r.count}</span>
-                              </div>
-                              <div className="font-mono text-[0.75rem] tabular-nums text-muted">
-                                {r.status === 'ordered'
-                                  ? `Arriving in ${r.daysLeft}d · ${money(sku.price * r.count)} paid`
-                                  : `Live · ${mw(sku.mw * r.count)} · sell ${Math.round(sku.sellBackRate * 100)}%`}
-                              </div>
-                            </div>
-                            <div className="flex shrink-0 gap-1">
-                              {r.status === 'live' ? (
-                                <HudButton
-                                  type="button"
-                                  variant="ghost"
-                                  className="!px-2 !py-0.5 text-[0.75rem] text-danger"
-                                  onClick={() => sellRacks(tile.x, tile.y, r.skuId, 1)}
-                                >
-                                  Sell 1
-                                </HudButton>
-                              ) : null}
-                              {r.status === 'ordered' ? (
-                                <HudButton
-                                  type="button"
-                                  variant="ghost"
-                                  className="!px-2 !py-0.5 text-[0.75rem]"
-                                  onClick={() => cancelRackOrder(tile.x, tile.y, r.skuId, 1)}
-                                >
-                                  Cancel 1
-                                </HudButton>
-                              ) : null}
-                            </div>
-                          </div>
-                        )
-                      })}
                     </div>
                   )}
                 </GameCard>
-              </div>
-                ) : null}
-              </div>
-            ) : <EmptyState title="Select a data hall" description="Choose a player or rival facility from Fleet to open its synchronized operations view." />
+              ) : null}
+
+              {hallCards.length > 0 ? (
+                <div className="anim-stagger space-y-2">
+                  {hallCards.map(({ hall, built, usage, facilityId, offline }) => {
+                    const tier = hallTier(usage?.flopsLive ?? 0)
+                    const commissioning = usage?.ordered ?? 0
+                    const commissioningDays = Math.ceil(commissioning / RACK_COMMISSION_PER_DAY)
+                    const isSelected = tile?.x === hall.x && tile?.y === hall.y
+                    return (
+                      <GameCard
+                        key={`${hall.x},${hall.y}`}
+                        eyebrow={hall.dcSize ?? 'small'}
+                        title={<BuildingNameField tile={hall} />}
+                        tone={isSelected ? 'mint' : 'train'}
+                        live={commissioning > 0}
+                        actions={<StatusChip tone={tier.tone}>{tier.label}</StatusChip>}
+                      >
+                        {!built ? (
+                          <>
+                            <MeterBar
+                              label="Under construction"
+                              value={hall.buildingProgress / Math.max(1, hall.buildingTarget)}
+                              detail={`${hall.buildingProgress}/${hall.buildingTarget}d`}
+                              tone="warning"
+                              live
+                            />
+                            <p className="mt-2 text-[0.75rem] text-muted">
+                              {hall.buildingTarget - hall.buildingProgress} days until this hall is ready for racks.
+                            </p>
+                          </>
+                        ) : usage ? (
+                          <>
+                            <div className="grid grid-cols-3 gap-2 font-mono text-[0.75rem] text-muted">
+                              <span><b className="block text-bone">{usage.live}</b> online</span>
+                              <span><b className="block text-bone">{usage.staged || '—'}</b> staged</span>
+                              <span><b className="block text-bone">{usage.reserved || '—'}</b> planned footprint</span>
+                            </div>
+                            <div className="mt-2">
+                              <MeterBar
+                                label="Operational fit"
+                                value={usage.live / Math.max(1, usage.placed)}
+                                detail={`${usage.live}/${usage.placed} placed rack-width`}
+                                tone="positive"
+                                live={usage.staged > 0}
+                              />
+                            </div>
+                            {commissioning > 0 ? (
+                              <p className="mt-1.5 text-[0.75rem] text-amber">
+                                Spinning up {commissioning} rack{commissioning === 1 ? '' : 's'} · {RACK_COMMISSION_PER_DAY}/day · ~{commissioningDays}d until fully on
+                              </p>
+                            ) : null}
+                            {offline > 0 ? (
+                              <p className="mt-1.5 text-[0.75rem] text-danger">
+                                {offline} rack{offline === 1 ? '' : 's'} offline — needs power/network in the hall editor
+                              </p>
+                            ) : null}
+                            <div className="mt-2 flex items-center justify-between font-mono text-[0.75rem] text-muted">
+                              <span>{num(usage.flopsLive, 1)} PF</span>
+                              <span>{mw(usage.mwLive)}</span>
+                            </div>
+                            <HudButton
+                              type="button"
+                              variant="primary"
+                              className="mt-3 w-full"
+                              onClick={() => {
+                                focusMapTile(hall.x, hall.y)
+                                openHallEditor(facilityId)
+                              }}
+                            >
+                              Open hall editor
+                            </HudButton>
+                          </>
+                        ) : null}
+                      </GameCard>
+                    )
+                  })}
+                </div>
+              ) : (
+                <EmptyState
+                  title="No data halls yet"
+                  description="Build a data center from Sites, then open its hall editor to place racks."
+                />
+              )}
+            </div>
           ) : (
             <div className="space-y-3">
               <GameCard eyebrow="Automation" title="Auto-design rack" tone="mint">
@@ -540,7 +498,7 @@ export function RacksPanel() {
                     <BlockerList items={stats.errors.map((e) => ({ text: e }))} />
                   </div>
                 ) : (
-                  <p className="mt-2 text-[0.75rem] text-mint">Valid — save to order this into any hall.</p>
+                  <p className="mt-2 text-[0.75rem] text-mint">Valid — save to place this in any hall.</p>
                 )}
 
                 <div className="mt-3">
@@ -586,15 +544,10 @@ export function RacksPanel() {
                     title={!stats.valid ? 'Fix design errors first' : undefined}
                     onClick={() => {
                       setState(saveRackDesign(state, design))
-                      if (isLiveDc) {
-                        setTab('hall')
-                        setMsg('Blueprint saved — choose it in the order list for this hall')
-                      } else {
-                        setMsg('Blueprint saved — select an owned hall under Facility to order it')
-                      }
+                      setMsg('Blueprint saved — place it from any hall editor')
                     }}
                   >
-                    {isLiveDc ? 'Save & order for this hall' : 'Save blueprint'}
+                    Save blueprint
                   </HudButton>
                   <HudButton
                     type="button"

@@ -52,6 +52,7 @@ describe('facility market', () => {
       stats: { ...facility.stats, capex: 100_000_000 },
       data: { ...facility.data, landValue: 20_000_000, commissionedDay: state.day },
     }).commit()
+    const hallEquipmentBefore = state.dataHallLayouts![facility.id]!.objects.filter((object) => object.kind !== 'rack')
 
     const nav = facilityNav(state, facility.id)
     expect(nav.land).toBe(20_000_000)
@@ -78,6 +79,8 @@ describe('facility market', () => {
     expect(state.player.rackFleet).toContainEqual(expect.objectContaining(rack(x, y)))
     expect(state.player.rackFleet[0]!.unitIds).toHaveLength(4)
     expect(state.dataHallLayouts?.[facility.id]?.objects.filter((object) => object.kind === 'rack')).toHaveLength(4)
+    expect(state.dataHallLayouts?.[facility.id]?.objects.filter((object) => object.kind !== 'rack')).toEqual(hallEquipmentBefore)
+    expect(state.dataHallLayouts?.[facility.id]?.constructionProject).toBeUndefined()
     expect(state.rivals[0]!.rackFleet).toEqual([])
     expect(state.siteCapacities[0]!.labId).toBe(state.playerLabId)
     expect(state.player.cash + state.rivals[0]!.cash).toBe(totalCash)

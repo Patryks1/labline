@@ -46,12 +46,12 @@ describe('construction fast-track', () => {
     const cashBefore = state.player.cash
     const quote = constructionFastTrackQuote(state, open.x, open.y)
 
-    expect(quote).toMatchObject({ eligible: true, remainingDays: 180, acceleratedDays: 90 })
+    expect(quote).toMatchObject({ eligible: true, remainingDays: 45, acceleratedDays: 23 })
     expect(quote.cost).toBe(Math.floor(before.capex * 0.5))
 
     state = fastTrackConstruction(state, open.x, open.y)
     const accelerated = state.map.tiles.find((tile) => tile.x === open.x && tile.y === open.y)!
-    expect(accelerated.buildingTarget).toBe(90)
+    expect(accelerated.buildingTarget).toBe(23)
     expect(accelerated.constructionExpedited).toBe(true)
     expect(accelerated.capex).toBe(before.capex + quote.cost)
     expect(state.player.cash).toBe(cashBefore - quote.cost)
@@ -61,7 +61,7 @@ describe('construction fast-track', () => {
     expect(state.player.cash).toBe(cashAfter)
   })
 
-  it('uses a 30-day minimum schedule when halving a short remaining window', () => {
+  it('uses the minimum schedule when halving a short remaining window', () => {
     let state = fundedLegacyGame(9_102)
     const open = state.map.tiles.find(
       (tile) =>
@@ -76,17 +76,17 @@ describe('construction fast-track', () => {
         ...state.map,
         tiles: state.map.tiles.map((tile) =>
           tile.x === open.x && tile.y === open.y
-            ? { ...tile, buildingProgress: 120 }
+            ? { ...tile, buildingProgress: 25 }
             : tile,
         ),
       },
     }
 
     const quote = constructionFastTrackQuote(state, open.x, open.y)
-    expect(quote).toMatchObject({ eligible: true, remainingDays: 60, acceleratedDays: 30 })
+    expect(quote).toMatchObject({ eligible: true, remainingDays: 20, acceleratedDays: 15 })
     state = fastTrackConstruction(state, open.x, open.y)
     const accelerated = state.map.tiles.find((tile) => tile.x === open.x && tile.y === open.y)!
-    expect(accelerated.buildingTarget).toBe(150)
+    expect(accelerated.buildingTarget).toBe(40)
   })
 
   it('updates compact-world construction through the indexed facility record', () => {
@@ -107,7 +107,7 @@ describe('construction fast-track', () => {
 
     state = fastTrackConstruction(state, x, y)
     const accelerated = state.map.world!.getFacilityAt(pad)!
-    expect(accelerated.constructionTarget).toBe(90)
+    expect(accelerated.constructionTarget).toBe(23)
     expect(accelerated.data?.constructionExpedited).toBe(true)
     const premium = Math.floor((before.stats?.capex ?? 0) * 0.5)
     expect(accelerated.stats?.capex).toBe((before.stats?.capex ?? 0) + premium)

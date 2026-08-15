@@ -5,9 +5,16 @@ import { RESEARCH_NODES } from '../balance/research'
 import { ioForPreset } from '../balance/trainingV3'
 import { createGame } from '../createGame'
 import type { Model, ResearchProgram, RivalLab, RivalTrainJob } from '../types'
+import { tickDay } from '../tick'
 import { buildRivalPublicEstimate, updateLab } from './labEngine'
 import { minResearchersForNode } from './research'
-import { rivalNextModelBet, tickRivals } from './rivals'
+import {
+  rivalNextModelBet,
+  rivalMediaDataShortfall,
+  rivalRoutableModalities,
+  synchronizeRivalPlanPrices,
+  tickRivals,
+} from './rivals'
 import { planRivalResearchPath } from './rivalStrategy'
 import { rivalResearcherHiringTarget } from './staff'
 
@@ -74,6 +81,15 @@ describe('rival multimodal lifecycle', () => {
     rival.researchUnlocked = []
     expect(rivalResearcherHiringTarget(rival)).toBe(8)
 
+    const stalled = {
+      ...rival,
+      researchUnlocked: ['dense_basics'],
+      researchQueue: ['data_self_train'],
+      staff: { ...rival.staff!, researcher: 2 },
+    }
+    expect(planRivalResearchPath(stalled, strategy, 7).at(-1)).toBe('mm_vision')
+    expect(rivalResearcherHiringTarget(stalled)).toBe(12)
+
     const generalist = { ...rival, id: 'generalist', archetype: 'hyperscale' as const }
     generalist.researchUnlocked = []
     expect(rivalResearcherHiringTarget(generalist)).toBe(3)
@@ -110,6 +126,11 @@ describe('rival multimodal lifecycle', () => {
       repeatedDataEpochs: 1,
       modalityComputeMult: 1,
       cashBurnPerDay: 0,
+      trainingNumerics: {
+        computeFormat: 'fp32',
+        nativeWeightFormat: 'float',
+        recipeVersion: 1,
+      },
     }
     const rival: RivalLab = {
       ...sourceRival,
@@ -124,7 +145,8 @@ describe('rival multimodal lifecycle', () => {
       ...initial,
       rivals: initial.rivals.map((entry) => entry.id === rival.id ? rival : entry),
     }
-    const next = tickRivals(state).rivals.find((entry) => entry.id === rival.id)!
+    const completed = tickRivals(state)
+    const next = completed.rivals.find((entry) => entry.id === rival.id)!
 
     expect(next.models).toHaveLength(4)
     expect(next.models.some((model) => model.productPreset === 'audio')).toBe(false)
@@ -134,6 +156,138 @@ describe('rival multimodal lifecycle', () => {
       backbone: 'moe',
       label: 'sparse omni iteration',
     })
+    const sparseOmni = next.models.find(
+      (model) => model.productPreset === 'omni' && model.backbone === 'moe',
+    )!
+    expect(sparseOmni.trainingNumerics).toEqual(trainingJob.trainingNumerics)
+    expect(sparseOmni.nativeWeightPrecision).toBe('fp32')
+    expect((sparseOmni.io?.outputs.audio ?? 0) / sparseOmni.capability).toBeGreaterThan(0.4)
+
+    const routed = tickRivals({ ...completed, day: completed.day + 1 })
+      .rivals.find((entry) => entry.id === rival.id)!
+    for (const plan of routed.pricing.plans) {
+      for (const modality of ['text', 'image', 'audio', 'video'] as const) {
+        const route = plan.modalityRoutes?.[modality]
+        expect(route?.primaryModelId).toBeTruthy()
+        const model = routed.models.find(
+          (candidate) => candidate.id === route?.primaryModelId,
+        )!
+        expect(rivalRoutableModalities(model)).toContain(modality)
+      }
+    }
+  })
+
+  it('keeps advertised rival tier prices synchronized with enabled plan offers', () => {
+    const initial = createGame({ config: buildGameConfig({ seed: 406 }) })
+    for (const rival of initial.rivals) {
+      const pricing = synchronizeRivalPlanPrices(rival.pricing)
+      const enabled = pricing.plans.filter((plan) => plan.enabled)
+      expect(enabled[0]?.pricePerMonth).toBe(pricing.subPlusPrice)
+      expect(enabled[1]?.pricePerMonth).toBe(pricing.subProPrice)
+    }
+  })
+
+  it('cannot start a media recipe on requested weights with zero actual media', () => {
+    expect(
+      rivalMediaDataShortfall({
+        family: 'diffusion',
+        productPreset: 'image_generation',
+        consumed: { chat: 100, image: 0 },
+      }),
+    ).toMatchObject({ domain: 'image', requiredShare: 0.15, actualShare: 0 })
+    expect(
+      rivalMediaDataShortfall({
+        family: 'video',
+        productPreset: 'video_generation',
+        consumed: { chat: 70, image: 10, video: 20 },
+      }),
+    ).toBeNull()
+  })
+
+  it('organically researches and ships every native media product in a seeded run', () => {
+    let state = createGame({
+      config: buildGameConfig({
+        seed: 407,
+        difficulty: 'easy',
+        advanced: {
+          researchCostMult: 0.4,
+          startingCashMult: 3,
+          economyMult: 0.4,
+          rivalCount: 5,
+        },
+      }),
+    })
+    state = {
+      ...state,
+      rivals: state.rivals.map((rival) => {
+        if (rival.archetype !== 'multimodal') return rival
+        const data = rival.data!
+        const stocks = { ...data.stocks }
+        for (const domain of ['image', 'audio', 'video'] as const) {
+          stocks[domain] = {
+            ...stocks[domain],
+            processed: 20_000,
+            fromWeb: 20_000,
+          }
+        }
+        return {
+          ...rival,
+          cash: 5_000_000_000,
+          staff: {
+            researcher: 12,
+            engineer: 8,
+            data_processor: 8,
+            ops: 4,
+          },
+          data: {
+            ...data,
+            stocks,
+            assets: [
+              ...(data.assets ?? []),
+              ...(['image', 'audio', 'video'] as const).map((domain) => ({
+                ...data.assets[0]!,
+                id: `seeded-${domain}-corpus`,
+                name: `Seeded ${domain} corpus`,
+                volumeMTok: 20_000,
+                domainWeights: { [domain]: 1 },
+                verticalTags: [domain, 'seeded-test-corpus'],
+              })),
+            ],
+          },
+          dataMTok: 60_500,
+        }
+      }),
+    }
+
+    // The organic controller must clear research, data, staffing, training,
+    // and release gates without injected unlocks. Leave room for a complete
+    // product cycle after the final omni research milestone lands.
+    for (let day = 0; day < 320; day += 1) {
+      state = tickDay(state)
+      const rival = state.rivals.find(
+        (candidate) => candidate.archetype === 'multimodal',
+      )!
+      const shipped = new Set(
+        rival.releaseMilestones?.map((milestone) => milestone.productPreset),
+      )
+      if (
+        ['audio', 'image_generation', 'video_generation', 'omni'].every(
+          (preset) => shipped.has(preset as NonNullable<Model['productPreset']>),
+        )
+      ) {
+        break
+      }
+    }
+
+    const rival = state.rivals.find(
+      (candidate) => candidate.archetype === 'multimodal',
+    )!
+    expect(rival.researchUnlocked).toEqual(
+      expect.arrayContaining(['mm_vision', 'mm_diff', 'mm_video', 'mm_omni']),
+    )
+    expect(rival.releaseMilestones?.map((milestone) => milestone.productPreset)).toEqual(
+      expect.arrayContaining(['audio', 'image_generation', 'video_generation', 'omni']),
+    )
   })
 
   it('projects secret research generically and names only disclosed programs', () => {

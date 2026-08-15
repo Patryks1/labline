@@ -1,6 +1,7 @@
 import type { MapTile, SimState, TileKind, TileOwner } from '../types'
 import { tileCoords, tileId } from '../world/ids'
 import {
+  DISTRICT_KIND,
   TERRAIN_KIND,
   TERRAIN_KIND_NAME,
   WORLD_GENERATOR_VERSION_V7,
@@ -11,6 +12,7 @@ import {
   type TileId,
   type WorldOwnerId,
 } from '../world/types'
+import { urbanInfillParcelAt } from '../world/urbanInfill'
 import type { WorldMutationBatch } from '../world/dynamicWorld'
 import type { DynamicWorld } from '../world/dynamicWorld'
 
@@ -171,6 +173,32 @@ function emptyLandValue(state: Pick<SimState, 'config' | 'map'>, x: number, y: n
     // Latency is already a stable generated regional input (lower is better),
     // so it can safely add a modest location premium without inventing traffic.
     const regionalMultiplier = latency === undefined ? 1 : 0.9 + (1 - latency) * 0.2
+    // Designated commercial_infill parcels carry the redevelopment premium.
+    const infillParcel = urbanInfillParcelAt(world.staticWorld, id)
+    if (infillParcel) {
+      return Math.floor(
+        infillParcel.landValuePerTile * transportMultiplier * regionalMultiplier,
+      )
+    }
+    // V7 urban lots keep a city feature tag on empty terrain — price them as
+    // expensive core/fringe parcels (multiple of landValueCityPeak).
+    const feature = world.staticWorld.feature[id] ?? 0
+    const urbanLot = feature > 0 && (feature & 0x8000) === 0
+    if (urbanLot) {
+      const zone = world.staticWorld.district?.[id] ?? DISTRICT_KIND.none
+      const zoneMult = zone === DISTRICT_KIND.core
+        ? 2.8
+        : zone === DISTRICT_KIND.mixed
+          ? 2.2
+          : zone === DISTRICT_KIND.suburb
+            ? 1.55
+            : 1.9
+      const coreBoost = 1.15 + settlementInfluence * 0.85
+      return Math.floor(
+        state.config.landValueCityPeak * zoneMult * coreBoost *
+        transportMultiplier * regionalMultiplier,
+      )
+    }
     return Math.floor(
       (state.config.landValueBase + state.config.landValueCityPeak * settlementInfluence) *
       transportMultiplier * regionalMultiplier,
@@ -253,7 +281,13 @@ export function compactTileAt(
     capex: isAnchor ? (stats?.capex ?? 0) : 0,
     opexPerDay: isAnchor ? (stats?.opexPerDay ?? 0) : 0,
     note: isAnchor ? (data?.note ?? '') : `Footprint pad for ${data?.name ?? facility?.kind ?? ''}`,
-    landValue: facility || terrainKind !== 'empty' ? 0 : emptyLandValue(state, x, y),
+    landValue: (() => {
+      if (facility) return 0
+      // Infill parcels are purchaseable even while still city/house fabric.
+      if (urbanInfillParcelAt(world.staticWorld, id)) return emptyLandValue(state, x, y)
+      if (terrainKind !== 'empty') return 0
+      return emptyLandValue(state, x, y)
+    })(),
     cityId,
     powered: facility?.powered,
     forSale: facility?.forSale,

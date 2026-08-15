@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { ECONOMY } from '../balance/economy'
 import { getChipDef } from '../balance/chips'
+import { getRackSku } from '../balance/rackSkus'
 import { createGame } from '../createGame'
 import type { LabId, RackInstall, SimState } from '../types'
 import { tileCoords } from '../world/ids'
 import { calculateFleetVariableOpex } from './fleetOperatingCosts'
+import { labHallEquipmentOpexDay } from './dataHallConstruction'
 import {
   labBuildingOpex,
   labFacilityShellOpex,
@@ -100,7 +102,8 @@ describe('controller-neutral fleet operating costs', () => {
       ],
     })
     const expectedDevices = 2 * 8 + 3
-    const expectedMw = 2 * 0.0072 + 3 * getChipDef('gen2').mwPerChip
+    const expectedMw =
+      2 * getRackSku('rack_h100').mw + 3 * getChipDef('gen2').mwPerChip
 
     expect(settled.deviceCount).toBe(expectedDevices)
     expect(settled.mw).toBeCloseTo(expectedMw, 12)
@@ -153,10 +156,11 @@ describe('controller-neutral fleet operating costs', () => {
     const empty = factory('player', 0)
     const full = factory('player', 12)
     const shell = labFacilityShellOpex(empty, 'player')
+    const hallEquipment = labHallEquipmentOpexDay(empty, 'player')
     const fleet = labFleetVariableOpex(full, 'player')
 
-    expect(labBuildingOpex(empty, 'player')).toBeCloseTo(shell, 8)
-    expect(labBuildingOpex(full, 'player')).toBeCloseTo(shell + fleet, 8)
+    expect(labBuildingOpex(empty, 'player')).toBeCloseTo(shell + hallEquipment, 8)
+    expect(labBuildingOpex(full, 'player')).toBeCloseTo(shell + hallEquipment + fleet, 8)
     expect(labBuildingOpex(full, 'player')).toBeGreaterThan(
       labBuildingOpex(empty, 'player'),
     )

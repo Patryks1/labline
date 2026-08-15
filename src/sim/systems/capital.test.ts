@@ -152,4 +152,22 @@ describe('capital stack', () => {
       stage: 'none',
     })
   })
+
+  it('does not start the player recovery ladder from runway alone', () => {
+    const base = createGame(38)
+    const next = tickCapital({
+      ...base,
+      player: {
+        ...base.player,
+        cash: 1_000_000,
+        finance: { ...base.player.finance, cash: 1_000_000, runwayDays: 10 },
+      },
+    })
+    expect(next.player.capital?.restructuring).toEqual({
+      active: false,
+      daysLeft: 0,
+      stage: 'none',
+    })
+    expect(next.alerts.some((a) => a.message.startsWith('Cash negative'))).toBe(false)
+  })
 })

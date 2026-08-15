@@ -969,3 +969,124 @@ function chunkFor(tile: number, source: SimViewportRenderSource): number {
 function idAt(x: number, y: number, width: number): TileId {
   return (y * width + x) as TileId
 }
+
+
+describe('SimViewportRenderSource.getConstructionSites', () => {
+  it('projects compact facilities with construction progress, cached on the journal', () => {
+    const state = compactGame()
+    const world = state.map.world!
+    const anchor = findOpenTile(world)
+    world.beginBatch().addFacility({
+      id: 'construction-sites-test',
+      kind: 'dc_l',
+      ownerId: 'player',
+      anchor,
+      footprint: [anchor],
+      level: 2,
+      constructionProgress: 1,
+      constructionTarget: 3,
+      powered: true,
+    }).commit()
+    const source = new SimViewportRenderSource(state)
+
+    const sites = source.getConstructionSites()
+    const active = sites.find((candidate) =>
+      candidate.tileX === anchor % source.width &&
+      candidate.tileY === Math.floor(anchor / source.width))
+    expect(active).toBeDefined()
+    expect(active!.progress).toBeCloseTo(1 / 3, 5)
+    expect(active!.widthTiles).toBe(1)
+    expect(active!.heightHint).toBeGreaterThan(1.35) // dc_l at level 2
+    expect(active!.phase).toBeGreaterThanOrEqual(0)
+    expect(active!.phase).toBeLessThan(Math.PI * 2)
+    // Cached: the same array identity until the world journal advances.
+    expect(source.getConstructionSites()).toBe(sites)
+
+    // Completing the facility flips the site to standing after a state sync.
+    world.beginBatch().updateFacility('construction-sites-test', {
+      constructionProgress: 3,
+    }).commit()
+    source.updateState(state)
+    const completed = source.getConstructionSites().find((candidate) => candidate.id === active!.id)
+    expect(completed).toBeDefined()
+    expect(completed!.progress).toBe(1)
+  })
+
+  it('projects legacy campus and single-tile facilities with building progress', () => {
+    const state = createGame({
+      seed: 41,
+      legacyMapFixture: true,
+      advanced: { mapWidth: 48, mapHeight: 48, cityCount: 1, rivalCount: 0 },
+    })
+    expect(state.map.storage).toBe('legacy')
+    const tileByCoordinate = new Map(state.map.tiles.map((tile) => [`${tile.x},${tile.y}`, tile]))
+    const campusAnchor = state.map.tiles.find((tile) =>
+      [
+        [0, 0], [1, 0],
+        [0, 1], [1, 1],
+      ].every(([dx, dy]) => tileByCoordinate.get(`${tile.x + dx},${tile.y + dy}`)?.kind === 'empty'),
+    )
+    expect(campusAnchor).toBeDefined()
+    const single = state.map.tiles.find((tile) =>
+      tile.kind === 'empty' &&
+      (Math.abs(tile.x - campusAnchor!.x) > 2 || Math.abs(tile.y - campusAnchor!.y) > 2))
+    expect(single).toBeDefined()
+    const campusId = 'construction-sites-legacy'
+    const campusCells = new Set([
+      `${campusAnchor!.x},${campusAnchor!.y}`,
+      `${campusAnchor!.x + 1},${campusAnchor!.y}`,
+      `${campusAnchor!.x},${campusAnchor!.y + 1}`,
+      `${campusAnchor!.x + 1},${campusAnchor!.y + 1}`,
+    ])
+    const placed = {
+      ...state,
+      map: {
+        ...state.map,
+        tiles: state.map.tiles.map((tile) => {
+          if (tile === single) {
+            return {
+              ...tile,
+              kind: 'lab' as const,
+              owner: 'player' as const,
+              buildingProgress: 1,
+              buildingTarget: 4,
+            }
+          }
+          if (campusCells.has(`${tile.x},${tile.y}`)) {
+            return {
+              ...tile,
+              kind: 'dc_m' as const,
+              owner: 'player' as const,
+              campusId,
+              campusRole:
+                tile.x === campusAnchor!.x && tile.y === campusAnchor!.y
+                  ? ('anchor' as const)
+                  : ('pad' as const),
+              dcSize: 'medium' as const,
+              buildingProgress: 3,
+              buildingTarget: 3,
+            }
+          }
+          return tile
+        }),
+      },
+    }
+    const source = new SimViewportRenderSource(placed)
+    const sites = source.getConstructionSites()
+
+    const singleSite = sites.find((candidate) =>
+      candidate.tileX === single!.x && candidate.tileY === single!.y)
+    expect(singleSite).toBeDefined()
+    expect(singleSite!.progress).toBeCloseTo(0.25, 5)
+    expect(singleSite!.widthTiles).toBe(1)
+
+    // Multi-tile campus collapses to one site at the footprint centre.
+    const campusSites = sites.filter((candidate) =>
+      candidate.tileX >= campusAnchor!.x && candidate.tileX <= campusAnchor!.x + 1 &&
+      candidate.tileY >= campusAnchor!.y && candidate.tileY <= campusAnchor!.y + 1)
+    expect(campusSites).toHaveLength(1)
+    expect(campusSites[0]!.progress).toBe(1) // complete → standing
+    expect(campusSites[0]!.widthTiles).toBe(2)
+    expect(campusSites[0]!.x).toBeCloseTo((campusAnchor!.x + 0.5) * source.tileSize)
+  })
+})

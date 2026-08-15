@@ -21,6 +21,7 @@ export interface ViewportRendererMetricsSnapshot {
   trafficRebuilds: number
   trafficUploadBytes: number
   municipalEffectInstances: number
+  constructionInstances: number
   chunkBuildMs: number
   lodActive: LodTier
   lodDesired: LodTier
@@ -50,6 +51,7 @@ export class ViewportRendererMetrics {
       trafficRebuilds: 0,
       trafficUploadBytes: 0,
       municipalEffectInstances: 0,
+      constructionInstances: 0,
       chunkBuildMs: 0,
       lodActive: initialTier,
       lodDesired: initialTier,

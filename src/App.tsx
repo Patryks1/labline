@@ -9,7 +9,6 @@ import { HotkeyHelp } from './view/hud/HotkeyHelp'
 import { NewGameMenu } from './view/hud/NewGameMenu'
 import { PauseMenu } from './view/hud/PauseMenu'
 import { VictoryOverlay } from './view/hud/VictoryOverlay'
-import { BenchmarkOverlay } from './view/hud/BenchmarkOverlay'
 import { TileInspector } from './view/hud/TileInspector'
 import { useHotkeys } from './view/hud/useHotkeys'
 import { UiScaleRoot } from './view/hud/UiScaleRoot'
@@ -51,9 +50,12 @@ function GameShell() {
       data-active-panel={activePanel}
       data-intel-open={dockOpen && !workbenchOpen ? 'true' : 'false'}
     >
+      <a href="#game-map" className="skip-to-map">Skip controls and focus the map</a>
       <TopBar />
       <LeftRail />
       <main
+        id="game-map"
+        tabIndex={-1}
         className="game-map relative min-h-0 min-w-0 overflow-hidden"
         style={FULL_BLEED_MAP_STYLE}
       >
@@ -64,7 +66,6 @@ function GameShell() {
       <MapNavigator />
       <BottomBar />
       <ObjectivesDock />
-      <BenchmarkOverlay />
       <VictoryOverlay />
       <PauseMenu />
       <HotkeyHelp />

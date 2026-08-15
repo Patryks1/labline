@@ -129,6 +129,11 @@ export function boundHistories(state: SimState): SimState {
     ...state,
     financeHistory: finance.daily,
     financeMonthlyHistory: finance.monthly,
+    // Per-plan demand series is oldest-first like financeHistory.
+    planStatsHistory: boundDailyHistory(
+      state.planStatsHistory ?? [],
+      HISTORY_LIMITS.financeDays,
+    ),
     // Alerts, news, and fills are newest-first in the existing simulation.
     alerts: (state.alerts ?? []).slice(0, HISTORY_LIMITS.alerts),
     news: (state.news ?? []).slice(0, HISTORY_LIMITS.news),

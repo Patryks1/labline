@@ -69,9 +69,11 @@ describe('map navigation', () => {
   })
 
   it('retains the chosen blueprint for consecutive map placements', () => {
+    // Dense-tile legacy map: compact worlds keep no dense tile storage.
     const state = createGame({
       seed: 813,
       difficulty: 'easy',
+      legacyMapFixture: true,
       advanced: { mapWidth: 60, mapHeight: 60, cityCount: 3, rivalCount: 1 },
     })
     const open = state.map.tiles.filter(
@@ -112,7 +114,7 @@ describe('map navigation', () => {
     const first = useGameStore.getState()
 
     expect(first.selectedTile).toEqual({ x: 17, y: 23 })
-    expect(first.mapFocusRequest).toEqual({ x: 17, y: 23, sequence: 1 })
+    expect(first.mapFocusRequest).toEqual({ x: 17, y: 23, sequence: 1, preserveZoom: false })
     expect(first.buildMode).toBeNull()
 
     useGameStore.getState().focusMapTile(17, 23)
@@ -121,9 +123,9 @@ describe('map navigation', () => {
 })
 
 describe('mission-control objectives', () => {
-  it('starts with the cloud-first runway decision', () => {
+  it('starts with the place-HQ onboarding decision', () => {
     const state = createGame({ seed: 3, difficulty: 'easy' })
-    expect(buildObjectives(state, true)[0]?.id).toBe('secure-cloud')
+    expect(buildObjectives(state, true)[0]?.id).toBe('place-hq')
   })
 
   it('prioritizes runway risk above guidance', () => {

@@ -1,0 +1,368 @@
+import {
+  createPendingCheckpointEvaluation,
+  resolveCheckpointEvaluation,
+  validateCheckpointEvaluationRequest,
+  type CheckpointEvaluationReport,
+  type CheckpointEvaluationRequest,
+  type PendingCheckpointEvaluation,
+} from "../balance/checkpointEvaluation";
+import { hashSeed } from "../rng";
+import type {
+  PrivateEvaluationJob,
+  SimState,
+  TrainingBenchmarkPending,
+  TrainingJob,
+} from "../types";
+import { chargeExpense } from "./financeLedger";
+import {
+  playerTrainingJobs,
+  resolveTrainingBenchmarkEvaluation,
+  withTrainingJobs,
+} from "./training";
+
+function withAlert(
+  state: SimState,
+  severity: "info" | "warn" | "danger",
+  message: string,
+): SimState {
+  return {
+    ...state,
+    alerts: [
+      {
+        id: `checkpoint-eval-${severity}-${state.day}-${message.slice(0, 24)}`,
+        day: state.day,
+        severity,
+        message,
+      },
+      ...state.alerts,
+    ].slice(0, 40),
+  };
+}
+
+export const MAX_CHECKPOINT_EVALUATIONS = 16;
+
+/** Stable evidence seed for an immutable checkpoint; never a paid-study reroll. */
+function checkpointEvidenceSeed(state: SimState, checkpointId: string): number {
+  return hashSeed(state.seed, checkpointId, "checkpoint-evidence-v2");
+}
+
+function queuedCheckpointEvaluations(
+  state: SimState,
+  checkpointId: string,
+): number {
+  return (state.player.privateEvaluationJobs ?? []).filter(
+    (job) =>
+      job.kind === "checkpoint_evaluation" &&
+      job.subjectId === checkpointId,
+  ).length;
+}
+
+/** Queue paid private work. Multiple studies may run concurrently. */
+export function scheduleCheckpointEvaluation(
+  state: SimState,
+  checkpointId: string,
+  request: CheckpointEvaluationRequest,
+): SimState {
+  const checkpoints = state.player.trainingCheckpoints ?? [];
+  const checkpoint = checkpoints.find(
+    (candidate) => candidate.id === checkpointId,
+  );
+  if (!checkpoint)
+    return withAlert(state, "warn", "Stealth checkpoint not found.");
+  if (checkpoint.status === "discarded") {
+    return withAlert(
+      state,
+      "warn",
+      "Discarded checkpoint weights cannot begin an evaluation.",
+    );
+  }
+  const completedReports = checkpoint.evaluations?.length ?? 0;
+  const queuedReports = queuedCheckpointEvaluations(state, checkpoint.id);
+  if (completedReports + queuedReports >= MAX_CHECKPOINT_EVALUATIONS) {
+    return withAlert(
+      state,
+      "warn",
+      `This checkpoint already has the maximum ${MAX_CHECKPOINT_EVALUATIONS} persisted or scheduled studies.`,
+    );
+  }
+  const errors = validateCheckpointEvaluationRequest(checkpoint.model, request);
+  if (errors.length) return withAlert(state, "warn", errors.join(" "));
+  const seed = checkpointEvidenceSeed(state, checkpoint.id);
+  const sequence = completedReports + queuedReports;
+  const pending = createPendingCheckpointEvaluation(
+    checkpoint.model,
+    request,
+    seed,
+    state.day,
+    sequence,
+  );
+  if (state.player.cash + 1e-9 < pending.quote.totalCost) {
+    return withAlert(
+      state,
+      "warn",
+      `Need $${pending.quote.totalCost.toLocaleString("en-US")} for this stealth evaluation.`,
+    );
+  }
+  const queueEntry: PrivateEvaluationJob = {
+    id: pending.id,
+    kind: "checkpoint_evaluation",
+    subjectId: checkpoint.id,
+    scheduledDay: pending.scheduledDay,
+    readyDay: pending.readyDay,
+    pending,
+  };
+  const charged = chargeExpense(state, pending.quote.totalCost, "training");
+  return withAlert(
+    {
+      ...charged,
+      player: {
+        ...charged.player,
+        privateEvaluationJobs: [
+          ...(charged.player.privateEvaluationJobs ?? []),
+          queueEntry,
+        ],
+        trainingCheckpoints: checkpoints.map((candidate) =>
+          candidate.id === checkpoint.id
+            ? {
+                ...candidate,
+                // Compatibility mirror only; the global queue is authoritative.
+                pendingEvaluation:
+                  candidate.pendingEvaluation ?? pending,
+              }
+            : candidate,
+        ),
+      },
+    },
+    "info",
+    `${checkpoint.model.name} entered ${request.mode.replaceAll("_", " ")} evaluation: ${request.suiteIds.length} suite${request.suiteIds.length === 1 ? "" : "s"}, ${Math.round(pending.quote.accuracy * 100)}% measurement accuracy, results in ${pending.quote.durationDays} days.`,
+  );
+}
+
+function mirrorCheckpointPending(
+  queue: readonly PrivateEvaluationJob[],
+  checkpointId: string,
+): PendingCheckpointEvaluation | undefined {
+  return queue.find(
+    (job) =>
+      job.kind === "checkpoint_evaluation" &&
+      job.subjectId === checkpointId,
+  )?.pending as PendingCheckpointEvaluation | undefined;
+}
+
+function mirrorTrainingPending(
+  queue: readonly PrivateEvaluationJob[],
+  jobId: string,
+): TrainingBenchmarkPending | undefined {
+  return queue.find(
+    (job) => job.kind === "training_benchmark" && job.subjectId === jobId,
+  )?.pending as TrainingBenchmarkPending | undefined;
+}
+
+function legacyQueue(state: SimState): PrivateEvaluationJob[] {
+  const queue = [...(state.player.privateEvaluationJobs ?? [])];
+  const known = new Set(queue.map((job) => job.id));
+  for (const job of playerTrainingJobs(state)) {
+    const pending = job.pendingBenchmark;
+    if (!pending || known.has(pending.id)) continue;
+    queue.push({
+      id: pending.id,
+      kind: "training_benchmark",
+      subjectId: job.id,
+      scheduledDay: pending.startedDay,
+      readyDay: pending.readyDay,
+      pending,
+    });
+    known.add(pending.id);
+  }
+  for (const checkpoint of state.player.trainingCheckpoints ?? []) {
+    const pending = checkpoint.pendingEvaluation;
+    if (!pending || known.has(pending.id)) continue;
+    queue.push({
+      id: pending.id,
+      kind: "checkpoint_evaluation",
+      subjectId: checkpoint.id,
+      scheduledDay: pending.scheduledDay,
+      readyDay: pending.readyDay,
+      pending,
+    });
+    known.add(pending.id);
+  }
+  return queue;
+}
+
+/** Resolve every due item; concurrent jobs never overwrite one another. */
+export function tickCheckpointEvaluations(state: SimState): SimState {
+  const queue = legacyQueue(state);
+  const due = queue.filter((job) => state.day >= job.readyDay);
+  const remaining = queue.filter((job) => state.day < job.readyDay);
+  if (due.length === 0) {
+    return {
+      ...state,
+      player: { ...state.player, privateEvaluationJobs: queue },
+    };
+  }
+
+  let trainingJobs = playerTrainingJobs(state);
+  let checkpoints = [...(state.player.trainingCheckpoints ?? [])];
+  const completedByCheckpoint = new Map<string, CheckpointEvaluationReport[]>();
+  const rumorNames: string[] = [];
+  const identityNames: string[] = [];
+  const completionAlerts: SimState["alerts"] = [];
+
+  for (const queued of due) {
+    if (queued.kind === "training_benchmark") {
+      const index = trainingJobs.findIndex((job) => job.id === queued.subjectId);
+      if (index < 0) continue;
+      const job = trainingJobs[index]!;
+      const snapshot = resolveTrainingBenchmarkEvaluation(
+        state,
+        job,
+        queued.pending.progress,
+        queued.pending.stage,
+        queued.pending,
+      );
+      const updated: TrainingJob = {
+        ...job,
+        benchmarkSnapshots: [...(job.benchmarkSnapshots ?? []), snapshot].slice(
+          -32,
+        ),
+      };
+      trainingJobs = trainingJobs.map((candidate, candidateIndex) =>
+        candidateIndex === index ? updated : candidate,
+      );
+      completionAlerts.push({
+        id: `train-benchmark-${queued.id}-${state.day}`,
+        day: state.day,
+        severity: "info",
+        message: `${job.name} benchmark: ${(snapshot.suiteIds ?? []).length} suite${(snapshot.suiteIds ?? []).length === 1 ? "" : "s"} at ${Math.round((snapshot.accuracy ?? 0) * 100)}% measurement accuracy; capability ${snapshot.capability.toFixed(1)} [${(snapshot.capabilityLow ?? snapshot.capability).toFixed(1)}–${(snapshot.capabilityHigh ?? snapshot.capability).toFixed(1)}].`,
+      });
+      continue;
+    }
+
+    const index = checkpoints.findIndex(
+      (checkpoint) => checkpoint.id === queued.subjectId,
+    );
+    if (index < 0) continue;
+    const checkpoint = checkpoints[index]!;
+    if ((checkpoint.evaluations?.length ?? 0) >= MAX_CHECKPOINT_EVALUATIONS)
+      continue;
+    const pending = queued.pending;
+    const report = resolveCheckpointEvaluation({
+      model: checkpoint.model,
+      rivals: state.rivals.flatMap((rival) =>
+        rival.models
+          .filter((model) => model.release === "released" || model.shipped)
+          .map((model) => ({ model, labName: rival.name })),
+      ),
+      request: pending.request,
+      reportSequence: pending.sequence,
+      seed: checkpointEvidenceSeed(state, checkpoint.id),
+      scheduledDay: pending.scheduledDay,
+      completedDay: state.day,
+    });
+    checkpoints = checkpoints.map((candidate, candidateIndex) =>
+      candidateIndex === index
+        ? {
+            ...candidate,
+            evaluations: [...(candidate.evaluations ?? []), report],
+          }
+        : candidate,
+    );
+    completedByCheckpoint.set(checkpoint.id, [
+      ...(completedByCheckpoint.get(checkpoint.id) ?? []),
+      report,
+    ]);
+    const promotedModel = checkpoint.promotedModelId
+      ? state.player.models.find(
+          (model) => model.id === checkpoint.promotedModelId,
+        )
+      : undefined;
+    const alreadyPublic =
+      promotedModel?.release === "released" || promotedModel?.shipped === true;
+    if (!alreadyPublic && report.leakOutcome === "rumor")
+      rumorNames.push(checkpoint.model.name);
+    if (!alreadyPublic && report.leakOutcome === "identity_leak")
+      identityNames.push(checkpoint.model.name);
+  }
+
+  trainingJobs = trainingJobs.map((job) => ({
+    ...job,
+    pendingBenchmark: mirrorTrainingPending(remaining, job.id),
+  }));
+  checkpoints = checkpoints.map((checkpoint) => ({
+    ...checkpoint,
+    pendingEvaluation: mirrorCheckpointPending(remaining, checkpoint.id),
+  }));
+
+  let next = withTrainingJobs(
+    {
+      ...state,
+      player: {
+        ...state.player,
+        privateEvaluationJobs: remaining,
+        trainingCheckpoints: checkpoints,
+        models: state.player.models.map((model) => {
+          const candidate = checkpoints.find(
+            (checkpoint) => checkpoint.promotedModelId === model.id,
+          );
+          const reports = candidate
+            ? completedByCheckpoint.get(candidate.id)
+            : undefined;
+          return reports?.length
+            ? {
+                ...model,
+                checkpointEvaluations: [
+                  ...(model.checkpointEvaluations ?? []),
+                  ...reports,
+                ],
+              }
+            : model;
+        }),
+      },
+    },
+    trainingJobs,
+  );
+  next = {
+    ...next,
+    alerts: [...completionAlerts, ...next.alerts].slice(0, 40),
+  };
+  if (rumorNames.length > 0) {
+    next = {
+      ...next,
+      news: [
+        `Day ${state.day}: Industry rumors point to an unidentified model undergoing private trials.`,
+        ...next.news,
+      ].slice(0, 20),
+      alerts: [
+        {
+          id: `checkpoint-eval-rumor-${state.day}`,
+          day: state.day,
+          severity: "warn" as const,
+          message:
+            "A stealth evaluation produced market rumors, but your lab identity remains concealed.",
+        },
+        ...next.alerts,
+      ].slice(0, 40),
+    };
+  }
+  if (identityNames.length > 0) {
+    next = {
+      ...next,
+      news: [
+        `Day ${state.day}: A private testing partner linked an unreleased checkpoint to ${state.player.name}.`,
+        ...next.news,
+      ].slice(0, 20),
+      alerts: [
+        {
+          id: `checkpoint-eval-identity-${state.day}`,
+          day: state.day,
+          severity: "danger" as const,
+          message:
+            "A reviewer leaked the identity of a stealth checkpoint. The weights remain private.",
+        },
+        ...next.alerts,
+      ].slice(0, 40),
+    };
+  }
+  return next;
+}

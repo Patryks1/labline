@@ -15,6 +15,7 @@ import type {
   TrainingNumerics,
 } from "../types";
 import {
+  bentCapabilityCeiling,
   capabilityCeiling,
   postTrainStrength,
   scaleIntelligence,
@@ -22,8 +23,13 @@ import {
   type ScaleInputs,
 } from "./modelScaling";
 import { lqSynthCapabilityMult } from "./data";
+import {
+  matureModelIo,
+  modalityMaturity,
+  type GenerativeModality,
+} from "./modelCapabilities";
 import { normalizeModelEvaluations } from "./evaluationSuites";
-import { suggestApiInOut } from "./pricing";
+import { FALLBACK_COST_PER_MTOK, suggestApiInOut } from "./pricing";
 import {
   backboneFromFamily,
   ioForPreset,
@@ -31,7 +37,11 @@ import {
   rollTrainingOutcome,
   serviceProfileForModel,
 } from "./trainingV3";
-import { trainingNumericsEconomicsProfile } from "./trainingPrecision";
+import {
+  nativeWeightPrecisionForNumerics,
+  trainingNumericsEconomicsProfile,
+} from "./trainingPrecision";
+import { getResearchNode } from "./research";
 
 export interface BuildScaledModelOpts {
   id: string;
@@ -68,6 +78,17 @@ export interface BuildScaledModelOpts {
   repeatedDataEpochs?: number;
   openWeights?: boolean;
   trainingNumerics?: TrainingNumerics;
+  /**
+   * Previously completed models per generative modality for this lab. Feeds
+   * the shared modalityMaturity curve so first-generation audio/image/video
+   * models are immature. Defaults to 0 (first generation) per modality.
+   */
+  modalityExperience?: Partial<Record<GenerativeModality, number>>;
+  /**
+   * Canonical $/MTok cost basis for birth list prices. Prefer
+   * `birthApiUnitCostPerMTok` from a live SimState when available.
+   */
+  costPerMTokBase?: number;
 }
 
 function clamp(n: number, lo = 0, hi = 100) {
@@ -97,6 +118,11 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
   const lqMult = lqSynthCapabilityMult(lqShare);
   const precision = trainingNumericsEconomicsProfile(opts.trainingNumerics);
 
+  let overtrainCapBonus = 0;
+  for (const id of unlocked) {
+    overtrainCapBonus += getResearchNode(id).effects.overtrainCapBonus ?? 0;
+  }
+
   const scaleIn: ScaleInputs = {
     paramsB: opts.paramsB,
     activeParamsB,
@@ -121,6 +147,7 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
     trainComplete: opts.trainComplete ?? 1,
     postTrainStrength: postTrainStrength(postTrain),
     reasoningEnabled: unlocked.includes("align_process"),
+    overtrainCapBonus,
   };
 
   const scale = scaleIntelligence(scaleIn);
@@ -128,12 +155,24 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
   let capability = clamp(scale.capability * lqMult);
 
   const modalities: Modality[] = opts.modalities ?? ["text"];
+  // Lab experience caps only the achievable modality ceiling: first-gen
+  // audio/image/video models are immature even at full theoretical scale.
+  const maturity: Partial<Record<GenerativeModality, number>> = {};
+  for (const modality of ["image", "audio", "video"] as const) {
+    if (modalities.includes(modality)) {
+      maturity[modality] = modalityMaturity(opts.modalityExperience?.[modality] ?? 0);
+    }
+  }
   const quality: QualityAxes = {
     reasoning: capability * 0.92,
     coding: capability * 0.88,
     chat: capability * 0.85,
-    image: modalities.includes("image") ? capability * 0.75 : 5,
-    video: modalities.includes("video") ? capability * 0.6 : 0,
+    image: modalities.includes("image")
+      ? capability * 0.75 * (maturity.image ?? 1)
+      : 5,
+    video: modalities.includes("video")
+      ? capability * 0.6 * (maturity.video ?? 1)
+      : 0,
     safety: Math.min(100, 45 + scale.intelligence * 40 - lqShare * 18),
     reliability: Math.min(100, 40 + scale.intelligence * 45 - lqShare * 22),
   };
@@ -145,6 +184,13 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
     unlocked,
     postTrain,
   });
+  // Immature modality experience also caps the modality-linked benchmark.
+  if (maturity.image != null && maturity.image < 1) {
+    benchmarks = {
+      ...benchmarks,
+      vision: clamp(benchmarks.vision * maturity.image),
+    };
+  }
   // Soft bench hit from LQ pollution
   if (lqShare > 0.05) {
     const bHit = 1 - lqShare * 0.18;
@@ -176,7 +222,8 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
   }
   capability = Math.min(
     capability,
-    capabilityCeiling(scaleIn).capability * precision.qualityCeilingMultiplier,
+    bentCapabilityCeiling(capabilityCeiling(scaleIn).capability) *
+      precision.qualityCeilingMultiplier,
   );
   for (const key of Object.keys(benchmarks) as (keyof BenchmarkScores)[]) {
     benchmarks[key] = Math.min(
@@ -188,9 +235,10 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
   const moe = backbone === "moe";
   const inferCostMult =
     (opts.inferCostMult ?? (moe ? 0.75 : 1)) * precision.inferenceCostMultiplier;
-  // Each model gets its own in/out list from size/family/capability costs
+  // Each model gets its own in/out list from size/family/capability costs.
+  // Without a live campus snapshot use the rebalanced fallback (~5× old 0.28).
   const apiSug = suggestApiInOut({
-    costPerMTokBase: 0.28,
+    costPerMTokBase: opts.costPerMTokBase ?? FALLBACK_COST_PER_MTOK,
     paramsB: opts.paramsB,
     activeParamsB,
     family,
@@ -205,6 +253,9 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
     activeParamsB,
     family,
     backbone,
+    productPreset: preset,
+    io: opts.io ?? ioForPreset(preset, capability),
+    modalities,
     tokPerSecMult: opts.tokPerSecMult ?? (moe ? 0.9 : 0.7),
     capability,
   });
@@ -217,7 +268,7 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
     activeParamsB,
     backbone,
     productPreset: preset,
-    io: opts.io ?? ioForPreset(preset, capability),
+    io: matureModelIo(opts.io ?? ioForPreset(preset, capability), maturity),
     capability,
     modalities,
     quality,
@@ -248,5 +299,8 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
     outcome,
     openWeights: opts.openWeights ?? false,
     trainingNumerics: opts.trainingNumerics,
+    nativeWeightPrecision: opts.trainingNumerics
+      ? nativeWeightPrecisionForNumerics(opts.trainingNumerics)
+      : undefined,
   });
 }

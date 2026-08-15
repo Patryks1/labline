@@ -115,7 +115,13 @@ function buildTrainBreakdown(
   const jobs = legacyJob
     ? [legacyJob, ...listedJobs.filter((entry) => entry.id !== legacyJob.id)]
     : listedJobs
-  const activeJobs = jobs.filter((entry) => !entry.paused)
+  const activeJobs = jobs.filter(
+    (entry) =>
+      !entry.paused &&
+      !entry.failed &&
+      !entry.pendingCampaignEvent &&
+      (entry.computePriority ?? 50) > 0,
+  )
   const job = activeJobs[0] ?? legacyJob ?? listedJobs[0]
   const lines: BreakdownLine[] = [
     {
@@ -244,7 +250,15 @@ function buildServeBreakdown(
   const pfPer =
     model != null
       ? pfPerMTokForModel(model, state.player.servingEfficiency)
-      : ECONOMY.pfPerMTokAt7B
+      : pfPerMTokForModel(
+          {
+            paramsB: 7,
+            activeParamsB: 7,
+            family: 'dense',
+            inferCostMult: 1,
+          },
+          state.player.servingEfficiency,
+        )
 
   const apiDemand = lm.apiDemandMTok ?? 0
   const planDemand = Math.max(0, demandM - apiDemand)

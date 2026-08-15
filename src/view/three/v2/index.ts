@@ -1,5 +1,6 @@
 export * from './archetypes'
 export * from './cloudLayer'
+export * from './constructionLayer'
 export * from './environmentLifeLayer'
 export * from './municipalPowerLayer'
 export * from './chunks'

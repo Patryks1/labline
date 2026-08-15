@@ -27,15 +27,20 @@ import {
   isDcKind,
   resolveLabPowerMw,
 } from './map'
-import { mapTileAtAny } from './worldAccess'
+import { mapTileAtAny, usesCompactWorld } from './worldAccess'
 import {
   hardwareTokPerSecFromPf,
   labInferCapacityWorkPf,
 } from './labCompute'
 import { HISTORY_LIMITS } from './history'
 import { ensureRackUnitIds } from './dataHallLayouts'
-import { pfPerMTokForModel } from '../balance/tokenServe'
+import {
+  estimateServingMemory,
+  pfPerMTokForModel,
+  residentMemoryFit,
+} from '../balance/tokenServe'
 import { servingPlacementNeedForLab } from './servingPlacement'
+import { activeBalanceTuning } from '../balance/tuning'
 
 const EMPTY_STAFF: StaffHeadcount = {
   researcher: 0,
@@ -861,13 +866,10 @@ export function computeLabSnapshot(state: SimState, labId: LabId): LabComputeSna
     installedPower.demandMw,
     power.mwAvailable,
   ).derate
-  const rackCap = labFacilityEnergyTotals(state, labId).rackCap
-  const rackDerate =
-    rackUnitsUsed <= 0
-      ? 1
-      : rackCap > 0
-        ? Math.max(0.2, Math.min(1, rackCap / rackUnitsUsed))
-        : 0.2
+  // Layout analysis is the physical admission boundary. Operational rack IDs
+  // already encode geometry, utilities, and access, so a second abstract shell
+  // ratio must not throttle them.
+  const rackDerate = 1
   const localHostDerate = powerDerate * rackDerate
   const hostedLocalPf = installedLocalPf * localHostDerate
   // Contracts transfer effective hosted capacity. Deducting nominal PF before
@@ -910,12 +912,38 @@ export function computeLabSnapshot(state: SimState, labId: LabId): LabComputeSna
     pricing: lab.pricing,
     demandMTok,
   })
-  const localServingMemoryReady =
-    placement.hbmNeedGb <= installedVramGb * localKeep + 1e-9 &&
-    placement.systemRamNeedGb <= installedSystemRamGb * localKeep + 1e-9
-  const remoteServingMemoryReady =
-    placement.hbmNeedGb <= remoteVramGb + 1e-9 &&
-    placement.systemRamNeedGb <= remoteSystemRamGb + 1e-9
+  // Admission needs one live request per routed endpoint. Offered-load
+  // concurrency is constrained later by the PF/queue settlement; sizing KV
+  // for every requested call here would make higher demand erase capacity.
+  const residentPlacement = placement.placements.map((hosted) =>
+    estimateServingMemory({
+      model: hosted.model,
+      precision: hosted.precision,
+      concurrentRequests: 1,
+      avgInputTokens: hosted.contextTokens,
+    }),
+  )
+  const residentHbmNeedGb = residentPlacement.reduce(
+    (sum, memory) => sum + memory.residentMemoryGb,
+    0,
+  )
+  const residentSystemRamNeedGb = residentPlacement.reduce(
+    (sum, memory) => sum + memory.requiredSystemRamGb,
+    0,
+  )
+  const localHbm = Math.max(0, installedVramGb * localKeep)
+  const localRam = Math.max(0, installedSystemRamGb * localKeep)
+  // There is no implicit expert/weight offload policy. Each location either
+  // holds the complete promised deployment or contributes no inference PF.
+  const localServeMem = Math.min(
+    residentMemoryFit(residentHbmNeedGb, localHbm),
+    residentMemoryFit(residentSystemRamNeedGb, localRam),
+  )
+  const remoteServeMem = Math.min(
+    residentMemoryFit(residentHbmNeedGb, remoteVramGb),
+    residentMemoryFit(residentSystemRamNeedGb, remoteSystemRamGb),
+  )
+  const localServingMemoryReady = localServeMem === 1
 
   const engineers = Math.max(0, lab.staff.engineer ?? 0)
   const engineerUtil = Math.min(0.14, engineers * 0.012)
@@ -927,9 +955,10 @@ export function computeLabSnapshot(state: SimState, labId: LabId): LabComputeSna
   )
   const allocation = normalizedComputeAllocation(lab.allocation)
   const base = rawFlopsPf * effectiveUtil
+  // Only locations with a fully resident endpoint contribute inference work.
   const inferenceFlopsPf =
-    (localServingMemoryReady ? availableLocalPf : 0) +
-    (remoteServingMemoryReady ? remoteInboundPf : 0)
+    (availableLocalPf * localServeMem + remoteInboundPf * remoteServeMem) *
+    activeBalanceTuning().serveCapacityMult
   const inferenceBase = inferenceFlopsPf * effectiveUtil
   const dataGenShare = Math.max(
     0,
@@ -974,6 +1003,75 @@ export function computeLabSnapshot(state: SimState, labId: LabId): LabComputeSna
       inference: inferenceBase * allocation.inference * (1 + engineerServe),
       research: base * allocation.research * (1 - dataGenShare),
     },
+  }
+}
+
+export interface LabInfrastructureSnapshot {
+  compute: LabComputeSnapshot
+  /** Commissioned interconnect + site firm capacity (MW). */
+  mwInterconnect: number
+  /** Commissioned owned generation (MW). */
+  mwGeneration: number
+  rackCap: number
+  racksUsed: number
+  /** Capacity still under construction (arrives with the build queue). */
+  pendingRackCap: number
+  pendingMwInterconnect: number
+  pendingMwGeneration: number
+  /** Current inference demand vs serving capacity (1 = saturated). */
+  hostingUtilization: number
+}
+
+/**
+ * One planning view over computeLabSnapshot plus campus energy totals. Rival
+ * scale/infrastructure planning reads this so projections consume the same
+ * physical accounting as the live simulation.
+ */
+export function labInfrastructureSnapshot(
+  state: SimState,
+  labId: LabId,
+): LabInfrastructureSnapshot {
+  const compute = computeLabSnapshot(state, labId)
+  const totals = labFacilityEnergyTotals(state, labId)
+  let pendingRackCap = 0
+  let pendingMwInterconnect = 0
+  let pendingMwGeneration = 0
+  if (usesCompactWorld(state)) {
+    for (const facility of state.map.world!.queryFacilities({
+      ownerId: labId,
+      underConstruction: true,
+    })) {
+      pendingRackCap += facility.stats?.rackCapacity ?? 0
+      pendingMwInterconnect += facility.stats?.mwCapacity ?? 0
+      pendingMwGeneration += facility.stats?.mwGeneration ?? 0
+    }
+  } else {
+    for (const tile of state.map.tiles) {
+      if (tile.owner !== labId) continue
+      if (tile.buildingTarget <= 0 || tile.buildingProgress >= tile.buildingTarget) continue
+      pendingRackCap += isDcAnchor(tile) ? tile.rackCapacity : 0
+      pendingMwInterconnect += tile.mwCapacity
+      pendingMwGeneration += tile.mwGeneration
+    }
+  }
+  const demandPf =
+    labId === state.playerLabId
+      ? state.lastMarket?.demandPf ?? 0
+      : state.rivals.find((rival) => rival.id === labId)?.lastDemandPf ?? 0
+  const hostingUtilization = Math.max(
+    0,
+    Math.min(2, demandPf / Math.max(1e-9, compute.inferenceWorkPf)),
+  )
+  return {
+    compute,
+    mwInterconnect: totals.mwInterconnect,
+    mwGeneration: totals.mwGeneration,
+    rackCap: totals.rackCap,
+    racksUsed: totals.racksUsed,
+    pendingRackCap,
+    pendingMwInterconnect,
+    pendingMwGeneration,
+    hostingUtilization,
   }
 }
 

@@ -39,7 +39,11 @@ describe('world generator V6', () => {
   it('does not alter the frozen V5 output path', () => {
     const before = generateStaticWorldV5(options)
     const after = generateStaticWorldV5(options)
-    expect(before.staticHash).toBe('ccbf587e')
+    // Frozen hash. Last reviewed change: municipalCapacityMw now excludes the
+    // utility's external contract MW from demand and adds a starter reserve,
+    // so every starting city can sell spare power (hash moved ccbf587e →
+    // a6021c6d). Bump only after reviewing the generator diff again.
+    expect(before.staticHash).toBe('a6021c6d')
     expect(after.staticHash).toBe(before.staticHash)
     expect(after).toEqual(before)
     expect(after.municipalPowerPlants?.every((plant) => plant.layout === undefined)).toBe(true)

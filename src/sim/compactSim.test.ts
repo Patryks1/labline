@@ -113,7 +113,9 @@ describe('compact million-tile simulation', () => {
     expect(a.map.world!.toSnapshot().terrainOverrides).toEqual(
       b.map.world!.toSnapshot().terrainOverrides,
     )
-  })
+    // Two 365-day million-tile runs: ~55s standalone, several minutes under
+    // full-suite contention — the default 30s timeout is not enough.
+  }, 400_000)
 
   it('invalidates commissioned-facility rollups exactly on world revision', () => {
     let state = createGame({
@@ -189,6 +191,9 @@ describe('compact million-tile simulation', () => {
     expect(next.map.tiles).toHaveLength(0)
     expect(next.map.world!.facilitiesById.size).toBeGreaterThanOrEqual(10_000)
     // Broad CI guard only; controlled-hardware gates use the perf harness.
-    expect(elapsed).toBeLessThan(250)
+    // Raised 250ms → 1500ms after the V7 world/facility systems made ticks
+    // heavier (measured ~550–820ms with 10k developed facilities; tickMarket
+    // itself is ~5ms of that).
+    expect(elapsed).toBeLessThan(1500)
   })
 })

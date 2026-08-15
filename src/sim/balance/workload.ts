@@ -1,0 +1,195 @@
+import type { ComputeWorkKind, NativeWorkUnits } from '../types'
+import type { CommercialModelKind } from './pricing'
+import { architectureBlueprintProfile } from './architectureFrontiers'
+
+export const CANONICAL_TEXT_INPUT_SHARE = 0.7
+export const CANONICAL_TEXT_OUTPUT_SHARE = 0.3
+
+const OMNI_FRONTIER_OUTPUT_BURDEN = architectureBlueprintProfile({
+  family: 'omni',
+}).outputTokenDemandMultiplier
+const OMNI_REASONING_SHARE = 0.05
+const OMNI_OUTPUT_SHARE = 0.27 * OMNI_FRONTIER_OUTPUT_BURDEN
+
+/**
+ * Canonical native serving-work conversion.
+ *
+ * Demand is still calibrated with an MTok-equivalent scalar in the legacy
+ * market model, but that scalar must not leak into billing, telemetry, or
+ * product capacity. This boundary converts it once into the product's native
+ * units. The equivalence constants are demand-calibration knobs, not claims
+ * that an image or a second of video is literally a text token.
+ */
+export const NATIVE_WORKLOAD_PROFILE = {
+  language: {
+    inputShare: CANONICAL_TEXT_INPUT_SHARE,
+    outputShare: CANONICAL_TEXT_OUTPUT_SHARE,
+    tokensPerInteraction: 1_500,
+  },
+  coding: {
+    inputShare: 0.86,
+    outputShare: 0.14,
+    tokensPerInteraction: 5_000,
+    toolCallsPerInteraction: 0.25,
+  },
+  reasoning: {
+    inputShare: 0.65,
+    outputShare: 0.12,
+    reasoningShare: 0.23,
+    tokensPerInteraction: 8_500,
+  },
+  omni: {
+    // Frontier omni sessions fan out into observations, agent traces and
+    // media/tool responses. Preserve the same demand-equivalent allowance,
+    // but move substantially more of it onto expensive autoregressive decode.
+    inputShare: 1 - OMNI_OUTPUT_SHARE - OMNI_REASONING_SHARE,
+    outputShare: OMNI_OUTPUT_SHARE,
+    reasoningShare: OMNI_REASONING_SHARE,
+    tokensPerInteraction: 3_000,
+    toolCallsPerInteraction: 0.12,
+  },
+  image: {
+    equivalentTokensPerImage: 4_000,
+    megapixelsPerImage: 1,
+    denoisingSteps: 30,
+  },
+  audio: {
+    equivalentTokensPerInteraction: 3_000,
+    secondsPerInteraction: 30,
+  },
+  video: {
+    equivalentTokensPerClip: 24_000,
+    secondsPerClip: 8,
+  },
+} as const
+
+function finiteNonNegative(value: number | undefined): number {
+  return Number.isFinite(value) ? Math.max(0, value ?? 0) : 0
+}
+
+/** Scale every native dimension without inventing dimensions that were absent. */
+export function scaleNativeWorkUnits(
+  units: Readonly<NativeWorkUnits>,
+  factor: number,
+): NativeWorkUnits {
+  const scale = Number.isFinite(factor) ? Math.max(0, factor) : 0
+  const result: NativeWorkUnits = {}
+  for (const key of Object.keys(units) as (keyof NativeWorkUnits)[]) {
+    const value = units[key]
+    if (value != null) result[key] = finiteNonNegative(value) * scale
+  }
+  return result
+}
+
+/** Add native dimensions independently; unlike MTok totals, unlike units never mix. */
+export function addNativeWorkUnits(
+  ...items: readonly Readonly<NativeWorkUnits>[]
+): NativeWorkUnits {
+  const result: NativeWorkUnits = {}
+  for (const item of items) {
+    for (const key of Object.keys(item) as (keyof NativeWorkUnits)[]) {
+      result[key] = finiteNonNegative(result[key]) + finiteNonNegative(item[key])
+    }
+  }
+  return result
+}
+
+/** Convert the legacy demand scalar into exactly one product-native workload. */
+export function nativeWorkFromEquivalentMTok(
+  kind: CommercialModelKind,
+  equivalentMTok: number,
+): NativeWorkUnits {
+  const mtok = finiteNonNegative(equivalentMTok)
+  const tokens = mtok * 1_000_000
+  switch (kind) {
+    case 'image': {
+      const profile = NATIVE_WORKLOAD_PROFILE.image
+      const images = tokens / profile.equivalentTokensPerImage
+      return {
+        images,
+        megapixelSteps:
+          images * profile.megapixelsPerImage * profile.denoisingSteps,
+      }
+    }
+    case 'audio': {
+      const profile = NATIVE_WORKLOAD_PROFILE.audio
+      return {
+        audioSeconds:
+          (tokens / profile.equivalentTokensPerInteraction) *
+          profile.secondsPerInteraction,
+      }
+    }
+    case 'video': {
+      const profile = NATIVE_WORKLOAD_PROFILE.video
+      return {
+        videoSeconds:
+          (tokens / profile.equivalentTokensPerClip) * profile.secondsPerClip,
+      }
+    }
+    case 'coding': {
+      const profile = NATIVE_WORKLOAD_PROFILE.coding
+      return {
+        inputMTok: mtok * profile.inputShare,
+        outputMTok: mtok * profile.outputShare,
+        toolCalls:
+          (tokens / profile.tokensPerInteraction) *
+          profile.toolCallsPerInteraction,
+      }
+    }
+    case 'reasoning': {
+      const profile = NATIVE_WORKLOAD_PROFILE.reasoning
+      return {
+        inputMTok: mtok * profile.inputShare,
+        outputMTok: mtok * profile.outputShare,
+        reasoningMTok: mtok * profile.reasoningShare,
+      }
+    }
+    case 'omni': {
+      const profile = NATIVE_WORKLOAD_PROFILE.omni
+      return {
+        inputMTok: mtok * profile.inputShare,
+        outputMTok: mtok * profile.outputShare,
+        reasoningMTok: mtok * profile.reasoningShare,
+        toolCalls:
+          (tokens / profile.tokensPerInteraction) *
+          profile.toolCallsPerInteraction,
+      }
+    }
+    case 'language':
+    default: {
+      const profile = NATIVE_WORKLOAD_PROFILE.language
+      return {
+        inputMTok: mtok * profile.inputShare,
+        outputMTok: mtok * profile.outputShare,
+      }
+    }
+  }
+}
+
+export function computeWorkKindForProduct(
+  channel: 'api' | 'subscription' | 'enterprise',
+  kind: CommercialModelKind,
+): ComputeWorkKind {
+  if (kind === 'image') return 'image_generation'
+  if (kind === 'audio') return 'audio'
+  if (kind === 'video') return 'video_generation'
+  return channel === 'api' ? 'api_text' : 'subscription_text'
+}
+
+/** Per-dimension conservation check used by settlement tests and diagnostics. */
+export function nativeWorkIsBounded(
+  smaller: Readonly<NativeWorkUnits>,
+  larger: Readonly<NativeWorkUnits>,
+  epsilon = 1e-9,
+): boolean {
+  const keys = new Set<keyof NativeWorkUnits>([
+    ...(Object.keys(smaller) as (keyof NativeWorkUnits)[]),
+    ...(Object.keys(larger) as (keyof NativeWorkUnits)[]),
+  ])
+  for (const key of keys) {
+    if (finiteNonNegative(smaller[key]) > finiteNonNegative(larger[key]) + epsilon) {
+      return false
+    }
+  }
+  return true
+}

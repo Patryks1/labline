@@ -26,26 +26,21 @@ const baseStatus = {
   completeReady: false,
   plateaued: false,
   computeDone: false,
-  calendarRemaining: 0,
 }
 
 describe('training presentation', () => {
-  it('uses the slower of compute and funded calendar time for the live countdown', () => {
+  it('uses allocated compute only for the live countdown', () => {
     expect(trainingRemainingTime({
       targetPfDays: 100,
       progressPfDays: 40,
       allocatedPf: 10,
-      minCalendarDays: 20,
-      daysElapsed: 3,
-    })).toMatchObject({ computeEta: 6, calendarRemaining: 17, etaDays: 17 })
+    })).toMatchObject({ computeEta: 6, etaDays: 6 })
 
     expect(trainingRemainingTime({
       targetPfDays: 100,
       progressPfDays: 40,
       allocatedPf: 2,
-      minCalendarDays: 20,
-      daysElapsed: 3,
-    })).toMatchObject({ computeEta: 30, calendarRemaining: 17, etaDays: 30 })
+    })).toMatchObject({ computeEta: 30, etaDays: 30 })
 
     expect(trainingRemainingTime({
       targetPfDays: 100,

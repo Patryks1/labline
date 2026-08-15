@@ -24,7 +24,10 @@ describe('concurrent training memory placement', () => {
     })
     const concurrentPressure = vramPressure(concurrent, 'train')
 
-    expect(soloPressure.needGb).toBeCloseTo(22)
+    // Default training numerics are FP32 (mixed precision is a research
+    // unlock): 16 GB persistent Adam state + 8 GB activation workspace + 2 GB
+    // communication buffers for a 1B dense model.
+    expect(soloPressure.needGb).toBeCloseTo(26)
     expect(concurrentPressure.needGb).toBeCloseTo(soloPressure.needGb * 2)
     expect(concurrentPressure.modelName).toBe('Alpha + 1 more')
     expect(computeSnapshot(concurrent).vramNeedTrain).toBeCloseTo(concurrentPressure.needGb)
@@ -53,17 +56,29 @@ describe('concurrent training memory placement', () => {
   })
 
   it('accounts for FP32 activation workspace without claiming optimizer savings', () => {
-    const fp16 = startTraining(richState(903), {
-      name: 'Mixed', family: 'dense', paramsB: 1,
-    })
+    // FP32 (the default) keeps no master copy but doubles activation memory;
+    // BF16 (research-gated) trades a master copy for half the activations.
+    const bf16Base = richState(903)
+    const bf16 = startTraining(
+      {
+        ...bf16Base,
+        player: {
+          ...bf16Base.player,
+          researchUnlocked: [...bf16Base.player.researchUnlocked, 'opt_mixed'],
+        },
+      },
+      {
+        name: 'Mixed', family: 'dense', paramsB: 1,
+        trainingNumerics: {
+          computeFormat: 'bf16_mixed', nativeWeightFormat: 'float', recipeVersion: 1,
+        },
+      },
+    )
     const fp32 = startTraining(richState(904), {
       name: 'Full', family: 'dense', paramsB: 1,
-      trainingNumerics: {
-        computeFormat: 'fp32', nativeWeightFormat: 'float', recipeVersion: 1,
-      },
     })
     expect(vramPressure(fp32, 'train').needGb).toBeGreaterThan(
-      vramPressure(fp16, 'train').needGb,
+      vramPressure(bf16, 'train').needGb,
     )
   })
 

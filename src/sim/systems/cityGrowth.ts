@@ -8,6 +8,7 @@ import {
   type CityGrowthPlan,
   type TileId,
 } from '../world'
+import { planUrbanInfill } from '../world/urbanInfill'
 import { commitWorldBatch, usesCompactWorld } from './worldAccess'
 import { transportCityGrowthMultiplier } from './transport'
 
@@ -65,7 +66,9 @@ export function tickCityGrowth(state: SimState): SimState {
   if (due.length === 0) return state
 
   const batch = world.beginBatch()
-  const reserved = new Set<TileId>()
+  // Reserved commercial-infill parcels survive growth until a facility takes
+  // them (acquired tiles are protected by their facility anyway).
+  const reserved = new Set<TileId>(planUrbanInfill(world.staticWorld).reservedTileIds)
   for (const city of due) {
     const plan = planCityGrowth(world, city.index, state.day, {
       maxTiles: 24,

@@ -1,4 +1,6 @@
 import type { DataDomain, Model, PostTrainStage, TrainingJob } from '../types'
+import { trainingNumericsEconomicsProfile } from './trainingPrecision'
+import { activeBalanceTuning } from './tuning'
 
 export type TrainablePostStage = Exclude<PostTrainStage, 'none'>
 
@@ -10,17 +12,24 @@ export const POST_TRAIN_STAGES: readonly TrainablePostStage[] = [
 ]
 
 const STAGE_BASE_TARGET: Record<TrainablePostStage, number> = {
-  sft: 8,
-  rlhf: 14,
-  process: 20,
-  tools: 18,
+  sft: 55,
+  rlhf: 105,
+  process: 155,
+  tools: 125,
 }
 
 const STAGE_MIN_DAYS: Record<TrainablePostStage, number> = {
-  sft: 3,
-  rlhf: 6,
-  process: 8,
-  tools: 7,
+  sft: 14,
+  rlhf: 24,
+  process: 32,
+  tools: 28,
+}
+
+const STAGE_BASE_FAILURE_RISK: Record<TrainablePostStage, number> = {
+  sft: 0.018,
+  rlhf: 0.045,
+  process: 0.07,
+  tools: 0.055,
 }
 
 const RELEVANT_DATA: Record<
@@ -55,24 +64,55 @@ export function postTrainRelevantDataMTok(
   return Math.max(0, job.trainMTok ?? 0) * Math.max(0.04, share)
 }
 
-/** PF-day work target: a meaningful fixed decision that grows sublinearly with data. */
+/**
+ * PF-day work target. Post-training is a real campaign rather than a short
+ * toggle: work grows sublinearly with the relevant instruction/preference
+ * corpus, superlinearly across parameter decades, and on repeated passes.
+ * `paramsB` defaults to 1 so legacy callers remain deterministic.
+ */
 export function postTrainTargetPfDays(
-  job: Pick<TrainingJob, 'trainMTok' | 'dataPlan'>,
+  job: Pick<TrainingJob, 'trainMTok' | 'dataPlan'> &
+    Partial<Pick<TrainingJob, 'postTrainStageRuns' | 'activeParamsB'>>,
   stage: TrainablePostStage,
+  paramsB = 1,
 ): number {
   const relevantMTok = postTrainRelevantDataMTok(job, stage)
-  const volumeScale = 1 + 0.55 * Math.log10(1 + relevantMTok / 250)
-  return Math.round(STAGE_BASE_TARGET[stage] * Math.min(4, volumeScale) * 10) / 10
+  const volumeScale = 1 + 0.7 * Math.log10(1 + relevantMTok / 100)
+  // Sparse checkpoints train the active path plus a bounded share of the
+  // inactive expert bank; treating the full bank as dense is too punitive.
+  const activeParamsB = Math.max(0, Math.min(paramsB, job.activeParamsB ?? paramsB))
+  const parameterBasisB = activeParamsB + (paramsB - activeParamsB) * 0.2
+  const sizeScale = Math.pow(Math.max(1, parameterBasisB), 0.18)
+  const repeatPasses = Math.max(0, job.postTrainStageRuns?.[stage] ?? 0)
+  const repeatScale = 1 + Math.min(0.75, repeatPasses * 0.22)
+  return (
+    Math.round(
+      STAGE_BASE_TARGET[stage] *
+        Math.min(5, volumeScale) *
+        Math.min(4.2, sizeScale) *
+        repeatScale *
+        activeBalanceTuning().postTrainWorkMult *
+        10,
+    ) / 10
+  )
 }
 
-export function postTrainMinimumDays(stage: TrainablePostStage): number {
-  return STAGE_MIN_DAYS[stage]
+/** @deprecated Forecast-only duration hint; PF targets are the completion gate. */
+export function postTrainMinimumDays(stage: TrainablePostStage, paramsB = 1): number {
+  return Math.ceil(
+    STAGE_MIN_DAYS[stage] * (1 + 0.4 * Math.log10(Math.max(1, paramsB))),
+  )
 }
 
 export function completedPostTrainStages(
   job: Pick<
     TrainingJob,
-    'completedPostTrainStages' | 'postTrain' | 'postTrainProgress' | 'postTrainTarget'
+    | 'completedPostTrainStages'
+    | 'postTrain'
+    | 'postTrainProgress'
+    | 'postTrainTarget'
+    | 'postTrainDaysElapsed'
+    | 'targetParamsB'
   >,
 ): TrainablePostStage[] {
   const completed = new Set(job.completedPostTrainStages ?? [])
@@ -84,6 +124,23 @@ export function completedPostTrainStages(
     completed.add(job.postTrain)
   }
   return POST_TRAIN_STAGES.filter((stage) => completed.has(stage))
+}
+
+/**
+ * A later model version may refresh a stage, but it cannot stack the full
+ * first-pass benefit forever. Existing quality is never lost and each repeat
+ * closes a progressively smaller share of the remaining headroom.
+ */
+export function mergePostTrainStageEffectiveness(
+  previous: number | undefined,
+  earned: number,
+  previousRuns: number,
+): number {
+  const prior = clamp01(previous ?? 0)
+  const next = clamp01(earned)
+  if (previousRuns <= 0) return next
+  const repeatWeight = Math.pow(0.55, Math.max(1, previousRuns))
+  return clamp01(prior + (1 - prior) * next * repeatWeight)
 }
 
 function relevantDataQuality(
@@ -127,6 +184,131 @@ function foundationSignal(job: TrainingJob, models: readonly Model[]): number {
   )
 }
 
+export type PostTrainRiskBand = 'low' | 'guarded' | 'high' | 'critical'
+
+export interface PostTrainFailureRisk {
+  probability: number
+  band: PostTrainRiskBand
+  dataAdequacy: number
+  dataQuality: number
+  researchReadiness: number
+  foundationStability: number
+  sizePressure: number
+  computePressure: number
+  numericalPressure: number
+  dataIntegrityPressure: number
+  campaignRiskShift: number
+  repeatPressure: number
+  factors: string[]
+}
+
+/**
+ * Explainable risk of a destructive stage divergence. The random draw lives
+ * in systems/training and is frozen when the stage starts; this function is a
+ * pure assessment of the immutable recipe, data, model scale and research.
+ */
+export function postTrainFailureRisk(input: {
+  job: TrainingJob
+  stage: TrainablePostStage
+  researchUnlocked: readonly string[]
+  models: readonly Model[]
+}): PostTrainFailureRisk {
+  const { job, stage } = input
+  const relevantMTok = postTrainRelevantDataMTok(job, stage)
+  const totalParamsB = Math.max(0.01, job.targetParamsB ?? 1)
+  const activeParamsB = Math.max(
+    0.01,
+    Math.min(totalParamsB, job.activeParamsB ?? totalParamsB),
+  )
+  const paramsB = activeParamsB + (totalParamsB - activeParamsB) * 0.2
+  const dataAdequacy = clamp01(
+    1 - Math.exp(-relevantMTok / Math.max(20, paramsB * 28)),
+  )
+  const dataQuality = relevantDataQuality(job, stage)
+  const researchReadiness = researchSignal(stage, input.researchUnlocked)
+  const foundationStability = foundationSignal(job, input.models)
+  const sizePressure = clamp01(Math.log10(Math.max(1, paramsB)) / 3)
+  const targetPfDays = postTrainTargetPfDays(job, stage, paramsB)
+  const computePressure = clamp01(
+    Math.log10(1 + targetPfDays / STAGE_BASE_TARGET[stage]) / 0.85,
+  )
+  const priorRuns = Math.max(0, job.postTrainStageRuns?.[stage] ?? 0)
+  const epochPressure = clamp01((Math.max(1, job.repeatedDataEpochs ?? 1) - 2) / 8)
+  const repeatPressure = Math.max(clamp01(priorRuns / 3), epochPressure)
+  const syntheticRisk = clamp01(job.synthLqShare ?? 0)
+  const evidence = job.dataEvidence
+  const dataIntegrityPressure = clamp01(
+    (evidence?.contaminationRisk ?? 0) * 0.65 +
+      (1 - (evidence?.effectiveDiversity ?? 1)) * 0.2 +
+      (1 - (evidence?.effectiveFreshness ?? 1)) * 0.15,
+  )
+  const numericalStability = trainingNumericsEconomicsProfile(
+    job.trainingNumerics ?? job.numerics,
+  ).stabilityRisk
+  const numericalPressure = clamp01((numericalStability + 0.08) / 0.2)
+  const campaignRiskShift = Math.max(
+    -0.12,
+    Math.min(0.2, job.campaignModifiers?.stumbleRisk ?? 0),
+  )
+  const recoveryAttempt = Math.max(0, job.postTrainRecoveryAttempt ?? 0)
+  const recipeMultiplier =
+    job.outcomeRisk === 'high' ? 1.65 : job.outcomeRisk === 'medium' ? 1.2 : 0.9
+  const learnedRecoveryMultiplier = Math.max(0.68, 1 - recoveryAttempt * 0.08)
+  const raw =
+    STAGE_BASE_FAILURE_RISK[stage] +
+    (1 - dataAdequacy) * 0.075 +
+    (1 - dataQuality) * 0.04 +
+    (1 - researchReadiness) * 0.055 +
+    (1 - foundationStability) * 0.025 +
+    sizePressure * 0.04 +
+    computePressure * 0.035 +
+    repeatPressure * 0.035 +
+    syntheticRisk * 0.08 +
+    dataIntegrityPressure * 0.055 +
+    numericalStability * 0.12 +
+    campaignRiskShift
+  const probability = Math.max(
+    0.012,
+    Math.min(0.38, raw * recipeMultiplier * learnedRecoveryMultiplier),
+  )
+  const band: PostTrainRiskBand =
+    probability < 0.055
+      ? 'low'
+      : probability < 0.12
+        ? 'guarded'
+        : probability < 0.22
+          ? 'high'
+          : 'critical'
+  const factors: string[] = []
+  if (dataAdequacy < 0.55) factors.push('thin relevant dataset')
+  if (dataQuality < 0.6) factors.push('weak supervision quality')
+  if (researchReadiness < 0.72) factors.push('immature stage research')
+  if (foundationStability < 0.58) factors.push('fragile foundation checkpoint')
+  if (sizePressure > 0.55) factors.push('large-model optimization pressure')
+  if (computePressure > 0.65) factors.push('long optimization horizon')
+  if (repeatPressure > 0) factors.push('repeat-pass interference')
+  if (syntheticRisk > 0.2) factors.push('low-quality synthetic signal')
+  if (dataIntegrityPressure > 0.25) factors.push('contaminated or narrow evidence')
+  if (numericalPressure > 0.6) factors.push('aggressive numerical precision')
+  if (campaignRiskShift > 0.01) factors.push('unresolved campaign instability')
+  if (factors.length === 0) factors.push('normal optimizer variance')
+  return {
+    probability,
+    band,
+    dataAdequacy,
+    dataQuality,
+    researchReadiness,
+    foundationStability,
+    sizePressure,
+    computePressure,
+    numericalPressure,
+    dataIntegrityPressure,
+    campaignRiskShift,
+    repeatPressure,
+    factors,
+  }
+}
+
 export interface PostTrainEffectivenessInput {
   job: TrainingJob
   stage: TrainablePostStage
@@ -137,24 +319,20 @@ export interface PostTrainEffectivenessInput {
 }
 
 /**
- * Earned stage quality. Compute is a gate; data, time, research and the
+ * Earned stage quality. Compute is the gate; data, research and the
  * teacher/base checkpoint determine how much a completed decision is worth.
  */
 export function postTrainStageEffectiveness(input: PostTrainEffectivenessInput): number {
   const historical = input.stage !== input.job.postTrain
+  const paramsB = input.job.targetParamsB ?? 1
   const target = Math.max(
     1e-9,
     historical
-      ? postTrainTargetPfDays(input.job, input.stage)
-      : input.job.postTrainTarget || postTrainTargetPfDays(input.job, input.stage),
+      ? postTrainTargetPfDays(input.job, input.stage, paramsB)
+      : input.job.postTrainTarget || postTrainTargetPfDays(input.job, input.stage, paramsB),
   )
   const compute = clamp01(
     (input.progress ?? (historical ? target : input.job.postTrainProgress)) / target,
-  )
-  const time = clamp01(
-    (input.daysElapsed ??
-      (historical ? postTrainMinimumDays(input.stage) : input.job.postTrainDaysElapsed ?? 0)) /
-      postTrainMinimumDays(input.stage),
   )
   const relevantMTok = postTrainRelevantDataMTok(input.job, input.stage)
   const data = 1 - Math.exp(-relevantMTok / Math.max(25, input.job.targetParamsB * 25))
@@ -164,11 +342,12 @@ export function postTrainStageEffectiveness(input: PostTrainEffectivenessInput):
   const evidence =
     0.22 * data +
     0.2 * quality +
-    0.18 * research +
-    0.12 * foundation +
-    0.18 * compute +
-    0.1 * time
-  return clamp01(evidence * (0.3 + 0.7 * compute) * (0.65 + 0.35 * time))
+    0.2 * research +
+    0.14 * foundation +
+    0.24 * compute
+  // A selected stage with no allocated work is neutral; partial PF exposes at
+  // most that fraction of the stage evidence.
+  return clamp01(evidence * compute)
 }
 
 /** Resolve and freeze every completed stage, including legacy/cheat completions. */
@@ -193,10 +372,36 @@ export function postTrainEffectProfile(
   job: TrainingJob,
   researchUnlocked: readonly string[],
   models: readonly Model[],
-): { scaleStrength: number; alignmentEquivalent: number; toolsEnabled: boolean } {
+): {
+  scaleStrength: number
+  alignmentEquivalent: number
+  toolsEnabled: boolean
+  stageEffectiveness: Record<TrainablePostStage, number>
+} {
   const completed = new Set(completedPostTrainStages(job))
   const effectiveness = (stage: TrainablePostStage) => {
     const frozen = job.postTrainStageEffectiveness?.[stage]
+    if (
+      frozen != null &&
+      (job.postTrainStagesCompletedThisRun ?? []).includes(stage)
+    ) {
+      return clamp01(frozen)
+    }
+    if (
+      stage === job.postTrain &&
+      job.postTrainTarget > 0 &&
+      job.postTrainProgress > 0
+    ) {
+      const current = postTrainStageEffectiveness({
+        job,
+        stage,
+        researchUnlocked,
+        models,
+      })
+      const priorRuns =
+        job.postTrainStageRuns?.[stage] ?? (frozen != null ? 1 : 0)
+      return mergePostTrainStageEffectiveness(frozen, current, priorRuns)
+    }
     if (frozen != null) return clamp01(frozen)
     if (stage === job.postTrain || completed.has(stage)) {
       return postTrainStageEffectiveness({ job, stage, researchUnlocked, models })
@@ -208,8 +413,12 @@ export function postTrainEffectProfile(
   const process = effectiveness('process')
   const tools = effectiveness('tools')
   return {
-    scaleStrength: clamp01(sft * 0.18 + rlhf * 0.28 + process * 0.34 + tools * 0.2),
+    scaleStrength: clamp01(sft * 0.35 + rlhf * 0.4 + process * 0.5 + tools * 0.4),
     alignmentEquivalent: Math.min(4, sft + rlhf * 1.45 + process * 1.85 + tools * 1.2),
-    toolsEnabled: job.postTrain === 'tools' || completed.has('tools'),
+    // Tool I/O is a completed-stage feature. Partial effectiveness still feeds
+    // the continuous scale/alignment previews above, but cannot flip a binary
+    // product capability on before both work gates complete.
+    toolsEnabled: completed.has('tools') && tools > 0,
+    stageEffectiveness: { sft, rlhf, process, tools },
   }
 }

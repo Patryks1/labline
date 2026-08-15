@@ -928,23 +928,24 @@ function facilityFar(kind: MapTile['kind']): THREE.BufferGeometry {
       ])
     case 'office':
       return compound([
-        box(0.74, 0.62, 0.58, 0, 0.31, 0, LIGHT_METAL),
-        box(0.58, 0.18, 0.03, 0, 0.36, 0.305, GLASS),
+        box(0.62, 0.88, 0.5, 0, 0.44, 0, LIGHT_METAL),
+        box(0.5, 0.12, 0.03, 0, 0.5, 0.26, GLASS),
       ])
     case 'hq':
       return compound([
-        box(0.72, 0.62, 0.56, -0.08, 0.31, 0, LIGHT_METAL),
-        box(0.24, 0.4, 0.42, 0.34, 0.2, 0.05, DARK_METAL),
+        box(0.62, 0.88, 0.5, 0, 0.44, 0, LIGHT_METAL),
+        box(0.5, 0.12, 0.03, 0, 0.5, 0.26, GLASS),
       ])
     case 'hq_m':
       return compound([
-        box(0.42, 0.78, 0.7, -0.22, 0.39, 0, LIGHT_METAL),
-        box(0.42, 0.64, 0.7, 0.22, 0.32, 0, LIGHT_METAL),
+        box(0.85, 0.55, 0.8, 0, 0.275, 0, DARK_METAL),
+        box(0.42, 2.2, 0.42, -0.08, 1.1, -0.04, LIGHT_METAL),
       ])
     case 'hq_l':
       return compound([
-        box(0.82, 0.58, 0.7, 0, 0.29, 0, LIGHT_METAL),
-        box(0.32, 1.05, 0.34, 0.2, 0.525, -0.08, DARK_METAL),
+        box(0.9, 0.55, 0.86, 0, 0.275, 0, DARK_METAL),
+        box(0.36, 4.0, 0.36, 0, 2.0, 0, LIGHT_METAL),
+        box(0.22, 0.35, 0.22, 0, 4.2, 0, DARK_METAL),
       ])
     case 'lab':
       return compound([

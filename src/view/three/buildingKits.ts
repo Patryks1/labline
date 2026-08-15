@@ -64,10 +64,33 @@ function rng(s: number) {
 }
 
 export type DataCenterStyleVariant = 0 | 1 | 2
+export type HqStyleVariant = 0 | 1 | 2
 
 /** Finite, deterministic variants only: safe for procedural registry caching. */
 export function dataCenterStyleVariant(tileX: number, tileY: number): DataCenterStyleVariant {
   return (seed(tileX, tileY) % 3) as DataCenterStyleVariant
+}
+
+/** Finite HQ façade / podium / roof variants — upgrades are not scaled copies. */
+export function hqStyleVariant(tileX: number, tileY: number): HqStyleVariant {
+  return (seed(tileX + 17, tileY + 41) % 3) as HqStyleVariant
+}
+
+/** World-unit height of one storey for HQ tower kits (visual only). */
+export const HQ_STOREY_HEIGHT = 0.11
+
+/**
+ * Nominal HQ tower height in world units.
+ * Small ~8 storeys, medium ~20, large ~36 (midpoints of 6–10 / 16–24 / 30–45).
+ */
+export function hqTowerHeight(kind: 'hq' | 'hq_m' | 'hq_l' | 'office'): number {
+  return hqStoreyCount(kind) * HQ_STOREY_HEIGHT
+}
+
+export function hqStoreyCount(kind: 'hq' | 'hq_m' | 'hq_l' | 'office'): number {
+  if (kind === 'hq_l') return 36
+  if (kind === 'hq_m') return 20
+  return 8
 }
 
 function mesh(
@@ -171,11 +194,11 @@ export function createBuildingKit(
       return kitBattery(g, w, h, color)
     case 'office':
     case 'hq':
-      return kitOffice(g, w, h, color, r)
+      return kitHqSmall(g, w, color, r, hqStyleVariant(tileX, tileY))
     case 'hq_m':
-      return kitOffice(g, w, h * 1.15, color, r)
+      return kitHqMedium(g, w, color, r, hqStyleVariant(tileX, tileY))
     case 'hq_l':
-      return kitOffice(g, w, h * 1.35, color, r)
+      return kitHqLarge(g, w, color, r, hqStyleVariant(tileX, tileY))
     case 'lab':
       return kitLab(g, w, h, color)
     default:
@@ -261,6 +284,28 @@ function kitLow(
       const shell = shellColor(color, 0x4f5b68, 0.18)
       g.add(mesh(new THREE.BoxGeometry(w * 0.82, hh, w * 0.55), mat(shell, { rough: 0.48, metal: 0.28, shellBase: 0x4f5b68 }), 0, hh / 2, 0, { shellBase: 0x4f5b68 }))
       g.add(mesh(new THREE.BoxGeometry(w * 0.24, hh * 1.35, w * 0.24), mat(shell, { rough: 0.48, metal: 0.28, shellBase: 0x4f5b68 }), w * 0.28, hh * 0.68, w * 0.12, { shellBase: 0x4f5b68 }))
+      return g
+    }
+    case 'office':
+    case 'hq': {
+      const hh = hqTowerHeight('hq')
+      const shell = shellColor(color || 0xc0c8d0, 0xb8c0cc, 0.35)
+      g.add(mesh(new THREE.BoxGeometry(w * 0.62, hh, w * 0.5), mat(shell, { rough: 0.42, metal: 0.22, shellBase: 0xb8c0cc }), 0, hh / 2, 0, { shellBase: 0xb8c0cc }))
+      return g
+    }
+    case 'hq_m': {
+      const hh = hqTowerHeight('hq_m')
+      const shell = shellColor(color || 0xb0b8c8, 0xa8b0c0, 0.32)
+      g.add(mesh(new THREE.BoxGeometry(w * 0.55, hh * 0.28, w * 0.7), mat(shell, { rough: 0.45, metal: 0.2, shellBase: 0xa8b0c0 }), 0, hh * 0.14, 0, { shellBase: 0xa8b0c0 }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.42, hh, w * 0.42), mat(shell, { rough: 0.4, metal: 0.25, shellBase: 0xa8b0c0 }), 0, hh / 2, 0, { shellBase: 0xa8b0c0 }))
+      return g
+    }
+    case 'hq_l': {
+      const hh = hqTowerHeight('hq_l')
+      const shell = shellColor(color || 0xa0a8bc, 0x98a0b4, 0.3)
+      g.add(mesh(new THREE.BoxGeometry(w * 0.7, hh * 0.22, w * 0.7), mat(shell, { rough: 0.48, metal: 0.18, shellBase: 0x98a0b4 }), 0, hh * 0.11, 0, { shellBase: 0x98a0b4 }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.38, hh, w * 0.38), mat(shell, { rough: 0.38, metal: 0.28, shellBase: 0x98a0b4 }), 0, hh / 2, 0, { shellBase: 0x98a0b4 }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.22, hh * 0.12, w * 0.22), mat(0x6a7488, { metal: 0.45, lockColor: true }), 0, hh + hh * 0.06, 0, { lockColor: true }))
       return g
     }
     default: {
@@ -2240,62 +2285,375 @@ function kitBattery(g: THREE.Group, w: number, h: number, color: number) {
   return g
 }
 
-function kitOffice(g: THREE.Group, w: number, h: number, color: number, r: () => number) {
-  const plaza = mesh(
-    new THREE.BoxGeometry(w, 0.05, w),
-    mat(0x2a2e38, { rough: 0.85, lockColor: true }),
-    0,
-    0.025,
-    0,
-    { lockColor: true },
-  )
-  g.add(plaza)
-  const bodyH = Math.max(0.35, h * 0.7)
-  const body = mesh(
-    new THREE.BoxGeometry(w * 0.7, bodyH, w * 0.55),
-    mat(color || 0xc8d0dc, { rough: 0.4, metal: 0.2 }),
-    0,
-    bodyH / 2,
-    0,
-  )
-  g.add(body)
-  // Glass curtain
-  for (let f = 0; f < 3; f++) {
-    const glass = mesh(
-      new THREE.BoxGeometry(w * 0.55, 0.06, 0.02),
-      mat(0x88ccee, {
-        metal: 0.5,
-        rough: 0.15,
-        emissive: 0x224455,
-        emInt: 0.2 + r() * 0.15,
-        lockColor: true,
-      }),
-      0,
-      0.12 + f * 0.12,
-      w * 0.28,
-      { lockColor: true },
+function hqGlass(
+  w: number,
+  bodyH: number,
+  floors: number,
+  z: number,
+  r: () => number,
+  widthFrac = 0.55,
+) {
+  const bandH = Math.min(0.045, bodyH / Math.max(6, floors * 1.4))
+  const step = bodyH / (floors + 1)
+  const group: THREE.Mesh[] = []
+  for (let f = 0; f < floors; f++) {
+    group.push(
+      mesh(
+        new THREE.BoxGeometry(w * widthFrac, bandH, 0.02),
+        mat(0x88ccee, {
+          metal: 0.55,
+          rough: 0.12,
+          emissive: 0x224455,
+          emInt: 0.18 + r() * 0.12,
+          lockColor: true,
+        }),
+        0,
+        step * (f + 1),
+        z,
+        { lockColor: true },
+      ),
     )
+  }
+  return group
+}
+
+function hqPlaza(g: THREE.Group, w: number) {
+  g.add(
+    mesh(
+      new THREE.BoxGeometry(w, 0.05, w),
+      mat(0x2a2e38, { rough: 0.85, lockColor: true }),
+      0,
+      0.025,
+      0,
+      { lockColor: true },
+    ),
+  )
+}
+
+function hqBrandSign(g: THREE.Group, color: number, y: number, z: number, width = 0.22) {
+  g.add(
+    mesh(
+      new THREE.BoxGeometry(width, 0.055, 0.02),
+      mat(color || 0x3dffc0, { emissive: color || 0x0a3d2e, emInt: 0.35, brand: true }),
+      0,
+      y,
+      z,
+      { brand: true },
+    ),
+  )
+}
+
+/** Small 1×1 mid-rise HQ — ~6–10 storeys; slab / setback / glass-box variants. */
+function kitHqSmall(
+  g: THREE.Group,
+  w: number,
+  color: number,
+  r: () => number,
+  variant: HqStyleVariant,
+) {
+  const storeys = 6 + Math.floor(r() * 5) // 6–10
+  const bodyH = storeys * HQ_STOREY_HEIGHT
+  g.userData.kitHeight = bodyH
+  g.userData.hqStoreys = storeys
+  g.userData.hqVariant = variant
+  hqPlaza(g, w)
+  const base = 0xb8c0cc
+  const shell = shellColor(color || 0xc8d0dc, base, 0.35)
+  const bodyMat = mat(shell, { rough: 0.4, metal: 0.22, shellBase: base })
+
+  if (variant === 0) {
+    // Street-wall slab
+    g.add(mesh(new THREE.BoxGeometry(w * 0.72, bodyH, w * 0.52), bodyMat, 0, bodyH / 2, 0, { shellBase: base }))
+    for (const glass of hqGlass(w, bodyH, Math.min(storeys, 8), w * 0.27, r, 0.58)) g.add(glass)
+    g.add(
+      mesh(
+        new THREE.BoxGeometry(w * 0.76, 0.04, w * 0.56),
+        mat(0x4a5566, { metal: 0.4, lockColor: true }),
+        0,
+        bodyH + 0.02,
+        0,
+        { lockColor: true },
+      ),
+    )
+  } else if (variant === 1) {
+    // Setback tower on low podium
+    const podiumH = HQ_STOREY_HEIGHT * 1.4
+    g.add(
+      mesh(
+        new THREE.BoxGeometry(w * 0.82, podiumH, w * 0.7),
+        mat(darken(shell, 0.12), { rough: 0.5, metal: 0.18, shellBase: base }),
+        0,
+        podiumH / 2,
+        0,
+        { shellBase: base },
+      ),
+    )
+    const shaftH = bodyH - podiumH
+    g.add(
+      mesh(
+        new THREE.BoxGeometry(w * 0.5, shaftH, w * 0.42),
+        bodyMat,
+        -w * 0.05,
+        podiumH + shaftH / 2,
+        0,
+        { shellBase: base },
+      ),
+    )
+    for (const glass of hqGlass(w, shaftH, Math.min(storeys - 1, 7), w * 0.22, r, 0.4)) {
+      glass.position.y += podiumH
+      glass.position.x = -w * 0.05
+      g.add(glass)
+    }
+  } else {
+    // Glass box with stone end wall
+    g.add(mesh(new THREE.BoxGeometry(w * 0.62, bodyH, w * 0.58), bodyMat, 0, bodyH / 2, 0, { shellBase: base }))
+    g.add(
+      mesh(
+        new THREE.BoxGeometry(w * 0.12, bodyH, w * 0.58),
+        mat(0x8a909c, { rough: 0.65, metal: 0.08, lockColor: true }),
+        w * 0.37,
+        bodyH / 2,
+        0,
+        { lockColor: true },
+      ),
+    )
+    for (const glass of hqGlass(w, bodyH, Math.min(storeys, 8), w * 0.3, r, 0.5)) g.add(glass)
+    g.add(
+      mesh(
+        new THREE.BoxGeometry(w * 0.28, 0.08, w * 0.28),
+        mat(0x556070, { metal: 0.45, lockColor: true }),
+        0,
+        bodyH + 0.04,
+        0,
+        { lockColor: true },
+      ),
+    )
+  }
+  hqBrandSign(g, color, bodyH * 0.72, w * 0.3)
+  return g
+}
+
+/** Medium 2×2 HQ campus — ~16–24 storeys; podium+shaft / twin / stepped. */
+function kitHqMedium(
+  g: THREE.Group,
+  w: number,
+  color: number,
+  r: () => number,
+  variant: HqStyleVariant,
+) {
+  const storeys = 16 + Math.floor(r() * 9) // 16–24
+  const bodyH = storeys * HQ_STOREY_HEIGHT
+  g.userData.kitHeight = bodyH
+  g.userData.hqStoreys = storeys
+  g.userData.hqVariant = variant
+  hqPlaza(g, w)
+  const base = 0xa8b0c0
+  const shell = shellColor(color || 0xb0b8c8, base, 0.32)
+  const bodyMat = mat(shell, { rough: 0.38, metal: 0.25, shellBase: base })
+  const podiumMat = mat(darken(shell, 0.15), { rough: 0.5, metal: 0.18, shellBase: base })
+
+  if (variant === 0) {
+    const podiumH = HQ_STOREY_HEIGHT * 3
+    g.add(mesh(new THREE.BoxGeometry(w * 0.9, podiumH, w * 0.85), podiumMat, 0, podiumH / 2, 0, { shellBase: base }))
+    const shaftH = bodyH - podiumH
+    g.add(
+      mesh(
+        new THREE.BoxGeometry(w * 0.48, shaftH, w * 0.48),
+        bodyMat,
+        -w * 0.08,
+        podiumH + shaftH / 2,
+        -w * 0.04,
+        { shellBase: base },
+      ),
+    )
+    for (const glass of hqGlass(w, shaftH, Math.min(12, storeys - 3), w * 0.25, r, 0.38)) {
+      glass.position.y += podiumH
+      glass.position.x = -w * 0.08
+      g.add(glass)
+    }
+    g.add(
+      mesh(
+        new THREE.BoxGeometry(w * 0.52, 0.05, w * 0.52),
+        mat(0x4a5566, { metal: 0.42, lockColor: true }),
+        -w * 0.08,
+        bodyH + 0.03,
+        -w * 0.04,
+        { lockColor: true },
+      ),
+    )
+  } else if (variant === 1) {
+    // Twin slabs of unequal height
+    const leftH = bodyH
+    const rightH = bodyH * (0.72 + r() * 0.12)
+    g.add(mesh(new THREE.BoxGeometry(w * 0.38, leftH, w * 0.7), bodyMat, -w * 0.22, leftH / 2, 0, { shellBase: base }))
+    g.add(
+      mesh(
+        new THREE.BoxGeometry(w * 0.38, rightH, w * 0.7),
+        mat(darken(shell, 0.08), { rough: 0.4, metal: 0.22, shellBase: base }),
+        w * 0.22,
+        rightH / 2,
+        0,
+        { shellBase: base },
+      ),
+    )
+    for (const glass of hqGlass(w, leftH, Math.min(10, storeys), w * 0.36, r, 0.3)) {
+      glass.position.x = -w * 0.22
+      g.add(glass)
+    }
+  } else {
+    // Stepped terraces
+    const tiers = [
+      { h: bodyH * 0.38, wFrac: 0.88, zOff: 0.02 },
+      { h: bodyH * 0.32, wFrac: 0.62, zOff: -0.04 },
+      { h: bodyH * 0.3, wFrac: 0.42, zOff: -0.08 },
+    ]
+    let y = 0
+    for (const tier of tiers) {
+      g.add(
+        mesh(
+          new THREE.BoxGeometry(w * tier.wFrac, tier.h, w * (tier.wFrac * 0.85)),
+          bodyMat,
+          0,
+          y + tier.h / 2,
+          tier.zOff,
+          { shellBase: base },
+        ),
+      )
+      y += tier.h
+    }
+    for (const glass of hqGlass(w, bodyH, Math.min(10, storeys), w * 0.32, r, 0.36)) g.add(glass)
+  }
+  hqBrandSign(g, color, bodyH * 0.55, w * 0.38, 0.28)
+  return g
+}
+
+/** Large HQ tower — ~30–45 storeys with crown; three façade/crown variants. */
+function kitHqLarge(
+  g: THREE.Group,
+  w: number,
+  color: number,
+  r: () => number,
+  variant: HqStyleVariant,
+) {
+  const storeys = 30 + Math.floor(r() * 16) // 30–45
+  const bodyH = storeys * HQ_STOREY_HEIGHT
+  g.userData.kitHeight = bodyH
+  g.userData.hqStoreys = storeys
+  g.userData.hqVariant = variant
+  hqPlaza(g, w)
+  const base = 0x98a0b4
+  const shell = shellColor(color || 0xa0a8bc, base, 0.3)
+  const bodyMat = mat(shell, { rough: 0.36, metal: 0.28, shellBase: base })
+  const podiumH = HQ_STOREY_HEIGHT * 4
+  g.add(
+    mesh(
+      new THREE.BoxGeometry(w * 0.92, podiumH, w * 0.88),
+      mat(darken(shell, 0.18), { rough: 0.55, metal: 0.15, shellBase: base }),
+      0,
+      podiumH / 2,
+      0,
+      { shellBase: base },
+    ),
+  )
+  const shaftH = bodyH - podiumH
+  const shaftW = variant === 1 ? 0.36 : variant === 2 ? 0.4 : 0.38
+  g.add(
+    mesh(
+      new THREE.BoxGeometry(w * shaftW, shaftH, w * shaftW),
+      bodyMat,
+      variant === 1 ? w * 0.06 : 0,
+      podiumH + shaftH / 2,
+      variant === 2 ? -w * 0.04 : 0,
+      { shellBase: base },
+    ),
+  )
+  for (const glass of hqGlass(w, shaftH, Math.min(14, Math.floor(storeys / 2)), w * (shaftW * 0.52), r, shaftW * 0.85)) {
+    glass.position.y += podiumH
+    if (variant === 1) glass.position.x = w * 0.06
+    if (variant === 2) glass.position.z = -w * 0.04
     g.add(glass)
   }
-  const roof = mesh(
-    new THREE.BoxGeometry(w * 0.75, 0.04, w * 0.6),
-    mat(0x4a5566, { metal: 0.4, lockColor: true }),
-    0,
-    bodyH + 0.03,
-    0,
-    { lockColor: true },
-  )
-  g.add(roof)
-  // Sign
-  const sign = mesh(
-    new THREE.BoxGeometry(0.2, 0.06, 0.02),
-    mat(0x3dffc0, { emissive: 0x0a3d2e, emInt: 0.35, lockColor: true }),
-    0,
-    bodyH * 0.7,
-    w * 0.29,
-    { lockColor: true },
-  )
-  g.add(sign)
+
+  // Crown — distinct per variant so large upgrades never look like scaled mediums.
+  const crownY = bodyH
+  if (variant === 0) {
+    // Lantern crown
+    g.add(
+      mesh(
+        new THREE.BoxGeometry(w * (shaftW + 0.08), HQ_STOREY_HEIGHT * 1.6, w * (shaftW + 0.08)),
+        mat(0x6a7488, { metal: 0.5, rough: 0.3, lockColor: true }),
+        0,
+        crownY + HQ_STOREY_HEIGHT * 0.8,
+        0,
+        { lockColor: true },
+      ),
+    )
+    g.add(
+      mesh(
+        new THREE.BoxGeometry(w * (shaftW - 0.06), HQ_STOREY_HEIGHT * 1.1, w * (shaftW - 0.06)),
+        mat(0xaaccff, {
+          metal: 0.4,
+          rough: 0.15,
+          emissive: 0x335577,
+          emInt: 0.35,
+          lockColor: true,
+        }),
+        0,
+        crownY + HQ_STOREY_HEIGHT * 2.2,
+        0,
+        { lockColor: true },
+      ),
+    )
+  } else if (variant === 1) {
+    // Spire
+    g.add(
+      mesh(
+        new THREE.BoxGeometry(w * 0.22, HQ_STOREY_HEIGHT * 1.2, w * 0.22),
+        mat(0x5a6478, { metal: 0.55, lockColor: true }),
+        w * 0.06,
+        crownY + HQ_STOREY_HEIGHT * 0.6,
+        0,
+        { lockColor: true },
+      ),
+    )
+    g.add(
+      mesh(
+        new THREE.CylinderGeometry(0.02, 0.05, HQ_STOREY_HEIGHT * 3.2, 6),
+        mat(0x8890a0, { metal: 0.65, lockColor: true }),
+        w * 0.06,
+        crownY + HQ_STOREY_HEIGHT * 2.8,
+        0,
+        { lockColor: true },
+      ),
+    )
+  } else {
+    // Chamfered mechanical crown
+    g.add(
+      mesh(
+        new THREE.BoxGeometry(w * (shaftW + 0.1), HQ_STOREY_HEIGHT * 0.9, w * (shaftW + 0.1)),
+        mat(0x4a5566, { metal: 0.48, lockColor: true }),
+        0,
+        crownY + HQ_STOREY_HEIGHT * 0.45,
+        -w * 0.04,
+        { lockColor: true },
+      ),
+    )
+    for (const ox of [-0.08, 0.08] as const) {
+      g.add(
+        mesh(
+          new THREE.BoxGeometry(0.1, HQ_STOREY_HEIGHT * 0.7, 0.1),
+          mat(0x667088, { metal: 0.5, lockColor: true }),
+          ox,
+          crownY + HQ_STOREY_HEIGHT * 1.2,
+          -w * 0.04,
+          { lockColor: true },
+        ),
+      )
+    }
+  }
+  hqBrandSign(g, color, podiumH + shaftH * 0.45, w * 0.42, 0.32)
+  // Total visual height includes crown
+  g.userData.kitHeight = crownY + HQ_STOREY_HEIGHT * (variant === 1 ? 4.2 : variant === 0 ? 2.8 : 1.6)
   return g
 }
 

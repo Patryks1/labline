@@ -11,21 +11,17 @@ export function trainingRemainingTime({
   targetPfDays,
   progressPfDays,
   allocatedPf,
-  minCalendarDays = 0,
-  daysElapsed = 0,
-}: Pick<TrainingJob, 'targetPfDays' | 'progressPfDays' | 'minCalendarDays' | 'daysElapsed'> & {
+}: Pick<TrainingJob, 'targetPfDays' | 'progressPfDays'> & {
   allocatedPf: number
 }) {
   const remainingPf = Math.max(0, targetPfDays - progressPfDays)
-  const calendarRemaining = Math.max(0, minCalendarDays - daysElapsed)
   const computeDone = remainingPf <= 1e-9
   const computeEta = computeDone ? 0 : allocatedPf > 0.05 ? remainingPf / allocatedPf : Infinity
 
   return {
-    calendarRemaining,
     computeDone,
     computeEta,
-    etaDays: Math.max(computeEta, calendarRemaining),
+    etaDays: computeEta,
   }
 }
 
@@ -54,8 +50,7 @@ export function classifyTrainingStatus({
   resources,
   completeReady,
   plateaued,
-  computeDone,
-  calendarRemaining,
+  launchReady = false,
 }: {
   failed?: boolean
   paused?: boolean
@@ -63,8 +58,7 @@ export function classifyTrainingStatus({
   resources?: TrainingResourceAllocation
   completeReady: boolean
   plateaued: boolean
-  computeDone: boolean
-  calendarRemaining: number
+  launchReady?: boolean
 }) {
   const ramBlocked = Boolean(
     resources && (!resources.ramReady || !resources.systemRamReady) && !failed && !paused && !completeReady,
@@ -74,7 +68,6 @@ export function classifyTrainingStatus({
   const powerBlocked = normalizedStall.includes('power') || normalizedStall.includes('brownout')
   const memoryBlocked = ramBlocked || Boolean(resources && resources.bottleneck !== 'none') || /\b(hbm|ram|memory)\b/.test(normalizedStall)
   const unstable = /\b(unstable|diverg|nan|numerical)\b/.test(normalizedStall)
-  const calendarWaiting = computeDone && calendarRemaining > 0 && !failed
   const visuallyBlocked = memoryBlocked || powerBlocked || incompatible || unstable
   const diagnosticStall = incompatible ? hardwareDiagnostic(resources) : stallReason || undefined
   const statusLabel = failed
@@ -91,14 +84,13 @@ export function classifyTrainingStatus({
               ? 'Unstable'
               : completeReady
                 ? 'Ready'
-                : calendarWaiting
-                  ? 'Calendar hold'
-                  : plateaued
+                : plateaued
                     ? 'Plateaued'
-                    : 'Progressing'
+                    : launchReady
+                      ? 'Launchable'
+                      : 'Progressing'
 
   return {
-    calendarWaiting,
     diagnosticStall,
     incompatible,
     memoryBlocked,

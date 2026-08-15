@@ -18,7 +18,6 @@ import {
   dataHallComputeMultiplier,
   isDcKind,
   isDcAnchor,
-  mapEnergy,
   mapTileAt,
 } from './map'
 import { seededId } from '../rng'
@@ -166,19 +165,6 @@ export function deployRacks(state: SimState, designId: string, count: number): S
   if (!stats.valid) return alert(state, 'warn', stats.errors[0] ?? 'Fix design first')
 
   const chassis = getChassis(design.chassisId)
-  const energy = mapEnergy(state)
-  // rack usage from map DC + already deployed custom racks
-  const fleet = fleetStats(state)
-  const free = Math.max(0, energy.rackCap - fleet.rackUnitsUsed)
-  const unitsNeeded = chassis.rackUnits * count
-  if (unitsNeeded > free) {
-    return alert(
-      state,
-      'warn',
-      `Need ${unitsNeeded} DC rack units, only ${free} free. Expand data halls.`,
-    )
-  }
-
   const need = new Map<string, number>()
   for (const p of design.placements) {
     need.set(p.moduleId, (need.get(p.moduleId) ?? 0) + count)
@@ -302,14 +288,18 @@ export function fleetStats(state: SimState): FleetStats {
     const layout = facilityId ? state.dataHallLayouts?.[facilityId] : undefined
     const operational = layout ? new Set(layout.analysis.operationalRackUnitIds) : null
     const placed = layout ? new Set(layout.objects.flatMap((object) => object.rackUnitId ? [object.rackUnitId] : [])) : null
+    const unitIds = normalized.unitIds ?? []
     const activeCount = operational
-      ? (normalized.unitIds ?? []).filter((unitId) => operational.has(unitId)).length
+      ? unitIds.filter((unitId) => operational.has(unitId)).length
       : r.count
     const placedCount = placed
-      ? (normalized.unitIds ?? []).filter((unitId) => placed.has(unitId)).length
+      ? unitIds.filter((unitId) => placed.has(unitId)).length
       : r.count
+    // A persisted layout is authoritative: disconnected or inaccessible racks
+    // never resurrect at partial throughput. Legacy layouts are repaired during
+    // save migration before this aggregation runs.
     const environmentThroughput = layout?.analysis.throughputMultiplier ?? 1
-    if (activeCount <= 0 && placedCount <= 0) continue
+    if (activeCount <= 0) continue
     const ram = sku.systemRamGb ?? sku.vramGb * 4
     const cpu = sku.cpuScore ?? Math.max(8, sku.flopsPf * 50)
     flopsPf += sku.flopsPf * activeCount * hallCompute * environmentThroughput
@@ -320,7 +310,7 @@ export function fleetStats(state: SimState): FleetStats {
     idleMw += (sku.accelerator?.idleMw ?? sku.mw * 0.3) * activeCount
     tokPerSec += sku.tokPerSec * activeCount * hallCompute * environmentThroughput
     gpuCount += (sku.accelerator?.deviceCount ?? 1) * activeCount
-    rackUnitsUsed += (r.rackUnits || sku.rackUnits) * placedCount
+    rackUnitsUsed += (r.rackUnits || sku.rackUnits) * Math.max(placedCount, activeCount)
     const existing = designRows.find((d) => d.designId === r.skuId)
     if (existing) {
       existing.count += activeCount

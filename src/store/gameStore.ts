@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { useUiStore } from "./uiStore";
 import { createGame, type CreateGameOpts } from "../sim/createGame";
+import { blendApiPrice, splitBlendedApiPrice } from "../sim/balance/pricing";
 import { tickDay, computeSnapshot } from "../sim/tick";
 import {
   startResearch,
@@ -20,11 +21,28 @@ import {
   keepInternal,
   releaseFromJob,
   releaseTrainingEarly,
+  captureTrainingCheckpoint,
+  createManualTrainingCheckpoint,
+  forkTrainingCheckpoint,
+  recoverFailedPostTrainFromCheckpoint,
+  rollbackTrainingJobToCheckpoint,
+  promoteTrainingCheckpoint,
+  discardTrainingCheckpoint,
   releaseModel,
   deleteModel,
   setModelApiPrice,
+  resolveTrainingCampaignEvent,
+  playerTrainingJobs,
+  withTrainingJobs,
 } from "../sim/systems/training";
+import { scheduleCheckpointEvaluation } from "../sim/systems/checkpointEvaluations";
+import type { CheckpointEvaluationRequest } from "../sim/balance/checkpointEvaluation";
 import { applyLabAction } from "../sim/systems/labActionKernel";
+import {
+  setActiveBalanceTuning,
+  resolveBalanceTuning,
+  type BalanceTuning,
+} from "../sim/balance/tuning";
 import {
   cancelSafetyCampaign,
   startSafetyCampaign,
@@ -57,7 +75,10 @@ import {
   applyInstantCheat,
   type InstantCheatAction,
 } from "../sim/systems/cheats";
-import { applyHallPlan, migrateDataHallLayouts } from "../sim/systems/dataHallLayouts";
+import {
+  applyHallPlan,
+  migrateDataHallLayouts,
+} from "../sim/systems/dataHallLayouts";
 import { facilityAnchorTiles } from "../sim/systems/worldAccess";
 import type { DataHallEditPlan } from "../sim/types";
 import {
@@ -78,8 +99,9 @@ import {
   submitLoanApplication,
 } from "../sim/systems/sharedMarkets";
 import {
-  buyDomainContract,
   buyDataPortfolio,
+  buyDataLotAmount,
+  buyAllFilteredDataLots,
   cancelSynthGen,
   enqueueAllDataPrunes,
   enqueueDataPrune,
@@ -92,6 +114,11 @@ import {
   purchaseDataPruneAudit,
   listDataSupplierOffers,
   acceptDataSupplierOffer,
+  acceptDataSupplierCounter,
+  proposeDataSupplierTerms,
+  counterDataSupplierOffer,
+  rejectDataSupplierCounter,
+  cancelDataSupplierContract,
   type DataPortfolioChannel,
 } from "../sim/systems/data";
 import { createPlan, updatePlan, deletePlan } from "../sim/systems/plans";
@@ -108,12 +135,15 @@ import {
 import type {
   Allocation,
   DataDomain,
+  DataSupplierTerms,
   PanelId,
   ProductPricing,
   SimState,
   Speed,
   StartTrainingOpts,
   SubPlan,
+  TrainingBenchmarkRequest,
+  TrainingCheckpointBranchDirection,
   BuildableKind,
   ChipDesignFocus,
   ChipDesignTechId,
@@ -201,7 +231,11 @@ interface GameStore {
   setPanel: (p: PanelId) => void;
   openHallEditor: (facilityId: string) => void;
   closeHallEditor: () => void;
-  applyHallEditorPlan: (plan: DataHallEditPlan) => { ok: boolean; error?: string; netCost: number };
+  applyHallEditorPlan: (plan: DataHallEditPlan) => {
+    ok: boolean;
+    error?: string;
+    netCost: number;
+  };
   /** Open Infrastructure → Overview (map) and expand the left rail. */
   openSites: () => void;
   openInfrastructureOverview: () => void;
@@ -215,9 +249,7 @@ interface GameStore {
   setSelectedRivalId: (id: string | null) => void;
   setMapTool: (tool: MapToolMode) => void;
   setMapOverlay: (overlay: MapOverlayMode) => void;
-  setMapViewport: (
-    viewport: MapViewport | null,
-  ) => void;
+  setMapViewport: (viewport: MapViewport | null) => void;
   selectTile: (x: number, y: number | null) => void;
   focusMapTile: (x: number, y: number) => void;
   /** Pan without changing selection, build mode, or main-map zoom. */
@@ -261,17 +293,54 @@ interface GameStore {
   ) => void;
   pauseTraining: (jobId: string, paused: boolean) => void;
   extendTraining: (jobId: string) => void;
+  resolveTrainingCampaignEvent: (jobId: string, choiceId: string) => void;
+  /** Auto-extend at the recommendation milestone instead of pausing. */
+  setTrainingAutoExtend: (jobId: string, on: boolean) => void;
+  /** Auto-advance to the next post-training stage when one completes. */
+  setTrainingAutoChain: (jobId: string, on: boolean) => void;
+  /** Merge balance-tuning overrides (pause-menu Balance tab). */
+  setBalanceTuning: (patch: Partial<BalanceTuning>) => void;
+  /** Restore all balance-tuning knobs to defaults. */
+  resetBalanceTuning: () => void;
   cancelTraining: (jobId: string) => void;
   selectPostTrain: (
     jobId: string,
     stage: Exclude<import("../sim/types").PostTrainStage, "none">,
   ) => void;
-  benchmarkTrainingJob: (jobId: string) => void;
+  benchmarkTrainingJob: (
+    jobId: string,
+    request?: TrainingBenchmarkRequest,
+  ) => void;
   advancePostTrain: (jobId?: string) => void;
   shipModel: () => void;
   keepInternal: (jobId?: string) => void;
   releaseFromJob: (jobId?: string) => void;
   releaseTrainingEarly: (jobId: string) => void;
+  captureTrainingCheckpoint: (jobId: string) => void;
+  createManualTrainingCheckpoint: (request: {
+    sourceJobId: string;
+    label?: string;
+    branchDirection?: TrainingCheckpointBranchDirection;
+  }) => void;
+  forkTrainingCheckpoint: (request: {
+    checkpointId: string;
+    direction: TrainingCheckpointBranchDirection;
+    label?: string;
+  }) => void;
+  rollbackTrainingJobToCheckpoint: (request: {
+    jobId: string;
+    checkpointId: string;
+  }) => void;
+  recoverFailedPostTrainFromCheckpoint: (request: {
+    jobId: string;
+    checkpointId: string;
+  }) => void;
+  promoteTrainingCheckpoint: (checkpointId: string) => void;
+  discardTrainingCheckpoint: (checkpointId: string) => void;
+  scheduleCheckpointEvaluation: (
+    checkpointId: string,
+    request: CheckpointEvaluationRequest,
+  ) => void;
   releaseModel: (id: string) => void;
   deleteModel: (id: string) => void;
   setModelApiPrice: (id: string, price: number | null) => void;
@@ -308,6 +377,8 @@ interface GameStore {
     pricePerMonth: number;
     usageMultiplier: number;
     modelIds?: string[];
+    includedMTokPerMonth?: number;
+    monthlyApiValueSubsidyGbp?: number;
   }) => void;
   updatePlan: (planId: string, patch: Partial<SubPlan>) => void;
   deletePlan: (planId: string) => void;
@@ -330,6 +401,19 @@ interface GameStore {
   ) => void;
   listDataSupplierOffers: () => ReturnType<typeof listDataSupplierOffers>;
   acceptDataSupplierOffer: (offerId: string, priceMultiplier?: number) => void;
+  proposeDataSupplierTerms: (
+    supplierId: string,
+    terms: DataSupplierTerms,
+  ) => void;
+  counterDataSupplierOffer: (
+    contractId: string,
+    terms: DataSupplierTerms,
+  ) => void;
+  acceptDataSupplierCounter: (contractId: string) => void;
+  rejectDataSupplierCounter: (contractId: string) => void;
+  cancelDataSupplierContract: (contractId: string) => void;
+  buyDataLotAmount: (lotId: string, amountMTok: number) => void;
+  buyAllFilteredDataLots: (offerIds: readonly string[]) => void;
   setMarketing: (n: number) => void;
   setMarketingChannel: (channel: MarketingChannel, n: number) => void;
   takeLoan: (offerId: string) => void;
@@ -359,9 +443,11 @@ interface GameStore {
     researchShare: number;
     qualityTier?: "hq" | "lq";
   }) => void;
-  startSynthBudget: (opts: { researchShare: number }) => void;
+  startSynthBudget: (opts: {
+    researchShare: number;
+    teacherModelIds?: Partial<Record<DataDomain, string>>;
+  }) => void;
   cancelSynthGen: (jobId: string) => void;
-  buyDomainContract: (contractId: string) => void;
   dismissOnboarding: () => void;
   setOnboardingDismissed: (dismissed: boolean) => void;
   /** Open new-game menu (does not start a run). */
@@ -584,17 +670,18 @@ export const useGameStore = create<GameStore>((set, get) => ({
         sequence: (store.researchFocusRequest?.sequence ?? 0) + 1,
       },
     })),
-  openHallEditor: (hallEditorFacilityId) => set((store) => ({
+  openHallEditor: (hallEditorFacilityId) =>
+    set((store) => ({
       state: migrateDataHallLayouts(store.state),
       hallEditorFacilityId,
       leftRailOpen: false,
       commandDockOpen: false,
-  })),
+    })),
   closeHallEditor: () => set({ hallEditorFacilityId: null }),
   applyHallEditorPlan: (plan) => {
-    const result = applyHallPlan(get().state, plan)
-    if (result.ok) set({ state: result.state })
-    return { ok: result.ok, error: result.error, netCost: result.netCost }
+    const result = applyHallPlan(get().state, plan);
+    if (result.ok) set({ state: result.state });
+    return { ok: result.ok, error: result.error, netCost: result.netCost };
   },
 
   openFleet: () =>
@@ -607,7 +694,9 @@ export const useGameStore = create<GameStore>((set, get) => ({
   openRackDesigner: (facilityId) =>
     set((store) => {
       const hall = facilityAnchorTiles(store.state).find(
-        (candidate) => (candidate.campusId ?? `facility:${candidate.x},${candidate.y}`) === facilityId,
+        (candidate) =>
+          (candidate.campusId ?? `facility:${candidate.x},${candidate.y}`) ===
+          facilityId,
       );
       return {
         activePanel: "racks",
@@ -742,7 +831,10 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
     // Physical ambient props and municipal campuses are inspectable. Flat
     // transport/water surfaces retain their historical non-selection behavior.
-    if ((tile.kind === "road" || tile.kind === "lake") && tile.owner === "neutral") {
+    if (
+      (tile.kind === "road" || tile.kind === "lake") &&
+      tile.owner === "neutral"
+    ) {
       set({ selectedTile: null });
       return;
     }
@@ -836,7 +928,10 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
   stepDay: () => {
     if (get().phase !== "playing") return;
-    set((st) => ({ state: tickDay(st.state) }));
+    set((st) => {
+      setActiveBalanceTuning(st.state.balanceTuning);
+      return { state: tickDay(st.state) };
+    });
     scheduleAutosave(get, (partial) => set(partial));
   },
 
@@ -895,12 +990,60 @@ export const useGameStore = create<GameStore>((set, get) => ({
     })),
   extendTraining: (jobId) =>
     set((st) => ({ state: extendTraining(st.state, jobId) })),
+  resolveTrainingCampaignEvent: (jobId, choiceId) =>
+    set((st) => ({
+      state: resolveTrainingCampaignEvent(st.state, jobId, choiceId),
+    })),
+  setTrainingAutoExtend: (jobId, on) =>
+    set((st) => {
+      const jobs = playerTrainingJobs(st.state);
+      if (!jobs.some((job) => job.id === jobId)) return st;
+      return {
+        state: withTrainingJobs(
+          st.state,
+          jobs.map((job) =>
+            job.id === jobId ? { ...job, autoExtend: on } : job,
+          ),
+        ),
+      };
+    }),
+  setTrainingAutoChain: (jobId, on) =>
+    set((st) => {
+      const jobs = playerTrainingJobs(st.state);
+      if (!jobs.some((job) => job.id === jobId)) return st;
+      return {
+        state: withTrainingJobs(
+          st.state,
+          jobs.map((job) =>
+            job.id === jobId ? { ...job, autoChainPostTrain: on } : job,
+          ),
+        ),
+      };
+    }),
+  setBalanceTuning: (patch) =>
+    set((st) => {
+      const merged = resolveBalanceTuning({
+        ...st.state.balanceTuning,
+        ...patch,
+      });
+      setActiveBalanceTuning(merged);
+      return { state: { ...st.state, balanceTuning: { ...merged } } };
+    }),
+  resetBalanceTuning: () =>
+    set((st) => {
+      setActiveBalanceTuning(null);
+      const next = { ...st.state };
+      delete next.balanceTuning;
+      return { state: next };
+    }),
   cancelTraining: (jobId) =>
     set((st) => ({ state: cancelTraining(st.state, jobId) })),
   selectPostTrain: (jobId, stage) =>
     set((st) => ({ state: selectPostTrain(st.state, jobId, stage) })),
-  benchmarkTrainingJob: (jobId) =>
-    set((st) => ({ state: benchmarkTrainingJob(st.state, jobId) })),
+  benchmarkTrainingJob: (jobId, request) =>
+    set((st) => ({
+      state: benchmarkTrainingJob(st.state, jobId, request),
+    })),
   advancePostTrain: (jobId) =>
     set((st) => ({ state: advancePostTrain(st.state, jobId) })),
   shipModel: () => set((st) => ({ state: shipModel(st.state) })),
@@ -910,6 +1053,34 @@ export const useGameStore = create<GameStore>((set, get) => ({
     set((st) => ({ state: releaseFromJob(st.state, jobId) })),
   releaseTrainingEarly: (jobId) =>
     set((st) => ({ state: releaseTrainingEarly(st.state, jobId) })),
+  captureTrainingCheckpoint: (jobId) =>
+    set((st) => ({ state: captureTrainingCheckpoint(st.state, jobId) })),
+  createManualTrainingCheckpoint: (request) =>
+    set((st) => ({
+      state: createManualTrainingCheckpoint(st.state, request),
+    })),
+  forkTrainingCheckpoint: (request) =>
+    set((st) => ({ state: forkTrainingCheckpoint(st.state, request) })),
+  rollbackTrainingJobToCheckpoint: (request) =>
+    set((st) => ({
+      state: rollbackTrainingJobToCheckpoint(st.state, request),
+    })),
+  recoverFailedPostTrainFromCheckpoint: (request) =>
+    set((st) => ({
+      state: recoverFailedPostTrainFromCheckpoint(st.state, request),
+    })),
+  promoteTrainingCheckpoint: (checkpointId) =>
+    set((st) => ({
+      state: promoteTrainingCheckpoint(st.state, checkpointId),
+    })),
+  discardTrainingCheckpoint: (checkpointId) =>
+    set((st) => ({
+      state: discardTrainingCheckpoint(st.state, checkpointId),
+    })),
+  scheduleCheckpointEvaluation: (checkpointId, request) =>
+    set((st) => ({
+      state: scheduleCheckpointEvaluation(st.state, checkpointId, request),
+    })),
   releaseModel: (id) => set((st) => ({ state: releaseModel(st.state, id) })),
   deleteModel: (id) => set((st) => ({ state: deleteModel(st.state, id) })),
   setModelApiPrice: (id, price) =>
@@ -985,17 +1156,17 @@ export const useGameStore = create<GameStore>((set, get) => ({
         p.apiPriceInPerMTok !== undefined ||
         p.apiPriceOutPerMTok !== undefined
       ) {
-        const pin = next.apiPriceInPerMTok ?? next.apiPricePerMTok * 0.35;
-        const pout = next.apiPriceOutPerMTok ?? next.apiPricePerMTok * 1.25;
+        const fallback = splitBlendedApiPrice(next.apiPricePerMTok);
+        const pin = next.apiPriceInPerMTok ?? fallback.priceIn;
+        const pout = next.apiPriceOutPerMTok ?? fallback.priceOut;
         next.apiPriceInPerMTok = pin;
         next.apiPriceOutPerMTok = pout;
         next.apiPricePerMTok =
-          Math.round((pin * 0.3 + pout * 0.7) * 1000) / 1000;
+          Math.round(blendApiPrice(pin, pout) * 1000) / 1000;
       } else if (p.apiPricePerMTok !== undefined) {
-        next.apiPriceInPerMTok =
-          Math.round(p.apiPricePerMTok * 0.35 * 1000) / 1000;
-        next.apiPriceOutPerMTok =
-          Math.round(p.apiPricePerMTok * 1.25 * 1000) / 1000;
+        const split = splitBlendedApiPrice(p.apiPricePerMTok);
+        next.apiPriceInPerMTok = Math.round(split.priceIn * 1000) / 1000;
+        next.apiPriceOutPerMTok = Math.round(split.priceOut * 1000) / 1000;
         next.apiPricePerMTok = p.apiPricePerMTok;
       }
       // Plans edits also update the active model's own in/out list (only fields touched).
@@ -1019,7 +1190,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
             ...m,
             apiPriceInPerMTok: pin,
             apiPriceOutPerMTok: pout,
-            apiPricePerMTok: Math.round((pin * 0.3 + pout * 0.7) * 1000) / 1000,
+            apiPricePerMTok: Math.round(blendApiPrice(pin, pout) * 1000) / 1000,
           };
         });
       }
@@ -1072,7 +1243,12 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
   submitFacilityOffer: (facilityId, amount) =>
     set((st) => ({
-      state: submitFacilityOffer(st.state, facilityId, st.state.playerLabId, amount),
+      state: submitFacilityOffer(
+        st.state,
+        facilityId,
+        st.state.playerLabId,
+        amount,
+      ),
     })),
   withdrawFacilityOffer: (offerId) =>
     set((st) => ({ state: withdrawFacilityOffer(st.state, offerId) })),
@@ -1098,6 +1274,34 @@ export const useGameStore = create<GameStore>((set, get) => ({
   acceptDataSupplierOffer: (offerId, priceMultiplier) =>
     set((st) => ({
       state: acceptDataSupplierOffer(st.state, offerId, priceMultiplier),
+    })),
+  proposeDataSupplierTerms: (supplierId, terms) =>
+    set((st) => ({
+      state: proposeDataSupplierTerms(st.state, supplierId, terms),
+    })),
+  counterDataSupplierOffer: (contractId, terms) =>
+    set((st) => ({
+      state: counterDataSupplierOffer(st.state, contractId, terms),
+    })),
+  acceptDataSupplierCounter: (contractId) =>
+    set((st) => ({
+      state: acceptDataSupplierCounter(st.state, contractId),
+    })),
+  rejectDataSupplierCounter: (contractId) =>
+    set((st) => ({
+      state: rejectDataSupplierCounter(st.state, contractId),
+    })),
+  cancelDataSupplierContract: (contractId) =>
+    set((st) => ({
+      state: cancelDataSupplierContract(st.state, contractId),
+    })),
+  buyDataLotAmount: (lotId, amountMTok) =>
+    set((st) => ({
+      state: buyDataLotAmount(st.state, lotId, amountMTok),
+    })),
+  buyAllFilteredDataLots: (offerIds) =>
+    set((st) => ({
+      state: buyAllFilteredDataLots(st.state, offerIds),
     })),
   setMarketing: (n) => set((st) => ({ state: setMarketing(st.state, n) })),
   setMarketingChannel: (channel, n) =>
@@ -1156,8 +1360,6 @@ export const useGameStore = create<GameStore>((set, get) => ({
     set((st) => ({ state: startSynthBudget(st.state, opts) })),
   cancelSynthGen: (jobId) =>
     set((st) => ({ state: cancelSynthGen(st.state, jobId) })),
-  buyDomainContract: (contractId) =>
-    set((st) => ({ state: buyDomainContract(st.state, contractId) })),
 
   dismissOnboarding: () =>
     set((st) => ({ state: { ...st.state, onboardingDismissed: true } })),
@@ -1206,20 +1408,22 @@ export const useGameStore = create<GameStore>((set, get) => ({
       });
       await yieldForPaint();
       resetAutosaveTracking(state.day);
+      setActiveBalanceTuning(state.balanceTuning);
       set({
         phase: "playing",
         loading: null,
         lifecycleError: null,
         saveStatus: "idle",
         state: { ...state, paused: true },
-        activePanel: "stats",
+        // HQ-first: enter build mode so the free starter HQ can be placed immediately.
+        activePanel: "build",
         rackWorkspaceTab: "fleet",
         selectedTile: null,
         mapFocusRequest: null,
         researchFocusRequest: null,
-        buildMode: null,
-        // Map-first: drawers start collapsed (icons only); Q / click opens workspace
-        leftRailOpen: false,
+        buildMode: "hq",
+        mapTool: "build",
+        leftRailOpen: true,
         commandDockOpen: false,
         commandView: "pnl",
         hotkeyHelpOpen: false,
@@ -1310,6 +1514,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       await yieldForPaint();
       resetAutosaveTracking(state.day);
       const loadedState = applyLoadedState(state);
+      setActiveBalanceTuning(loadedState.state.balanceTuning);
       useUiStore.getState().clearNegotiations();
       set({ ...loadedState, saveStatus: "idle" });
       return { ok: true as const };

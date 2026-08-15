@@ -131,10 +131,14 @@ export function TileInspector() {
   }
 
   if (isDcKind(tile.kind) && isDcAnchor(tile)) {
-    const bays = usage
-      ? `${usage.used}/${usage.capacity}`
-      : `${tile.racksUsed}/${tile.rackCapacity}`
-    metrics.push({ label: 'Bays', value: bays })
+    if (usage) {
+      metrics.push({ label: 'Placed', value: `${usage.used} rack-width` })
+      metrics.push({ label: 'Online', value: `${usage.live} rack-width` })
+      if (usage.staged > 0)
+        metrics.push({ label: 'Staged', value: `${usage.staged} rack-width` })
+    } else {
+      metrics.push({ label: 'Placed', value: `${tile.racksUsed} rack-width` })
+    }
   } else if (tile.kind === 'empty' && (tile.landValue ?? 0) > 0) {
     metrics.push({ label: 'Land', value: money(tile.landValue) })
   } else if ((tile.mwCapacity > 0 || tile.mwGeneration > 0) && isOurs) {
@@ -215,7 +219,7 @@ export function TileInspector() {
           </span>
           <button
             type="button"
-            className="rounded-md px-1.5 py-0.5 text-[0.8125rem] text-muted hover:bg-line/40 hover:text-bone"
+            className="tile-inspector__close flex min-h-11 min-w-11 items-center justify-center rounded-md text-[1rem] text-muted hover:bg-line/40 hover:text-bone"
             onClick={() => clearSelection()}
             aria-label="Close inspector"
           >
@@ -299,7 +303,7 @@ export function TileInspector() {
       {(isOurs || isRival || constructing) && isBuildableKind(tile.kind) && (
         <button
           type="button"
-          className="mt-2.5 w-full rounded-lg border border-mint/40 bg-mint/10 py-1.5 text-[0.75rem] font-medium text-mint hover:bg-mint/20"
+          className="mt-2.5 min-h-11 w-full rounded-lg border border-mint/40 bg-mint/10 px-3 py-2 text-[0.75rem] font-medium text-mint hover:bg-mint/20"
           onClick={goFleet}
           onPointerDown={(e) => e.stopPropagation()}
         >

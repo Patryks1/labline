@@ -10,7 +10,7 @@ describe('plan audience reviews', () => {
 
     const groups = buildPlanReviewGroups(state)
 
-    expect(groups.map((group) => group.planName)).toEqual(['Free', 'Pro'])
+    expect(groups.map((group) => group.planName)).toEqual(['Free', 'Pro', 'Max'])
     expect(groups[0]!.reviews.map((review) => review.id)).toEqual([
       'enterprise',
       'youtuber',

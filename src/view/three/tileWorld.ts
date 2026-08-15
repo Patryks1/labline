@@ -356,11 +356,12 @@ function heightForTile(t: MapTile, buildFactor: number): number {
       return 0.32 * b
     case 'office':
     case 'hq':
-      return 0.5 * b
+      // Visual tower height lives in buildingKits; this drives LOD kit scale only.
+      return 0.88 * b
     case 'hq_m':
-      return 0.58 * b
+      return 2.2 * b
     case 'hq_l':
-      return 0.72 * b
+      return 4.0 * b
     case 'lab':
       return 0.45 * b
     default:

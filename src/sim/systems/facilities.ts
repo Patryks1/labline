@@ -38,6 +38,7 @@ import {
   submitFacilityOffer,
 } from './facilityMarket'
 import { removeDataHallLayout } from './dataHallLayouts'
+import { deriveCityStats } from './cityStats'
 
 function alert(state: SimState, severity: 'info' | 'warn' | 'danger', message: string): SimState {
   return {
@@ -300,6 +301,8 @@ export interface CityGridConnectorCapacity {
   connectorCount: number
   totalMw: number
   committedMw: number
+  /** Municipal surplus still available to sell (after demand + existing imports). */
+  surplusMw: number
   availableMw: number
 }
 
@@ -309,7 +312,9 @@ export function cityGridConnectorCapacity(
   cityId: string,
 ): CityGridConnectorCapacity {
   const city = citiesOf(state).find((candidate) => candidate.id === cityId)
-  if (!city) return { connectorCount: 0, totalMw: 0, committedMw: 0, availableMw: 0 }
+  if (!city) {
+    return { connectorCount: 0, totalMw: 0, committedMw: 0, surplusMw: 0, availableMw: 0 }
+  }
   const connectors = commissionedPlayerGridConnectors(state).filter(
     (tile) =>
       tileDist(tile.x, tile.y, city.cx, city.cy) <= city.powerRadius,
@@ -318,12 +323,20 @@ export function cityGridConnectorCapacity(
   const committedMw = activeCityPowerContracts(state)
     .filter((contract) => contract.cityId === cityId)
     .reduce((sum, contract) => sum + contract.mw, 0)
-  const utilityRemainingMw = Math.max(0, city.powerBuyMw * 1.8 - committedMw)
+  const stats = deriveCityStats(state).find((row) => row.cityId === cityId)
+  // Sell only real municipal surplus. reserveMw already nets demand + committed
+  // imports against plant capacity (+ player exports into the city).
+  const surplusMw =
+    stats && stats.municipalCapacityMw > 0
+      ? Math.max(0, stats.reserveMw)
+      : Math.max(0, city.powerBuyMw * 1.8 - committedMw)
+  const connectorHeadroomMw = Math.max(0, totalMw - committedMw)
   return {
     connectorCount: connectors.length,
     totalMw,
     committedMw,
-    availableMw: Math.max(0, Math.min(totalMw - committedMw, utilityRemainingMw)),
+    surplusMw,
+    availableMw: Math.max(0, Math.min(connectorHeadroomMw, surplusMw)),
   }
 }
 
@@ -801,7 +814,7 @@ function clearParcel(tile: MapTile): MapTile {
 }
 
 export const CONSTRUCTION_FAST_TRACK_PREMIUM = 0.5
-export const CONSTRUCTION_FAST_TRACK_MIN_DAYS = 30
+export const CONSTRUCTION_FAST_TRACK_MIN_DAYS = 15
 
 export interface ConstructionFastTrackQuote {
   eligible: boolean
@@ -811,7 +824,7 @@ export interface ConstructionFastTrackQuote {
   acceleratedDays: number
 }
 
-/** One-time quote to halve a project's remaining schedule, never below 30 days. */
+/** One-time quote to halve a project's remaining schedule, never below the fast-track floor. */
 export function constructionFastTrackQuote(
   state: SimState,
   x: number,
@@ -834,12 +847,12 @@ export function constructionFastTrackQuote(
     return { eligible: false, reason: 'This project is already fast-tracked.', cost, remainingDays, acceleratedDays: remainingDays }
   }
   if (remainingDays <= CONSTRUCTION_FAST_TRACK_MIN_DAYS) {
-    return { eligible: false, reason: 'This project is already within 30 days of completion.', cost, remainingDays, acceleratedDays: remainingDays }
+    return { eligible: false, reason: `This project is already within ${CONSTRUCTION_FAST_TRACK_MIN_DAYS} days of completion.`, cost, remainingDays, acceleratedDays: remainingDays }
   }
   return { eligible: true, cost, remainingDays, acceleratedDays }
 }
 
-/** Pay a 50% capex premium to halve remaining construction time, with a 30-day floor. */
+/** Pay a 50% capex premium to halve remaining construction time, with a short-schedule floor. */
 export function fastTrackConstruction(state: SimState, x: number, y: number): SimState {
   const tile = resolveSellTile(state, x, y)
   const quote = constructionFastTrackQuote(state, x, y)
@@ -1252,6 +1265,7 @@ export function cityDashboard(state: SimState): {
       genInZone,
       connectorCount: connector.connectorCount,
       connectorMw: connector.totalMw,
+      connectorSurplusMw: connector.surplusMw,
       connectorAvailableMw: connector.availableMw,
     }
   })

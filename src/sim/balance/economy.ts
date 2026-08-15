@@ -136,7 +136,7 @@ export const SEGMENTS: SegmentDef[] = [
 ]
 
 /** Bump when persisted market demand needs a one-time normalization on load. */
-export const DEMAND_MODEL_VERSION = 3
+export const DEMAND_MODEL_VERSION = 5
 
 export const ECONOMY = {
   daysPerMonth: 30,
@@ -194,17 +194,18 @@ export const ECONOMY = {
   basePlanUsageMTokPerDay: 20 / 30,
   /**
    * API users: MTok/user/day at usageIntensity = 1.
-   * Higher than subs per-user so API is the bigger token pool at equal headcount.
+   * Tuned so capable, peer-priced API offers can match or beat subscription
+   * token demand on API-native segments (hobby/indie/startup/science/creative).
    */
-  apiBaseMTokPerUserDay: 0.009,
+  apiBaseMTokPerUserDay: 0.055,
   /**
    * Fraction of the addressable audience generating a useful AI workload on
    * an average day. Adoption is not the same thing as daily compute activity.
    */
-  marketDailyActiveUsageShare: 0.2,
+  marketDailyActiveUsageShare: 0.28,
   /**
-   * PF·day of inference work per MTok for a ~7B dense model at serveEff = 1.0.
-   * Lower = more tokens per PF (early small models need room to breathe).
+   * @deprecated Legacy constant. Prefer `pfPerMTokForModel` on a 7B dense
+   * reference. Retained for old saves/tests; not used by settlement.
    */
   pfPerMTokAt7B: 0.007,
   /** Soft ceiling for plan price/mo — higher needs token value + SOTA to justify */
@@ -222,10 +223,15 @@ export const ECONOMY = {
   rackOpexPerMwDay: 5_000,
   /** Facility shells, cooling, fleet operations, security, and maintenance. */
   facilityOpexMultiplier: 1,
-  /** Early util floor before software research — less punitive so one hall can ship product */
-  startingUtilCap: 0.48,
-  /** Early serving stack — research still pushes toward 1.0–1.4 */
-  startingServingEfficiency: 0.55,
+  /** Early util floor before software research — serving starts power-hungry */
+  startingUtilCap: 0.38,
+  /**
+   * Early serving stack. Decode MFU + this floor make dense 100B ~0.02 PF/MTok;
+   * research pushes toward {@link maxServingEfficiency}.
+   */
+  startingServingEfficiency: 0.3,
+  /** Soft cap applied in applyResearchEffectsToLab (late ASIC/fusion nodes). */
+  maxServingEfficiency: 1.8,
   startingTrainEfficiency: 0.55,
   startingPue: 1.45,
   startingTalent: 1.15,
@@ -297,11 +303,15 @@ export const ECONOMY = {
   },
 
   victory: {
-    share: 0.36,
+    share: 0.6,
     valuation: 42_000_000_000,
     capability: 76,
-    minDay: 90,
-    bankruptCash: -20_000_000,
+    minDay: 180,
+    sustainDays: 180,
+    minServeRate: 0.99,
+    minPaidServeRate: 0.995,
+    minHeadroom: 0.25,
+    bankruptCash: -500_000_000,
   },
 
   /** Max facility upgrade level */

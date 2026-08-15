@@ -30,12 +30,12 @@ export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boole
   return (
     <div className="intel-shell pointer-events-none">
       {!expanded ? (
-        <aside className="hud-surface pointer-events-auto relative m-2 ml-1 flex h-[calc(100%-1rem)] flex-col items-center gap-1 rounded-lg py-2">
+        <aside className="command-dock command-dock--collapsed hud-surface pointer-events-auto relative m-2 ml-1 flex h-[calc(100%-1rem)] flex-col items-center gap-1 rounded-lg py-2">
           <button
             type="button"
             title="Open intel dock"
             onClick={() => setOpen(true)}
-            className="flex h-8 w-8 items-center justify-center rounded-md text-muted transition hover:bg-panel-2 hover:text-bone"
+            className="flex min-h-11 min-w-11 items-center justify-center rounded-md text-muted transition hover:bg-panel-2 hover:text-bone"
           >
             <CaretLeft size="1rem" />
           </button>
@@ -46,7 +46,7 @@ export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boole
               aria-label={v.label}
               title={v.label}
               onClick={() => setView(v.id)}
-              className={`flex h-9 w-9 items-center justify-center rounded-md transition ${
+              className={`flex min-h-11 min-w-11 items-center justify-center rounded-md transition ${
                 view === v.id ? 'bg-mint/15 text-mint' : 'text-muted hover:bg-panel-2 hover:text-bone'
               }`}
             >
@@ -55,7 +55,7 @@ export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boole
           ))}
         </aside>
       ) : (
-        <aside className="hud-surface pointer-events-auto relative m-2 ml-1 flex h-[calc(100%-1rem)] min-w-0 flex-col overflow-hidden rounded-lg">
+        <aside className="command-dock command-dock--expanded hud-surface pointer-events-auto relative m-2 ml-1 flex h-[calc(100%-1rem)] min-w-0 flex-col overflow-hidden rounded-lg">
           <div className="relative z-10 flex items-center gap-1.5 border-b border-line/60 px-2 py-2">
             <div className="min-w-0 flex-1">
               <SegmentedTabs
@@ -73,7 +73,7 @@ export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boole
               type="button"
               title="Collapse"
               onClick={() => setOpen(false)}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted transition hover:bg-panel-2 hover:text-bone"
+              className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md text-muted transition hover:bg-panel-2 hover:text-bone"
             >
               <CaretRight size="1rem" />
             </button>

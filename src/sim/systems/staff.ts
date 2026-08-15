@@ -14,10 +14,13 @@ import {
   STAFF_WAGE_PER_DAY,
   STAFF_LABELS,
   HQ_STAFF_CAP,
+  BASE_REMOTE_TEAM_SEATS,
   cityTalentCapacity,
   cityTalentInitial,
 } from '../balance/staff'
+import { getResearchNode } from '../balance/research'
 import type { MapCity, SimState, StaffHeadcount, StaffRole } from '../types'
+import { chargeExpense } from './financeLedger'
 import { isHqAnchor, isHqKind } from './map'
 import {
   compactCompletedFacilitiesForOwner,
@@ -26,10 +29,7 @@ import {
 } from './worldAccess'
 import { queueTalentOrder } from './sharedMarkets'
 
-export { STAFF_ROLES, STAFF_LABELS, emptyStaff, staffTotal, talentFromStaff }
-
-/** Cloud-startup campaigns begin in a small leased office before owning a campus. */
-export const BASE_REMOTE_TEAM_SEATS = 12
+export { STAFF_ROLES, STAFF_LABELS, emptyStaff, staffTotal, talentFromStaff, BASE_REMOTE_TEAM_SEATS }
 
 export function playerStaff(state: SimState): StaffHeadcount {
   return clampStaff(state.player.staff ?? emptyStaff())
@@ -42,11 +42,38 @@ export function rivalStaff(state: SimState, rivalId: string): StaffHeadcount {
 
 /** Product-specific staffing target; generic rivals stay deliberately lean. */
 export function rivalResearcherHiringTarget(
-  rival: Pick<SimState['rivals'][number], 'archetype' | 'researchUnlocked'>,
+  rival: Pick<SimState['rivals'][number], 'archetype' | 'researchUnlocked'> &
+    Partial<Pick<SimState['rivals'][number], 'activeResearch' | 'researchQueue'>>,
 ): number {
-  return rival.archetype === 'multimodal' && !rival.researchUnlocked.includes('mm_omni')
-    ? 8
-    : 3
+  const nodeDepth = (nodeId: string, seen = new Set<string>()): number => {
+    if (seen.has(nodeId)) return 0
+    seen.add(nodeId)
+    const node = getResearchNode(nodeId)
+    if (!node.prereqs.length) return 0
+    return 1 + Math.max(...node.prereqs.map((id) => nodeDepth(id, new Set(seen))))
+  }
+  const staffNeed = (nodeId: string): number => {
+    const node = getResearchNode(nodeId)
+    if (node.minResearchers != null) return Math.max(1, node.minResearchers)
+    const table = [1, 2, 3, 5, 8, 12, 16, 20, 24, 28, 32]
+    return table[Math.min(nodeDepth(nodeId), table.length - 1)]!
+  }
+  const scheduled = [
+    ...(rival.activeResearch ? [rival.activeResearch] : []),
+    ...(rival.researchQueue ?? []),
+  ]
+  const scheduledNeed = scheduled.reduce((need, nodeId) => {
+    try {
+      return Math.max(need, staffNeed(nodeId))
+    } catch {
+      return need
+    }
+  }, 0)
+  const productNeed =
+    rival.archetype === 'multimodal' && !rival.researchUnlocked.includes('mm_omni')
+      ? 8
+      : 3
+  return Math.max(productNeed, scheduledNeed)
 }
 
 /** Desk seats from completed HQs. Identical for every lab controller. */
@@ -194,27 +221,26 @@ export function hireStaff(
     talentAvailable: addStaff(city.talentAvailable ?? emptyStaff(), role, -n),
   }
   const staff = addStaff(playerStaff(s), role, n)
-  return {
-    ...s,
-    map: {
-      ...s.map,
-      cities: cities.map((candidate, index) =>
-        index === ci ? city : ensureCityTalent(candidate),
-      ),
-    },
-    player: {
-      ...s.player,
-      cash: s.player.cash - cost,
-      staff,
-      talent: talentFromStaff(staff),
-      finance: {
-        ...s.player.finance,
-        cash: s.player.cash - cost,
-        dayTotalOut: s.player.finance.dayTotalOut + cost,
-        dayNet: s.player.finance.dayNet - cost,
-        lifetimeNet: s.player.finance.lifetimeNet - cost,
+  const charged = chargeExpense(
+    {
+      ...s,
+      map: {
+        ...s.map,
+        cities: cities.map((candidate, index) =>
+          index === ci ? city : ensureCityTalent(candidate),
+        ),
+      },
+      player: {
+        ...s.player,
+        staff,
+        talent: talentFromStaff(staff),
       },
     },
+    cost,
+    'hiring',
+  )
+  return {
+    ...charged,
     alerts: [
       {
         id: `hire-${s.day}-${cityId}-${role}-${n}`,
@@ -222,7 +248,7 @@ export function hireStaff(
         severity: 'info' as const,
         message: `${n} ${STAFF_LABELS[role].toLowerCase()} hired immediately in ${city.name} for $${(cost / 1e6).toFixed(2)}M.`,
       },
-      ...s.alerts,
+      ...charged.alerts,
     ].slice(0, 40),
   }
 }
@@ -275,16 +301,22 @@ export function poachRivalStaff(
     staff: addStaff(rs, role, -n),
     brandTrust: Math.max(20, rival.brandTrust - 1.5 * n),
   }
-  return {
-    ...state,
-    rivals,
-    player: {
-      ...state.player,
-      cash: state.player.cash - cost,
-      staff,
-      talent: talentFromStaff(staff),
-      brandTrust: Math.min(100, state.player.brandTrust + 0.4 * n),
+  const charged = chargeExpense(
+    {
+      ...state,
+      rivals,
+      player: {
+        ...state.player,
+        staff,
+        talent: talentFromStaff(staff),
+        brandTrust: Math.min(100, state.player.brandTrust + 0.4 * n),
+      },
     },
+    cost,
+    'hiring',
+  )
+  return {
+    ...charged,
     alerts: [
       {
         id: `poach-${rivalId}-${role}-${state.day}`,
@@ -292,7 +324,7 @@ export function poachRivalStaff(
         severity: 'info' as const,
         message: `Poached ${n}× ${STAFF_LABELS[role].toLowerCase()} from ${rival.name} (−$${(cost / 1e6).toFixed(1)}M).`,
       },
-      ...state.alerts,
+      ...charged.alerts,
     ].slice(0, 40),
   }
 }

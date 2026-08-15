@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   COMPUTE_OPTIMAL_TOKENS_PER_PARAMETER,
+  computeOptimalDensePfDays,
+  computeOptimalTrainingTokensMTok,
   denseTrainingPfDays,
   estimateTrainingEconomics,
   FLOPS_PER_PF_DAY,
@@ -21,6 +23,7 @@ import {
 } from './trainingPrecision'
 import { buildScaledModel } from './modelBuild'
 import { ECONOMY } from './economy'
+import { MODEL_SYSTEMS_WORK_MULTIPLIER } from './computeCalibration'
 
 describe('training formula v2', () => {
   it('matches exact C≈6ND reference values before calendar compression', () => {
@@ -31,7 +34,16 @@ describe('training formula v2', () => {
     expect(denseTrainingPfDays(70, 1_400_000)).toBeCloseTo(6805.5555555556, 7)
   })
 
-  it('applies four-times calendar compression after physical work', () => {
+  it('provides golden 20N dense work without changing campaign recipe pacing', () => {
+    expect(computeOptimalTrainingTokensMTok(70)).toBe(1_400_000)
+    expect(computeOptimalTrainingTokensMTok(405)).toBe(8_100_000)
+    expect(computeOptimalDensePfDays(1)).toBeCloseTo(1.3888888889, 9)
+    expect(computeOptimalDensePfDays(7)).toBeCloseTo(68.0555555556, 8)
+    expect(computeOptimalDensePfDays(70)).toBeCloseTo(6_805.5555555556, 7)
+    expect(computeOptimalDensePfDays(405)).toBeCloseTo(227_812.5, 6)
+  })
+
+  it('applies two-times calendar compression after physical work', () => {
     const gamePfDays = trainCostPfDays({
       paramsB: 1,
       family: 'dense',
@@ -39,8 +51,11 @@ describe('training formula v2', () => {
       trainingTokensMTok: 20_000,
       formulaVersion: 2,
     })
-    expect(TRAINING_CALENDAR_COMPRESSION).toBe(4)
-    expect(gamePfDays).toBeCloseTo(1.3888888889 / 4, 9)
+    expect(TRAINING_CALENDAR_COMPRESSION).toBe(2)
+    expect(gamePfDays).toBeCloseTo(
+      (1.3888888889 * MODEL_SYSTEMS_WORK_MULTIPLIER) / 2,
+      9,
+    )
   })
 
   it('charges every additional token with no high-volume clamp', () => {
@@ -75,7 +90,10 @@ describe('training formula v2', () => {
       trainingTokensMTok: 20_000,
       verificationTokensMTok: 2_000,
     })
-    expect(withVerify - withoutVerify).toBeCloseTo(verificationPfDays(1, 2_000) / 4, 9)
+    expect(withVerify - withoutVerify).toBeCloseTo(
+      (verificationPfDays(1, 2_000) * MODEL_SYSTEMS_WORK_MULTIPLIER) / 2,
+      9,
+    )
   })
 
   it('uses active MoE work plus a small routing/communication overhead', () => {
@@ -167,11 +185,11 @@ describe('training numerical formats', () => {
       0.08 *
       estimate.precision.upfrontCashMultiplier
 
-    expect(oldSetupCost).toBeGreaterThan(4_000)
-    expect(oldSetupCost).toBeLessThan(6_000)
+    expect(oldSetupCost).toBeGreaterThan(12_000)
+    expect(oldSetupCost).toBeLessThan(13_000)
     expect(estimate.setupCost / oldSetupCost).toBeCloseTo(25, 3)
-    expect(estimate.setupCost).toBeGreaterThan(100_000)
-    expect(estimate.setupCost).toBeLessThan(140_000)
+    expect(estimate.setupCost).toBeGreaterThan(310_000)
+    expect(estimate.setupCost).toBeLessThan(320_000)
   })
 
   it('makes FP32 the highest-cost, highest-ceiling training recipe', () => {
@@ -247,7 +265,7 @@ describe('training numerical formats', () => {
   it('uses conservative achieved throughput rather than peak marketing FLOPS', () => {
     expect(trainingFormatThroughput(1, {
       computeFormat: 'fp32', nativeWeightFormat: 'float', recipeVersion: 1,
-    })).toBeCloseTo(0.065)
+    })).toBeCloseTo(0.45)
     expect(trainingFormatThroughput(2, {
       computeFormat: 'fp8_hybrid', nativeWeightFormat: 'float', recipeVersion: 1,
     })).toBeCloseTo(1.7)
@@ -304,7 +322,8 @@ describe('training numerical formats', () => {
     expect(float.persistentStateGb).toBe(1_120)
     expect(ternary.persistentStateGb).toBe(float.persistentStateGb)
     expect(float.packedCheckpointGb).toBe(140)
-    expect(ternary.packedCheckpointGb).toBeCloseTo(13.825, 6)
+    // 2-bit packing + 15% scale overhead — still ~7× smaller than BF16.
+    expect(ternary.packedCheckpointGb).toBeCloseTo(20.125, 6)
   })
 
   it('conserves raw PF while weighting eligible concurrent jobs', () => {

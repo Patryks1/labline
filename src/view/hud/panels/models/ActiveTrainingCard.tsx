@@ -1,63 +1,69 @@
-import { useState } from 'react'
-import type { PostTrainStage, TrainingJob } from '../../../../sim/types'
+import { useState } from "react";
+import { useGameStore } from "../../../../store/gameStore";
+import type {
+  PostTrainStage,
+  TrainingJob,
+} from "../../../../sim/types";
 import {
   canReleaseTrainingJob,
   earlyReleasePenalty,
   trainingMinimumStatus,
   type TrainingResourceAllocation,
-} from '../../../../sim/systems/training'
-import { formatParams } from '../../../../sim/balance/training'
-import { formatTokens, DATA_DOMAINS, DATA_DOMAIN_META } from '../../../../sim/balance/data'
-import { money, num } from '../../format'
-import { GameCard, LiveDot, MeterBar, StatRow } from '../../ui/kit'
-import { HudButton, StatusChip } from '../../ui/HudPrimitives'
-import { ResearchUnlockLink } from '../../ui/ResearchUnlockLink'
-import { TrainingLossChart } from './TrainingLossChart'
-import { SafetyCampaignSection } from './SafetyCampaignSection'
-import type { Model, SafetyCampaign, SafetyCampaignIntensity } from '../../../../sim/types'
+} from "../../../../sim/systems/training";
+import {
+  formatParams,
+  fundedTrainingMaturity,
+} from "../../../../sim/balance/training";
+import { postTrainTargetPfDays } from "../../../../sim/balance/postTraining";
+import {
+  formatTokens,
+  DATA_DOMAINS,
+  DATA_DOMAIN_META,
+} from "../../../../sim/balance/data";
+import { money, num } from "../../format";
+import { GameCard, LiveDot, MeterBar, StatRow } from "../../ui/kit";
+import { HudButton, StatusChip } from "../../ui/HudPrimitives";
+import { ResearchUnlockLink } from "../../ui/ResearchUnlockLink";
+import {
+  TrainingLossChart,
+  type TrainingLossCheckpointMarker,
+} from "./TrainingLossChart";
+import { architectureBlueprintProfile } from "../../../../sim/balance/architectureFrontiers";
 import {
   classifyTrainingStatus,
   trainingReleaseDisabledReason,
   trainingRemainingTime,
-} from './trainingPresentation'
+} from "./trainingPresentation";
 
-type TrainStage = Exclude<PostTrainStage, 'none'>
+type TrainStage = Exclude<PostTrainStage, "none">;
 
 const POST_TRAIN_META: Record<
   TrainStage,
-  { feature: string; research?: string; target: number; compute: string; data: string; spike: string }
+  { feature: string; research?: string; data: string; spike: string }
 > = {
   sft: {
-    feature: 'Instruction following',
-    target: 4,
-    compute: '~4 PF target units',
-    data: 'Curated instruction data',
-    spike: '+0.2–0.5, then recovery',
+    feature: "Instruction following",
+    data: "Curated instruction data",
+    spike: "+0.2–0.5, then recovery",
   },
   rlhf: {
-    feature: 'Preference alignment',
-    research: 'align_rlhf',
-    target: 8,
-    compute: '~8 PF target units',
-    data: 'Preference comparisons',
-    spike: '+0.3–0.7, then recovery',
+    feature: "Preference alignment",
+    research: "align_rlhf",
+    data: "Preference comparisons",
+    spike: "+0.3–0.7, then recovery",
   },
   process: {
-    feature: 'Process reward',
-    research: 'align_process',
-    target: 10,
-    compute: '~10 PF target units',
-    data: 'Step-level judgments',
-    spike: '+0.4–0.8, then recovery',
+    feature: "Process reward",
+    research: "align_process",
+    data: "Step-level judgments",
+    spike: "+0.4–0.8, then recovery",
   },
   tools: {
-    feature: 'Tool use in benchmarks',
-    target: 6,
-    compute: '~6 PF target units',
-    data: 'Tool-call trajectories',
-    spike: '+0.2–0.6, then recovery',
+    feature: "Tool use in benchmarks",
+    data: "Tool-call trajectories",
+    spike: "+0.2–0.6, then recovery",
   },
-}
+};
 
 export function ActiveTrainingCard({
   job,
@@ -66,78 +72,106 @@ export function ActiveTrainingCard({
   jobs,
   unlocked,
   day,
+  cash,
   onPriority,
   onPause,
   onCancel,
   onRelease,
-  onBenchmark,
   onKeepInternal,
-  onExtend,
+  onBenchmark,
+  onSaveCheckpoint,
+  onRecoverFromCheckpoint,
   onSelectPostTrain,
-  safetyProps,
+  checkpointMarkers = [],
 }: {
-  job: TrainingJob
-  trainingPoolPf: number
-  resources?: TrainingResourceAllocation
-  jobs: TrainingJob[]
-  unlocked: string[]
-  day: number
-  onPriority: (jobId: string, priority: number, reservedPf?: number) => void
-  onPause: (jobId: string, paused: boolean) => void
-  onCancel: (jobId: string) => void
-  onRelease: (jobId: string) => void
-  onBenchmark: (jobId: string) => void
-  onKeepInternal: (jobId: string) => void
-  onExtend?: (jobId: string) => void
-  onSelectPostTrain: (jobId: string, stage: Exclude<PostTrainStage, 'none'>) => void
-  safetyProps?: {
-    model: Model | null
-    campaign: SafetyCampaign | null
-    intensity: SafetyCampaignIntensity
-    setIntensity: (value: SafetyCampaignIntensity) => void
-    researchers: number
-    setResearchers: (value: number) => void
-    researcherCount: number
-    estimate: ReturnType<typeof import('../../../../sim/systems/safetyCampaigns').safetyCampaignEstimate> | null
-    onStart: () => void
-    onCancel: () => void
-  }
+  job: TrainingJob;
+  trainingPoolPf: number;
+  resources?: TrainingResourceAllocation;
+  jobs: TrainingJob[];
+  unlocked: string[];
+  day: number;
+  cash: number;
+  onPriority: (jobId: string, priority: number, reservedPf?: number) => void;
+  onPause: (jobId: string, paused: boolean) => void;
+  onCancel: (jobId: string) => void;
+  onRelease: (jobId: string) => void;
+  onKeepInternal: (jobId: string) => void;
+  onBenchmark: (jobId: string) => void;
+  onSaveCheckpoint: (jobId: string) => void;
+  onRecoverFromCheckpoint: (jobId: string, checkpointId: string) => void;
+  checkpointMarkers?: TrainingLossCheckpointMarker[];
+  onSelectPostTrain: (
+    jobId: string,
+    stage: Exclude<PostTrainStage, "none">,
+  ) => void;
 }) {
-  const [cancelConfirm, setCancelConfirm] = useState(false)
-  const progress = job.targetPfDays > 0 ? job.progressPfDays / job.targetPfDays : 0
-  const pct = Math.round(Math.max(0, Math.min(1, progress)) * 100)
+  const [cancelConfirm, setCancelConfirm] = useState(false);
+  const [launchConfirm, setLaunchConfirm] = useState(false);
+  const resolveTrainingCampaignEvent = useGameStore(
+    (s) => s.resolveTrainingCampaignEvent,
+  );
+  const researcherCount = useGameStore(
+    (s) => s.state.player.staff?.researcher ?? 0,
+  );
+  const dataManifest = useGameStore((s) =>
+    s.state.player.data.manifests?.find(
+      (manifest) => manifest.id === job.dataManifestId,
+    ),
+  );
+  const dataEvidence = job.dataEvidence ?? dataManifest;
+  const blueprint = architectureBlueprintProfile({
+    family: job.family,
+    backbone: job.backbone,
+    verifiedRecursiveCapabilityBonus:
+      job.campaignModifiers?.verifiedRecursiveCapabilityBonus,
+  });
+  const progress =
+    job.targetPfDays > 0 ? job.progressPfDays / job.targetPfDays : 0;
+  const pct = Math.round(Math.max(0, Math.min(1, progress)) * 100);
   const prioritySum = Math.max(
     1,
-    jobs.reduce((sum, candidate) => sum + (candidate.paused || candidate.failed ? 0 : candidate.computePriority ?? 50), 0),
-  )
-  const allocatedPf =
-    resources
-      ? resources.effectivePf
-      : job.failed || job.paused
+    jobs.reduce(
+      (sum, candidate) =>
+        sum +
+        (candidate.paused || candidate.failed
+          ? 0
+          : (candidate.computePriority ?? 50)),
+      0,
+    ),
+  );
+  const allocatedPf = resources
+    ? resources.effectivePf
+    : job.failed || job.paused
       ? 0
-      : trainingPoolPf * ((job.computePriority ?? 50) / prioritySum)
-  const { calendarRemaining, computeDone, etaDays } = trainingRemainingTime({
+      : trainingPoolPf * ((job.computePriority ?? 50) / prioritySum);
+  const { computeDone, etaDays } = trainingRemainingTime({
     targetPfDays: job.targetPfDays,
     progressPfDays: job.progressPfDays,
     allocatedPf,
-    minCalendarDays: job.minCalendarDays,
-    daysElapsed: job.daysElapsed,
-  })
-  const currentLoss = job.lossHistory?.at(-1)?.loss
-  const recommended = job.recommendedPfDays ?? job.targetPfDays
-  const atRecommended = job.progressPfDays + 1e-9 >= recommended
-  const recommendedProgress = recommended > 0 ? job.progressPfDays / recommended : progress
-  const releaseGate = canReleaseTrainingJob(job)
-  const releaseDisabledReason = trainingReleaseDisabledReason(releaseGate)
-  const minimum = trainingMinimumStatus(job)
-  const earlyPenalty = earlyReleasePenalty(job)
-  const economics = job.economics
-  const snapshots = job.benchmarkSnapshots ?? []
-  const canBenchmarkMid = !job.failed && progress >= 0.1 && (job.lastBenchmarkDay == null || day - job.lastBenchmarkDay >= 7)
-  const done = minimum.ok
-  const awaiting = Boolean(job.awaitingDecision)
+  });
+  const currentLoss = job.lossHistory?.at(-1)?.loss;
+  const recommended = job.recommendedPfDays ?? job.targetPfDays;
+  const recommendedProgress =
+    recommended > 0 ? job.progressPfDays / recommended : progress;
+  const releaseGate = canReleaseTrainingJob(job);
+  const releaseDisabledReason = trainingReleaseDisabledReason(releaseGate);
+  const minimum = trainingMinimumStatus(job);
+  const earlyPenalty = earlyReleasePenalty(job);
+  const economics = job.economics;
+  const snapshots = job.benchmarkSnapshots ?? [];
+  const done = minimum.completeReady;
+  const launchable = minimum.launchReady;
+  const checkpointEligible =
+    job.progressPfDays > 1e-9 || job.postTrainProgress > 1e-9;
+  const recoveryMarker = checkpointMarkers.find(
+    (marker) => marker.id === job.failureRecoveryCheckpointId,
+  );
+  const postTrainingActive =
+    job.postTrain !== "none" &&
+    job.postTrainProgress + 1e-9 < job.postTrainTarget;
+  const investmentMaturity = fundedTrainingMaturity(job);
+  const haircutCopy = `Expected haircut at ${pct}% compute: capability ×${earlyPenalty.capabilityMultiplier.toFixed(2)}, benchmarks ×${earlyPenalty.benchmarkMultiplier.toFixed(2)}, reliability ×${earlyPenalty.reliabilityMultiplier.toFixed(2)}.`;
   const {
-    calendarWaiting,
     diagnosticStall,
     incompatible,
     memoryBlocked,
@@ -153,62 +187,139 @@ export function ActiveTrainingCard({
     resources,
     completeReady: minimum.completeReady,
     plateaued: minimum.plateaued,
-    computeDone,
-    calendarRemaining,
-  })
-  const statusTone = job.failed || memoryBlocked || powerBlocked || incompatible || unstable
-    ? 'danger'
-    : job.paused || calendarWaiting
-      ? 'warning'
-      : minimum.completeReady
-        ? 'positive'
-        : 'warning'
+    launchReady: launchable,
+  });
+  const statusTone =
+    job.failed || memoryBlocked || powerBlocked || incompatible || unstable
+      ? "danger"
+      : job.paused
+        ? "warning"
+        : minimum.completeReady
+          ? "positive"
+          : "warning";
+  const optimizing =
+    done &&
+    !postTrainingActive &&
+    !job.paused &&
+    !job.pendingCampaignEvent &&
+    (job.computePriority ?? 50) > 0 &&
+    allocatedPf > 0.05 &&
+    !visuallyBlocked;
+  const postTrainingLive =
+    done &&
+    postTrainingActive &&
+    !job.paused &&
+    !job.pendingCampaignEvent &&
+    (job.computePriority ?? 50) > 0 &&
+    allocatedPf > 0.05 &&
+    !visuallyBlocked;
+  const targetCompleteIdle =
+    done &&
+    !postTrainingActive &&
+    !optimizing &&
+    !job.failed &&
+    !visuallyBlocked &&
+    !job.paused &&
+    !job.pendingCampaignEvent &&
+    ((job.computePriority ?? 50) <= 0 || allocatedPf <= 0.05);
+  const fundedContinuationLabel =
+    investmentMaturity.fundedRatio < 10
+      ? `${investmentMaturity.fundedRatio.toFixed(2)}× funded`
+      : `${num(job.progressPfDays, 1)} PF invested · ${
+          investmentMaturity.extraSignal >= 0.995
+            ? "maturity saturated"
+            : `maturity ${Math.round(investmentMaturity.extraSignal * 100)}%`
+        }`;
+  const displayedStatusLabel = optimizing
+    ? `Optimizing · ${fundedContinuationLabel}`
+    : targetCompleteIdle
+      ? "Target complete · idle"
+      : postTrainingLive
+        ? `Post-training · ${job.postTrain.toUpperCase()}`
+        : postTrainingActive && !job.paused && !visuallyBlocked
+          ? "Post-training · idle"
+        : statusLabel;
   const etaDetail =
     etaDays === Infinity
-      ? 'stalled'
-      : calendarWaiting
-        ? `calendar hold · ${calendarRemaining}d left`
-        : computeDone
-          ? 'compute done'
-          : `~${etaDays.toFixed(0)}d left`
+      ? "stalled"
+      : computeDone
+          ? optimizing
+            ? `${fundedContinuationLabel} · optimizing`
+            : postTrainingLive
+              ? "base target complete · post-training active"
+              : postTrainingActive && !job.paused
+                ? "base target complete · post-training idle"
+              : targetCompleteIdle
+                ? "target complete · idle"
+                : job.paused
+                  ? "target complete · paused"
+                  : "target complete"
+          : `~${etaDays.toFixed(0)}d left`;
   const modeLabel =
-    job.mode === 'distill'
+    job.mode === "distill"
       ? `Distill · teacher ${Math.round((job.distillTeacherShare ?? 0.72) * 100)}%`
-      : job.mode === 'continue'
-        ? 'Continuation'
-        : 'Pretrain'
+      : job.mode === "continue"
+        ? "Continuation"
+        : "Pretrain";
   const jobWithEnergy = job as TrainingJob & {
-    energyMWh?: number
-    cumulativeMWh?: number
-    energyMwDays?: number
-    mwDays?: number
-    powerMw?: number
-    trainingPowerMw?: number
-  }
-  const directMWh = jobWithEnergy.energyMWh ?? jobWithEnergy.cumulativeMWh
-  const directMwDays = jobWithEnergy.energyMwDays ?? jobWithEnergy.mwDays
-  const powerMw = jobWithEnergy.trainingPowerMw ?? jobWithEnergy.powerMw
-  const estimatedMwDays = powerMw != null ? Math.max(0, powerMw) * Math.max(0, job.daysElapsed ?? 0) : undefined
-  const chartMwDays = directMwDays ?? (directMWh != null ? directMWh / 24 : estimatedMwDays)
-  const chartMWh = directMWh ?? (chartMwDays != null ? chartMwDays * 24 : undefined)
-  const energyEstimated = directMWh == null && directMwDays == null && chartMWh != null
-  const stageHistory = new Set((job.lossHistory ?? []).filter((point) => point.stage !== 'base').map((point) => point.stage as TrainStage))
+    energyMWh?: number;
+    cumulativeMWh?: number;
+    energyMwDays?: number;
+    mwDays?: number;
+    powerMw?: number;
+    trainingPowerMw?: number;
+  };
+  const directMWh = jobWithEnergy.energyMWh ?? jobWithEnergy.cumulativeMWh;
+  const directMwDays = jobWithEnergy.energyMwDays ?? jobWithEnergy.mwDays;
+  const powerMw = jobWithEnergy.trainingPowerMw ?? jobWithEnergy.powerMw;
+  const estimatedMwDays =
+    powerMw != null
+      ? Math.max(0, powerMw) * Math.max(0, job.daysElapsed ?? 0)
+      : undefined;
+  const chartMwDays =
+    directMwDays ?? (directMWh != null ? directMWh / 24 : estimatedMwDays);
+  const chartMWh =
+    directMWh ?? (chartMwDays != null ? chartMwDays * 24 : undefined);
+  const energyEstimated =
+    directMWh == null && directMwDays == null && chartMWh != null;
+  const stageHistory = new Set(
+    (job.lossHistory ?? [])
+      .filter((point) => point.stage !== "base")
+      .map((point) => point.stage as TrainStage),
+  );
 
   return (
     <GameCard
       eyebrow="Live training"
       title={
         <span className="flex items-center gap-2">
-          <LiveDot className={job.failed || visuallyBlocked ? 'text-danger' : job.paused || calendarWaiting ? 'text-amber' : 'text-train'} />
+          <LiveDot
+            className={
+              job.failed || visuallyBlocked
+                ? "text-danger"
+                : job.paused
+                  ? "text-amber"
+                  : "text-train"
+            }
+          />
           <span className="truncate">{job.name}</span>
         </span>
       }
-      tone={job.failed || visuallyBlocked ? 'danger' : 'train'}
-      live={!job.failed && !job.paused && !done && !visuallyBlocked && !calendarWaiting}
-      className={!job.failed && !done && !visuallyBlocked && !calendarWaiting ? 'live-glow' : ''}
+      tone={job.failed || visuallyBlocked ? "danger" : "train"}
+      live={
+        !job.failed &&
+        !job.paused &&
+        (!done || optimizing || postTrainingLive) &&
+        !visuallyBlocked
+      }
+      className={
+        !job.failed && (!done || optimizing || postTrainingLive) && !visuallyBlocked
+          ? "live-glow"
+          : ""
+      }
       actions={
         <div className="flex items-center gap-1.5">
-          <StatusChip tone={statusTone}>{statusLabel}</StatusChip>
+          <StatusChip tone={statusTone}>{displayedStatusLabel}</StatusChip>
         </div>
       }
     >
@@ -216,7 +327,7 @@ export function ActiveTrainingCard({
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <p className="text-[0.8125rem] text-muted">
             {modeLabel} · {job.family}
-            {job.family === 'moe'
+            {job.family === "moe"
               ? ` · ${formatParams(job.targetParamsB)} / ${formatParams(job.activeParamsB ?? 0)} active`
               : ` · ${formatParams(job.targetParamsB)}`}
           </p>
@@ -226,11 +337,29 @@ export function ActiveTrainingCard({
             </p>
             {resources ? (
               <>
-                <p className={resources.bottleneck === 'none' ? 'text-muted' : 'text-danger'}>
-                  HBM {num(resources.ramAllocatedGb, 0)} / {num(resources.ramRequiredGb, 0)} GB · host RAM {num(resources.systemRamAllocatedGb, 0)} / {num(resources.systemRamRequiredGb, 0)} GB
+                <p
+                  className={
+                    resources.bottleneck === "none"
+                      ? "text-muted"
+                      : "text-danger"
+                  }
+                >
+                  HBM {num(resources.ramAllocatedGb, 0)} /{" "}
+                  {num(resources.ramRequiredGb, 0)} GB · host RAM{" "}
+                  {num(resources.systemRamAllocatedGb, 0)} /{" "}
+                  {num(resources.systemRamRequiredGb, 0)} GB
                 </p>
-                <p className={resources.bottleneck === 'none' ? 'text-muted' : 'text-danger'}>
-                  Bottleneck: {resources.bottleneck === 'none' ? 'none' : resources.bottleneck.replace('_', ' ')}
+                <p
+                  className={
+                    resources.bottleneck === "none"
+                      ? "text-muted"
+                      : "text-danger"
+                  }
+                >
+                  Bottleneck:{" "}
+                  {resources.bottleneck === "none"
+                    ? "none"
+                    : resources.bottleneck.replace("_", " ")}
                 </p>
               </>
             ) : null}
@@ -240,76 +369,324 @@ export function ActiveTrainingCard({
         <MeterBar
           label="Progress"
           value={progress}
-          detail={`${pct}% · ${etaDetail} · calendar ${job.daysElapsed ?? 0}/${job.minCalendarDays ?? 0}d`}
+          detail={
+            done
+              ? `${etaDetail} · ${num(job.progressPfDays, 1)} / ${num(job.recommendedPfDays ?? job.targetPfDays, 1)} PF funded`
+              : `${pct}% · ${etaDetail} · ${num(Math.max(0, job.targetPfDays - job.progressPfDays), 1)} PF remaining`
+          }
           tone="train"
-          live={!job.failed && !job.paused && !done && !ramBlocked && !calendarWaiting}
+          live={
+            !job.failed &&
+            !job.paused &&
+            (!done || optimizing || postTrainingLive) &&
+            !ramBlocked
+          }
         />
 
-        <div className="grid grid-cols-3 gap-2">
-          <StatRow label="Loss" value={currentLoss == null ? '—' : currentLoss.toFixed(3)} strong />
+        <div className="grid grid-cols-2 gap-2 min-[420px]:grid-cols-3">
+          <StatRow
+            label="Loss"
+            value={currentLoss == null ? "—" : currentLoss.toFixed(3)}
+            strong
+          />
           <StatRow
             label="Data"
             value={formatTokens(
-              job.trainMTok + job.verifyMTok || job.dataPlan?.totalMTok || job.dataPlan?.totalUnits || 0,
+              job.trainMTok + job.verifyMTok ||
+                job.dataPlan?.totalMTok ||
+                job.dataPlan?.totalUnits ||
+                0,
             )}
           />
           <StatRow
             label="Burn"
-            value={job.cashBurnPerDay ? `${money(job.cashBurnPerDay)}/d` : '—'}
+            value={job.cashBurnPerDay ? `${money(job.cashBurnPerDay)}/d` : "—"}
             tone="warning"
           />
         </div>
+
+        <details className="group rounded-md border border-line/50 bg-void/25">
+          <summary className="flex min-h-11 cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-2.5 py-2 marker:hidden">
+            <span className="hud-eyebrow">{blueprint.label} frontier</span>
+            <span className="inline-flex items-center gap-2 font-mono text-[0.6875rem] tabular-nums text-bone">
+              cap {blueprint.pretrainingCapabilityCap}
+              <span
+                aria-hidden="true"
+                className="text-muted transition-transform group-open:rotate-180"
+              >
+                ⌄
+              </span>
+            </span>
+          </summary>
+          <div className="border-t border-line/40 px-2.5 pb-2.5 pt-2">
+            {blueprint.id === "omni" ? (
+              <p className="font-mono text-[0.625rem] text-research">
+                Verified recursive ceiling {blueprint.verifiedRecursiveCapabilityCap}
+              </p>
+            ) : null}
+            <p className="mt-1 text-[0.6875rem] leading-5 text-muted">
+              {blueprint.advantages[0]} · {blueprint.constraints[0]}
+            </p>
+            <p className="font-mono text-[0.625rem] leading-5 text-muted">
+              {blueprint.dataDemandMultiplier.toFixed(2)}× data breadth ·{" "}
+              {blueprint.outputTokenDemandMultiplier.toFixed(2)}× frontier
+              output burden · {blueprint.trainingStability} stability
+            </p>
+          </div>
+        </details>
 
         {job.failed ? (
           <div className="rounded-md border border-danger/35 bg-danger/10 p-2.5">
             <div className="flex items-center justify-between gap-2">
               <strong className="text-[0.8125rem] text-danger">
-                {job.failureStage === 'base' ? 'Base training failed' : `${job.failureStage?.toUpperCase()} failed`}
+                {job.failureStage === "base"
+                  ? "Base training failed"
+                  : `${job.failureStage?.toUpperCase()} failed`}
               </strong>
-              <span className="font-mono text-[0.6875rem] tabular-nums text-muted">Day {job.failureDay ?? day}</span>
+              <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
+                Day {job.failureDay ?? day}
+              </span>
             </div>
-            <p className="mt-1 text-[0.75rem] text-muted">{job.failureReason}</p>
+            <p className="mt-1 text-[0.75rem] text-muted">
+              {job.failureReason}
+            </p>
+            {job.failureRecord ? (
+              <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <StatRow
+                  label="Frozen risk"
+                  value={`${Math.round(job.failureRecord.probability * 100)}% · ${job.failureRecord.riskBand}`}
+                />
+                <StatRow
+                  label="Failed at"
+                  value={`${Math.round(job.failureRecord.stageProgress * 100)}%`}
+                />
+                <StatRow
+                  label="Recovery"
+                  value={recoveryMarker?.label ?? "No checkpoint"}
+                />
+                <StatRow label="Refund" value="None" />
+              </div>
+            ) : null}
+            {(job.failureRecord?.factors.length ?? 0) > 0 ? (
+              <p className="mt-2 font-mono text-[0.625rem] leading-5 text-danger/80">
+                Factors · {job.failureRecord!.factors.join(" · ")}
+              </p>
+            ) : null}
           </div>
         ) : null}
 
-        {diagnosticStall ? <p className="text-[0.75rem] text-amber">{diagnosticStall}</p> : null}
-        {calendarWaiting && !job.stallReason ? (
-          <p className="text-[0.75rem] text-amber">
-            {minimum.reason ??
-              `${calendarRemaining} funded active calendar day${calendarRemaining === 1 ? '' : 's'} remain for integration and validation.`}
-          </p>
+        {job.pendingCampaignEvent ? (
+          <div
+            className={`rounded-md border p-3 ${
+              job.pendingCampaignEvent.severity === "opportunity"
+                ? "border-research/45 bg-research/10"
+                : job.pendingCampaignEvent.severity === "critical"
+                  ? "border-danger/45 bg-danger/10"
+                  : "border-amber/45 bg-amber/10"
+            }`}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <p className="hud-eyebrow">
+                  Campaign decision ·{" "}
+                  {Math.round(job.pendingCampaignEvent.milestone * 100)}%
+                  checkpoint
+                </p>
+                <strong className="mt-1 block text-[0.875rem] text-bone">
+                  {job.pendingCampaignEvent.title}
+                </strong>
+              </div>
+              <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
+                Auto-resolves D{job.pendingCampaignEvent.decisionDeadlineDay}
+              </span>
+            </div>
+            <p className="mt-1.5 text-[0.75rem] leading-5 text-bone">
+              {job.pendingCampaignEvent.description}
+            </p>
+            <p className="mt-1 font-mono text-[0.6875rem] leading-5 text-muted">
+              Signal: {job.pendingCampaignEvent.signal}
+            </p>
+            <p className="mt-1 font-mono text-[0.625rem] leading-5 text-muted">
+              Decision evidence{" "}
+              {Math.round(
+                (job.pendingCampaignEvent.evidenceAccuracy ?? 0.35) * 100,
+              )}
+              %
+              {job.benchmarkSnapshots?.length
+                ? " · paid checkpoint measurements improve interventions without rerolling the run"
+                : " · evaluate a retained checkpoint to improve intervention precision"}
+            </p>
+            <div className="mt-2.5 grid grid-cols-1 gap-2 lg:grid-cols-3">
+              {job.pendingCampaignEvent.choices.map((choice) => {
+                const cost = choice.effects.cashCost ?? 0;
+                const researchersRequired = choice.effects.minResearchers ?? 0;
+                const disabled =
+                  cash + 1e-9 < cost || researcherCount < researchersRequired;
+                return (
+                  <button
+                    key={choice.id}
+                    type="button"
+                    disabled={disabled}
+                    title={
+                      cash + 1e-9 < cost
+                        ? `Need ${money(cost)}.`
+                        : researcherCount < researchersRequired
+                          ? `Need ${researchersRequired} researchers.`
+                          : undefined
+                    }
+                    onClick={() =>
+                      resolveTrainingCampaignEvent(job.id, choice.id)
+                    }
+                    className="rounded-md border border-line/60 bg-void/35 p-2.5 text-left transition hover:border-train/60 hover:bg-train/5 disabled:cursor-not-allowed disabled:opacity-45"
+                  >
+                    <span className="flex items-center justify-between gap-2">
+                      <strong className="text-[0.75rem] text-bone">
+                        {choice.label}
+                      </strong>
+                      {choice.recommended ? (
+                        <span className="font-mono text-[0.5625rem] uppercase tracking-[0.12em] text-train">
+                          recommended
+                        </span>
+                      ) : null}
+                    </span>
+                    <span className="mt-1 block text-[0.6875rem] leading-5 text-muted">
+                      {choice.description}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+
+        {(job.campaignEventHistory?.length ?? 0) > 0 ? (
+          <details className="group rounded-md border border-line/50 bg-void/25">
+            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 marker:hidden">
+              <span className="hud-eyebrow">Campaign log</span>
+              <span className="font-mono text-[0.625rem] text-muted">
+                {job.campaignEventHistory!.length} decisions · details
+              </span>
+            </summary>
+            <div className="space-y-1 border-t border-line/40 px-2.5 pb-2.5 pt-2">
+              {job.campaignEventHistory!.slice(-3).map((event) => {
+                const selected = event.choices.find(
+                  (choice) => choice.id === event.selectedChoiceId,
+                );
+                return (
+                  <div
+                    key={event.id}
+                    className="flex items-start justify-between gap-3 text-[0.6875rem] leading-5"
+                  >
+                    <span className="text-muted">
+                      D{event.day} · {event.title}
+                    </span>
+                    <span className="text-right text-bone">
+                      {selected?.label ?? "Resolved"}
+                      {event.autoResolved ? " · auto" : ""}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </details>
+        ) : null}
+
+        {diagnosticStall ? (
+          <p className="text-[0.75rem] text-amber">{diagnosticStall}</p>
         ) : null}
         {ramBlocked && !job.stallReason ? (
           <p className="text-[0.75rem] text-danger">
-            Training RAM is a hard limit. Raise Training allocation, add memory, or pause another run.
+            Training RAM is a hard limit. Raise Training allocation, add memory,
+            or pause another run.
           </p>
         ) : null}
 
         {job.dataPlan ? (
           <p className="truncate text-[0.75rem] text-muted">
-            Mix:{' '}
+            Mix:{" "}
             {DATA_DOMAINS.filter((d) => (job.dataPlan!.weights[d] ?? 0) >= 0.05)
-              .map((d) => `${DATA_DOMAIN_META[d].label} ${Math.round((job.dataPlan!.weights[d] ?? 0) * 100)}%`)
-              .join(' · ')}
+              .map(
+                (d) =>
+                  `${DATA_DOMAIN_META[d].label} ${Math.round((job.dataPlan!.weights[d] ?? 0) * 100)}%`,
+              )
+              .join(" · ")}
           </p>
         ) : null}
 
-        {job.postTrain !== 'none' ? (
+        {dataEvidence ? (
+          <details className="group rounded-md border border-line/50 bg-void/25">
+            <summary className="flex min-h-11 cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-2.5 py-2 marker:hidden">
+              <span className="hud-eyebrow">Frozen corpus evidence</span>
+              <span className="font-mono text-[0.625rem] text-muted">
+                {dataManifest
+                  ? `${dataManifest.assetIds.length} source asset${dataManifest.assetIds.length === 1 ? "" : "s"}`
+                  : "immutable run snapshot"}
+              </span>
+            </summary>
+            <div className="border-t border-line/40 px-2.5 pb-2.5 pt-2">
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-3">
+              <StatRow
+                label="Unique"
+                value={formatTokens(dataManifest?.uniqueMTok ?? job.trainMTok)}
+              />
+              <StatRow
+                label="Repeated"
+                value={formatTokens(dataManifest?.repeatedMTok ?? 0)}
+              />
+              <StatRow
+                label="Learnable value"
+                value={`${Math.round((dataEvidence.effectiveTrainingValue ?? 0) * 100)}%`}
+              />
+              <StatRow
+                label="Diversity"
+                value={`${Math.round((dataEvidence.effectiveDiversity ?? 0) * 100)}%`}
+              />
+              <StatRow
+                label="Freshness"
+                value={`${Math.round((dataEvidence.effectiveFreshness ?? 0) * 100)}%`}
+              />
+              <StatRow
+                label="Human anchor"
+                value={`${Math.round((dataEvidence.humanAnchorShare ?? 1) * 100)}%`}
+              />
+            </div>
+              <p className="mt-2 font-mono text-[0.625rem] leading-5 text-muted">
+              Contamination {Math.round(dataEvidence.contaminationRisk * 100)}%
+              · rights exposure{" "}
+              {Math.round((dataEvidence.rightsRisk ?? 0) * 100)}% · synthetic{" "}
+              {Math.round((dataEvidence.syntheticShare ?? 0) * 100)}%
+              {(dataEvidence.syntheticGenerationDepth ?? 0) > 0
+                ? ` at ${dataEvidence.syntheticGenerationDepth!.toFixed(1)} generation depth`
+                : ""}
+              </p>
+            </div>
+          </details>
+        ) : null}
+
+        {job.postTrain !== "none" ? (
           <MeterBar
             label={`Post-train: ${job.postTrain}`}
-            value={job.postTrainTarget > 0 ? job.postTrainProgress / job.postTrainTarget : 0}
-            detail={`${num(job.postTrainProgress, 1)} / ${num(job.postTrainTarget, 1)}`}
+            value={
+              job.postTrainTarget > 0
+                ? job.postTrainProgress / job.postTrainTarget
+                : 0
+            }
+            detail={`${num(job.postTrainProgress, 1)} / ${num(job.postTrainTarget, 1)} PF`}
             tone="research"
           />
         ) : null}
 
-        {(economics || snapshots.length > 0) ? (
+        {economics || snapshots.length > 0 ? (
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             {economics ? (
               <>
                 <StatRow label="Setup" value={money(economics.setupCost)} />
                 <StatRow label="Data" value={money(economics.dataCost)} />
-                <StatRow label="Training" value={money(economics.trainingCostAccrued)} tone="warning" />
+                <StatRow
+                  label="Training"
+                  value={money(economics.trainingCostAccrued)}
+                  tone="warning"
+                />
               </>
             ) : null}
             <StatRow
@@ -319,26 +696,14 @@ export function ActiveTrainingCard({
           </div>
         ) : null}
 
-        {snapshots.length ? (
-          <div className="rounded-md border border-line/50 bg-void/25 p-2.5">
-            <p className="hud-eyebrow mb-1.5">Benchmarks during training</p>
-            <div className="space-y-1">
-              {snapshots.slice(-4).map((snap, index) => (
-                <div key={`${snap.day}-${index}`} className="flex items-center justify-between gap-2 font-mono text-[0.6875rem] tabular-nums">
-                  <span className="text-muted">D{snap.day} · {(snap.progress * 100).toFixed(0)}%</span>
-                  <span className="text-bone">cap {snap.capability.toFixed(1)} · safety {snap.safety.toFixed(1)}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : null}
-
         <TrainingLossChart
           history={job.lossHistory ?? []}
           failed={job.failed ?? false}
           energyMWh={chartMWh}
           mwDays={chartMwDays}
           energyEstimated={energyEstimated}
+          benchmarks={snapshots}
+          checkpoints={checkpointMarkers}
         />
 
         {!job.failed ? (
@@ -346,22 +711,39 @@ export function ActiveTrainingCard({
             Compute priority · {job.computePriority ?? 50}/100
             <input
               type="range"
-              min={10}
+              min={0}
               max={100}
               step={5}
               value={job.computePriority ?? 50}
-              onChange={(event) => onPriority(job.id, Number(event.target.value), job.reservedPf)}
+              onChange={(event) =>
+                onPriority(job.id, Number(event.target.value), job.reservedPf)
+              }
               className="mt-1 w-full"
             />
           </label>
         ) : null}
 
-        <div className="flex flex-wrap gap-2">
+        <div className="sticky bottom-0 z-20 -mx-3 grid grid-cols-2 gap-2 border-y border-line/60 bg-panel-2/95 px-3 py-2 shadow-[0_-0.5rem_1.5rem_rgba(0,0,0,0.25)] backdrop-blur-md sm:static sm:z-auto sm:mx-0 sm:flex sm:flex-wrap sm:border-0 sm:bg-transparent sm:p-0 sm:shadow-none sm:backdrop-blur-none">
           {job.failed ? (
-            <HudButton variant="danger" onClick={() => onCancel(job.id)}>
-              Delete failed run
-            </HudButton>
-          ) : done || awaiting ? (
+            <>
+              {job.failureRecoveryCheckpointId ? (
+                <HudButton
+                  variant="primary"
+                  onClick={() =>
+                    onRecoverFromCheckpoint(
+                      job.id,
+                      job.failureRecoveryCheckpointId!,
+                    )
+                  }
+                >
+                  Recover from {recoveryMarker?.label ?? "checkpoint"}
+                </HudButton>
+              ) : null}
+              <HudButton variant="danger" onClick={() => onCancel(job.id)}>
+                Delete failed run
+              </HudButton>
+            </>
+          ) : done ? (
             <>
               {minimum.completeReady ? (
                 <HudButton
@@ -375,77 +757,132 @@ export function ActiveTrainingCard({
               ) : (
                 <HudButton
                   variant="primary"
-                  disabled={!releaseGate.ok || releaseGate.releaseKind !== 'early'}
-                  title={releaseDisabledReason ?? 'Release this plateaued checkpoint with degraded quality.'}
-                  onClick={() => onRelease(job.id)}
+                  disabled={!releaseGate.ok}
+                  title={releaseDisabledReason ?? haircutCopy}
+                  onClick={() => {
+                    if (!launchConfirm) {
+                      setLaunchConfirm(true);
+                      return;
+                    }
+                    setLaunchConfirm(false);
+                    onRelease(job.id);
+                  }}
                 >
-                  Early release
+                  {launchConfirm ? "Confirm launch" : "Launch now"}
                 </HudButton>
               )}
-              <HudButton onClick={() => onBenchmark(job.id)}>Run benchmarks</HudButton>
-              <HudButton onClick={() => onKeepInternal(job.id)}>Keep internal</HudButton>
-              {onExtend && (awaiting || atRecommended) ? (
-                <HudButton variant="secondary" onClick={() => onExtend(job.id)}>
-                  Extend 10 days
-                </HudButton>
-              ) : null}
+              <HudButton onClick={() => onKeepInternal(job.id)}>
+                Keep internal
+              </HudButton>
               <HudButton
-                variant={cancelConfirm ? 'danger' : 'ghost'}
+                disabled={!checkpointEligible}
+                title={
+                  checkpointEligible
+                    ? "Capture these exact weights, then choose benchmark suites and measurement spend."
+                    : "Allocate compute before benchmarking current weights."
+                }
+                onClick={() => onBenchmark(job.id)}
+              >
+                Benchmark
+              </HudButton>
+              <HudButton
+                disabled={!checkpointEligible}
+                title={
+                  checkpointEligible
+                    ? "Save immutable current weights without stopping training."
+                    : "Allocate compute before saving a checkpoint."
+                }
+                onClick={() => onSaveCheckpoint(job.id)}
+              >
+                Save checkpoint
+              </HudButton>
+              <HudButton
+                variant={cancelConfirm ? "danger" : "ghost"}
                 onClick={() => {
-                  if (cancelConfirm) onCancel(job.id)
-                  else setCancelConfirm(true)
+                  if (cancelConfirm) onCancel(job.id);
+                  else setCancelConfirm(true);
                 }}
               >
-                {cancelConfirm ? 'Confirm delete' : 'Delete run'}
+                {cancelConfirm ? "Confirm delete" : "Delete run"}
               </HudButton>
-              {releaseDisabledReason ? (
-                <p className="basis-full text-[0.75rem] text-amber">{releaseDisabledReason}</p>
-              ) : releaseGate.releaseKind === 'early' || minimum.earlyReleaseReady ? (
-                <p className="basis-full text-[0.75rem] text-amber">
-                  Degraded checkpoint: capability ×{earlyPenalty.capabilityMultiplier.toFixed(2)}, benchmarks ×{earlyPenalty.benchmarkMultiplier.toFixed(2)}, reliability ×{earlyPenalty.reliabilityMultiplier.toFixed(2)}.
+              {!minimum.completeReady && launchable ? (
+                <p className="col-span-2 basis-full text-[0.75rem] text-amber">
+                  {haircutCopy}
+                </p>
+              ) : releaseDisabledReason ? (
+                <p className="col-span-2 basis-full text-[0.75rem] text-amber">
+                  {releaseDisabledReason}
                 </p>
               ) : null}
             </>
           ) : (
             <>
               <HudButton onClick={() => onPause(job.id, !job.paused)}>
-                {job.paused ? 'Resume' : 'Pause'}
+                {job.paused ? "Resume" : "Pause"}
               </HudButton>
               <HudButton
-                disabled={!canBenchmarkMid}
-                title={!canBenchmarkMid ? 'Benchmarks unlock after 10% progress, then every 7 days.' : undefined}
+                disabled={!checkpointEligible}
+                title={
+                  checkpointEligible
+                    ? "Capture these exact weights, then choose benchmark suites and measurement spend."
+                    : "Allocate compute before benchmarking current weights."
+                }
                 onClick={() => onBenchmark(job.id)}
               >
                 Benchmark
               </HudButton>
               <HudButton
-                variant="primary"
-                disabled={!releaseGate.ok || releaseGate.releaseKind !== 'early'}
-                title={releaseDisabledReason ?? 'Release this plateaued checkpoint with degraded quality.'}
-                onClick={() => onRelease(job.id)}
+                disabled={!checkpointEligible}
+                title={
+                  checkpointEligible
+                    ? "Save immutable current weights without stopping training."
+                    : "Allocate compute before saving a checkpoint."
+                }
+                onClick={() => onSaveCheckpoint(job.id)}
               >
-                Early release
+                Save checkpoint
               </HudButton>
-              {onExtend && atRecommended ? (
-                <HudButton variant="secondary" onClick={() => onExtend(job.id)}>
-                  Extend 10 days
-                </HudButton>
-              ) : null}
               <HudButton
-                variant={cancelConfirm ? 'danger' : 'ghost'}
+                variant="primary"
+                disabled={
+                  !launchable ||
+                  !releaseGate.ok ||
+                  job.pendingCampaignEvent != null
+                }
+                title={
+                  !launchable
+                    ? (releaseDisabledReason ??
+                      "Train at least 5% before launching.")
+                    : haircutCopy
+                }
                 onClick={() => {
-                  if (cancelConfirm) onCancel(job.id)
-                  else setCancelConfirm(true)
+                  if (!launchConfirm) {
+                    setLaunchConfirm(true);
+                    return;
+                  }
+                  setLaunchConfirm(false);
+                  onRelease(job.id);
                 }}
               >
-                {cancelConfirm ? 'Confirm cancel' : 'Cancel'}
+                {launchConfirm ? "Confirm launch" : "Launch now"}
               </HudButton>
-              {releaseGate.releaseKind === 'early' || minimum.earlyReleaseReady ? (
-                <p className="basis-full text-[0.75rem] text-amber">
-                  Early release degrades quality: capability ×{earlyPenalty.capabilityMultiplier.toFixed(2)}, benchmarks ×{earlyPenalty.benchmarkMultiplier.toFixed(2)}, reliability ×{earlyPenalty.reliabilityMultiplier.toFixed(2)}.
+              <HudButton
+                variant={cancelConfirm ? "danger" : "ghost"}
+                onClick={() => {
+                  if (cancelConfirm) onCancel(job.id);
+                  else setCancelConfirm(true);
+                }}
+              >
+                {cancelConfirm ? "Confirm cancel" : "Cancel"}
+              </HudButton>
+              {launchable ? (
+                <p className="col-span-2 basis-full text-[0.75rem] text-amber">
+                  {haircutCopy}
                 </p>
               ) : releaseDisabledReason ? (
-                <p className="basis-full text-[0.75rem] text-muted">Early release locked: {releaseDisabledReason}</p>
+                <p className="col-span-2 basis-full text-[0.75rem] text-muted">
+                  Launch locked: {releaseDisabledReason}
+                </p>
               ) : null}
             </>
           )}
@@ -454,28 +891,46 @@ export function ActiveTrainingCard({
         {done ? (
           <div className="rounded-md border border-research/25 bg-research/5 p-2.5">
             <div className="mb-1.5 flex items-center justify-between gap-2">
-              <span className="text-[0.8125rem] font-semibold text-bone">Optional post-training</span>
-              <span className="font-mono text-[0.6875rem] text-muted">choose next stage</span>
+              <span className="text-[0.8125rem] font-semibold text-bone">
+                Optional post-training
+              </span>
+              <span className="font-mono text-[0.6875rem] text-muted">
+                choose next stage
+              </span>
             </div>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {(Object.keys(POST_TRAIN_META) as TrainStage[]).map((stage) => {
-                const meta = POST_TRAIN_META[stage]
-                const locked = Boolean(meta.research && !unlocked.includes(meta.research))
-                const busy = job.postTrain !== 'none' && job.postTrainProgress < job.postTrainTarget
+                const meta = POST_TRAIN_META[stage];
+                const locked = Boolean(
+                  meta.research && !unlocked.includes(meta.research),
+                );
+                const currentStageIncomplete =
+                  job.postTrain !== "none" &&
+                  job.postTrainProgress < job.postTrainTarget;
+                const busy = currentStageIncomplete;
                 const applied =
                   (stageHistory.has(stage) && job.postTrain !== stage) ||
-                  (job.postTrain === stage && job.postTrainProgress >= job.postTrainTarget)
-                const stageTime = allocatedPf > 0.05
-                  ? `~${Math.ceil(meta.target / allocatedPf)} active day${Math.ceil(meta.target / allocatedPf) === 1 ? '' : 's'}`
-                  : 'Time awaits PF allocation'
+                  (job.postTrainStagesCompletedThisRun ?? []).includes(stage) ||
+                  (job.postTrain === stage && !currentStageIncomplete);
+                const stageTarget = postTrainTargetPfDays(
+                  job,
+                  stage,
+                  job.targetParamsB,
+                );
                 const lockReason = applied
-                  ? 'Already applied; post-training stages are one-shot.'
+                  ? "Already applied in this version. Continue-train a new version to refresh it with diminishing returns."
                   : locked
                     ? `Research ${meta.research} required.`
                     : busy
                       ? `${job.postTrain.toUpperCase()} is already in progress.`
-                      : undefined
-                const stateLabel = applied ? 'done' : locked ? 'locked' : busy ? 'busy' : 'available'
+                      : undefined;
+                const stateLabel = applied
+                  ? "done"
+                  : locked
+                    ? "locked"
+                    : busy
+                      ? "busy"
+                      : "available";
                 return (
                   <button
                     key={stage}
@@ -485,35 +940,54 @@ export function ActiveTrainingCard({
                     onClick={() => onSelectPostTrain(job.id, stage)}
                     className={`rounded-md border p-2.5 text-left disabled:cursor-not-allowed disabled:opacity-55 ${
                       job.postTrain === stage
-                        ? 'border-research bg-research/20 text-research'
-                        : 'border-line text-muted'
+                        ? "border-research bg-research/20 text-research"
+                        : "border-line text-muted"
                     }`}
                   >
                     <span className="flex items-center justify-between gap-2">
-                      <strong className="text-[0.75rem] uppercase tracking-[0.12em] text-bone">{stage}</strong>
-                      <span className="font-mono text-[0.625rem] uppercase tracking-[0.1em]">{stateLabel}</span>
+                      <strong className="text-[0.75rem] uppercase tracking-[0.12em] text-bone">
+                        {stage}
+                      </strong>
+                      <span className="font-mono text-[0.625rem] uppercase tracking-[0.1em]">
+                        {stateLabel}
+                      </span>
                     </span>
-                    <span className="mt-1 block text-[0.75rem] text-bone">Gains: {meta.feature}</span>
+                    <span className="mt-1 block text-[0.75rem] text-bone">
+                      Gains: {meta.feature}
+                    </span>
                     <span className="mt-1 block font-mono text-[0.6875rem] leading-5">
-                      {meta.data} · {meta.compute} · {stageTime}
+                      {meta.data} · {num(stageTarget, 0)} PF target
                     </span>
-                    <span className="block text-[0.6875rem]">Expected loss spike {meta.spike}</span>
-                    {lockReason ? <span className="mt-1 block text-[0.6875rem] text-amber">{lockReason}</span> : null}
+                    <span className="block text-[0.6875rem]">
+                      Expected loss spike {meta.spike}
+                    </span>
+                    {lockReason ? (
+                      <span className="mt-1 block text-[0.6875rem] text-amber">
+                        {lockReason}
+                      </span>
+                    ) : null}
                   </button>
-                )
+                );
               })}
             </div>
-            {job.postTrain === 'sft' && !unlocked.includes('align_rlhf') ? (
-              <ResearchUnlockLink className="mt-2" nodeId="align_rlhf" label="Unlock RLHF Pipeline for the next post-train stage" />
+            {job.postTrain === "sft" && !unlocked.includes("align_rlhf") ? (
+              <ResearchUnlockLink
+                className="mt-2"
+                nodeId="align_rlhf"
+                label="Unlock RLHF Pipeline for the next post-train stage"
+              />
             ) : null}
-            {job.postTrain === 'rlhf' && !unlocked.includes('align_process') ? (
-              <ResearchUnlockLink className="mt-2" nodeId="align_process" label="Unlock Process Reward Models for the next stage" />
+            {job.postTrain === "rlhf" && !unlocked.includes("align_process") ? (
+              <ResearchUnlockLink
+                className="mt-2"
+                nodeId="align_process"
+                label="Unlock Process Reward Models for the next stage"
+              />
             ) : null}
           </div>
         ) : null}
 
-        {safetyProps ? <SafetyCampaignSection {...safetyProps} compact /> : null}
       </div>
     </GameCard>
-  )
+  );
 }

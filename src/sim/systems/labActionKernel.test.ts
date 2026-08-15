@@ -29,7 +29,15 @@ describe('shared lab action kernel', () => {
   })
 
   it('queues a complete prerequisite path through one shared action', () => {
-    const state = createGame(712)
+    const created = createGame(712)
+    const state = {
+      ...created,
+      player: {
+        ...created.player,
+        starterHqGrant: false,
+        staff: { researcher: 3, data_processor: 1, engineer: 1, ops: 1 },
+      },
+    }
     const action: LabAction = { kind: 'queue_research', nodeId: 'sys_fp8' }
     const preview = previewLabAction(state, state.playerLabId, action)
     expect(preview.legal).toBe(true)

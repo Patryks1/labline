@@ -13,6 +13,14 @@ const MIN_PF = 1
 const MAX_PF = 10_000
 const PROVIDER_DAILY_GROWTH_RATE = 0.0005
 const PROVIDER_DEFAULT_GROWTH_CAP_MULTIPLIER = 1.5
+/**
+ * Wholesale provider rate multiplier (balance pass). Applied once where quotes
+ * are generated, so on-demand daily rates, spot scarcity pricing, reserved and
+ * colocation capacity, emergency premiums, rival resale, renewals, and the UI
+ * forecast all move together for player and rival buyers. Signed contracts
+ * keep the pricePerPfDay locked at signing.
+ */
+export const PROVIDER_RATE_MULTIPLIER = 2
 
 export interface ComputeContractRequest {
   providerId: string
@@ -110,7 +118,7 @@ function quotedPrice(
             : kind === 'rival_resale'
               ? 1.08
               : 1
-  return Math.max(1, provider.basePricePerPfDay * multiplier)
+  return Math.max(1, provider.basePricePerPfDay * PROVIDER_RATE_MULTIPLIER * multiplier)
 }
 
 function quotedInterruptionRisk(
@@ -239,6 +247,108 @@ export function quoteComputeContract(
     dailyCost,
     providerAvailablePf: source.availablePf,
   }
+}
+
+/** Seller floor for negotiated provider offers, as % of the quoted list rate. */
+export const PROVIDER_MIN_OFFER_PERCENT = 80
+
+export interface ComputeProviderOfferInput {
+  reliability: number
+  pf: number
+  availablePf: number
+  termDays: number
+  /** Player offer as % of the quoted list rate. */
+  offerPercent: number
+  /** Deterministic event flavor adjustment applied by the desk. */
+  satisfactionDelta?: number
+}
+
+export interface ComputeProviderOfferEvaluation {
+  outcome: 'agreed' | 'countered' | 'declined'
+  satisfaction: number
+  /** The seller never signs below this % of list. */
+  floorOfferPercent: number
+  belowFloor: boolean
+  /** Counter terms the seller commits to when the offer is close. */
+  counter?: { pf: number; termDays: number; offerPercent: number }
+}
+
+/**
+ * Contract-action kernel seam for the provider desk: deterministic seller
+ * evaluation for one offer. The shared lab action kernel (labActionKernel.ts)
+ * has no contract actions, so negotiation lives here next to quoting while
+ * acceptance stays with signComputeContract.
+ */
+export function evaluateComputeProviderOffer(
+  input: ComputeProviderOfferInput,
+): ComputeProviderOfferEvaluation {
+  const satisfaction = clamp(
+    0,
+    100,
+    42 +
+      (Math.max(0, input.reliability) - 0.88) * 100 +
+      Math.min(12, Math.max(1, input.termDays) / 30) +
+      (input.offerPercent - 90) * 0.9 -
+      (Math.max(1, input.pf) / Math.max(1, input.availablePf)) * 25 +
+      (input.satisfactionDelta ?? 0),
+  )
+  const belowFloor = input.offerPercent < PROVIDER_MIN_OFFER_PERCENT
+  if (belowFloor || satisfaction < 30) {
+    return {
+      outcome: 'declined',
+      satisfaction,
+      floorOfferPercent: PROVIDER_MIN_OFFER_PERCENT,
+      belowFloor,
+    }
+  }
+  if (satisfaction >= 58) {
+    return {
+      outcome: 'agreed',
+      satisfaction,
+      floorOfferPercent: PROVIDER_MIN_OFFER_PERCENT,
+      belowFloor,
+    }
+  }
+  return {
+    outcome: 'countered',
+    satisfaction,
+    floorOfferPercent: PROVIDER_MIN_OFFER_PERCENT,
+    belowFloor,
+    counter: {
+      pf: Math.max(1, Math.floor(input.pf * 0.9)),
+      termDays: clamp(30, 720, Math.max(1, input.termDays) + 30),
+      offerPercent: Math.min(
+        115,
+        input.offerPercent + Math.max(2, Math.ceil((58 - satisfaction) / 2)),
+      ),
+    },
+  }
+}
+
+/**
+ * Cash the buyer should hold before signing: the full term value, capped at
+ * 30 days of billing — the same cover signPlayerComputeSale asks of rivals.
+ */
+export function computeContractCashReserve(
+  contract: Pick<ComputeContract, 'pf' | 'pricePerPfDay' | 'daysTotal'>,
+): number {
+  const daily = Math.max(0, contract.pf) * Math.max(0, contract.pricePerPfDay)
+  return Math.min(daily * Math.max(1, contract.daysTotal), daily * 30)
+}
+
+/** True while the buyer already holds a live (non-expired) contract with this provider. */
+export function providerContractActiveForLab(
+  state: SimState,
+  providerId: string,
+  labId: LabId,
+): boolean {
+  return state.computeContracts.some(
+    (contract) =>
+      contract.providerId === providerId &&
+      contract.buyerLabId === labId &&
+      contract.status !== 'expired' &&
+      contract.daysLeft > 0,
+  )
 }
 
 /** Activate a still-valid quote and reserve finite provider capacity exactly once. */

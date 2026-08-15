@@ -1,8 +1,6 @@
 import { getChipDef, buyableChips } from '../balance/chips'
 import { aggregateEffects } from './research'
 import type { SimState } from '../types'
-import { mapEnergy } from './map'
-import { fleetStats } from './racks'
 import { eventChipLeadMult, eventExportBanGen } from './events'
 import { transportDeliveryAccess } from './transport'
 
@@ -70,8 +68,6 @@ export function buyChips(state: SimState, defId: string, count: number): SimStat
   }
   inv.arriving.push({ daysLeft: lead, count })
 
-  const energy = mapEnergy(state)
-  const freeRacks = Math.max(0, energy.rackCap - fleetStats(state).rackUnitsUsed)
   const alerts = [
     {
       id: `chip-buy-${state.day}-${defId}`,
@@ -81,12 +77,13 @@ export function buyChips(state: SimState, defId: string, count: number): SimStat
     },
     ...state.alerts,
   ]
-  if (count > freeRacks) {
+  if (count > 0) {
     alerts.unshift({
       id: `chip-rack-${state.day}`,
       day: state.day,
-      severity: 'warn' as const,
-      message: `Only ${freeRacks} free racks — expand DCs or chips will throttle.`,
+      severity: 'info' as const,
+      message:
+        'Loose accelerators remain inventory until assembled into racks and placed in a valid data-hall layout.',
     })
   }
 

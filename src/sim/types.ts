@@ -1,9 +1,6 @@
 import type { DynamicWorld } from "./world/dynamicWorld";
-import type {
-  CityGrowthMetadata,
-  CityPalette,
-  CityTier,
-} from "./world/types";
+import type { BalanceTuning } from "./balance/tuning";
+import type { CityGrowthMetadata, CityPalette, CityTier } from "./world/types";
 
 export type LabId = string;
 export type LabController = "player" | "rival";
@@ -33,6 +30,15 @@ export type NativeWeightFormat = "float" | "ternary_1_58";
 /** Precision of a concrete serving artifact, not of its source checkpoint. */
 export type ServePrecision =
   "fp16" | "bf16" | "fp8" | "int8" | "int4" | "nvfp4" | "ternary_1_58";
+
+/**
+ * Weight precision a released checkpoint natively carries out of training.
+ * Serving defaults to this precision; quantization research can override it.
+ * FP32 remains a valid native precision even though it is not a deployable
+ * endpoint format (endpoints fall back to BF16 kernels over FP32 weights).
+ */
+export type NativeWeightPrecision =
+  "fp32" | "fp16" | "bf16" | "fp8" | "nvfp4" | "ternary_1_58";
 
 export interface TrainingNumerics {
   computeFormat: TrainingComputeFormat;
@@ -98,6 +104,75 @@ export interface TrainingOutcome {
   reliabilityDelta: number;
   revealedDay: number;
   explanation: string;
+}
+
+/**
+ * Explainable, seeded incidents and discoveries surfaced during a training run.
+ * These are operational decisions, not opaque final capability rolls.
+ */
+export type TrainingCampaignEventKind =
+  | "loss_spike"
+  | "data_anomaly"
+  | "mixture_discovery"
+  | "hardware_fault"
+  | "routing_imbalance"
+  | "modality_interference"
+  | "recursive_research";
+
+export interface TrainingCampaignModifiers {
+  /** Additive points applied after the normal capability calculation. */
+  capabilityDelta: number;
+  reliabilityDelta: number;
+  safetyDelta: number;
+  /** Additive probability mass for the terminal seeded outcome. */
+  breakthroughBias: number;
+  stumbleRisk: number;
+  /** Effective data-quality adjustment captured by campaign interventions. */
+  dataQualityDelta: number;
+  /** Omni-only, independently verified lift to the current blueprint wall. */
+  verifiedRecursiveCapabilityBonus: number;
+}
+
+export interface TrainingCampaignChoiceEffects {
+  cashCost?: number;
+  /** Fraction of the original recommended PF-days added to the run. */
+  extraComputeFraction?: number;
+  /** Fraction of current base-training progress rolled back to a checkpoint. */
+  progressRollbackFraction?: number;
+  capabilityDelta?: number;
+  reliabilityDelta?: number;
+  safetyDelta?: number;
+  breakthroughBias?: number;
+  stumbleRisk?: number;
+  dataQualityDelta?: number;
+  verifiedRecursiveCapabilityBonus?: number;
+  minResearchers?: number;
+}
+
+export interface TrainingCampaignChoice {
+  id: string;
+  label: string;
+  description: string;
+  recommended?: boolean;
+  effects: TrainingCampaignChoiceEffects;
+}
+
+export interface TrainingCampaignEvent {
+  id: string;
+  kind: TrainingCampaignEventKind;
+  title: string;
+  description: string;
+  signal: string;
+  /** Accuracy of completed checkpoint evidence available when this decision surfaced. */
+  evidenceAccuracy?: number;
+  day: number;
+  milestone: number;
+  decisionDeadlineDay: number;
+  severity: "opportunity" | "warning" | "critical";
+  choices: TrainingCampaignChoice[];
+  selectedChoiceId?: string;
+  resolvedDay?: number;
+  autoResolved?: boolean;
 }
 
 export type Modality = "text" | "image" | "video" | "audio" | "tools";
@@ -297,12 +372,7 @@ export interface FacilityNavBreakdown {
 }
 
 export type FacilityAcquisitionStatus =
-  | "pending"
-  | "countered"
-  | "accepted"
-  | "rejected"
-  | "withdrawn"
-  | "expired";
+  "pending" | "countered" | "accepted" | "rejected" | "withdrawn" | "expired";
 
 /** Lab-neutral, cash-backed offer for a physical data-centre campus. */
 export interface FacilityAcquisitionOffer {
@@ -456,6 +526,28 @@ export type BenchmarkMetricId =
 export type BenchmarkSuiteScores = Partial<
   Record<BenchmarkSuiteId, Partial<Record<BenchmarkMetricId, number>>>
 >;
+
+/** Player-selected private evaluation suites for an in-flight checkpoint. */
+export interface TrainingBenchmarkRequest {
+  suiteIds: BenchmarkSuiteId[];
+  /** Uniform spend for every selected suite. Each suite validates its own bounds. */
+  spendPerSuite: number;
+}
+
+/** A suite-level noisy estimate produced by a paid checkpoint evaluation. */
+export interface TrainingBenchmarkSuiteResult {
+  suiteId: BenchmarkSuiteId;
+  spend: number;
+  score: number;
+  /** Estimated measurement accuracy (0-1), not the model's task score. */
+  accuracy: number;
+  /** Nominal confidence in the reported interval (0-1). */
+  confidence: number;
+  /** Proportional half-width of the interval around score. */
+  inaccuracy: number;
+  low: number;
+  high: number;
+}
 
 export interface EvaluationMetricDriver {
   positive: string;
@@ -649,7 +741,14 @@ export interface RackInstall {
 }
 
 export type HallRotation = 0 | 90 | 180 | 270;
-export type DataHallShellId = "hall-small-v1" | "hall-medium-v1" | "hall-large-v1";
+export type DataHallShellId =
+  | "hall-small-v1"
+  | "hall-medium-v1"
+  | "hall-large-v1"
+  /** Pre-density-rebalance shells retained only for safe legacy save migration. */
+  | "hall-small-v1-legacy"
+  | "hall-medium-v1-legacy"
+  | "hall-large-v1-legacy";
 export type DataHallObjectKind = "rack" | "cooling" | "power" | "network";
 export type HallAutoLayoutStrategy = "density" | "efficiency" | "resilience";
 
@@ -663,6 +762,8 @@ export interface DataHallObjectPlacement {
   rackUnitId?: string;
   /** Persisted physical rack cabinet reserved for future delivered inventory. */
   reserved?: boolean;
+  /** Equipment undergoing repair is unavailable to utility routing until this reaches zero. */
+  repairDaysRemaining?: number;
   purchasePrice: number;
 }
 
@@ -694,24 +795,82 @@ export interface DataHallLayoutAnalysis {
   coolingScore: number;
   airflowScore: number;
   aisleScore: number;
+  /** Share of placed equipment/racks reachable from the exterior service entrance. */
+  accessScore: number;
+  /** Serviceability after access, aisle clearance, and repair state are considered. */
+  maintenanceScore: number;
+  /** Approximate N+1/path diversity score across all three required utilities. */
+  redundancyScore: number;
+  powerUtilization: number;
+  coolingUtilization: number;
+  networkUtilization: number;
+  powerHeadroomMw: number;
+  coolingHeadroomMw: number;
+  networkHeadroomGbps: number;
   throughputMultiplier: number;
   pueMultiplier: number;
   incidentRiskMultiplier: number;
-  powerRoutes: Array<{ rackUnitId: string; equipmentId: string; cells: number[] }>;
-  networkRoutes: Array<{ rackUnitId: string; equipmentId: string; cells: number[] }>;
+  powerRoutes: Array<{
+    rackUnitId: string;
+    equipmentId: string;
+    cells: number[];
+  }>;
+  coolingRoutes: Array<{
+    rackUnitId: string;
+    equipmentId: string;
+    cells: number[];
+  }>;
+  networkRoutes: Array<{
+    rackUnitId: string;
+    equipmentId: string;
+    cells: number[];
+  }>;
+  serviceRoutes: Array<{ objectId: string; cells: number[] }>;
+  inaccessibleObjectIds: string[];
+  redundantRackUnitIds: string[];
+  bottlenecks: Array<{
+    kind:
+      "power" | "cooling" | "network" | "access" | "airflow" | "maintenance";
+    severity: "warning" | "critical";
+    message: string;
+    utilization?: number;
+    objectId?: string;
+  }>;
+}
+
+export type HallConstructionStage = "build" | "cabling" | "commissioning";
+
+export interface DataHallConstructionProject {
+  id: string;
+  startedDay: number;
+  totalDays: number;
+  remainingDays: number;
+  stage: HallConstructionStage;
+  stageDays: { build: number; cabling: number; commissioning: number };
+  targetRevision: number;
+  targetObjects: DataHallObjectPlacement[];
+  targetWalls: DataHallWallSegment[];
+  targetDoors: DataHallDoorPlacement[];
+  targetPreferredStrategy: HallAutoLayoutStrategy;
+  infrastructureCost: number;
+  rackPurchaseCost: number;
+  totalCost: number;
 }
 
 export interface DataHallLayout {
-  version: 1;
+  version: 2;
   facilityId: string;
   shellId: DataHallShellId;
   revision: number;
   autoPlaceDeliveries: boolean;
+  /** Rival fit-out planning retry; avoids recomputing an unchanged blocked topology every day. */
+  autoPlaceRetryDay?: number;
   preferredStrategy: HallAutoLayoutStrategy;
   objects: DataHallObjectPlacement[];
   walls: DataHallWallSegment[];
   doors: DataHallDoorPlacement[];
   analysis: DataHallLayoutAnalysis;
+  constructionProject?: DataHallConstructionProject;
 }
 
 export interface DataHallEditPlan {
@@ -795,6 +954,13 @@ export interface ResearchEffects {
   trainingStumbleRisk?: number;
   /** Direct safety-axis penalty applied to models trained with this method unlocked. */
   trainingSafetyPenalty?: number;
+  /**
+   * Raises the hard cap on overtrain / compute-intensity capability points
+   * (added to the early-game 1.5 base, clamped at 8 total).
+   */
+  overtrainCapBonus?: number;
+  /** Unlocks omni-only closed-loop research campaigns; grants no passive gain. */
+  unlockClosedLoopResearch?: boolean;
 }
 
 export interface ResearchProgress {
@@ -862,8 +1028,35 @@ export interface DataManifest {
   uniqueMTok: number;
   repeatedMTok: number;
   effectiveQuality: number;
+  /** Allocation-weighted within-asset diversity (0-1). Optional for legacy saves. */
+  effectiveDiversity?: number;
+  /** Allocation-weighted corpus freshness (0-1). Optional for legacy saves. */
+  effectiveFreshness?: number;
   contaminationRisk: number;
+  /** Share of attributed tokens generated by another model (0-1). */
+  syntheticShare?: number;
+  /** Synthetic-token-weighted recursion depth; zero when no synthetic data is used. */
+  syntheticGenerationDepth?: number;
+  /** Human-origin tokens plus the human-anchored share of synthetic tokens (0-1). */
+  humanAnchorShare?: number;
+  /** Allocation-weighted licensing/commercialization exposure (0-1). */
+  rightsRisk?: number;
+  /** Combined learnable value of one unique token after corpus-level penalties (0-1). */
+  effectiveTrainingValue?: number;
   createdDay: number;
+}
+
+/** Compact immutable corpus evidence copied onto a training job at launch. */
+export interface TrainingDataEvidence {
+  effectiveQuality: number;
+  effectiveDiversity: number;
+  effectiveFreshness: number;
+  contaminationRisk: number;
+  syntheticShare: number;
+  syntheticGenerationDepth: number;
+  humanAnchorShare: number;
+  rightsRisk: number;
+  effectiveTrainingValue: number;
 }
 
 /** @deprecated use DataDomain + TrainingDataPlan */
@@ -904,6 +1097,20 @@ export interface ProcessJob {
   remaining: number;
   total: number;
   qualityTarget: number;
+  /**
+   * Provenance of a purchased raw market lot. When present, accepted tokens are
+   * attributed to bought stock and recorded under the seller lineage asset.
+   */
+  purchaseLot?: {
+    lineageId: string;
+    name: string;
+    sellerKind: string;
+    sellerName?: string;
+    qualityBand: DataQualityBand;
+    offerSource: "web" | "scrap" | "licensed";
+    /** Listed quality of the raw lot before cleaning. */
+    purchaseQuality: number;
+  };
 }
 
 /** Research-assisted audit that permanently discards low-quality corpus. */
@@ -947,11 +1154,26 @@ export interface SynthGenJob {
   qualityTier: "hq" | "lq";
   /** Automatic portfolio jobs spend a compute budget and route useful output themselves. */
   autoPortfolio?: boolean;
+  /**
+   * Teacher routing for automatic generation, keyed by target corpus. Missing
+   * entries mean Auto. Invalid/deleted teachers also fall back to Auto without
+   * rewriting the historical synthetic assets they produced.
+   */
+  teacherModelIds?: Partial<Record<DataDomain, string>>;
   /** Cumulative useful output split by generated quality. */
   hqMTok?: number;
   lqMTok?: number;
   /** Cumulative generated output rejected by the automatic verifier. */
   wastedMTok?: number;
+  /**
+   * Targeted jobs: how hard the output is filtered (0–1). Higher filtering
+   * raises per-token quality but rejects more candidates (slower throughput).
+   */
+  filterIntensity?: number;
+  /** Targeted jobs: total research PF-days this job may consume before stopping. */
+  computeBudgetPfDays?: number;
+  /** Research PF-days consumed so far (checked against computeBudgetPfDays). */
+  pfDaysSpent?: number;
 }
 
 export interface LabData {
@@ -974,6 +1196,10 @@ export interface LabData {
   dayProcessed: number;
   daySynthMTok: number;
   dayCollectByDomain: Partial<Record<DataDomain, number>>;
+  /** Chat MTok collected today from free-plan served traffic. */
+  dayCollectChatFree?: number;
+  /** Chat MTok collected today from paid-plan served traffic (≤ $50 tiers). */
+  dayCollectChatPaid?: number;
   /**
    * Aggregate research-pool share reserved for data gen (0–0.85).
    * Tech research gets (1 − this) of the research PF pool.
@@ -1059,6 +1285,16 @@ export interface TrainingDataPlan {
 
 export interface Model {
   id: string;
+  /** Stable identifier shared by every checkpoint/version descended from one base model. */
+  lineageId?: string;
+  /** Immediate source checkpoint for a continued-training version. */
+  parentModelId?: string;
+  /** Stealth candidate that produced this retained checkpoint, when applicable. */
+  checkpointCandidateId?: string;
+  /** Training campaign that produced this checkpoint. */
+  sourceTrainingJobId?: string;
+  /** Base-training progress captured into this immutable checkpoint (0-1). */
+  checkpointProgress?: number;
   name: string;
   family: ModelFamily;
   /** Total parameters in billions (0.007 = 7M, 1000 = 1T) */
@@ -1069,6 +1305,8 @@ export interface Model {
   productPreset?: ModelProductPreset;
   io?: ModelIO;
   capability: number;
+  /** Verified omni-only closed-loop gains banked on this immutable version. */
+  verifiedRecursiveCapabilityBonus?: number;
   /** Authoritative domain vector for v4 models; legacy models derive it on read. */
   capabilities?: ModelCapabilities;
   modalities: Modality[];
@@ -1079,14 +1317,24 @@ export interface Model {
   evaluationProfile?: EvaluationProfile;
   reasoningEnabled?: boolean;
   revision?: number;
+  /** Semantic display revision, e.g. `0.3`, stable across save/load. */
+  versionLabel?: string;
   safetyTraining?: SafetyTrainingRecord;
   postTrain: PostTrainStage;
-  /** One-shot post-training stages completed anywhere in this model lineage. */
+  /** Post-training stage kinds completed by this checkpoint or its ancestors. */
   completedPostTrainStages?: Exclude<PostTrainStage, "none">[];
   /** Effectiveness earned by each completed stage (0-1), preserved across continuation. */
   postTrainStageEffectiveness?: Partial<
     Record<Exclude<PostTrainStage, "none">, number>
   >;
+  /** Number of completed passes per stage; repeat passes have diminishing returns. */
+  postTrainStageRuns?: Partial<Record<Exclude<PostTrainStage, "none">, number>>;
+  /** Immutable training curve retained after the source job is finalized. */
+  trainingLossHistory?: NonNullable<TrainingJob["lossHistory"]>;
+  /** Private checkpoint evaluations retained for later release comparison UI. */
+  trainingBenchmarkSnapshots?: TrainingBenchmarkSnapshot[];
+  /** Blind-panel reports produced while this exact checkpoint was in stealth. */
+  checkpointEvaluations?: import("./balance/checkpointEvaluation").CheckpointEvaluationReport[];
   trainComputeSpent: number;
   /** Lifetime revenue/cost attribution for this model. */
   economics?: ModelEconomics;
@@ -1107,6 +1355,10 @@ export interface Model {
   apiPriceInPerMTok: number | null;
   /** $/1M output tokens — model-specific */
   apiPriceOutPerMTok: number | null;
+  /** Native media list prices; absent models derive conservative defaults. */
+  apiPricePerImage?: number | null;
+  apiPricePerAudioMinute?: number | null;
+  apiPricePerVideoSecond?: number | null;
   /** Suggested blended list price at default markup */
   suggestedApiPrice: number;
   suggestedApiPriceIn: number;
@@ -1161,6 +1413,12 @@ export interface Model {
   benchmarkOverfit?: number;
   /** Numerics and native topology used to produce this checkpoint. */
   trainingNumerics?: TrainingNumerics;
+  /**
+   * Native weight precision carried by this checkpoint. Default serving reads
+   * it for weight bytes, HBM/host RAM, inference work and endpoint precision;
+   * absent on legacy models (treated as fp16 by readers).
+   */
+  nativeWeightPrecision?: NativeWeightPrecision;
   /** Evaluated deployable artifacts derived from this checkpoint. */
   deploymentArtifacts?: DeploymentArtifact[];
   /** Version of the physical training-work formula used by this model. */
@@ -1255,6 +1513,12 @@ export interface ResearchProgram {
   evidence: ResearchEvidence[];
   insightProgress: number;
   engineeringProgress: number;
+  /** Authoritative catalog-scaled PF-days completed by this program. */
+  progressPfDays?: number;
+  /** Funded active calendar days; stalled days do not satisfy the floor. */
+  daysSpent?: number;
+  /** Completion bookkeeping used to guarantee stored lab effects apply once. */
+  effectsApplied?: boolean;
   computeShare: number;
   disclosure: ResearchDisclosure;
 }
@@ -1299,6 +1563,151 @@ export interface TrainingProgram {
   dataManifestId: string | null;
 }
 
+export type TrainingCheckpointStatus = "stealth" | "promoted" | "discarded";
+
+export type TrainingCheckpointKind = "milestone" | "manual";
+
+export type TrainingCheckpointBranchDirection =
+  "general" | "chat" | "code" | "agents" | "reasoning" | "safety" | "custom";
+
+/** Immutable telemetry frozen when an in-flight campaign writes a checkpoint. */
+export interface TrainingCheckpointTelemetry {
+  progressPfDays: number;
+  targetPfDays: number;
+  progress: number;
+  daysElapsed: number;
+  stage: "base" | Exclude<PostTrainStage, "none">;
+  stageProgress: number;
+  loss: number | null;
+  energyMWh: number;
+  trainingNumerics?: TrainingNumerics;
+}
+
+/**
+ * A private weight snapshot. Until promoted, `model` deliberately lives
+ * outside `player.models`, so ordinary serving, teachers, continuation,
+ * revenue, market-share and public-release systems cannot discover it.
+ */
+export interface TrainingCheckpointCandidate {
+  id: string;
+  sourceJobId: string;
+  lineageId: string;
+  sourceModelId?: string;
+  /** Final model version produced by sourceJobId; canonical archive owner. */
+  ownerModelId?: string;
+  /**
+   * The fleet entry for these exact weights was explicitly deleted. The
+   * producing run/final base version may no longer keep this archive alive;
+   * only re-retained exact weights or a concrete child branch may do so.
+   */
+  sourceOwnershipRevoked?: boolean;
+  ordinal: number;
+  /** How this snapshot entered the private checkpoint archive. */
+  kind?: TrainingCheckpointKind;
+  /** Optional player-facing release/branch label. */
+  customLabel?: string;
+  /** Product direction inherited by branches created from this snapshot. */
+  branchDirection?: TrainingCheckpointBranchDirection;
+  /** Immediate private checkpoint ancestor, when this is a branch. */
+  parentCheckpointId?: string;
+  /** Base-training milestone that earned this checkpoint (0-1). */
+  milestone: number;
+  capturedDay: number;
+  stage: "base" | Exclude<PostTrainStage, "none">;
+  status: TrainingCheckpointStatus;
+  model: Model;
+  telemetry: TrainingCheckpointTelemetry;
+  /** Completed private benchmark/reviewer reports for this exact weight snapshot. */
+  evaluations?: import("./balance/checkpointEvaluation").CheckpointEvaluationReport[];
+  /** Evaluation currently in flight; the scheduler owns its cash and timing. */
+  pendingEvaluation?: import("./balance/checkpointEvaluation").PendingCheckpointEvaluation;
+  promotedModelId?: string;
+  promotedDay?: number;
+  discardedDay?: number;
+}
+
+/** Persisted payload for one paid mid-training benchmark run. */
+export interface TrainingBenchmarkPending {
+  id: string;
+  startedDay: number;
+  readyDay: number;
+  /** Progress fraction (0-1) captured when the benchmark was scheduled. */
+  progress: number;
+  stage: "base" | Exclude<PostTrainStage, "none">;
+  /** Paid, product-eligible suites captured at scheduling time. */
+  suiteIds?: BenchmarkSuiteId[];
+  /** Uniform spend applied to every selected suite. */
+  spendPerSuite?: number;
+  /** Cash deducted once when the run was scheduled. */
+  totalCost?: number;
+  /** Expected measurement accuracy at the selected spend (0-1). */
+  accuracy?: number;
+  /** Nominal interval confidence at the selected spend (0-1). */
+  confidence?: number;
+  /** Loss frozen with the evaluated weights; later training cannot rewrite it. */
+  capturedLoss?: number;
+}
+
+/**
+ * Unified, concurrent private-evaluation scheduler. Legacy subject-level pending
+ * fields remain mirrors only and are migrated into this queue on load.
+ */
+export type PrivateEvaluationJob =
+  | {
+      id: string;
+      kind: "training_benchmark";
+      subjectId: string;
+      scheduledDay: number;
+      readyDay: number;
+      pending: TrainingBenchmarkPending;
+    }
+  | {
+      id: string;
+      kind: "checkpoint_evaluation";
+      subjectId: string;
+      scheduledDay: number;
+      readyDay: number;
+      pending: import("./balance/checkpointEvaluation").PendingCheckpointEvaluation;
+    };
+
+export interface PostTrainRiskPlan {
+  stage: Exclude<PostTrainStage, "none">;
+  /** Frozen probability used for this attempt; later research cannot rewrite it. */
+  probability: number;
+  band: "low" | "guarded" | "high" | "critical";
+  willFail: boolean;
+  /** Hidden deterministic crossing in stage progress (0-1). */
+  atFraction: number;
+  /** Checkpoint progress already survived when this attempt began. */
+  startFraction?: number;
+  factors: string[];
+  createdDay: number;
+  seedVersion: 2;
+}
+
+export type TrainingFailureKind =
+  | "numerical_divergence"
+  | "supervision_collapse"
+  | "preference_collapse"
+  | "reward_model_collapse"
+  | "tool_policy_collapse";
+
+/** Persisted evidence for a destructive training failure and its recovery path. */
+export interface TrainingFailureRecord {
+  kind: TrainingFailureKind;
+  stage: "base" | Exclude<PostTrainStage, "none">;
+  day: number;
+  /** Exact base-training PF position at the point of failure. */
+  progressPfDays: number;
+  /** Exact progress through the failed stage (0-1). */
+  stageProgress: number;
+  probability: number;
+  riskBand: "low" | "guarded" | "high" | "critical";
+  factors: string[];
+  /** Only this immutable pre-failure snapshot is eligible for one-click recovery. */
+  recoveryCheckpointId?: string;
+}
+
 export interface TrainingJob {
   id: string;
   name: string;
@@ -1314,23 +1723,37 @@ export interface TrainingJob {
   energyMwDays?: number;
   /** Cumulative accelerator energy in MWh (`energyMwDays × 24`). */
   energyMWh?: number;
-  /** Live ETA: max(remaining PF/current effective PF, remaining calendar gate). */
+  /** Live ETA from remaining PF divided by current effective PF. */
   daysRemaining?: number;
-  /** Integration/validation time gate, independent of allocated PF. */
+  /** @deprecated Forecast-only integration duration; never a completion gate. */
   minCalendarDays?: number;
-  /** Funded, unpaused active days accumulated toward the calendar gate. */
+  /** Active-day telemetry retained for charts and legacy saves. */
   daysElapsed?: number;
   postTrain: PostTrainStage;
   postTrainProgress: number;
   postTrainTarget: number;
-  /** One-shot stages inherited from, or completed within, this lineage. */
+  /** Stage kinds inherited from the source or completed in this version. */
   completedPostTrainStages?: Exclude<PostTrainStage, "none">[];
   /** Frozen result for completed stages so later research cannot rewrite history. */
   postTrainStageEffectiveness?: Partial<
     Record<Exclude<PostTrainStage, "none">, number>
   >;
-  /** Funded active days spent in the current post-training stage. */
+  /** Completed stage-pass count inherited from the source plus this run. */
+  postTrainStageRuns?: Partial<Record<Exclude<PostTrainStage, "none">, number>>;
+  /** Stages already completed in this particular job (each may run once per version). */
+  postTrainStagesCompletedThisRun?: Exclude<PostTrainStage, "none">[];
+  /** Active-day telemetry for the current post-training stage. */
   postTrainDaysElapsed?: number;
+  /** Frozen deterministic risk plan for the current post-training attempt. */
+  postTrainRiskPlan?: PostTrainRiskPlan;
+  /** Number of checkpoint-backed retries in this recovery lineage. */
+  postTrainRecoveryAttempt?: number;
+  /** Failed source run that this recovery branch replaces. */
+  recoveredFromJobId?: string;
+  /** Immutable source weights used for a recovery branch. */
+  recoveryCheckpointId?: string;
+  /** Child recovery job launched from this failed source, preventing rerolls. */
+  recoveryChildJobId?: string;
   mode: TrainMode;
   teacherId?: string;
   /**
@@ -1340,6 +1763,14 @@ export interface TrainingJob {
   distillTeacherShare?: number;
   /** Continue-train from existing model weights */
   continueFromId?: string;
+  /** Frozen lineage identity used to prevent concurrent continuation branches. */
+  continueLineageId?: string;
+  /** Frozen lineage for every checkpoint and final version produced by this run. */
+  lineageId?: string;
+  /** Private checkpoint used to start this branch, if any. */
+  parentCheckpointId?: string;
+  /** Product direction selected when this continuation branch was created. */
+  branchDirection?: TrainingCheckpointBranchDirection;
   /** @deprecated */
   dataMix: DataMix;
   dataPlan: TrainingDataPlan;
@@ -1360,11 +1791,21 @@ export interface TrainingJob {
   /** Deterministic hidden roll; result is computed only when the model finalizes. */
   outcomeSeed?: number;
   outcomeRisk?: "low" | "medium" | "high";
+  /** Campaign milestones already surfaced for this run (fractions in 0–1). */
+  campaignMilestonesReached?: number[];
+  /** Current explainable incident/discovery awaiting a player decision. */
+  pendingCampaignEvent?: TrainingCampaignEvent;
+  /** Bounded resolved event history retained for the release review. */
+  campaignEventHistory?: TrainingCampaignEvent[];
+  /** Accumulated effects of player campaign decisions. */
+  campaignModifiers?: TrainingCampaignModifiers;
   effectiveDataRatio?: number;
   repeatedDataEpochs?: number;
   modalityComputeMult?: number;
   /** Immutable v4 data snapshot captured before the run starts. */
   dataManifestId?: string;
+  /** Immutable compact evidence for campaign weighting and live presentation. */
+  dataEvidence?: TrainingDataEvidence;
   /** Integrated-method snapshot; later disclosure changes cannot rewrite this run. */
   integratedMethods?: string[];
   /** Player-selected model-specific research integrations. */
@@ -1390,6 +1831,10 @@ export interface TrainingJob {
   failureStage?: "base" | Exclude<PostTrainStage, "none">;
   failureDay?: number;
   failureReason?: string;
+  /** Structured failure evidence for run-card diagnostics and save-stable recovery. */
+  failureRecord?: TrainingFailureRecord;
+  /** Eligible immutable checkpoint selected when the failure occurred. */
+  failureRecoveryCheckpointId?: string;
   /** Persisted, bounded telemetry used by the training loss chart. */
   lossHistory?: Array<{
     day: number;
@@ -1399,9 +1844,9 @@ export interface TrainingJob {
   }>;
   /** Fixed recommended PF-day target captured at job creation. */
   recommendedPfDays?: number;
-  /** Extra calendar days purchased after the recommendation milestone. */
+  /** @deprecated Calendar extensions no longer alter fixed PF targets. */
   extensionDays?: number;
-  /** True when the recommended milestone is reached and the player must decide. */
+  /** @deprecated Recommendation decisions no longer pause training. */
   awaitingDecision?: boolean;
   /** Split training cost accounting for UI / P&L. */
   economics?: TrainingEconomics;
@@ -1409,6 +1854,14 @@ export interface TrainingJob {
   benchmarkSnapshots?: TrainingBenchmarkSnapshot[];
   /** Day of the last mid-run benchmark attempt. */
   lastBenchmarkDay?: number;
+  /** Monotonic identity source for concurrent benchmark work. */
+  benchmarkSequence?: number;
+  /** Benchmark currently running; resolves into a snapshot at readyDay. */
+  pendingBenchmark?: TrainingBenchmarkPending;
+  /** @deprecated Fixed PF targets do not auto-extend. */
+  autoExtend?: boolean;
+  /** @deprecated Post-training stages never auto-chain. */
+  autoChainPostTrain?: boolean;
 }
 
 /** Upfront / data / accrued daily training cost split. */
@@ -1434,6 +1887,16 @@ export interface TrainingBenchmarkSnapshot {
   capabilityHigh?: number;
   safetyLow?: number;
   safetyHigh?: number;
+  /** Paid evaluation metadata; absent on legacy snapshots. */
+  suiteIds?: BenchmarkSuiteId[];
+  spendPerSuite?: number;
+  totalCost?: number;
+  /** Aggregate measurement accuracy across selected suites (0-1). */
+  accuracy?: number;
+  /** Suite-specific score and uncertainty table. */
+  suiteResults?: Partial<
+    Record<BenchmarkSuiteId, TrainingBenchmarkSuiteResult>
+  >;
 }
 
 export interface ModelEconomics {
@@ -1447,6 +1910,23 @@ export interface ModelEconomics {
   trainingDailyCost: number;
 }
 
+/**
+ * Negotiable supplier contract terms. `dailyPrice` on the contract equals
+ * `dailyDeliveryMTok × pricePerMTok` for the locked term.
+ */
+export interface DataSupplierTerms {
+  /** MTok delivered each day, split across domainMix. */
+  dailyDeliveryMTok: number;
+  /** $ per MTok. */
+  pricePerMTok: number;
+  /** Minimum delivered quality the seller guarantees. */
+  qualityFloor: number;
+  /** Contract length in days. */
+  termDays: number;
+  /** Requested delivery mix (seller may adjust toward its own mix). */
+  domainMix: Partial<Record<DataDomain, number>>;
+}
+
 export interface DataSupplierContract {
   id: string;
   supplierId: string;
@@ -1458,7 +1938,37 @@ export interface DataSupplierContract {
   termDays: number;
   daysRemaining: number;
   acceptedDay: number;
-  status: "offered" | "active" | "completed" | "cancelled";
+  /**
+   * Lifecycle: offered → countered → accepted → active → expired, with
+   * countered → rejected, active → cancelled, and active → extended exits.
+   * "completed" is the legacy terminal state of pre-negotiation saves.
+   */
+  status:
+    | "offered"
+    | "countered"
+    | "accepted"
+    | "active"
+    | "completed"
+    | "expired"
+    | "rejected"
+    | "cancelled"
+    | "extended";
+  /** Terms the buyer most recently put on the table (status offered/countered). */
+  proposedTerms?: DataSupplierTerms;
+  /** Terms the seller most recently countered with (status countered). */
+  counterTerms?: DataSupplierTerms;
+  /** Guaranteed quality floor locked at signing. */
+  qualityFloor?: number;
+  /** Day the buyer submitted the standing offer. */
+  offeredDay?: number;
+  /** Total MTok delivered so far; extensions never reset this. */
+  deliveredMTok?: number;
+  /** Cancellation fee already charged (the fee is charged exactly once). */
+  cancellationFeeCharged?: number;
+  /** Days added by accepted extensions. */
+  extendedDays?: number;
+  /** Number of accepted extensions. */
+  extensionCount?: number;
 }
 
 export interface StartTrainingOpts {
@@ -1480,6 +1990,10 @@ export interface StartTrainingOpts {
   distillTeacherShare?: number;
   /** Continue training from this model id */
   continueFromId?: string;
+  /** Private checkpoint source for an explicit branch continuation. */
+  continueFromCheckpointId?: string;
+  /** Branch direction used to bias the continuation recipe. */
+  branchDirection?: TrainingCheckpointBranchDirection;
   /** @deprecated prefer dataPlan */
   dataMix?: DataMix;
   /** Domain mix + volume of processed data to use */
@@ -1531,6 +2045,12 @@ export interface SubPlan {
   /** V3 authoritative allowance. Legacy usageMultiplier is migrated into this value. */
   includedMTokPerMonth?: number;
   /**
+   * Legacy advertised API-equivalent value. It is retained for save/UI
+   * compatibility but never determines physical entitlement: changing an API
+   * list price must not silently change subscription usage.
+   */
+  monthlyApiValueSubsidyGbp?: number;
+  /**
    * Legacy save/display field. V3 utilization is always endogenous from plan
    * value, model quality, and service health; player input is ignored.
    */
@@ -1555,6 +2075,11 @@ export interface SubPlan {
   demandShocks?: PlanDemandShock[];
   /** Stable fraction of allowance consumed after launch effects decay. */
   steadyUsageTarget?: number;
+  /**
+   * Desired share of this plan's served traffic retained as training data (0–1).
+   * Paid tiers are hard-capped by price (0 above $50/mo); see plan data-collection policy.
+   */
+  dataCollectionRate?: number;
   enabled: boolean;
   subscriberCap?: number;
 }
@@ -1602,6 +2127,14 @@ export interface PlanDayStats {
   dissatisfaction?: number;
   allowanceDissatisfaction?: number;
   stabilityDissatisfaction?: number;
+  /** 0–1 dissatisfaction from throttled stream speed under overload. */
+  slownessDissatisfaction?: number;
+  /** Band-based expected allowance utilization used for today's demand. */
+  expectedUtilization?: number;
+  /** price − raw serving COGS − support/payment overhead, per subscriber month. */
+  contributionMarginPerSubMonth?: number;
+  /** Advertised monthly API-value subsidy for this plan (£/mo). */
+  apiValueSubsidyGbp?: number;
 }
 
 export interface PlanModelUsage {
@@ -1613,6 +2146,19 @@ export interface PlanModelUsage {
   share: number;
   /** Fully loaded serving cost after model intensity and plan precision. */
   costPerMTok: number;
+}
+
+/** One day's per-plan demand snapshot for UI trend graphs (newest last). */
+export interface PlanStatsDaySnapshot {
+  day: number;
+  plans: {
+    planId: string;
+    name: string;
+    pricePerMonth: number;
+    subscribers: number;
+    dayRevenue: number;
+    dayMTok: number;
+  }[];
 }
 
 export interface ProductPricing {
@@ -1629,6 +2175,12 @@ export interface ProductPricing {
    * 0 = all subs, 1 = all API. Default ~0.68 (API preferred).
    */
   apiVsSubPriority: number;
+  /**
+   * Overload policy: 'shed' rejects excess demand (queues/timeouts → churn),
+   * 'throttle' serves everyone but slows streams (speed strain → demand cools
+   * tomorrow), 'balanced' throttles the first ~25% of overload then sheds.
+   */
+  serveThrottlePolicy?: ServeThrottlePolicy;
   /** Public models currently listed as simultaneous API endpoints. */
   apiModelIds?: string[];
   /** Per-endpoint API precision. Missing entries serve full precision. */
@@ -1642,6 +2194,8 @@ export interface ProductPricing {
   plusIncludedMTok: number;
   proIncludedMTok: number;
 }
+
+export type ServeThrottlePolicy = "shed" | "balanced" | "throttle";
 
 export interface SegmentState {
   id: SegmentId;
@@ -1866,6 +2420,8 @@ export interface LabFinance {
   dayWageCost: number;
   dayChipAmort: number;
   dayBuildingOpex: number;
+  /** Public-model hosting stack (endpoint replicas, KV pool, load infra). */
+  dayHostingOpex?: number;
   dayMarketing: number;
   /** Loan principal + interest paid today */
   dayLoanPayment: number;
@@ -1873,6 +2429,16 @@ export interface LabFinance {
   dayEnergyOther: number;
   /** Chip amort charged to non-inference */
   dayChipAmortOther: number;
+  /** Data supplier contracts, buys, processing, prune audits */
+  dayDataCost?: number;
+  /** Training setup + daily cluster burn */
+  dayTrainingCost?: number;
+  /** Research node / program cash burn */
+  dayResearchCost?: number;
+  /** Hire / poach signing costs */
+  dayHiringCost?: number;
+  /** One-off capital spends booked through the ledger (optional) */
+  dayCapexCost?: number;
   apiRevenue: number;
   subRevenue: number;
   enterpriseRevenue: number;
@@ -1981,6 +2547,44 @@ export type MarketingChannel =
 
 export type MarketingChannels = Record<MarketingChannel, number>;
 
+/** Per-channel slice of the canonical daily marketing result. */
+export interface MarketingChannelBreakdown {
+  spend: number;
+  /** Raw conversions at face value: spend / channel CAC */
+  baseAcquisitions: number;
+  /** After channel fit × model appeal × brand factor × saturation */
+  effectiveAcquisitions: number;
+  qualifiedLeads: number;
+  enterpriseLeads: number;
+  /** New addressable-market customers created (not share stolen) */
+  marketExpansion: number;
+  brandGain: number;
+}
+
+/**
+ * Canonical daily marketing result, computed once per day by
+ * systems/marketing. Market demand / brand settlement consume this instead of
+ * re-deriving campaign effects from raw spend.
+ */
+export interface MarketingOutcome {
+  day: number;
+  spend: number;
+  qualifiedLeads: number;
+  acquiredCustomers: number;
+  enterpriseLeads: number;
+  /** TAM growth in customer-equivalents (grows the market, not just share) */
+  marketExpansion: number;
+  /** Campaign brand lift applied by the marketing system (single writer) */
+  brandGain: number;
+  channelBreakdown: Record<MarketingChannel, MarketingChannelBreakdown>;
+  /** spend / acquiredCustomers (0 when nothing was acquired) */
+  effectiveCac: number;
+}
+
+/** Cash-distress ladder surfaced to UI; bankruptcy ends the run. */
+export type CashDistressStage =
+  "stable" | "distressed" | "severe" | "final" | "bankrupt";
+
 export interface CapitalStack {
   capTable: EquityStake[];
   fundingRounds: FundingRound[];
@@ -2074,11 +2678,23 @@ export type ComputeWorkKind =
   | "data_processing";
 
 export interface NativeWorkUnits {
+  /** Text prompt tokens actually presented to the model, in millions. */
   inputMTok?: number;
+  /** Prefix/cache hits are tracked separately because they have different COGS. */
+  cachedInputMTok?: number;
+  /** Visible model output, in millions of tokens. */
   outputMTok?: number;
+  /** Hidden chain-of-thought / reasoning work, in millions of tokens. */
+  reasoningMTok?: number;
+  /** External tools invoked by an agent workload. */
+  toolCalls?: number;
+  /** Completed image generations. */
   images?: number;
+  /** Resolution x denoising-step work used by image generation. */
   megapixelSteps?: number;
+  /** Native audio duration processed or generated. */
   audioSeconds?: number;
+  /** Native video duration generated. */
   videoSeconds?: number;
 }
 
@@ -2086,6 +2702,8 @@ export interface NativeWorkUnits {
 export interface ComputeWorkItem {
   id: string;
   labId: LabId;
+  /** Commercial channel is independent from the product-native work kind. */
+  channel: "api" | "subscription" | "enterprise";
   kind: ComputeWorkKind;
   modelId?: string;
   planId?: string;
@@ -2225,6 +2843,8 @@ export interface RivalLab {
   researchQueue?: string[];
   /** 0–1 overload EMA (shared capacity economy) */
   servicePain?: number;
+  /** 0–1 throttling EMA: streams slowed by overload under a throttle policy. */
+  speedStrain?: number;
   /** Last-day abstract product revenue */
   dayRevenue?: number;
   /** Provider-neutral compute contract income accrued before market settlement. */
@@ -2264,6 +2884,67 @@ export interface RivalLab {
   powerExportEnabled?: boolean;
   publicEstimate?: RivalPublicEstimate;
   strategy?: RivalControllerState;
+  /**
+   * Latest infrastructure build target derived from the scale-ladder decision.
+   * Optional so old saves load unchanged; recomputed when stale or missing.
+   */
+  campusPlan?: RivalCampusPlan;
+  /** Seeded, financially-accounted emergency backing and checkpoint comeback. */
+  financialComeback?: RivalFinancialComeback;
+}
+
+export interface RivalFinancialComeback {
+  /** Incremented only when this lab enters a fresh distress episode. */
+  distressEpisode: number;
+  /** Episode whose single backing roll was already consumed. */
+  attemptedEpisode?: number;
+  /** Backers will not reconsider until this day, even after a new distress episode. */
+  cooldownUntilDay: number;
+  status: "none" | "announced" | "released";
+  announcedDay?: number;
+  releaseDay?: number;
+  completedDay?: number;
+  backingCash?: number;
+  acquisitionCost?: number;
+  investorName?: string;
+  modelId?: string;
+  family?: ModelFamily;
+  backbone?: ModelBackbone;
+  productPreset?: ModelProductPreset;
+  /** Acquired checkpoint scale snapshotted when the rescue is announced. */
+  paramsB?: number;
+  activeParamsRatio?: number;
+  /** Research/process multiplier carried by the acquired checkpoint. */
+  researchMultiplier?: number;
+  /** Immutable technical snapshot disclosed with the acquired weights. */
+  researchUnlocked?: string[];
+  dataCoverage?: number;
+  dataQuality?: number;
+  modalityExperience?: Partial<Record<"image" | "audio" | "video", number>>;
+  targetCapability?: number;
+  referenceFrontierCapability?: number;
+}
+
+/**
+ * Persisted rival infrastructure plan: the model the lab is building toward
+ * and the capacity the campus must have ready before the campaign starts.
+ */
+export interface RivalCampusPlan {
+  createdDay: number;
+  /** Strategy revision the plan was computed from (replan on change). */
+  decisionRevision: number;
+  targetParamsB: number;
+  targetActiveParamsB?: number;
+  targetFamily: ModelFamily;
+  targetBackbone: ModelBackbone;
+  /** Hall size chosen from projected three-year rack demand. */
+  dcSize: "dc" | "dc_m" | "dc_l";
+  projectedRackDemand: number;
+  projectedMwDemand: number;
+  projectedHbmGb: number;
+  projectedSystemRamGb: number;
+  projectedDataMTok: number;
+  triggers: string[];
 }
 
 /**
@@ -2296,6 +2977,8 @@ export interface LabState {
   data: LabData;
   brandTrust: number;
   servicePain: number;
+  /** 0–1 throttling EMA: streams slowed by overload under a throttle policy. */
+  speedStrain?: number;
   researchUnlocked: string[];
   activeResearch: ResearchProgress | string | null;
   researchQueue: string[];
@@ -2452,6 +3135,16 @@ export interface TrainingForecast {
   cashBurnPerDay: number;
   weightedMTok: number;
   effectiveDataRatio: number;
+  /** Raw-target progress and the reductions that produce effective training signal. */
+  dataGuidance?: {
+    rawStrongTargetMTok: number;
+    rawStrongTargetMet: boolean;
+    qualityRetention: number;
+    diversityRetention: number;
+    holdoutRetention: number;
+    lowQualityRetention: number;
+    provenanceRetention: number;
+  };
   repeatedDataEpochs: number;
   modalityComputeMult: number;
   expectedCapability: number;
@@ -2530,6 +3223,9 @@ export interface RivalTrainJob {
   effectiveDataRatio?: number;
   repeatedDataEpochs?: number;
   modalityComputeMult?: number;
+  /** Immutable manifest identity and compact evidence retained for parity. */
+  dataManifestId?: string;
+  dataEvidence?: TrainingDataEvidence;
   cashBurnPerDay?: number;
   cashSunk?: number;
   /** Numerical recipe selected through the same research/hardware gates as player jobs. */
@@ -2584,6 +3280,10 @@ export interface MapCity {
   talentWageMult?: number;
 }
 
+/** City-block parcel use: municipal utility, buildable commercial infill, protected park, or road/bridge infrastructure. */
+export type UrbanUse =
+  "municipal" | "commercial_infill" | "park" | "infrastructure";
+
 export interface MapTile {
   x: number;
   y: number;
@@ -2626,6 +3326,8 @@ export interface MapTile {
   dcSize?: DcSize;
   /** HQ size class */
   hqSize?: HqSize;
+  /** City-block parcel classification (compact worlds derive it in sim/world/urbanInfill). */
+  urbanUse?: UrbanUse;
 }
 
 export interface BuildDef {
@@ -2695,6 +3397,11 @@ export interface PlayerState {
    * Capacity comes from completed HQ buildings.
    */
   staff?: StaffHeadcount;
+  /**
+   * When true, the next small `hq` placement is free (build + land waived)
+   * and completes instantly. Cleared after use.
+   */
+  starterHqGrant?: boolean;
   /** Named senior staff plus aggregate pods for decade campaigns. */
   researchLeads?: ResearchLead[];
   researchPods?: ResearchPod[];
@@ -2719,6 +3426,12 @@ export interface PlayerState {
    * Raises latency, drives gradual churn / complaints until compute catches up.
    */
   servicePain: number;
+  /** Headline throttling EMA: max of the two channel strains. */
+  speedStrain?: number;
+  /** 0–1 throttling EMA on the API channel (streams to API users). */
+  apiSpeedStrain?: number;
+  /** 0–1 throttling EMA on the subscription channel (plan streams). */
+  subSpeedStrain?: number;
   researchUnlocked: string[];
   activeResearch: ResearchProgress | null;
   /** Ordered research queue (next starts when active completes) */
@@ -2726,6 +3439,10 @@ export interface PlayerState {
   /** Named-pod method queue; kept separate from the legacy single-worker queue. */
   researchProgramQueue?: string[];
   models: Model[];
+  /** In-flight immutable weight snapshots undergoing private evaluation. */
+  trainingCheckpoints?: TrainingCheckpointCandidate[];
+  /** Concurrent paid benchmark/reviewer work across jobs and checkpoints. */
+  privateEvaluationJobs?: PrivateEvaluationJob[];
   /** Concurrent player training jobs. `trainingJob` mirrors the first entry for legacy saves. */
   trainingJobs?: TrainingJob[];
   trainingJob: TrainingJob | null;
@@ -2747,6 +3464,8 @@ export interface PlayerState {
   capital?: CapitalStack;
   /** Daily raw-PF-per-drawn-MW samples for the Power panel trend (newest last). */
   powerEfficiencyHistory?: PowerEfficiencySample[];
+  /** Latest settled daily marketing result (written once per day by systems/marketing). */
+  marketingOutcome?: MarketingOutcome;
 }
 
 export interface WorldEvent {
@@ -2783,6 +3502,9 @@ export interface VictoryState {
   goalValuation: number;
   goalCapability: number;
   bankruptDay: number;
+  /** Consecutive distinct days meeting fulfilled-share/SLO/headroom dominance. */
+  dominanceQualifiedDays?: number;
+  lastDominanceQualifiedDay?: number;
 }
 
 export type ExternalityMode = "standard" | "advanced";
@@ -2876,6 +3598,10 @@ export interface IndustryDataPack {
   calibratedThroughYear: number;
   demand: {
     baselineUsefulTasks: number;
+    /** Human/organization adoption grows slower than automated task volume. */
+    reportYearUserMinMultiplier?: number;
+    reportYearUserMaxMultiplier?: number;
+    /** Legacy min/max fields are retained as task-intensity multipliers. */
     reportYearMinMultiplier: number;
     reportYearMaxMultiplier: number;
   };
@@ -3029,6 +3755,8 @@ export interface SimState {
   config: RunConfig;
   /** Immutable calibration snapshot pinned into this campaign and its save. */
   industryDataPack: IndustryDataPack;
+  /** Per-campaign balance overrides (pause-menu Balance tab); absent = defaults. */
+  balanceTuning?: Partial<BalanceTuning>;
   calendar: CalendarState;
   progression: ProgressionState;
   automation: AutomationPolicies;
@@ -3103,7 +3831,27 @@ export interface SimState {
     effectiveLatencyScore: number;
     /** 0–1 overload pressure used for churn/latency */
     servicePain: number;
+    /** API channel demand ÷ its reserved capacity today (1 = saturated). */
+    apiLoad?: number;
+    /** Subscription channel demand ÷ its reserved capacity today. */
+    subLoad?: number;
+    /** Demand that could not be served or trickled down today (MTok). */
+    overflowMTok?: number;
+    /** Unserved API demand retried onto the lab's other models today (MTok). */
+    trickledMTok?: number;
+    /** 0–1 throttling EMA in effect during today's offers. */
+    speedStrain?: number;
+    /** API-channel throttle strain after today's settlement. */
+    apiSpeedStrain?: number;
+    /** Subscription-channel throttle strain after today's settlement. */
+    subSpeedStrain?: number;
     planStats: PlanDayStats[];
+    /** Served subscription MTok today keyed by plan id. */
+    servedMTokByPlanId?: Record<string, number>;
+    /** Served MTok from free plans today. */
+    servedFreeMTok?: number;
+    /** Served MTok from paid plans today. */
+    servedPaidMTok?: number;
     apiSubscribers: number;
     /** Pre-serve API demand MTok (price-sensitive) */
     apiDemandMTok?: number;
@@ -3132,6 +3880,8 @@ export interface SimState {
     industryServedMTok?: number;
     /** Secular adoption multiplier vs day-1 segment bases (approx) */
     marketAdoption?: number;
+    /** Tasks per adopter multiplier, separated from user adoption. */
+    marketTaskIntensity?: number;
     /** Player capacity priority (API share of inference) */
     apiVsSubPriority?: number;
     apiServeFrac?: number;
@@ -3151,6 +3901,8 @@ export interface SimState {
   };
   /** Rolling finance/compute history for trends (newest last). */
   financeHistory: FinanceDaySnapshot[];
+  /** Per-plan daily subscriber/revenue/token history for UI graphs (newest last). */
+  planStatsHistory: PlanStatsDaySnapshot[];
   /** Older daily finance compacted into calendar-month summaries. */
   financeMonthlyHistory: FinanceMonthSnapshot[];
   /** Present in all saves; standard mode leaves it cost- and incident-free. */

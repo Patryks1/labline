@@ -13,6 +13,7 @@ import {
 import { ScreenSpaceLod, type LodSnapshot } from './lod'
 import { ViewportRendererMetrics } from './metrics'
 import { CloudLayer } from './cloudLayer'
+import { ConstructionLayer } from './constructionLayer'
 import { EnvironmentLifeLayer } from './environmentLifeLayer'
 import { MunicipalPowerLayer } from './municipalPowerLayer'
 import { MapSurfaceLayer } from './surfaceLayer'
@@ -76,6 +77,7 @@ export class ViewportMapRenderer {
   readonly traffic: TrafficLayer
   readonly environmentLife: EnvironmentLifeLayer
   readonly municipalPower: MunicipalPowerLayer
+  readonly construction: ConstructionLayer
   readonly worldVoid: WorldVoidLayer
   readonly chunkRoot = new THREE.Group()
 
@@ -98,6 +100,7 @@ export class ViewportMapRenderer {
     this.traffic = new TrafficLayer(this.registry, options.trafficLimits)
     this.environmentLife = new EnvironmentLifeLayer(this.registry)
     this.municipalPower = new MunicipalPowerLayer()
+    this.construction = new ConstructionLayer()
     this.worldVoid = new WorldVoidLayer({
       width: this.source.width,
       height: this.source.height,
@@ -131,6 +134,7 @@ export class ViewportMapRenderer {
     this.scene.add(this.traffic.root)
     this.scene.add(this.environmentLife.root)
     this.scene.add(this.municipalPower.root)
+    this.scene.add(this.construction.root)
     this.scene.add(this.clouds.root)
     this.metrics.addSurfaceUpload(this.surface.data.data.length, this.surface.data.tileCount)
   }
@@ -317,6 +321,7 @@ export class ViewportMapRenderer {
     this.traffic.update(selection.visible, this.chunks, this.source)
     this.environmentLife.update(selection.visible, this.chunks, this.source)
     this.municipalPower.update(selection.visible, this.chunks, this.source, lod.active)
+    this.construction.update(selection.visible, this.chunks, this.source)
     this.updateMetrics(selection, lod, pendingChunks, performance.now() - buildStarted)
     return { chunks: selection, lod, prewarming: pendingPrewarm > 0 }
   }
@@ -332,6 +337,7 @@ export class ViewportMapRenderer {
     this.setTrafficFrame(timeSeconds)
     this.environmentLife.setFrame(timeSeconds)
     this.municipalPower.setFrame(timeSeconds)
+    this.construction.setFrame(timeSeconds)
     this.worldVoid.setFrame(timeSeconds)
     this.clouds.setFrame(timeSeconds, this.source.isSimulationPaused?.() ?? false)
   }
@@ -399,6 +405,7 @@ export class ViewportMapRenderer {
     this.scene.remove(this.traffic.root)
     this.scene.remove(this.environmentLife.root)
     this.scene.remove(this.municipalPower.root)
+    this.scene.remove(this.construction.root)
     this.scene.remove(this.worldVoid.mesh)
     this.scene.remove(this.clouds.root)
     this.chunkRoot.clear()
@@ -406,6 +413,7 @@ export class ViewportMapRenderer {
     this.traffic.dispose()
     this.environmentLife.dispose()
     this.municipalPower.dispose()
+    this.construction.dispose()
     this.worldVoid.dispose()
     this.clouds.dispose()
     if (this.ownsRegistry) this.registry.dispose()
@@ -470,6 +478,10 @@ export class ViewportMapRenderer {
     capacity += this.municipalPower.stats.instances
     drawCalls += this.municipalPower.stats.drawCalls
     triangles += this.municipalPower.stats.triangles
+    instances += this.construction.stats.instances
+    capacity += this.construction.stats.instances
+    drawCalls += this.construction.stats.drawCalls
+    triangles += this.construction.stats.triangles
     if (this.clouds.root.visible) {
       drawCalls += this.clouds.stats.drawCalls
       triangles += this.clouds.stats.triangles
@@ -490,6 +502,7 @@ export class ViewportMapRenderer {
       trafficRebuilds: this.traffic.stats.rebuilds,
       trafficUploadBytes: this.traffic.stats.uploadBytes,
       municipalEffectInstances: this.municipalPower.stats.instances,
+      constructionInstances: this.construction.stats.instances,
       chunkBuildMs,
       lodActive: lod.active,
       lodDesired: lod.desired,

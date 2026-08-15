@@ -95,10 +95,11 @@ export function deriveCityStats(state: Pick<SimState, 'map' | 'cityPowerContract
   return cities.map((city) => {
     const accumulator = accumulatorByIndex.get(city.index)!
     const population = world?.cityRuntime.get(city.index)?.population ?? city.population
+    // Instantaneous MW demand only: tier floor vs population load. powerBuyMw
+    // is the utility's external contract capacity, not demand — never mix it in.
     const municipalDemandMw = Math.max(
       tierDemandFloor(city.tier),
       population / 1_500,
-      city.powerBuyMw * 24,
     )
     const availableSupplyMw = accumulator.municipalCapacityMw + accumulator.powerExportContractMw
     const totalObligationMw = municipalDemandMw + accumulator.cityPowerContractMw

@@ -244,7 +244,7 @@ export function createWorldDescriptorV7(options: WorldGenerationOptions): WorldD
     terrainAlgorithmVersion: 1,
     biomeVersion: 1,
     transportAlgorithmVersion: 2,
-    settlementAlgorithmVersion: 5,
+    settlementAlgorithmVersion: 6,
     municipalCampusAlgorithmVersion: 2,
     cityStatsModelVersion: 1,
     riverAlgorithmVersion: 1,
@@ -1837,11 +1837,16 @@ function municipalPlantKind(city: StaticCity, seed: number): MunicipalPowerPlant
   return roll < 38 ? 'coal' : roll < 70 ? 'wind' : 'solar'
 }
 
-function municipalCapacityMw(city: StaticCity, kind: MunicipalPowerPlantKind): number {
+function municipalCapacityMw(city: StaticCity): number {
   const tierDemand = city.tier === 'metro' ? 220 : city.tier === 'satellite' ? 105 : city.tier === 'town' ? 52 : 24
-  const demand = Math.max(tierDemand, city.population / 1_500, city.powerBuyMw * 24)
-  const factor = kind === 'nuclear' ? 2.4 : kind === 'coal' ? 1.55 : kind === 'wind' ? 1.05 : 0.78
-  return Math.max(10, Math.round(demand * factor / 10) * 10)
+  // Instantaneous MW demand: tier floor vs population load. powerBuyMw is the
+  // utility's external contract capacity and must not enter the demand mix.
+  const demand = Math.max(tierDemand, city.population / 1_500)
+  // Starter reserve: at least 20 MW or 25% of demand, so every starting city
+  // can sell spare capacity before the player builds anything. Rounding up to
+  // the next 10 MW block keeps the reserve intact after quantization.
+  const starterReserveMw = Math.max(20, demand * 0.25)
+  return Math.max(10, Math.ceil((demand + starterReserveMw) / 10) * 10)
 }
 
 function plantFootprintIds(descriptor: WorldDescriptorV5, cx: number, cy: number): TileId[] {
@@ -2082,7 +2087,7 @@ function addV5SuburbsAndMunicipalPower(
       cx: site.x,
       cy: site.y,
       footprint: Object.freeze(footprint),
-      capacityMw: municipalCapacityMw(city, plantKind),
+      capacityMw: municipalCapacityMw(city),
       animationPhase: (coordinateHash(site.x, site.y, descriptor.seed ^ 0x8f31) & 0xffff) / 0xffff,
     }))
   }
@@ -2516,7 +2521,7 @@ function addV6ZoningAndMunicipalPower(
       cy: site.y,
       footprint: Object.freeze(footprint),
       layout,
-      capacityMw: municipalCapacityMw(city, plantKind),
+      capacityMw: municipalCapacityMw(city),
       animationPhase: (coordinateHash(site.x, site.y, descriptor.seed ^ 0x8f31) & 0xffff) / 0xffff,
     }))
   }
@@ -2561,7 +2566,52 @@ function addV6ZoningAndMunicipalPower(
       }
     }
   }
+
+  // V7: carve purchasable empty lots inside settlements while keeping most of
+  // the scenic city/house fabric. Feature + district stay so lots remain
+  // "in-city" for talent markets and expensive urban land pricing.
+  if (descriptor.generatorVersion === WORLD_GENERATOR_VERSION_V7) {
+    carveV7UrbanEmptyLots(descriptor, kind, feature, transport, district)
+  }
+
   return plants
+}
+
+/**
+ * Convert a minority of city/house parcels to empty buildable lots.
+ * Density stays high and deterministic: settlementAlgorithmVersion 5 carves
+ * ~8% core / ~14% mixed / ~16% suburb; version 6 carves ~14% / ~20% / ~22%
+ * so fresh cities keep more open in-city office plots without looking sparse.
+ * Both versions share one hash salt, so v6 lots are a superset of v5 lots and
+ * version-5 descriptors (existing saves) regenerate byte-identical terrain.
+ */
+function carveV7UrbanEmptyLots(
+  descriptor: WorldDescriptorV7,
+  kind: Uint8Array,
+  feature: Uint16Array,
+  transport: Uint16Array,
+  district: Uint8Array,
+): void {
+  const roomierLots = descriptor.settlementAlgorithmVersion >= 6
+  for (let id = 0; id < kind.length; id++) {
+    const terrain = kind[id]!
+    if (terrain !== TERRAIN_KIND.city && terrain !== TERRAIN_KIND.house) continue
+    if (cityIndexFromFeature(feature[id]!) === undefined) continue
+    if (transportClass(transport[id]!) !== TRANSPORT_ROAD_CLASS.none) continue
+    const zone = district[id]!
+    if (zone === V6_DISTRICT_UTILITY || zone === V6_DISTRICT_GREEN_BUFFER) continue
+    const threshold = zone === V6_DISTRICT_CORE
+      ? (roomierLots ? 14 : 8)
+      : zone === V6_DISTRICT_MIXED
+        ? (roomierLots ? 20 : 14)
+        : zone === V6_DISTRICT_SUBURB
+          ? (roomierLots ? 22 : 16)
+          : 0
+    if (threshold <= 0) continue
+    const roll = coordinateHash(id % descriptor.width, Math.floor(id / descriptor.width),
+      descriptor.seed ^ 0x51a7) % 100
+    if (roll < threshold) kind[id] = TERRAIN_KIND.empty
+  }
 }
 
 /**

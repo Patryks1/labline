@@ -114,6 +114,32 @@ export interface RenderInstance {
   color: number
 }
 
+/**
+ * One player/rival facility projected for the construction-animation layer.
+ * `progress < 1` is an active construction site (scaffold + crane);
+ * `progress >= 1` is a standing building used for first-appearance settle bursts.
+ */
+export interface RenderConstructionSite {
+  /** Stable numeric id shared across updates (hashed facility/campus id). */
+  readonly id: number
+  /** Anchor tile, used for chunk-visibility tests. */
+  readonly tileX: number
+  readonly tileY: number
+  /** World-space footprint centre and ground elevation. */
+  readonly x: number
+  readonly y: number
+  readonly z: number
+  /** Footprint span in tiles. */
+  readonly widthTiles: number
+  readonly depthTiles: number
+  /** Construction ratio 0..1 (1 = complete / standing). */
+  readonly progress: number
+  /** Approximate finished building height in world units (crane sizing). */
+  readonly heightHint: number
+  /** Deterministic per-site animation jitter in [0, 2π). */
+  readonly phase: number
+}
+
 export interface RenderMunicipalPowerPlant {
   readonly id: number
   readonly kind: 'coal' | 'wind' | 'solar' | 'nuclear'
@@ -161,6 +187,13 @@ export interface ViewportRenderSource {
 
   /** Immutable V5 utility campuses used by the shader-driven effects layer. */
   getMunicipalPowerPlants?(): readonly RenderMunicipalPowerPlant[]
+
+  /**
+   * All player/rival facilities with construction state for the construction
+   * animation layer. Active sites (progress < 1) get scaffolds and cranes;
+   * standing sites let the layer detect completions and first appearances.
+   */
+  getConstructionSites?(): readonly RenderConstructionSite[]
 
   /** Simulation pause freezes the fixed-step visual traffic clock. */
   isSimulationPaused?(): boolean

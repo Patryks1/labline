@@ -6,9 +6,45 @@ import type {
   LabId,
   SimState,
 } from '../types'
+import { hashSeed } from '../rng'
 import { getLab, updateLab } from './labEngine'
+import {
+  maybeStartRivalFinancialComeback,
+  normalizeRivalFinancialComeback,
+} from './rivalComeback'
 
 const DAY_COUNT = 365
+
+/** Rival-specific tolerance prevents a shared market shock from synchronizing every board. */
+export function rivalDistressRunwayThreshold(
+  seed: number,
+  rivalId: string,
+): number {
+  return 72 + (hashSeed(seed, rivalId, 'distress-runway-v2') % 37)
+}
+
+/** Deterministic stage bands retain urgency without identical countdown clocks. */
+export function rivalRestructuringStageDays(
+  seed: number,
+  rivalId: string,
+  stage: CapitalStack['restructuring']['stage'],
+  distressEpisode: number,
+): number {
+  const bands: Partial<
+    Record<CapitalStack['restructuring']['stage'], readonly [number, number]>
+  > = {
+    warning: [50, 75],
+    refinance: [35, 55],
+    asset_sale: [22, 40],
+  }
+  const band = bands[stage]
+  if (!band) return 0
+  return (
+    band[0] +
+    (hashSeed(seed, rivalId, stage, distressEpisode, 'restructure-days-v2') %
+      (band[1] - band[0] + 1))
+  )
+}
 
 function clamp(value: number, low: number, high: number): number {
   return Math.max(low, Math.min(high, value))
@@ -538,6 +574,10 @@ function settleRivalCapital(state: SimState): SimState {
   for (const rival of state.rivals) {
     const before = getLab(next, rival.id)
     const capital = before.capital ?? defaultCapital()
+    let financialComeback = normalizeRivalFinancialComeback(
+      next.rivals.find((candidate) => candidate.id === rival.id) ?? rival,
+    )
+    const runwayThreshold = rivalDistressRunwayThreshold(state.seed, rival.id)
     let cash = before.cash
     let paid = 0
     let breach = false
@@ -551,18 +591,33 @@ function settleRivalCapital(state: SimState): SimState {
       const daysLeft = Math.max(0, debt.daysLeft - 1)
       const covenantBreached =
         payment + 0.01 < due ||
-        (debt.kind === 'venture_debt' && before.finance.runwayDays < 90)
+        (debt.kind === 'venture_debt' &&
+          before.finance.runwayDays < runwayThreshold)
       breach ||= covenantBreached
       if (remaining > 0.01) {
         debts.push({ ...debt, remaining, daysLeft, breached: covenantBreached })
       }
     }
-    const distressed = breach || before.finance.runwayDays < 90 || cash < 0
+    const distressed =
+      breach || before.finance.runwayDays < runwayThreshold || cash < 0
     let restructuring = capital.restructuring
     if (!distressed && restructuring.stage !== 'bankruptcy') {
       restructuring = { active: false, daysLeft: 0, stage: 'none' }
     } else if (distressed && !restructuring.active) {
-      restructuring = { active: true, daysLeft: 60, stage: 'warning' }
+      financialComeback = {
+        ...financialComeback,
+        distressEpisode: financialComeback.distressEpisode + 1,
+      }
+      restructuring = {
+        active: true,
+        daysLeft: rivalRestructuringStageDays(
+          state.seed,
+          rival.id,
+          'warning',
+          financialComeback.distressEpisode,
+        ),
+        stage: 'warning',
+      }
     } else if (distressed && restructuring.daysLeft > 1) {
       restructuring = { ...restructuring, daysLeft: restructuring.daysLeft - 1 }
     } else if (distressed) {
@@ -570,9 +625,36 @@ function settleRivalCapital(state: SimState): SimState {
         CapitalStack['restructuring']['stage'],
         CapitalStack['restructuring']
       > = {
-        none: { active: true, daysLeft: 60, stage: 'warning' },
-        warning: { active: true, daysLeft: 45, stage: 'refinance' },
-        refinance: { active: true, daysLeft: 30, stage: 'asset_sale' },
+        none: {
+          active: true,
+          daysLeft: rivalRestructuringStageDays(
+            state.seed,
+            rival.id,
+            'warning',
+            financialComeback.distressEpisode,
+          ),
+          stage: 'warning',
+        },
+        warning: {
+          active: true,
+          daysLeft: rivalRestructuringStageDays(
+            state.seed,
+            rival.id,
+            'refinance',
+            financialComeback.distressEpisode,
+          ),
+          stage: 'refinance',
+        },
+        refinance: {
+          active: true,
+          daysLeft: rivalRestructuringStageDays(
+            state.seed,
+            rival.id,
+            'asset_sale',
+            financialComeback.distressEpisode,
+          ),
+          stage: 'asset_sale',
+        },
         asset_sale: { active: true, daysLeft: 0, stage: 'bankruptcy' },
         bankruptcy: { active: true, daysLeft: 0, stage: 'bankruptcy' },
       }
@@ -605,6 +687,14 @@ function settleRivalCapital(state: SimState): SimState {
           lab.loans.reduce((sum, loan) => sum + loan.remaining, 0),
       },
     }))
+    next = {
+      ...next,
+      rivals: next.rivals.map((candidate) =>
+        candidate.id === rival.id
+          ? { ...candidate, financialComeback }
+          : candidate,
+      ),
+    }
     if (restructuring.stage !== capital.restructuring.stage) {
       next = {
         ...next,
@@ -614,6 +704,7 @@ function settleRivalCapital(state: SimState): SimState {
         ].slice(0, 64),
       }
     }
+    next = maybeStartRivalFinancialComeback(next, rival.id)
   }
   return next
 }
@@ -716,16 +807,16 @@ export function tickCapital(state: SimState): SimState {
     breach ||= covenantBreached
     if (remaining > 0.01) debts.push({ ...debt, remaining, daysLeft, breached: covenantBreached })
   }
-  const runwayWarning = state.player.finance.runwayDays < 90 || cash < 0
-  const distressed = breach || runwayWarning
+  // Player recovery ladder: negative cash only (runway soft-warns elsewhere).
+  const cashNegative = cash < 0
   let restructuring = capital.restructuring
-  if (!distressed && restructuring.stage !== 'bankruptcy') {
+  if (!cashNegative && restructuring.stage !== 'bankruptcy') {
     restructuring = { active: false, daysLeft: 0, stage: 'none' }
-  } else if (distressed && !restructuring.active) {
+  } else if (cashNegative && !restructuring.active) {
     restructuring = { active: true, daysLeft: 60, stage: 'warning' }
-  } else if (distressed && restructuring.active && restructuring.daysLeft > 1) {
+  } else if (cashNegative && restructuring.active && restructuring.daysLeft > 1) {
     restructuring = { ...restructuring, daysLeft: restructuring.daysLeft - 1 }
-  } else if (distressed && restructuring.active) {
+  } else if (cashNegative && restructuring.active) {
     const nextStage: Record<CapitalStack['restructuring']['stage'], CapitalStack['restructuring']> = {
       none: { active: true, daysLeft: 60, stage: 'warning' },
       warning: { active: true, daysLeft: 45, stage: 'refinance' },
@@ -763,8 +854,8 @@ export function tickCapital(state: SimState): SimState {
   }
   if (restructuring.stage !== capital.restructuring.stage) {
     const messages: Record<CapitalStack['restructuring']['stage'], string> = {
-      none: 'Recovery complete: runway and covenants are stable again.',
-      warning: 'Runway warning: cut commitments, refinance, or raise equity within 60 days.',
+      none: 'Recovery complete: cash is non-negative again.',
+      warning: 'Cash negative: cut commitments, refinance, or raise equity within 60 days.',
       refinance: 'Refinancing stage: lenders and investors now demand corrective terms.',
       asset_sale: 'Forced-recovery stage: sell assets, accept a down round, or restructure within 30 days.',
       bankruptcy: 'Restructuring failed; the lab has entered bankruptcy review.',
@@ -774,7 +865,13 @@ export function tickCapital(state: SimState): SimState {
   }
   return settleRivalCapital(
     breach
-      ? pushAlert(next, 'danger', 'A debt covenant was breached. The recovery window is active.')
+      ? pushAlert(
+          next,
+          'danger',
+          cashNegative
+            ? 'A debt covenant was breached. The recovery window is active.'
+            : 'A debt covenant was breached.',
+        )
       : next,
   )
 }

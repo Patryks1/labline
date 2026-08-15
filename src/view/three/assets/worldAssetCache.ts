@@ -54,7 +54,11 @@ export class WorldAssetCache {
   private readonly manifestUrl: string
 
   constructor(
-    fetcher: FetchLike = fetch,
+    // `fetch` is a Web API method whose receiver matters in some browsers.
+    // Keeping the bare function on the cache and later calling
+    // `this.fetcher(...)` binds it to the cache instance, which WebKit and the
+    // embedded Chromium runtime reject as an illegal invocation.
+    fetcher: FetchLike = globalThis.fetch.bind(globalThis),
     manifestUrl = WORLD_ASSET_MANIFEST_URL,
   ) {
     this.fetcher = fetcher

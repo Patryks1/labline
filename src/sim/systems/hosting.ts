@@ -8,7 +8,7 @@ import { getRackSku } from "../balance/rackSkus";
 import { estimateServingMemory } from "../balance/tokenServe";
 import type { Model, ServePrecision, SimState } from "../types";
 import { fleetStats, resolveRackSku } from "./racks";
-import { dcBayUsage, orderRacksIntoDc } from "./dcRacks";
+import { orderRacksIntoDc } from "./dcRacks";
 import { computeSnapshot } from "./compute";
 import { facilityAnchorTiles } from "./worldAccess";
 import { servingPlacementNeed } from "./servingPlacement";
@@ -44,13 +44,39 @@ export interface RackDeploymentQuote {
   skuId: string;
   rackUnits: number;
   selectedHalls: number;
-  freeBays: number;
-  fillAllRacks: number;
+  /** Collision-valid empty cabinet footprints explicitly drawn in layouts. */
+  plannedCabinets: number;
   marketAvailable: number;
   affordableRacks: number;
   maxRacks: number;
-  canFillAll: boolean;
+  canFillPlanned: boolean;
   reservePerRack: number;
+}
+
+function plannedCabinetsForSku(
+  state: SimState,
+  hall: { x: number; y: number; campusId?: string },
+  rackUnits: number,
+): number {
+  const facilityId = hall.campusId ?? `facility:${hall.x},${hall.y}`;
+  const layout = state.dataHallLayouts?.[facilityId];
+  if (!layout) return 0;
+  return layout.objects.filter((object) => {
+    if (object.kind !== "rack" || !object.reserved) return false;
+    try {
+      return (
+        Math.max(
+          1,
+          resolveRackSku(
+            object.catalogId,
+            state.player.rackDesigns,
+          ).rackUnits,
+        ) >= rackUnits
+      );
+    } catch {
+      return rackUnits <= 1;
+    }
+  }).length;
 }
 
 /** Aggregate quote for a multi-hall order. Supply and cash are capped once for the whole batch. */
@@ -61,8 +87,7 @@ export function quoteRackDeployment(
 ): RackDeploymentQuote {
   const sku = resolveRackSku(skuId, state.player.rackDesigns);
   const rackUnits = Math.max(1, sku.rackUnits);
-  let freeBays = 0;
-  let fillAllRacks = 0;
+  let plannedCabinets = 0;
   let selectedHalls = 0;
   for (const target of targets) {
     const hall = facilityAnchorTiles(state, { ownerId: "player" }).find(
@@ -75,15 +100,13 @@ export function quoteRackDeployment(
       hall.buildingProgress < hall.buildingTarget
     )
       continue;
-    const free = dcBayUsage(state, hall.x, hall.y).free;
     selectedHalls += 1;
-    freeBays += free;
-    fillAllRacks += Math.floor(free / rackUnits);
+    plannedCabinets += plannedCabinetsForSku(state, hall, rackUnits);
   }
   const supply = state.worldMarkets.accelerators[skuId];
   const marketAvailable = Math.max(
     0,
-    Math.floor(supply?.available ?? fillAllRacks),
+    Math.floor(supply?.available ?? plannedCabinets),
   );
   const reservePerRack = Math.max(
     1,
@@ -95,18 +118,18 @@ export function quoteRackDeployment(
   );
   const maxRacks = Math.max(
     0,
-    Math.min(fillAllRacks, marketAvailable, affordableRacks),
+    Math.min(plannedCabinets, marketAvailable, affordableRacks),
   );
   return {
     skuId,
     rackUnits,
     selectedHalls,
-    freeBays,
-    fillAllRacks,
+    plannedCabinets,
     marketAvailable,
     affordableRacks,
     maxRacks,
-    canFillAll: fillAllRacks > 0 && maxRacks >= fillAllRacks,
+    canFillPlanned:
+      plannedCabinets > 0 && maxRacks >= plannedCabinets,
     reservePerRack,
   };
 }
@@ -127,12 +150,18 @@ export function deployRackBatchAcrossHalls(
   let next = state;
   for (const target of targets) {
     if (remaining <= 0) break;
-    const free = dcBayUsage(next, target.x, target.y).free;
-    const count = Math.min(remaining, Math.floor(free / quote.rackUnits));
+    const hall = facilityAnchorTiles(next, { ownerId: "player" }).find(
+      (tile) => tile.x === target.x && tile.y === target.y,
+    );
+    if (!hall) continue;
+    const count = Math.min(
+      remaining,
+      plannedCabinetsForSku(next, hall, quote.rackUnits),
+    );
     if (count <= 0) continue;
-    const before = next.worldMarkets.orders.length;
+    const cashBefore = next.player.cash;
     next = orderRacksIntoDc(next, target.x, target.y, skuId, count);
-    if (next.worldMarkets.orders.length <= before) break;
+    if (next.player.cash >= cashBefore) break; // blocked or unaffordable
     remaining -= count;
   }
   return next;
@@ -421,14 +450,12 @@ export function autoBalanceHosting(state: SimState): SimState {
     }
     needBays = Math.min(48, Math.max(0, needBays));
 
-    // Fill halls with free capacity
-    // `needBays` is a bay count; orders are expressed in complete rack SKUs.
+    // Fill only explicit empty cabinet footprints. Hardware without a drawn
+    // destination remains staged rather than consuming an abstract shell bay.
     let remainingRacks = Math.ceil(needBays / Math.max(1, sku.rackUnits));
     for (const h of halls) {
       if (remainingRacks <= 0) break;
-      const free = dcBayUsage(s, h.x, h.y).free;
-      if (free < sku.rackUnits) continue;
-      const can = Math.floor(free / sku.rackUnits);
+      const can = plannedCabinetsForSku(s, h, Math.max(1, sku.rackUnits));
       const buy = Math.min(can, remainingRacks);
       if (buy <= 0) continue;
       const before = s.player.cash;
@@ -455,11 +482,7 @@ export function autoBalanceHosting(state: SimState): SimState {
   };
 }
 
-/**
- * Reserve every free bay in every completed player data hall in one action.
- * The rack screen uses this explicit capacity command; the separate hosting
- * auto-balancer remains demand-based and targets roughly 80% utilization.
- */
+/** Fill every explicit empty cabinet footprint across completed halls. */
 export function fillAllAvailableRackBays(state: SimState): SimState {
   const host = fleetHostSnapshot(state);
   const skuId = host.recommendedSkuId;
@@ -490,11 +513,12 @@ export function fillAllAvailableRackBays(state: SimState): SimState {
     )
     .toSorted((a, b) => a.y - b.y || a.x - b.x);
 
-  const freeAtStart = halls.reduce(
-    (sum, hall) => sum + dcBayUsage(state, hall.x, hall.y).free,
+  const spacesAtStart = halls.reduce(
+    (sum, hall) =>
+      sum + plannedCabinetsForSku(state, hall, Math.max(1, sku.rackUnits)),
     0,
   );
-  if (freeAtStart <= 0) {
+  if (spacesAtStart <= 0) {
     return {
       ...state,
       alerts: [
@@ -502,7 +526,8 @@ export function fillAllAvailableRackBays(state: SimState): SimState {
           id: `fill-halls-full-${state.day}`,
           day: state.day,
           severity: "info" as const,
-          message: "All completed data-hall bays are already committed.",
+          message:
+            "No compatible empty cabinet footprints are planned. Add physical rack placements in the hall editor first.",
         },
         ...state.alerts.filter((entry) => !entry.id.startsWith("fill-halls-")),
       ].slice(0, 40),
@@ -511,25 +536,27 @@ export function fillAllAvailableRackBays(state: SimState): SimState {
 
   let next = state;
   let racksQueued = 0;
-  let baysCommitted = 0;
+  let rackWidthsCommitted = 0;
   let hallsFilled = 0;
   for (const hall of halls) {
-    const free = dcBayUsage(next, hall.x, hall.y).free;
-    const count = Math.floor(free / Math.max(1, sku.rackUnits));
+    const count = plannedCabinetsForSku(
+      next,
+      hall,
+      Math.max(1, sku.rackUnits),
+    );
     if (count <= 0) continue;
-    const ordersBefore = next.worldMarkets.orders.length;
-    const candidate = orderRacksIntoDc(next, hall.x, hall.y, skuId, count);
-    next = candidate;
-    if (candidate.worldMarkets.orders.length <= ordersBefore) break;
+    const cashBefore = next.player.cash;
+    next = orderRacksIntoDc(next, hall.x, hall.y, skuId, count);
+    if (next.player.cash >= cashBefore) break; // blocked or unaffordable
     racksQueued += count;
-    baysCommitted += count * Math.max(1, sku.rackUnits);
+    rackWidthsCommitted += count * Math.max(1, sku.rackUnits);
     hallsFilled += 1;
   }
 
-  const completelyFilled = baysCommitted >= freeAtStart;
+  const completelyFilled = racksQueued >= spacesAtStart;
   const message =
-    baysCommitted > 0
-      ? `Fill halls: queued ${racksQueued}× ${sku.name} across ${hallsFilled} halls · ${baysCommitted}/${freeAtStart} free bays committed${completelyFilled ? "." : " (cash or market access limited)."}`
+    racksQueued > 0
+      ? `Fill plans: queued ${racksQueued}× ${sku.name} across ${hallsFilled} halls · ${racksQueued}/${spacesAtStart} physical cabinet footprints committed (${rackWidthsCommitted} rack-width units)${completelyFilled ? "." : " (cash or market access limited)."}`
       : "No racks were queued — check cash and market access.";
   return {
     ...next,

@@ -38,6 +38,7 @@ import {
 import {
   dequeueResearchProgram,
   queueResearchProgram,
+  researchPodStaffRequirements,
   startResearchProgram,
 } from "../../../sim/systems/researchPrograms";
 import { playerStaff } from "../../../sim/systems/staff";
@@ -50,6 +51,7 @@ import {
   MetricTile,
   StatusChip,
 } from "../ui/HudPrimitives";
+import { scrollMobileResearchSelection } from "./researchPanelMobile";
 
 const FULL_RESEARCH_LAYOUT = layoutResearchTree();
 
@@ -87,6 +89,7 @@ export function ResearchPanel() {
     () => state.player.researchPods?.[0]?.id ?? "",
   );
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const mobileSelectedMethodRef = useRef<HTMLElement | null>(null);
 
   const active = state.player.activeResearch;
   const legacyQueue = state.player.researchQueue;
@@ -142,7 +145,11 @@ export function ResearchPanel() {
     (program) => program.phase !== "complete",
   );
   const unlockedCount = state.player.researchUnlocked.length;
-  const researcherCount = playerStaff(state).researcher ?? 0;
+  const staff = playerStaff(state);
+  const researcherCount = staff.researcher ?? 0;
+  const selectedStaffNeed = selected
+    ? researchPodStaffRequirements(selected.id)
+    : null;
 
   useEffect(() => {
     if (!focusRequest) return;
@@ -159,17 +166,25 @@ export function ResearchPanel() {
     };
   }, [centerResearchNode, focusRequest]);
 
+  useEffect(() => {
+    if (!selectedId || !window.matchMedia("(max-width: 900px)").matches) return;
+    const frame = window.requestAnimationFrame(() => {
+      scrollMobileResearchSelection(mobileSelectedMethodRef.current, true);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [selectedId]);
+
   const startOrQueue = (id: string) => apply(startResearch(state, id));
   const L = RESEARCH_LAYOUT;
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-2 overflow-hidden">
+    <div className="flex min-h-full flex-col gap-2 overflow-y-auto overscroll-contain pb-2 xl:h-full xl:min-h-0 xl:overflow-hidden xl:pb-0">
       <header className="shrink-0">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="hud-eyebrow">Leads · pods · methods</p>
-            <h2 className="hud-title">Research</h2>
-            <p className="hud-description">
+            <h2 className="hud-title hidden sm:block">Research</h2>
+            <p className="hud-description hidden sm:block">
               Burn research PF and cash for unlocks.
             </p>
           </div>
@@ -208,9 +223,9 @@ export function ResearchPanel() {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden xl:flex-row">
-        <aside className="order-2 flex max-h-56 shrink-0 flex-col gap-2 overflow-hidden xl:order-1 xl:max-h-none xl:w-72">
-          <div className="panel-scroll min-h-0 flex-1 space-y-2 overflow-y-auto pr-0.5">
+      <div className="flex min-h-0 flex-none flex-col gap-2 overflow-visible xl:flex-1 xl:flex-row xl:overflow-hidden">
+        <aside className="order-2 flex shrink-0 flex-col gap-2 overflow-visible xl:order-1 xl:max-h-none xl:w-72 xl:overflow-hidden">
+          <div className="panel-scroll min-h-0 flex-1 space-y-2 pr-0.5 xl:overflow-y-auto">
             {usesPodPrograms ? (
               <>
                 <div className="flex flex-wrap items-center gap-2">
@@ -367,63 +382,8 @@ export function ResearchPanel() {
           </div>
         </aside>
 
-        <div className="order-1 flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-hidden xl:order-2">
-          {(activePrograms.length > 0 || !!active || queue.length > 0) && (
-            <div className="shrink-0 rounded-lg border border-research/30 bg-research/5 px-2.5 py-2">
-              <div className="mb-1 flex items-center justify-between gap-2">
-                <span className="inline-flex items-center gap-1.5 text-[0.6875rem] font-semibold uppercase tracking-[0.1em] text-research">
-                  <LiveDot className="text-research" /> In flight
-                </span>
-                <span className="text-[0.6875rem] text-muted">
-                  {queue.length} queued
-                </span>
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {usesPodPrograms ? (
-                  activePrograms.slice(0, 3).map((program) => (
-                    <button
-                      key={program.id}
-                      type="button"
-                      className="rounded-md border border-line bg-panel-2 px-2 py-1 text-left hover:border-research/50"
-                      onClick={() => {
-                        setSelectedId(program.methodId);
-                        centerResearchNode(program.methodId);
-                      }}
-                    >
-                      <span className="block truncate text-[0.75rem] text-bone">
-                        {getResearchNode(program.methodId).name}
-                      </span>
-                      <span className="block font-mono text-[0.625rem] text-muted">
-                        {program.phase}
-                      </span>
-                    </button>
-                  ))
-                ) : active ? (
-                  <button
-                    type="button"
-                    className="rounded-md border border-line bg-panel-2 px-2 py-1 text-left hover:border-research/50"
-                    onClick={() => {
-                      setSelectedId(active.nodeId);
-                      centerResearchNode(active.nodeId);
-                    }}
-                  >
-                    <span className="block truncate text-[0.75rem] text-bone">
-                      {getResearchNode(active.nodeId).name}
-                    </span>
-                    <span className="block font-mono text-[0.625rem] text-muted">
-                      active · day {active.daysSpent}
-                    </span>
-                  </button>
-                ) : null}
-                {queue.length > 0 && (
-                  <span className="rounded-md border border-line/70 px-2 py-1 font-mono text-[0.6875rem] text-muted">
-                    +{queue.length} queued
-                  </span>
-                )}
-              </div>
-            </div>
-          )}
-          <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden">
+        <div className="order-1 flex min-h-0 min-w-0 flex-none flex-col gap-2 overflow-visible xl:order-2 xl:flex-1 xl:overflow-hidden">
+          <div className="grid min-h-0 flex-1 grid-cols-1 overflow-visible xl:overflow-hidden">
             <div
               ref={canvas.viewportRef}
               onPointerDown={canvas.onPointerDown}
@@ -431,16 +391,16 @@ export function ResearchPanel() {
               onPointerUp={canvas.onPointerUp}
               onPointerCancel={canvas.onPointerUp}
               onWheel={canvas.onWheel}
-              className="relative min-h-[360px] touch-none select-none overflow-hidden rounded-lg border border-line bg-void/90 cursor-grab data-[dragging=true]:cursor-grabbing xl:min-h-0 xl:h-full"
-              aria-label="Interactive research tree. Drag to pan and use the mouse wheel to zoom."
+              className="relative h-[min(62dvh,34rem)] min-h-[24rem] touch-pan-y select-none overflow-hidden rounded-lg border border-line bg-void/90 cursor-grab data-[dragging=true]:cursor-grabbing sm:touch-none xl:h-full xl:min-h-0"
+              aria-label="Interactive research tree. Drag to pan and use the zoom controls to inspect methods."
             >
-              <div className="absolute right-3 top-3 z-20 grid grid-cols-3 gap-1 rounded-lg border border-line bg-panel/95 p-1.5 shadow-lg backdrop-blur-md">
-                <span className="col-span-3 rounded bg-void/70 px-2 py-1 text-center font-mono text-[0.6875rem] tabular-nums text-bone">
+              <div className="absolute right-2 top-2 z-20 grid grid-cols-4 gap-1 rounded-lg border border-line bg-panel/95 p-1.5 shadow-lg backdrop-blur-md sm:right-3 sm:top-3">
+                <span className="col-span-4 rounded bg-void/70 px-2 py-1 text-center font-mono text-[0.6875rem] tabular-nums text-bone">
                   {Math.round(canvas.zoom * 100)}%
                 </span>
                 <HudButton
                   variant="ghost"
-                  className="!h-8 !min-h-0 !w-8 !p-0 text-base"
+                  className="!h-11 !min-h-0 !w-11 !p-0 text-base lg:!h-8 lg:!w-8"
                   onClick={() => canvas.zoomBy(0.84)}
                   aria-label="Zoom research tree out"
                 >
@@ -448,7 +408,7 @@ export function ResearchPanel() {
                 </HudButton>
                 <HudButton
                   variant="ghost"
-                  className="!h-8 !min-h-0 !w-8 !p-0 text-base"
+                  className="!h-11 !min-h-0 !w-11 !p-0 text-base lg:!h-8 lg:!w-8"
                   onClick={() => canvas.zoomBy(1.19)}
                   aria-label="Zoom research tree in"
                 >
@@ -456,14 +416,23 @@ export function ResearchPanel() {
                 </HudButton>
                 <HudButton
                   variant="ghost"
-                  className="!h-8 !min-h-0 !px-2 text-[0.6875rem]"
+                  className="!h-11 !min-h-0 !px-3 text-[0.6875rem] lg:!h-8 lg:!px-2"
                   onClick={canvas.fit}
                 >
                   Fit
                 </HudButton>
+                <HudButton
+                  variant="ghost"
+                  className="!h-11 !min-h-0 !px-2 text-[0.6875rem] lg:!h-8"
+                  onClick={canvas.reset}
+                  aria-label="Reset research tree view"
+                >
+                  Reset
+                </HudButton>
               </div>
               <div className="pointer-events-none absolute bottom-2 left-2 z-20 rounded-md border border-line/70 bg-panel/85 px-2 py-1 font-mono text-[0.625rem] text-muted backdrop-blur-md">
-                drag · wheel · double-click to queue
+                <span className="sm:hidden">drag · +/− zoom · tap a method</span>
+                <span className="hidden sm:inline">drag · wheel · double-click to queue</span>
               </div>
               <div
                 ref={canvas.contentRef}
@@ -623,7 +592,7 @@ export function ResearchPanel() {
 
                       {sel && selected && status && (
                         <div
-                          className="panel-scroll max-h-[30rem] overflow-y-auto rounded-b-lg border border-t-0 border-research/50 bg-panel-2 p-3 text-left shadow-[0_1rem_2.5rem_rgba(0,0,0,0.55)] backdrop-blur-md"
+                          className="panel-scroll hidden max-h-[30rem] overflow-y-auto rounded-b-lg border border-t-0 border-research/50 bg-panel-2 p-3 text-left shadow-[0_1rem_2.5rem_rgba(0,0,0,0.55)] backdrop-blur-md xl:block"
                           onPointerDown={(event) => event.stopPropagation()}
                           onWheel={(event) => event.stopPropagation()}
                         >
@@ -772,10 +741,14 @@ export function ResearchPanel() {
                               />
                               <StatRow
                                 label="Staff"
-                                value={`${minResearchersForNode(selected.id)}R`}
+                                value={selectedStaffNeed
+                                  ? `${selectedStaffNeed.researchers}R · ${selectedStaffNeed.engineers}E · ${selectedStaffNeed.dataStaff}D`
+                                  : `${minResearchersForNode(selected.id)}R`}
                                 tone={
-                                  researcherCount >=
-                                  minResearchersForNode(selected.id)
+                                  selectedStaffNeed &&
+                                  researcherCount >= selectedStaffNeed.researchers &&
+                                  (staff.engineer ?? 0) >= selectedStaffNeed.engineers &&
+                                  (staff.data_processor ?? 0) >= selectedStaffNeed.dataStaff
                                     ? "positive"
                                     : "warning"
                                 }
@@ -822,6 +795,149 @@ export function ResearchPanel() {
                 })}
               </div>
             </div>
+            {selected && status ? (
+              <section
+                ref={mobileSelectedMethodRef}
+                className="mt-2 rounded-lg border border-research/45 bg-panel-2/95 p-3 xl:hidden"
+                aria-label={`Selected research method: ${selected.name}`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="hud-eyebrow">
+                      {RESEARCH_BRANCHES[researchBranchForNode(selected.id)].label}
+                    </p>
+                    <h3 className="mt-0.5 text-sm font-semibold text-bone">
+                      {selected.name}
+                    </h3>
+                  </div>
+                  <StatusChip tone={statusTone(status)}>{status}</StatusChip>
+                </div>
+
+                <p className="mt-2 text-[0.8125rem] leading-5 text-muted">
+                  {selected.description}
+                </p>
+
+                <div className="mt-2 grid grid-cols-2 gap-x-3">
+                  <StatRow
+                    label="PF target"
+                    value={`~${num(researchPfTarget(state, selected), 0)}`}
+                    strong
+                  />
+                  <StatRow
+                    label="Days"
+                    value={`≥${researchDaysTarget(selected, researcherCount)}`}
+                  />
+                  <StatRow
+                    label="Cash"
+                    value={`~${money(researchCashEstimate(state, selected))}`}
+                  />
+                  <StatRow
+                    label="Staff"
+                    value={
+                      selectedStaffNeed
+                        ? `${selectedStaffNeed.researchers}R · ${selectedStaffNeed.engineers}E · ${selectedStaffNeed.dataStaff}D`
+                        : `${minResearchersForNode(selected.id)}R`
+                    }
+                    tone={
+                      selectedStaffNeed &&
+                      researcherCount >= selectedStaffNeed.researchers &&
+                      (staff.engineer ?? 0) >= selectedStaffNeed.engineers &&
+                      (staff.data_processor ?? 0) >= selectedStaffNeed.dataStaff
+                        ? "positive"
+                        : "warning"
+                    }
+                  />
+                </div>
+
+                {selectedProgram ? (
+                  <p className="mt-2 rounded-md border border-research/30 bg-research/10 px-2 py-1.5 text-[0.75rem] text-research">
+                    In {selectedProgram.phase} · {selectedProgram.evidence.length}{" "}
+                    evidence
+                  </p>
+                ) : null}
+
+                <div className="mt-3 grid gap-2 min-[420px]:grid-cols-2">
+                  {!usesPodPrograms &&
+                  status !== "done" &&
+                  status !== "active" &&
+                  status !== "queued" &&
+                  status !== "blocked" ? (
+                    <HudButton
+                      variant="primary"
+                      className="w-full"
+                      onClick={() => startOrQueue(selected.id)}
+                    >
+                      {status === "locked"
+                        ? `Queue unlock path${selectedPath.length > 1 ? ` (${selectedPath.length})` : ""}`
+                        : active
+                          ? "Queue"
+                          : "Start"}
+                    </HudButton>
+                  ) : null}
+                  {!usesPodPrograms && status === "queued" ? (
+                    <HudButton
+                      variant="ghost"
+                      className="w-full"
+                      onClick={() => apply(dequeueResearch(state, selected.id))}
+                    >
+                      Remove from queue
+                    </HudButton>
+                  ) : null}
+                  {usesPodPrograms &&
+                  status === "available" &&
+                  selectedPod &&
+                  !selectedPod.assignmentId &&
+                  !selectedProgram ? (
+                    <HudButton
+                      variant="primary"
+                      className="w-full"
+                      onClick={() =>
+                        apply(
+                          startResearchProgram(state, selected.id, selectedPod.id),
+                        )
+                      }
+                    >
+                      Assign {selectedPod.name}
+                    </HudButton>
+                  ) : null}
+                  {usesPodPrograms &&
+                  (status === "available" || status === "locked") ? (
+                    <HudButton
+                      variant="secondary"
+                      className="w-full"
+                      onClick={() =>
+                        apply(queueResearchProgram(state, selected.id))
+                      }
+                    >
+                      Queue for next pod
+                    </HudButton>
+                  ) : null}
+                  {usesPodPrograms && status === "queued" ? (
+                    <HudButton
+                      variant="ghost"
+                      className="w-full"
+                      onClick={() =>
+                        apply(dequeueResearchProgram(state, selected.id))
+                      }
+                    >
+                      Remove from queue
+                    </HudButton>
+                  ) : null}
+                </div>
+
+                {selected.prereqs.length > 0 ? (
+                  <p className="mt-2 text-[0.75rem] text-muted">
+                    Needs{" "}
+                    {selected.prereqs
+                      .map((prereq) => getResearchNode(prereq).name)
+                      .join(", ")}
+                  </p>
+                ) : null}
+                <div className="mt-2">
+                  <EffectsLine effects={selected.effects} />
+                </div>
+              </section>
+            ) : null}
           </div>
         </div>
       </div>
@@ -896,6 +1012,8 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
     const frame = window.requestAnimationFrame(focus);
     return () => window.cancelAnimationFrame(frame);
   }, [focus]);
+
+  const reset = useCallback(() => focus(), [focus]);
 
   const zoomAt = useCallback(
     (factor: number, clientX?: number, clientY?: number) => {
@@ -988,6 +1106,7 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
     contentRef,
     zoom,
     fit,
+    reset,
     centerNode,
     zoomBy,
     onPointerDown,

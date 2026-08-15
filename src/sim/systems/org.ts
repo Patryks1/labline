@@ -2,6 +2,7 @@ import { ECONOMY } from '../balance/economy'
 import { aggregateEffects } from './research'
 import type { MarketingChannel, MarketingChannels, SimState } from '../types'
 import { grantPartnershipData } from './data'
+import { applyDailyMarketing } from './marketing'
 // hireTalent deprecated — use systems/staff hireStaff via HQs
 
 /**
@@ -209,7 +210,7 @@ export function tickOrg(state: SimState): SimState {
   }
   const effects = aggregateEffects(state.player.researchUnlocked)
   let dataQuality = state.player.dataQuality
-  let brandTrust = state.player.brandTrust
+  const brandTrust = state.player.brandTrust
 
   // Hygiene drift from flywheel research (collection itself is in tickData/collect)
   if (state.lastMarket.servedMTok > 1 && effects.dataFlywheel) {
@@ -219,21 +220,8 @@ export function tickOrg(state: SimState): SimState {
     )
   }
 
-  // Marketing cash is billed once in tickMarket — here only brand lift
-  const mkt = state.player.marketingSpendPerDay
-  if (mkt > 0) {
-    const channels = marketingChannels(state)
-    const brandSpend =
-      channels.web * 0.65 +
-      channels.billboards * 1.25 +
-      channels.restaurants * 0.95 +
-      channels.enterprise * 0.8
-    // Diminishing returns keep billion-dollar labs from buying 100 brand in a day.
-    brandTrust = Math.min(
-      100,
-      brandTrust + Math.log1p(brandSpend / 250_000) * 0.18,
-    )
-  }
+  // Marketing cash is billed once in tickMarket; campaign brand lift is
+  // written once per day by systems/marketing (applied below, after org ops).
 
   // Enterprise contracts: grant seats (annuity only in tickMarket — no signing lump)
   let enterpriseContracts = state.player.enterpriseContracts
@@ -258,7 +246,9 @@ export function tickOrg(state: SimState): SimState {
     enterpriseContracts += 1
   }
 
-  return {
+  // Campaign outcome + brand gain settle last, so the marketing system sees
+  // the final org state of the day.
+  return applyDailyMarketing({
     ...state,
     player: {
       ...state.player,
@@ -266,7 +256,7 @@ export function tickOrg(state: SimState): SimState {
       brandTrust,
       enterpriseContracts,
     },
-  }
+  })
 }
 
 function formatM(n: number) {

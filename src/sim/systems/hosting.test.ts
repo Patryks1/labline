@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
 import type { MapTile, Model, SimState } from '../types'
-import { dcBayUsage } from './dcRacks'
 import {
   deployRackBatchAcrossHalls,
   fleetHostSnapshot,
@@ -9,8 +8,7 @@ import {
   modelHostNeed,
   quoteRackDeployment,
 } from './hosting'
-import { isDcAnchor, isDcKind } from './map'
-import { facilityAnchorTiles } from './worldAccess'
+import { createDefaultHallLayout } from './dataHallLayouts'
 
 function blankTile(x: number, y: number, regionId = 'city_0'): MapTile {
   return {
@@ -143,29 +141,15 @@ describe('grounded hosting requirements', () => {
 })
 
 describe('fillAllAvailableRackBays', () => {
-  it('reserves every free bay in completed halls and ignores construction', () => {
+  it('does not synthesize order capacity from a legacy hall bay rating', () => {
     const firstHall = hallTile(2, 2, { rackCapacity: 4, buildingProgress: 30 })
     const secondHall = hallTile(4, 2, { rackCapacity: 3, buildingProgress: 30 })
     const constructionSite = hallTile(6, 2, { rackCapacity: 11, buildingProgress: 3 })
     const state = withLegacyHalls(82_441, [firstHall, secondHall, constructionSite])
 
-    const completed = facilityAnchorTiles(state, { ownerId: 'player' }).filter(
-      (tile) =>
-        isDcKind(tile.kind) &&
-        isDcAnchor(tile) &&
-        tile.buildingProgress >= tile.buildingTarget,
-    )
-    const freeBefore = completed.reduce(
-      (sum, hall) => sum + dcBayUsage(state, hall.x, hall.y).free,
-      0,
-    )
-
-    expect(freeBefore).toBeGreaterThan(0)
     const filled = fillAllAvailableRackBays(state)
 
-    expect(
-      completed.reduce((sum, hall) => sum + dcBayUsage(filled, hall.x, hall.y).free, 0),
-    ).toBe(0)
+    expect(filled.worldMarkets.orders).toHaveLength(state.worldMarkets.orders.length)
     expect(
       filled.worldMarkets.orders.some(
         (order) =>
@@ -174,10 +158,7 @@ describe('fillAllAvailableRackBays', () => {
           order.destination?.y === constructionSite.y,
       ),
     ).toBe(false)
-
-    const orderCount = filled.worldMarkets.orders.length
-    const filledAgain = fillAllAvailableRackBays(filled)
-    expect(filledAgain.worldMarkets.orders).toHaveLength(orderCount)
+    expect(filled.alerts[0]?.message).toContain('physical rack placements')
   })
 
   it('caps a multi-hall deployment by aggregate market supply', () => {
@@ -186,7 +167,7 @@ describe('fillAllAvailableRackBays', () => {
       hallTile(4, 2, { rackCapacity: 6, buildingProgress: 30 }),
     ]
     const created = createGame(73_112)
-    const state = withLegacyHalls(73_112, halls, {
+    const unplanned = withLegacyHalls(73_112, halls, {
       player: { ...created.player, cash: 10_000_000_000 },
       worldMarkets: {
         ...created.worldMarkets,
@@ -199,17 +180,33 @@ describe('fillAllAvailableRackBays', () => {
         },
       },
     })
+    const dataHallLayouts = Object.fromEntries(halls.map((hall) => {
+      const facilityId = `facility:${hall.x},${hall.y}`
+      const base = createDefaultHallLayout(facilityId, 'hall-small-v1', [], hall.rackCapacity)
+      const cabinets = Array.from({ length: 6 }, (_, index) => ({
+        id: `reserved:${facilityId}:${index}`,
+        kind: 'rack' as const,
+        catalogId: 'rack_h100',
+        x: 20 + index * 7,
+        z: 20,
+        rotation: 0 as const,
+        reserved: true,
+        purchasePrice: 0,
+      }))
+      return [facilityId, { ...base, objects: [...base.objects, ...cabinets] }]
+    }))
+    const state = { ...unplanned, dataHallLayouts }
     const targets = halls.map((site) => ({ x: site.x, y: site.y }))
     const quote = quoteRackDeployment(state, 'rack_h100', targets)
 
-    expect(quote.fillAllRacks).toBe(12)
+    expect(quote.plannedCabinets).toBe(12)
     expect(quote.maxRacks).toBe(2)
-    expect(quote.canFillAll).toBe(false)
+    expect(quote.canFillPlanned).toBe(false)
 
     const deployed = deployRackBatchAcrossHalls(state, 'rack_h100', targets, 99)
-    const reserved = deployed.worldMarkets.orders
-      .filter((order) => order.kind === 'accelerator' && order.resourceId === 'rack_h100')
-      .reduce((sum, order) => sum + order.quantity, 0)
+    const reserved = deployed.player.rackFleet
+      .filter((install) => install.skuId === 'rack_h100' && install.status === 'ordered')
+      .reduce((sum, install) => sum + install.count, 0)
     expect(reserved).toBe(2)
   })
 })

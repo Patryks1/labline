@@ -1,6 +1,13 @@
 import { useEffect, useState } from 'react'
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import type {
+  BenchmarkSuiteId,
+  ModelFamily,
+  ModelProductPreset,
+  TrainingBenchmarkSnapshot,
+  TrainingJob,
+} from '../sim/types'
 import {
   DEFAULT_MAP_CAMERA_HEADING,
   DEFAULT_MAP_CAMERA_TILT,
@@ -62,6 +69,15 @@ export interface ReleaseEvent {
   id: number
   name: string
   capability: number
+  modelId?: string
+  family?: ModelFamily
+  productPreset?: ModelProductPreset
+  benchmarkSuiteIds?: BenchmarkSuiteId[]
+  /** Captured before release finalization removes the source training job. */
+  lossHistory?: NonNullable<TrainingJob['lossHistory']>
+  benchmarkSnapshots?: TrainingBenchmarkSnapshot[]
+  energyMWh?: number
+  energyMwDays?: number
 }
 
 export type NegotiationOutcome = 'idle' | 'countered' | 'declined' | 'agreed' | 'signed'
@@ -147,7 +163,7 @@ interface UiPreferences extends AudioPreferences {
   clearConfirm: () => void
   pushToast: (message: string, tone?: HudToast['tone']) => void
   clearToast: () => void
-  announceRelease: (event: { name: string; capability: number }) => void
+  announceRelease: (event: Omit<ReleaseEvent, 'id'>) => void
   clearRelease: () => void
   rotateMapCamera: (quarterTurns: number) => void
   cycleMapCameraTilt: () => void
@@ -248,7 +264,30 @@ export const useUiStore = create<UiPreferences>()(
         set({ toast: { id: Date.now(), message, tone } }),
       clearToast: () => set({ toast: null }),
       announceRelease: (event) =>
-        set({ releaseEvent: { id: Date.now(), name: event.name, capability: event.capability } }),
+        set({
+          releaseEvent: {
+            ...event,
+            // Snapshot all nested telemetry: the source job is finalized in
+            // the same interaction and must not be referenced by identity.
+            lossHistory: event.lossHistory?.map((point) => ({ ...point })),
+            benchmarkSnapshots: event.benchmarkSnapshots?.map((snapshot) => ({
+              ...snapshot,
+              suiteIds: snapshot.suiteIds ? [...snapshot.suiteIds] : undefined,
+              suiteResults: snapshot.suiteResults
+                ? Object.fromEntries(
+                    Object.entries(snapshot.suiteResults).map(([id, result]) => [
+                      id,
+                      result ? { ...result } : result,
+                    ]),
+                  ) as TrainingBenchmarkSnapshot['suiteResults']
+                : undefined,
+            })),
+            benchmarkSuiteIds: event.benchmarkSuiteIds
+              ? [...event.benchmarkSuiteIds]
+              : undefined,
+            id: Date.now(),
+          },
+        }),
       clearRelease: () => set({ releaseEvent: null }),
       rotateMapCamera: (quarterTurns) => set((state) => ({
         mapCameraHeading: rotateMapCameraHeading(state.mapCameraHeading, quarterTurns),

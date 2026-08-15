@@ -64,7 +64,7 @@ describe('instant cheat actions', () => {
     expect(result.affected).toBe(1)
     expect(completed.progressPfDays).toBe(120)
     expect(completed.postTrainProgress).toBe(9)
-    expect(completed.awaitingDecision).toBe(true)
+    expect(completed.awaitingDecision).toBe(false)
     expect(result.state.player.models).toEqual(state.player.models)
   })
 

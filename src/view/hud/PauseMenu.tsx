@@ -4,10 +4,20 @@ import {
   type SaveSlotId,
 } from '../../sim/save'
 import { useGameStore } from '../../store/gameStore'
-import { money } from './format'
-import { X } from '@phosphor-icons/react'
+import { money, pct } from './format'
 import { LablineMenuShell } from './menu/LablineMenuShell'
 import { SettingsPanel } from './menu/SettingsPanel'
+import { ConsoleDialog } from './ui/ConsoleDialog'
+import {
+  BALANCE_TUNING_GROUPS,
+  resolveBalanceTuning,
+  type BalanceTuning,
+} from '../../sim/balance/tuning'
+import {
+  runBalanceSimulation,
+  type BalanceSimulationReport,
+} from '../../sim/play/balanceSimulation'
+import type { SimState } from '../../sim/types'
 
 /**
  * In-run pause menu: resume, save/load slots, return to main menu.
@@ -31,8 +41,10 @@ export function PauseMenu() {
   const cash = useGameStore((s) => s.state.player.cash)
   const adjustCheatMoney = useGameStore((s) => s.adjustCheatMoney)
   const runInstantCheat = useGameStore((s) => s.runInstantCheat)
+  const balanceTuning = useGameStore((s) => s.state.balanceTuning)
+  const gameState = useGameStore((s) => s.state)
   const [msg, setMsg] = useState<string | null>(null)
-  const [tab, setTab] = useState<'main' | 'save' | 'load' | 'settings'>('main')
+  const [tab, setTab] = useState<'main' | 'save' | 'load' | 'settings' | 'balance'>('main')
   const [confirm, setConfirm] = useState<{
     title: string
     body: string
@@ -93,11 +105,11 @@ export function PauseMenu() {
       variant="pause"
       titleId="labline-pause-title"
       onRequestClose={requestClose}
-      contentClassName="max-h-[calc(100dvh-11.5rem)] max-w-[46rem] p-5 sm:p-6"
+      contentClassName="pause-menu-content max-h-[calc(100dvh-11.5rem)] max-w-[46rem] p-5 sm:p-6"
     >
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-sm font-semibold text-bone">
-            {tab === 'main' ? 'Paused' : tab === 'save' ? 'Save run' : tab === 'load' ? 'Load run' : 'Settings'}
+            {tab === 'main' ? 'Paused' : tab === 'save' ? 'Save run' : tab === 'load' ? 'Load run' : tab === 'settings' ? 'Settings' : 'Balance'}
           </h2>
           <span className="font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">Esc to close</span>
         </div>
@@ -150,6 +162,13 @@ export function PauseMenu() {
               }}
             />
             <MenuBtn
+              label="Balance"
+              onClick={() => {
+                setMsg(null)
+                setTab('balance')
+              }}
+            />
+            <MenuBtn
               danger
               label="Return to main menu"
               onClick={() => {
@@ -171,7 +190,7 @@ export function PauseMenu() {
           <div className="space-y-2">
             <button
               type="button"
-              className="text-[0.8125rem] text-mint hover:underline"
+              className="min-h-11 text-[0.8125rem] text-mint hover:underline"
               onClick={() => {
                 setTab('main')
                 setMsg(null)
@@ -205,7 +224,7 @@ export function PauseMenu() {
           <div>
             <button
               type="button"
-              className="text-[0.75rem] text-mint hover:underline"
+              className="min-h-11 text-[0.75rem] text-mint hover:underline"
               onClick={() => setTab('main')}
             >
               ← Back
@@ -219,35 +238,44 @@ export function PauseMenu() {
           </div>
         )}
 
-        {confirm ? (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-void/88 p-5 backdrop-blur-sm">
-            <div className="w-full rounded-xl border border-danger/30 bg-panel p-4 shadow-2xl">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-[1rem] font-semibold text-bone">{confirm.title}</h3>
-                  <p className="mt-2 text-[0.8125rem] leading-relaxed text-muted">{confirm.body}</p>
-                </div>
-                <button type="button" aria-label="Cancel" onClick={() => setConfirm(null)} className="flex h-8 w-8 items-center justify-center rounded-lg text-muted hover:bg-panel-2 hover:text-bone">
-                  <X size="1rem" />
-                </button>
-              </div>
-              <div className="mt-4 flex justify-end gap-2">
-                <button type="button" className="hud-button hud-button--secondary" onClick={() => setConfirm(null)}>Cancel</button>
-                <button
-                  type="button"
-                  className="hud-button hud-button--danger"
-                  onClick={() => {
-                    const action = confirm.onConfirm
-                    setConfirm(null)
-                    action()
-                  }}
-                >
-                  {confirm.action}
-                </button>
-              </div>
+        {tab === 'balance' && (
+          <BalanceTab
+            overrides={balanceTuning}
+            snapshot={gameState}
+            onBack={() => {
+              setTab('main')
+              setMsg(null)
+            }}
+          />
+        )}
+
+        <ConsoleDialog
+          open={Boolean(confirm)}
+          titleId="pause-confirm-title"
+          eyebrow="Confirm save operation"
+          title={confirm?.title ?? 'Confirm operation'}
+          onClose={() => setConfirm(null)}
+          closeLabel="Cancel operation"
+          maxWidthClass="max-w-[30rem]"
+          footer={confirm ? (
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button type="button" className="hud-button hud-button--secondary" onClick={() => setConfirm(null)}>Cancel</button>
+              <button
+                type="button"
+                className="hud-button hud-button--danger"
+                onClick={() => {
+                  const action = confirm.onConfirm
+                  setConfirm(null)
+                  action()
+                }}
+              >
+                {confirm.action}
+              </button>
             </div>
-          </div>
-        ) : null}
+          ) : null}
+        >
+          <p className="text-[0.875rem] leading-relaxed text-muted">{confirm?.body}</p>
+        </ConsoleDialog>
     </LablineMenuShell>
   )
 }
@@ -267,7 +295,7 @@ function MenuBtn({
     <button
       type="button"
       onClick={onClick}
-      className={`w-full rounded-xl border px-3 py-2.5 text-left text-[0.8125rem] transition ${
+      className={`min-h-11 w-full rounded-xl border px-3 py-2.5 text-left text-[0.8125rem] transition ${
         primary
           ? 'border-mint/40 bg-mint/15 text-mint hover:bg-mint/25'
           : danger
@@ -277,6 +305,182 @@ function MenuBtn({
     >
       {label}
     </button>
+  )
+}
+
+function BalanceTab({
+  overrides,
+  snapshot,
+  onBack,
+}: {
+  overrides: Partial<BalanceTuning> | undefined
+  snapshot: SimState
+  onBack: () => void
+}) {
+  const setBalanceTuning = useGameStore((s) => s.setBalanceTuning)
+  const resetBalanceTuning = useGameStore((s) => s.resetBalanceTuning)
+  const resolved = resolveBalanceTuning(overrides)
+  const [simDays, setSimDays] = useState(90)
+  const [simRunning, setSimRunning] = useState(false)
+  const [simProgress, setSimProgress] = useState(0)
+  const [report, setReport] = useState<BalanceSimulationReport | null>(null)
+
+  const runSimulation = () => {
+    if (simRunning) return
+    setSimRunning(true)
+    setSimProgress(0)
+    setReport(null)
+    // Defer so the "running" paint lands before the synchronous sim loop
+    // blocks the main thread; progress flows back through onProgress
+    // (React batches the state updates). Runs are capped at 180 days here.
+    setTimeout(() => {
+      const result = runBalanceSimulation(snapshot, simDays, {
+        onProgress: (done, total) => {
+          setSimProgress(total > 0 ? done / total : 1)
+        },
+      })
+      setReport(result)
+      setSimProgress(1)
+      setSimRunning(false)
+    }, 30)
+  }
+
+  return (
+    <div className="max-h-[calc(100dvh-16rem)] space-y-4 overflow-y-auto pr-1">
+      <button
+        type="button"
+        className="text-[0.75rem] text-mint hover:underline"
+        onClick={onBack}
+      >
+        ← Back
+      </button>
+
+      {BALANCE_TUNING_GROUPS.map((group) => (
+        <section key={group.id}>
+          <h3 className="mb-1.5 font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">
+            {group.label}
+          </h3>
+          <div className="space-y-2">
+            {group.sliders.map((slider) => {
+              const value = resolved[slider.key]
+              return (
+                <div
+                  key={slider.key}
+                  className="rounded-xl border border-line bg-panel-2 px-2.5 py-2"
+                >
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="text-[0.75rem] font-medium text-bone">{slider.label}</span>
+                    <span className="font-mono text-[0.6875rem] tabular-nums text-mint">
+                      {slider.format(value)}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={slider.min}
+                    max={slider.max}
+                    step={slider.step}
+                    value={value}
+                    title={slider.hint}
+                    onChange={(event) =>
+                      setBalanceTuning({
+                        [slider.key]: Number(event.currentTarget.value),
+                      } as Partial<BalanceTuning>)
+                    }
+                    className="mt-1 w-full accent-mint"
+                  />
+                  <p className="mt-0.5 text-[0.625rem] leading-snug text-muted">{slider.hint}</p>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      ))}
+
+      <button
+        type="button"
+        className="hud-button hud-button--secondary w-full"
+        onClick={() => resetBalanceTuning()}
+      >
+        Reset to defaults
+      </button>
+
+      <section className="border-t border-line pt-3">
+        <h3 className="mb-1.5 font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">
+          Simulation
+        </h3>
+        <p className="mb-2 text-[0.6875rem] leading-snug text-muted">
+          Fast-forward a clone of this run with the current tuning. The live game is not touched.
+        </p>
+        <div className="flex items-center gap-1.5">
+          {[30, 90, 180].map((d) => (
+            <button
+              key={d}
+              type="button"
+              disabled={simRunning}
+              onClick={() => setSimDays(d)}
+              className={`rounded-lg border px-2.5 py-1 text-[0.75rem] transition disabled:opacity-50 ${
+                simDays === d
+                  ? 'border-mint/40 bg-mint/15 text-mint'
+                  : 'border-line bg-panel-2 text-bone hover:border-mint/30'
+              }`}
+            >
+              {d}d
+            </button>
+          ))}
+          <button
+            type="button"
+            disabled={simRunning}
+            onClick={runSimulation}
+            className="ml-auto rounded-lg border border-mint/40 bg-mint/15 px-3 py-1 text-[0.75rem] text-mint transition hover:bg-mint/25 disabled:opacity-50"
+          >
+            {simRunning ? `Running… ${Math.round(simProgress * 100)}%` : 'Run'}
+          </button>
+        </div>
+
+        {report && (
+          <div className="mt-2 space-y-1.5 rounded-xl border border-line bg-panel-2 px-2.5 py-2 text-[0.75rem]">
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-muted">Days simulated</span>
+              <span className="font-mono tabular-nums text-bone">
+                {report.daysSimulated} (day {report.startDay} → {report.startDay + report.daysSimulated})
+              </span>
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-muted">Cash</span>
+              <span className="font-mono tabular-nums text-bone">
+                {money(report.startCash)} → {money(report.endCash)}
+              </span>
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-muted">Cash negative</span>
+              <span className="font-mono tabular-nums text-bone">
+                {report.firstCashNegativeDay !== null ? `Day ${report.firstCashNegativeDay}` : 'Never'}
+              </span>
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-muted">Top capability</span>
+              <span className="font-mono tabular-nums text-bone">{report.endTopCapability.toFixed(1)}</span>
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-muted">Avg unserved demand</span>
+              <span className="font-mono tabular-nums text-bone">{pct(report.avgUnservedRatio)}</span>
+            </div>
+            {report.error && (
+              <p className="rounded-lg border border-danger/30 bg-danger/10 px-2 py-1 text-[0.6875rem] text-danger">
+                Simulation stopped early: {report.error}
+              </p>
+            )}
+            {report.warnings.length > 0 && (
+              <ul className="list-disc space-y-0.5 pl-4 text-[0.6875rem] text-amber">
+                {report.warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </section>
+    </div>
   )
 }
 

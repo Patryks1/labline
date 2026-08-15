@@ -4,7 +4,6 @@ import { money, pct } from './format'
 import type { Speed } from '../../sim/types'
 import {
   CalendarBlank,
-  CaretRight,
   FloppyDisk,
   GearSix,
   Pause,
@@ -31,7 +30,6 @@ export function TopBar() {
   const setSpeed = useGameStore((s) => s.setSpeed)
   const setPaused = useGameStore((s) => s.setPaused)
   const togglePause = useGameStore((s) => s.togglePause)
-  const stepDay = useGameStore((s) => s.stepDay)
   const setPanel = useGameStore((s) => s.setPanel)
   const toggleHotkeyHelp = useGameStore((s) => s.toggleHotkeyHelp)
   const setPauseMenuOpen = useGameStore((s) => s.setPauseMenuOpen)
@@ -77,6 +75,7 @@ export function TopBar() {
           >
             <button
               type="button"
+              aria-label={paused ? 'Resume simulation' : 'Pause simulation'}
               title={paused ? 'Resume (Space)' : 'Pause (Space)'}
               onClick={togglePause}
               className={`flex h-8 min-w-8 items-center justify-center rounded-lg px-2 font-mono text-[0.75rem] font-semibold transition ${
@@ -106,14 +105,6 @@ export function TopBar() {
                 </button>
               )
             })}
-            <button
-              type="button"
-              title="Step one day (+)"
-              onClick={stepDay}
-              className="flex h-8 items-center gap-1 rounded-lg px-2 font-mono text-[0.75rem] text-muted hover:bg-panel-2 hover:text-bone"
-            >
-              <CaretRight size="0.85rem" weight="bold" /> 1d
-            </button>
           </div>
 
         </div>
@@ -170,7 +161,7 @@ export function TopBar() {
                 )
               })
             }}
-            className="hidden h-8 items-center gap-1.5 rounded-lg border border-line/60 px-2 text-[0.75rem] text-muted hover:border-mint/40 hover:text-mint sm:inline-flex"
+            className="top-command-save hidden h-8 items-center gap-1.5 rounded-lg border border-line/60 px-2 text-[0.75rem] text-muted hover:border-mint/40 hover:text-mint sm:inline-flex"
           >
             <FloppyDisk size="1rem" /> <span className="hidden 2xl:inline">Save</span>
           </button>
@@ -178,15 +169,16 @@ export function TopBar() {
             type="button"
             title="Hotkeys (?)"
             onClick={toggleHotkeyHelp}
-            className="flex h-8 w-8 items-center justify-center rounded-lg text-muted hover:bg-panel-2 hover:text-bone"
+            className="top-command-help flex h-8 w-8 items-center justify-center rounded-lg text-muted hover:bg-panel-2 hover:text-bone"
           >
             <Question size="1.1rem" />
           </button>
           <button
             type="button"
+            aria-label="Open game menu"
             title="Pause menu"
             onClick={() => setPauseMenuOpen(true)}
-            className="flex h-8 w-8 items-center justify-center rounded-lg border border-line/60 text-[0.75rem] text-muted hover:border-line hover:text-bone sm:w-auto sm:gap-1.5 sm:px-2.5"
+            className="top-command-menu flex h-8 w-8 items-center justify-center rounded-lg border border-line/60 text-[0.75rem] text-muted hover:border-line hover:text-bone sm:w-auto sm:gap-1.5 sm:px-2.5"
           >
             <GearSix size="1rem" /> <span className="hidden 2xl:inline">Menu</span>
           </button>
@@ -244,7 +236,7 @@ function Metric({
       onClick={onClick}
       aria-pressed={onClick ? active : undefined}
       title={onClick ? `View ${label} history` : undefined}
-      className={`flex min-w-[4rem] max-w-[7rem] shrink flex-col items-start rounded-md px-1 py-1 leading-none ${
+      className={`top-command-metric flex min-w-[4rem] max-w-[7rem] shrink flex-col items-start rounded-md px-1 py-1 leading-none ${
         onClick ? 'text-left hover:opacity-90' : ''
       } ${active ? 'bg-mint/10 ring-1 ring-mint/30' : ''} ${className}`}
     >

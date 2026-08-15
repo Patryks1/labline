@@ -1,5 +1,6 @@
 import { DATA_DOMAINS, defaultDataWeights, normalizeWeights } from './data'
 import type { DataDomain, Model, TrainMode } from '../types'
+import { activeBalanceTuning } from './tuning'
 
 export interface SyntheticTrainingProfile {
   realMTok: number
@@ -20,6 +21,7 @@ export interface SyntheticTrainingProfile {
 }
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0))
+const clampScore = (value: number) => Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0))
 const smoothstep = (value: number) => {
   const t = clamp01(value)
   return t * t * (3 - 2 * t)
@@ -85,7 +87,10 @@ export function syntheticTrainingProfile(input: {
     beyond2,
     conditionalBeyond2 * 1.8 * (1 - Math.exp(-beyond2 / 1.8)),
   )
-  const effectiveSyntheticMTok = realMTok * (usefulBase + usefulBeyond)
+  const effectiveSyntheticMTok =
+    realMTok *
+    (usefulBase + usefulBeyond) *
+    activeBalanceTuning().syntheticEfficiencyMult
   const seededVariation = (seededUnit(input.seed) - 0.5) * 0.08
   const baseConditions = (0.45 + reliability * 0.55) * (0.4 + quality * 0.6)
   const imitationRetention = input.teacherCapability > 0
@@ -134,6 +139,66 @@ export function syntheticExpansionUnlocked(input: {
   return (
     input.synthResearchUnlocked ||
     (input.mode === 'distill' && input.hasDistillTeacher)
+  )
+}
+
+/**
+ * Domain-specific teacher strength for a targeted generation job.
+ * A teacher weak at math cannot generate strong math data merely because it
+ * has a high general score: the domain benchmark carries 70% of the signal.
+ */
+export function teacherDomainStrength(input: {
+  /** Teacher benchmark for the target domain (teacherCapabilityForDataDomain). */
+  domainBenchmark: number
+  /** Teacher reliability axis (model.quality.reliability). */
+  reliability: number
+  /** Teacher general capability (model.capability). */
+  capability: number
+}): number {
+  return (
+    0.7 * Math.max(0, input.domainBenchmark) +
+    0.2 * Math.max(0, input.reliability) +
+    0.1 * Math.max(0, input.capability)
+  )
+}
+
+/** Per-token quality factor of the generation method (0–1). */
+export const SYNTH_GENERATION_METHOD_QUALITY: Record<
+  'imitation' | 'filtered' | 'verifier' | 'curriculum',
+  number
+> = {
+  imitation: 0.72,
+  filtered: 0.88,
+  verifier: 0.95,
+  curriculum: 0.9,
+}
+
+/** Quality retention per generation of self-consuming synthetic lineage. */
+export function syntheticDepthDecay(generationDepth: number): number {
+  return Math.pow(0.92, Math.max(1, generationDepth) - 1)
+}
+
+/**
+ * Quality of one targeted synthetic generation job:
+ * teacher strength × generation-method quality × filtering quality × depth decay.
+ * Filtering quality scales 0.6–1.0 with the job's filter intensity.
+ */
+export function syntheticJobQuality(input: {
+  /** teacherDomainStrength output (0–100). */
+  teacherStrength: number
+  method?: 'imitation' | 'filtered' | 'verifier' | 'curriculum'
+  /** Job filtering intensity 0–1. */
+  filterIntensity: number
+  generationDepth: number
+}): number {
+  const methodQuality =
+    SYNTH_GENERATION_METHOD_QUALITY[input.method ?? 'imitation']
+  const filteringQuality = 0.6 + 0.4 * clamp01(input.filterIntensity)
+  return clampScore(
+    Math.max(0, input.teacherStrength) *
+      methodQuality *
+      filteringQuality *
+      syntheticDepthDecay(input.generationDepth),
   )
 }
 

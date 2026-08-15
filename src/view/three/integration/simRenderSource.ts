@@ -41,10 +41,12 @@ import {
   DefaultArchetype,
   LodTier,
   RenderBiome,
+  sitePhase,
   SurfaceFlag,
   SurfaceKind,
   type ChunkId,
   type RenderBiomeId,
+  type RenderConstructionSite,
   type RenderInstance,
   type RenderMunicipalPowerPlant,
   type SurfaceTexel,
@@ -187,6 +189,7 @@ export class SimViewportRenderSource implements ViewportRenderSource {
   private rivalColors = new Map<string, number>()
   private rivalColorSignature = ''
   private chunkPreparationMs = 0
+  private constructionSitesCache?: { key: unknown; sites: readonly RenderConstructionSite[] }
   private roadNetworkRevisionValue = 0
   private readonly roadRevisionState = { value: 0 }
   private readonly roadCompileSource?: RoadNetworkCompileSource
@@ -519,6 +522,78 @@ export class SimViewportRenderSource implements ViewportRenderSource {
 
   isSimulationPaused(): boolean {
     return this.state.paused
+  }
+
+  /**
+   * All player/rival facilities with construction state for the
+   * construction-animation layer. Cached on the world journal sequence
+   * (compact) or tile-array identity (legacy) so viewport pans stay cheap.
+   */
+  getConstructionSites(): readonly RenderConstructionSite[] {
+    const key: unknown = this.compactWorld ? this.compactWorld.sequence : this.state.map.tiles
+    const cached = this.constructionSitesCache
+    if (cached && cached.key === key) return cached.sites
+
+    const sites: RenderConstructionSite[] = []
+    if (this.compactWorld) {
+      for (const facility of this.compactWorld.facilitiesById.values()) {
+        const { minX, minY, maxX, maxY } = this.facilityBounds(facility)
+        const id = stableStringId(facility.id)
+        sites.push({
+          id,
+          tileX: Math.round((minX + maxX) * 0.5),
+          tileY: Math.round((minY + maxY) * 0.5),
+          x: ((minX + maxX) * 0.5) * MAP_TILE_SIZE,
+          y: this.foundationElevation(facility.footprint),
+          z: ((minY + maxY) * 0.5) * MAP_TILE_SIZE,
+          widthTiles: Math.max(1, maxX - minX + 1),
+          depthTiles: Math.max(1, maxY - minY + 1),
+          progress: constructionScale(facility.constructionProgress, facility.constructionTarget),
+          heightHint: facilityHeightHint(facility.kind, facility.level),
+          phase: sitePhase(id),
+        })
+      }
+    } else {
+      for (const campus of this.legacyCampuses.values()) {
+        const tile = campus.anchor
+        const id = stableStringId(campus.id)
+        sites.push({
+          id,
+          tileX: Math.round((campus.minX + campus.maxX) * 0.5),
+          tileY: Math.round((campus.minY + campus.maxY) * 0.5),
+          x: ((campus.minX + campus.maxX) * 0.5) * MAP_TILE_SIZE,
+          y: 0,
+          z: ((campus.minY + campus.maxY) * 0.5) * MAP_TILE_SIZE,
+          widthTiles: Math.max(1, campus.maxX - campus.minX + 1),
+          depthTiles: Math.max(1, campus.maxY - campus.minY + 1),
+          progress: constructionScale(tile.buildingProgress, tile.buildingTarget),
+          heightHint: facilityHeightHint(tile.kind, tile.level),
+          phase: sitePhase(id),
+        })
+      }
+      // Single-tile legacy facilities have no campus record.
+      for (let tileId = 0; tileId < this.legacyTilesById.length; tileId++) {
+        const tile = this.legacyTilesById[tileId]
+        if (!tile || tile.campusId || tile.campusRole === 'pad') continue
+        if (!isFacilityKind(tile.kind)) continue
+        const id = stableStringId(`legacy-${tileId}`)
+        sites.push({
+          id,
+          tileX: tile.x,
+          tileY: tile.y,
+          x: tile.x * MAP_TILE_SIZE,
+          y: 0,
+          z: tile.y * MAP_TILE_SIZE,
+          widthTiles: 1,
+          depthTiles: 1,
+          progress: constructionScale(tile.buildingProgress, tile.buildingTarget),
+          heightHint: facilityHeightHint(tile.kind, tile.level),
+          phase: sitePhase(id),
+        })
+      }
+    }
+    this.constructionSitesCache = { key, sites }
+    return sites
   }
 
   prepareChunk(chunkId: ChunkId, tier: LodTier): void {
@@ -2039,6 +2114,24 @@ export function facilityArchetypeFor(
 function constructionScale(progress: number, target: number): number {
   if (target <= 0 || progress >= target) return 1
   return Math.max(0.08, Math.min(1, progress / target))
+}
+
+/**
+ * Approximate finished building height in world units, used only to size
+ * tower cranes above a construction site. Mirrors the kit height ratios.
+ */
+function facilityHeightHint(kind: string, level: number): number {
+  const base =
+    kind === 'hq_l' ? 4.0 :
+    kind === 'hq_m' ? 2.2 :
+    kind === 'hq' || kind === 'office' ? 0.9 :
+    kind === 'dc_l' ? 1.35 :
+    kind === 'dc_m' ? 1.1 :
+    kind === 'dc' ? 0.9 :
+    kind === 'nuclear' || kind === 'fab' ? 0.62 :
+    kind === 'lab' ? 0.5 :
+    0.55
+  return base * (1 + Math.max(0, level) * 0.1)
 }
 
 function stableStringId(value: string): number {

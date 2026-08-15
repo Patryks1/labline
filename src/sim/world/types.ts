@@ -154,7 +154,8 @@ export interface WorldDescriptorV7 extends WorldDescriptorBase {
   readonly terrainAlgorithmVersion: 1
   readonly biomeVersion: 1
   readonly transportAlgorithmVersion: 2
-  readonly settlementAlgorithmVersion: 5
+  /** 5 = original V7 urban lot carve; 6 = roomier in-city office lots. Old saves keep 5. */
+  readonly settlementAlgorithmVersion: 5 | 6
   readonly municipalCampusAlgorithmVersion: 2
   readonly cityStatsModelVersion: 1
   readonly riverAlgorithmVersion: 1

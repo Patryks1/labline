@@ -15,7 +15,7 @@ import {
 } from './balance/trainingV3'
 import { createEmptyLabData, DATA_DOMAINS } from './balance/data'
 import { queueResourceOrder, tickSharedMarkets } from './systems/sharedMarkets'
-import type { DataDomain, TrainingDataPlan } from './types'
+import type { DataDomain, DataManifest, TrainingDataPlan } from './types'
 
 const diverseWeights = Object.fromEntries(
   DATA_DOMAINS.map((domain) => [domain, 1 / DATA_DOMAINS.length]),
@@ -33,21 +33,25 @@ function plan(totalMTok: number, over: Partial<TrainingDataPlan> = {}): Training
 }
 
 describe('simulation v3 shared rules', () => {
-  it('keeps unique HQ data useful through the frontier region without an overtraining penalty', () => {
+  it('keeps unique HQ optimization data useful through the frontier region after verification holdout', () => {
+    const trainShare = 0.82
+    const strongRawMTok = 6_000 / trainShare
+    const frontierRawMTok = 20_000 / trainShare
     const strong = analyzeTrainingData({
       paramsB: 1,
       family: 'dense',
-      plan: plan(6_000),
-      actualMTok: 6_000,
+      plan: plan(strongRawMTok, { trainShare }),
+      actualMTok: strongRawMTok,
       quality: 100,
     })
     const frontier = analyzeTrainingData({
       paramsB: 1,
       family: 'dense',
-      plan: plan(20_000),
-      actualMTok: 20_000,
+      plan: plan(frontierRawMTok, { trainShare }),
+      actualMTok: frontierRawMTok,
       quality: 100,
     })
+    expect(strong.holdoutRetention).toBe(trainShare)
     expect(strong.effectiveDataRatio).toBeCloseTo(6, 2)
     expect(frontier.effectiveDataRatio).toBeCloseTo(20, 2)
     expect(frontier.effectiveMTok).toBeGreaterThan(strong.effectiveMTok)
@@ -68,6 +72,84 @@ describe('simulation v3 shared rules', () => {
     expect(analysis.warnings.join(' ')).toMatch(/eight corpus epochs/i)
     expect(analysis.warnings.join(' ')).toMatch(/low-quality synthetic/i)
     expect(analysis.warnings.join(' ')).toMatch(/verification/i)
+  })
+
+  it('uses manifest provenance to separate equal-quality corpora', () => {
+    const manifest = (over: Partial<DataManifest>): DataManifest => ({
+      id: 'manifest',
+      assetIds: ['asset'],
+      domainWeights: diverseWeights,
+      uniqueMTok: 6_000,
+      repeatedMTok: 0,
+      effectiveQuality: 80,
+      contaminationRisk: 0.03,
+      effectiveDiversity: 0.85,
+      effectiveFreshness: 0.9,
+      syntheticShare: 0.05,
+      syntheticGenerationDepth: 1,
+      humanAnchorShare: 0.96,
+      rightsRisk: 0.08,
+      effectiveTrainingValue: 0.8,
+      createdDay: 1,
+      ...over,
+    })
+    const strong = analyzeTrainingData({
+      paramsB: 1,
+      family: 'dense',
+      plan: plan(6_000),
+      actualMTok: 6_000,
+      quality: 80,
+      manifest: manifest({}),
+    })
+    const recursive = analyzeTrainingData({
+      paramsB: 1,
+      family: 'dense',
+      plan: plan(6_000),
+      actualMTok: 6_000,
+      quality: 80,
+      manifest: manifest({
+        contaminationRisk: 0.55,
+        effectiveDiversity: 0.35,
+        effectiveFreshness: 0.3,
+        syntheticShare: 0.7,
+        syntheticGenerationDepth: 5,
+        humanAnchorShare: 0.2,
+        rightsRisk: 0.72,
+        effectiveTrainingValue: 0.32,
+      }),
+    })
+
+    expect(strong.effectiveMTok).toBeGreaterThan(recursive.effectiveMTok * 2)
+    expect(strong.risk).not.toBe('high')
+    expect(recursive.risk).toBe('high')
+    expect(recursive.warnings.join(' ')).toMatch(/internally repetitive/i)
+    expect(recursive.warnings.join(' ')).toMatch(/synthetic lineage/i)
+    expect(recursive.warnings.join(' ')).toMatch(/rights exposure/i)
+  })
+
+  it('uses manifest-attributed unique volume instead of the requested plan volume', () => {
+    const analysis = analyzeTrainingData({
+      paramsB: 1,
+      family: 'dense',
+      plan: plan(6_000, { uniqueMTok: 6_000 }),
+      actualMTok: 6_000,
+      quality: 80,
+      manifest: {
+        id: 'short-manifest',
+        assetIds: ['small-lot'],
+        domainWeights: diverseWeights,
+        uniqueMTok: 1_000,
+        repeatedMTok: 5_000,
+        effectiveQuality: 80,
+        contaminationRisk: 0.04,
+        effectiveTrainingValue: 0.8,
+        createdDay: 1,
+      },
+    })
+
+    expect(analysis.uniqueMTok).toBe(1_000)
+    expect(analysis.repeatedEpochs).toBe(6)
+    expect(analysis.warnings.join(' ')).toMatch(/past four useful epochs/i)
   })
 
   it('uses MoE total parameters for memory and active-weighted parameters for compute', () => {
@@ -198,14 +280,23 @@ describe('simulation v3 shared rules', () => {
   })
 
   it('uses shared pricing thresholds for API and plans', () => {
-    const api = analyzeApiPricing({
+    // Extreme premium vs peers still collapses demand; moderate premiums are "expensive".
+    const collapse = analyzeApiPricing({
+      price: 80,
+      marginalCost: 2,
+      capability: 60,
+      featureScore: 20,
+      peers: [{ price: 10, capability: 60, featureScore: 20 }],
+    })
+    expect(collapse.primary).toBe('demand_collapse')
+    const expensive = analyzeApiPricing({
       price: 30,
       marginalCost: 2,
       capability: 60,
       featureScore: 20,
       peers: [{ price: 10, capability: 60, featureScore: 20 }],
     })
-    expect(api.primary).toBe('demand_collapse')
+    expect(expensive.primary).toBe('expensive')
     const planStatus = analyzePlanPricing({
       price: 20,
       includedMTokPerMonth: 100,
@@ -218,15 +309,15 @@ describe('simulation v3 shared rules', () => {
     expect(planStatus.primary).toBe('unsustainable_plan')
   })
 
-  it('uses the live fully loaded API cost floor when facilities dominate serving cost', () => {
+  it('uses the live fully loaded API cost floor when the model served tokens', () => {
     const floor = fullyLoadedApiCostFloor({
       dayCogs: 73_600_000,
       dayMTok: 375_860,
       marginalCostPerMTok: 0.038,
     })
     expect(floor.source).toBe('live')
-    expect(floor.blended).toBeCloseTo(195.82, 1)
-    expect(0.3 * floor.costIn + 0.7 * floor.costOut).toBeCloseTo(floor.blended, 8)
+    expect(floor.blended).toBeCloseTo(73_600_000 / 375_860, 5)
+    expect(floor.costIn).toBeLessThanOrEqual(floor.costOut)
   })
 
   it('falls back to marginal API cost before there is live serving history', () => {
@@ -237,6 +328,7 @@ describe('simulation v3 shared rules', () => {
     })
     expect(floor.source).toBe('marginal')
     expect(floor.blended).toBe(0.42)
+    expect(floor.costIn).toBeLessThanOrEqual(floor.costOut)
   })
 
   it('quality-adjusts API demand diagnostics for capability and endpoint speed', () => {

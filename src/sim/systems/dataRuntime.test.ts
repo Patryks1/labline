@@ -7,6 +7,8 @@ import {
   enqueueAutomaticProcessing,
   processDataJobs,
   processingAcceptanceYield,
+  processingCostPerInspectedMTok,
+  resolveCollectableServed,
   resolvedProcessingQuality,
   syntheticGenerationMTokPerDay,
   updateDataQualityIndex,
@@ -28,13 +30,28 @@ function rawCorpus(): LabData {
 }
 
 describe('controller-neutral data runtime', () => {
-  it('uses a monotone calibrated acceptance yield from 88% to 50%', () => {
-    expect(processingAcceptanceYield(30)).toBeCloseTo(0.88, 12)
-    expect(processingAcceptanceYield(95)).toBeCloseTo(0.5, 12)
+  it('uses monotone, modality-aware acceptance yields', () => {
+    expect(processingAcceptanceYield(30)).toBeGreaterThan(0.7)
+    expect(processingAcceptanceYield(95)).toBeLessThan(0.5)
     expect(processingAcceptanceYield(70)).toBeLessThan(
       processingAcceptanceYield(50),
     )
-    expect(processingAcceptanceYield(70)).toBeGreaterThan(0.5)
+    const chat = processingAcceptanceYield(70, 'chat', 'web', 48)
+    const image = processingAcceptanceYield(70, 'image', 'web', 48)
+    const audio = processingAcceptanceYield(70, 'audio', 'web', 48)
+    const video = processingAcceptanceYield(70, 'video', 'web', 48)
+    expect(chat).toBeGreaterThan(image)
+    expect(image).toBeGreaterThan(audio)
+    expect(audio).toBeGreaterThan(video)
+  })
+
+  it('makes clean licensed lots yield more than low-quality scrap', () => {
+    const licensed = processingAcceptanceYield(75, 'image', 'licensed', 84)
+    const scrap = processingAcceptanceYield(75, 'image', 'scrap', 32)
+    const cleanWeb = processingAcceptanceYield(75, 'image', 'web', 84)
+    const dirtyWeb = processingAcceptanceYield(75, 'image', 'web', 32)
+    expect(licensed).toBeGreaterThan(scrap * 1.5)
+    expect(cleanWeb).toBeGreaterThan(dirtyWeb)
   })
 
   it('conserves inspected raw volume across accepted and rejected output', () => {
@@ -61,7 +78,11 @@ describe('controller-neutral data runtime', () => {
     expect(result.data.stocks.chat.raw).toBe(0)
     expect(result.data.processQueue).toHaveLength(0)
     expect(accepted).toBeCloseTo(result.processedMTok, 12)
-    expect(accepted + result.rejectedMTok).toBeCloseTo(10, 12)
+    expect(result.inspectedMTok).toBeCloseTo(10, 12)
+    expect(accepted + result.rejectedMTok).toBeCloseTo(
+      result.inspectedMTok,
+      12,
+    )
     expect(accepted).toBeLessThan(10)
   })
 
@@ -177,7 +198,7 @@ describe('controller-neutral data runtime', () => {
     ).toBeLessThan(player)
   })
 
-  it('never processes a partial unaffordable job or creates cash', () => {
+  it('spends available cash on a fractional pass without creating cash', () => {
     const data = rawCorpus()
     data.processQueue = [
       {
@@ -197,10 +218,57 @@ describe('controller-neutral data runtime', () => {
       day: 1,
     })
     expect(result.blockedForCash).toBe(true)
-    expect(result.processedMTok).toBe(0)
-    expect(result.cashSpent).toBe(0)
-    expect(result.cash).toBe(100)
-    expect(result.data.processQueue[0]?.remaining).toBe(20)
+    expect(result.inspectedMTok).toBeGreaterThan(0)
+    expect(result.inspectedMTok).toBeLessThan(1)
+    expect(result.processedMTok).toBeGreaterThan(0)
+    expect(result.cashSpent).toBeCloseTo(100, 8)
+    expect(result.cash).toBeCloseTo(0, 8)
+    expect(result.data.processQueue[0]?.remaining).toBeLessThan(20)
+    expect(result.data.processQueue[0]?.remaining).toBeGreaterThan(19)
+    expect(result.processedMTok + result.rejectedMTok).toBeCloseTo(
+      result.inspectedMTok,
+      12,
+    )
+  })
+
+  it('charges strict cleaning on inspected raw volume, including rejects', () => {
+    const run = (qualityTarget: number) => {
+      const data = createEmptyLabData()
+      data.processQueue = [{
+        id: `strict-${qualityTarget}`,
+        domain: 'image',
+        remaining: 10,
+        total: 10,
+        qualityTarget,
+        purchaseLot: {
+          lineageId: `lot-${qualityTarget}`,
+          name: 'Image crawl',
+          sellerKind: 'web_scrape',
+          qualityBand: 'scrap',
+          offerSource: 'scrap',
+          purchaseQuality: 34,
+        },
+      }]
+      return processDataJobs({
+        data,
+        cash: 10_000_000,
+        throughputMTok: 1_000,
+        dataQuality: 1,
+        staff: STAFF,
+        day: 1,
+      })
+    }
+    const loose = run(40)
+    const strict = run(90)
+
+    expect(loose.inspectedMTok).toBeCloseTo(10, 12)
+    expect(strict.inspectedMTok).toBeCloseTo(10, 12)
+    expect(strict.cashSpent).toBeGreaterThan(loose.cashSpent * 1.8)
+    expect(strict.processedMTok).toBeLessThan(loose.processedMTok)
+    expect(strict.cashSpent).toBeCloseTo(
+      strict.inspectedMTok * processingCostPerInspectedMTok('image', 90, 'scrap'),
+      8,
+    )
   })
 
   it('aggregates recurring automatic traffic into one bounded domain asset', () => {
@@ -229,7 +297,7 @@ describe('controller-neutral data runtime', () => {
     )
     expect(assets).toHaveLength(1)
     expect(assets[0]?.volumeMTok).toBeCloseTo(
-      12 * processingAcceptanceYield(75),
+      12 * processingAcceptanceYield(75, 'code', 'product_traffic', 58),
       8,
     )
     expect(assets[0]?.acquiredDay).toBe(1)
@@ -319,8 +387,136 @@ describe('controller-neutral data runtime', () => {
     )
 
     expect(asset?.quality).toBeCloseTo(
-      resolvedProcessingQuality(75, 1.08, STAFF),
+      resolvedProcessingQuality(75, 1.08, STAFF, 48, 'science'),
       12,
     )
+  })
+
+  it('caps output quality by raw source and lab capability', () => {
+    const weakSource = resolvedProcessingQuality(95, 1, STAFF, 28, 'video')
+    const sameWeakSource = resolvedProcessingQuality(75, 1, STAFF, 28, 'video')
+    const cleanSource = resolvedProcessingQuality(95, 1, STAFF, 88, 'video')
+
+    expect(weakSource).toBe(sameWeakSource)
+    expect(weakSource).toBeLessThan(40)
+    expect(cleanSource).toBeGreaterThan(weakSource)
+    expect(cleanSource).toBeLessThan(95)
+  })
+})
+
+describe('chat collection tiers', () => {
+  const segments = [{ id: 'consumer' as const, size: 1_000_000 }]
+
+  it('grows collection from free-plan traffic when collection is on', () => {
+    const off = collectTrafficData({
+      data: createEmptyLabData(),
+      servedMTok: 80,
+      demandMTok: 80,
+      brandTrust: 70,
+      dataFlywheel: 0,
+      segments,
+      planSlices: [
+        {
+          id: 'free',
+          pricePerMonth: 0,
+          servedMTok: 80,
+          dataCollectionRate: 0,
+        },
+      ],
+    })
+    const on = collectTrafficData({
+      data: createEmptyLabData(),
+      servedMTok: 80,
+      demandMTok: 80,
+      brandTrust: 70,
+      dataFlywheel: 0,
+      segments,
+      planSlices: [
+        {
+          id: 'free',
+          pricePerMonth: 0,
+          servedMTok: 80,
+          dataCollectionRate: 1,
+        },
+      ],
+    })
+
+    expect(off.collectedMTok).toBe(0)
+    expect(on.collectedMTok).toBeGreaterThan(0)
+    expect(on.data.dayCollectChatFree ?? 0).toBeGreaterThan(0)
+    expect(on.data.dayCollectChatPaid ?? 0).toBe(0)
+  })
+
+  it('collects nothing from $60 plans even at 100% setting', () => {
+    const result = collectTrafficData({
+      data: createEmptyLabData(),
+      servedMTok: 120,
+      demandMTok: 120,
+      brandTrust: 70,
+      dataFlywheel: 0,
+      segments,
+      planSlices: [
+        {
+          id: 'pro',
+          pricePerMonth: 60,
+          servedMTok: 120,
+          dataCollectionRate: 1,
+        },
+      ],
+    })
+    expect(result.collectedMTok).toBe(0)
+    expect(result.data.dayCollectChatFree ?? 0).toBe(0)
+    expect(result.data.dayCollectChatPaid ?? 0).toBe(0)
+  })
+
+  it('never lets a $20 plan exceed ~16% collect share even at 100% slider', () => {
+    const served = 100
+    const capped = resolveCollectableServed({
+      servedMTok: served,
+      collectionRate: 1,
+      planSlices: [
+        {
+          id: 'plus',
+          pricePerMonth: 20,
+          servedMTok: served,
+          dataCollectionRate: 1,
+        },
+      ],
+    })
+    expect(capped.effectiveServedMTok / served).toBeCloseTo(0.16, 8)
+    expect(capped.effectiveServedMTok / served).toBeLessThanOrEqual(0.161)
+
+    const fullFree = resolveCollectableServed({
+      servedMTok: served,
+      collectionRate: 1,
+      planSlices: [
+        {
+          id: 'free',
+          pricePerMonth: 0,
+          servedMTok: served,
+          dataCollectionRate: 1,
+        },
+      ],
+    })
+    expect(fullFree.effectiveServedMTok).toBeCloseTo(served, 8)
+
+    const paidCollect = collectTrafficData({
+      data: createEmptyLabData(),
+      servedMTok: served,
+      demandMTok: served,
+      brandTrust: 70,
+      dataFlywheel: 0,
+      segments,
+      planSlices: [
+        {
+          id: 'plus',
+          pricePerMonth: 20,
+          servedMTok: served,
+          dataCollectionRate: 1,
+        },
+      ],
+    })
+    expect(paidCollect.data.dayCollectChatPaid ?? 0).toBeGreaterThan(0)
+    expect(paidCollect.data.dayCollectChatFree ?? 0).toBe(0)
   })
 })

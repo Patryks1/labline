@@ -26,10 +26,10 @@ import type {
   SimState,
   SiteCapacity,
 } from './types'
-import { cityTalentCapacity, cityTalentInitial } from './balance/staff'
+import { cityTalentCapacity, cityTalentInitial, emptyStaff } from './balance/staff'
 import {
   getIndustryDataPack,
-  GROUNDED_2026_COMPUTE_V2_PACK,
+  GROUNDED_2026_ECONOMY_V3_PACK,
 } from './balance/industryDataPack'
 import {
   TERRAIN_KIND,
@@ -257,7 +257,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
 
   const campaignRules = cfg.campaignRules ?? defaultCampaignRules()
   const industryDataPack =
-    getIndustryDataPack(campaignRules.contentPackId) ?? GROUNDED_2026_COMPUTE_V2_PACK
+    getIndustryDataPack(campaignRules.contentPackId) ?? GROUNDED_2026_ECONOMY_V3_PACK
   const calendar = calendarForDay(1, campaignRules)
   const initialSiteCapacities: SiteCapacity[] = rivals.map((rival) => {
     const firmMw = Math.max(0.25, rival.flopsPf * 0.011 * (rival.pue ?? 1.42) * 1.12)
@@ -321,8 +321,9 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       // dense_basics starter unlock includes +0.05 trainEfficiency
       trainEfficiency: ECONOMY.startingTrainEfficiency + 0.05,
       pue: ECONOMY.startingPue,
-      talent: ECONOMY.startingTalent,
-      staff: { researcher: 3, data_processor: 1, engineer: 3, ops: 1 },
+      talent: 1,
+      staff: emptyStaff(),
+      starterHqGrant: true,
       researchLeads: [
         {
           id: 'lead-mira-chen',
@@ -351,9 +352,9 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
           name: 'Foundations Pod',
           leadId: 'lead-mira-chen',
           focus: 'scaling',
-          researchers: 3,
-          engineers: 1,
-          dataStaff: 1,
+          researchers: 0,
+          engineers: 0,
+          dataStaff: 0,
           assignmentId: null,
         },
         {
@@ -362,7 +363,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
           leadId: 'lead-jonah-reyes',
           focus: 'systems',
           researchers: 0,
-          engineers: 2,
+          engineers: 0,
           dataStaff: 0,
           assignmentId: null,
         },
@@ -374,11 +375,14 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       data: createEmptyLabData(),
       brandTrust: ECONOMY.startingBrand,
       servicePain: 0,
+      speedStrain: 0,
       // Dense transformers unlocked at start (same for player + rivals)
       researchUnlocked: ['dense_basics'],
       activeResearch: null,
       researchQueue: [],
       models: [],
+      trainingCheckpoints: [],
+      privateEvaluationJobs: [],
       trainingJobs: [],
       trainingJob: null,
       safetyCampaign: null,
@@ -389,13 +393,14 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
         apiPriceOutPerMTok: 3.2,
         apiMarkupPct: 120,
         apiVsSubPriority: ECONOMY.defaultApiVsSubPriority,
+        serveThrottlePolicy: 'balanced',
         activeModelId: null,
         enterpriseContractBonus: 0,
         plans: defaultPlans(),
         subPlusPrice: 20,
-        subProPrice: 60,
-        plusIncludedMTok: 0,
-        proIncludedMTok: 0,
+        subProPrice: 100,
+        plusIncludedMTok: 20,
+        proIncludedMTok: 100,
       },
       finance: {
         cash: startingCash,
@@ -526,7 +531,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
         id: 'welcome',
         day: 1,
         severity: 'info' as const,
-        message: `${cfg.labName} opens in January 2026 with $3M in cloud credits, 24 PF online, two technical leads, and 8 supporting staff. Ship before the runway closes.`,
+        message: `${cfg.labName} opens in January 2026 with a free HQ grant, $3M cloud credits, and 24 PF on-demand. Place your HQ in the city, hire researchers, then ship before the runway closes.`,
       },
     ],
     news: [
@@ -543,6 +548,8 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       goalValuation: ECONOMY.victory.valuation,
       goalCapability: ECONOMY.victory.capability,
       bankruptDay: 0,
+      dominanceQualifiedDays: 0,
+      lastDominanceQualifiedDay: 0,
     },
     lastMarket: {
       demandModelVersion: DEMAND_MODEL_VERSION,
@@ -574,6 +581,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       capacityProductRevenueCeiling: 0,
     },
     financeHistory: [],
+    planStatsHistory: [],
     financeMonthlyHistory: [],
     externalities: { accounts: {}, incidents: [] },
     lastBenchmarkEvent: null,

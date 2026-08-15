@@ -48,6 +48,8 @@ import {
   marketingRevenueMultiple,
   MARKETING_MAX_REVENUE_MULTIPLE,
 } from "../../../sim/systems/org";
+import { computeMarketingOutcome } from "../../../sim/systems/marketing";
+import { cashDistressStage } from "../../../sim/systems/victory";
 import { sparkPath } from "../../../sim/systems/stats";
 import { setAutomationPolicies } from "../../../sim/systems/automation";
 import { useGameStore } from "../../../store/gameStore";
@@ -133,6 +135,8 @@ export function OrgPanel({
   );
   const channelSpend = useMemo(() => marketingChannels(state), [state]);
   const reach = useMemo(() => marketingReach(state), [state]);
+  const marketingOutcome = useMemo(() => computeMarketingOutcome(state), [state]);
+  const distress = cashDistressStage(p.cash);
   const marketingBasis = marketingRevenueBasis(state);
   const marketingMultiple = marketingRevenueMultiple(state);
   const rivalMarketing = useMemo(
@@ -252,9 +256,18 @@ export function OrgPanel({
             tone="serve"
           />
           <MetricTile
-            label="Web visits"
-            value={num(reach.webVisits, 0)}
+            label="Acquired customers"
+            value={num(marketingOutcome.acquiredCustomers, 0)}
             detail="/ day"
+          />
+          <MetricTile
+            label="Effective CAC"
+            value={
+              marketingOutcome.effectiveCac > 0
+                ? money(marketingOutcome.effectiveCac)
+                : "—"
+            }
+            detail={`${num(marketingOutcome.qualifiedLeads, 0)} leads / day`}
           />
         </div>
 
@@ -308,6 +321,59 @@ export function OrgPanel({
               <p className="mt-1 text-[0.8125rem] text-muted">leads / day</p>
             </GameCard>
           </CardGrid>
+
+          <GameCard eyebrow="Impact" title="Measured acquisition" tone="mint">
+            <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+              <Stat
+                label="Qualified leads"
+                value={`${num(marketingOutcome.qualifiedLeads, 0)}/d`}
+              />
+              <Stat
+                label="Customers won"
+                value={`${num(marketingOutcome.acquiredCustomers, 0)}/d`}
+              />
+              <Stat
+                label="Enterprise leads"
+                value={`${num(marketingOutcome.enterpriseLeads, 1)}/d`}
+              />
+              <Stat
+                label="Brand lift"
+                value={`+${num(marketingOutcome.brandGain, 2)}/d`}
+              />
+            </div>
+            <div className="mt-2 space-y-1">
+              {(
+                [
+                  ["web", "Web & developer"],
+                  ["billboards", "Billboards"],
+                  ["restaurants", "Restaurants"],
+                  ["enterprise", "Enterprise"],
+                ] as const
+              ).map(([channel, label]) => {
+                const slice = marketingOutcome.channelBreakdown[channel];
+                return (
+                  <div
+                    key={channel}
+                    className="flex items-center justify-between gap-2 rounded border border-line/60 bg-void/35 px-2 py-1 font-mono text-[0.6875rem] tabular-nums"
+                  >
+                    <span className="text-muted">{label}</span>
+                    <span className="text-bone">
+                      {num(slice.effectiveAcquisitions, 1)} customers ·{" "}
+                      {slice.spend > 0
+                        ? money(slice.spend / Math.max(0.01, slice.effectiveAcquisitions))
+                        : "—"}{" "}
+                      CAC
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-2 text-[0.6875rem] text-muted">
+              Market expansion {num(marketingOutcome.marketExpansion, 0)} new
+              reachable customers / day. Saturation caps each channel — past
+              its audience, extra spend buys little.
+            </p>
+          </GameCard>
 
           <GameCard eyebrow="Competition" title="Spend race">
             <SpendRace
@@ -373,6 +439,43 @@ export function OrgPanel({
           tone={p.finance.dayNet < 0 ? "danger" : "gold"}
         />
       </div>
+
+      {distress !== "stable" && (
+        <div
+          className={`mt-3 rounded-lg border px-3 py-2 text-[0.75rem] leading-snug ${
+            distress === "distressed"
+              ? "border-amber/35 bg-amber/10 text-amber"
+              : "border-danger/40 bg-danger/10 text-danger"
+          }`}
+        >
+          {distress === "distressed" && (
+            <>
+              <span className="font-medium">Cash distress.</span> Cash is below
+              zero — credit gets expensive and vendor terms may worsen. Raise
+              cash, cut burn, or take emergency funding in Capital.
+            </>
+          )}
+          {distress === "severe" && (
+            <>
+              <span className="font-medium">Severe distress.</span> Cash below
+              -$100M. Lenders charge distress rates; an emergency facility may
+              be available in Capital.
+            </>
+          )}
+          {distress === "final" && (
+            <>
+              <span className="font-medium">Final warning.</span> Cash below
+              -$250M. At -$500M the board forces a fire sale and the run ends.
+            </>
+          )}
+          {distress === "bankrupt" && (
+            <>
+              <span className="font-medium">Bankruptcy.</span> Cash at or below
+              -$500M — the company is being wound down.
+            </>
+          )}
+        </div>
+      )}
 
       <div className="mt-3">
         <CompanyPulse
@@ -450,7 +553,7 @@ export function OrgPanel({
                         wage ×{(hireCity.talentWageMult ?? 1).toFixed(2)}
                       </span>
                     </div>
-                    <div className="grid grid-cols-[1fr_auto] items-end gap-3 p-3">
+                    <div className="grid gap-3 p-3 sm:grid-cols-[1fr_auto] sm:items-end">
                       <div>
                         <p className="mb-2 text-[0.6875rem] leading-snug text-muted">
                           {STAFF_BLURBS[selectedHireRole]}
@@ -508,6 +611,7 @@ export function OrgPanel({
                         <HudButton
                           type="button"
                           variant="primary"
+                          className="w-full sm:w-auto"
                           disabled={blocked}
                           title={
                             blocked
@@ -548,7 +652,7 @@ export function OrgPanel({
                   return (
                     <div
                       key={rival.id}
-                      className="flex items-center justify-between gap-2 rounded-lg border border-line/60 bg-panel-2 px-2 py-1.5"
+                      className="flex flex-col items-stretch gap-2 rounded-lg border border-line/60 bg-panel-2 px-2 py-2 min-[500px]:flex-row min-[500px]:items-center min-[500px]:justify-between"
                     >
                       <div className="min-w-0">
                         <div className="truncate text-[0.8125rem] text-bone">
@@ -559,7 +663,7 @@ export function OrgPanel({
                           {rivalStaff.data_processor} · E{rivalStaff.engineer}
                         </div>
                       </div>
-                      <div className="flex gap-1">
+                      <div className="grid grid-cols-2 gap-1 [&>:last-child]:col-span-2 sm:grid-cols-3 sm:[&>:last-child]:col-span-1">
                         {(
                           [
                             "researcher",
@@ -582,7 +686,7 @@ export function OrgPanel({
                                   : "Need seats, cash, or rival talent"
                               }
                               disabled={!canPoach}
-                              className={`rounded-md px-1.5 py-1 font-mono text-[0.6875rem] tabular-nums ${canPoach ? "bg-amber/15 text-amber hover:bg-amber/25" : "bg-line/30 text-muted"}`}
+                              className={`min-h-11 rounded-md px-1.5 py-1 font-mono text-[0.6875rem] tabular-nums min-[500px]:min-h-0 ${canPoach ? "bg-amber/15 text-amber hover:bg-amber/25" : "bg-line/30 text-muted"}`}
                               onClick={() =>
                                 setState(
                                   poachRivalStaff(state, rival.id, role, 1),
@@ -626,7 +730,7 @@ export function OrgPanel({
                   role="tab"
                   aria-selected={capitalView === id}
                   onClick={() => setCapitalView(id)}
-                  className={`rounded-md px-2 py-1.5 text-[0.6875rem] transition ${capitalView === id ? "bg-panel-2 text-mint" : "text-muted hover:text-bone"}`}
+                  className={`min-h-11 rounded-md px-2 py-1.5 text-[0.6875rem] transition sm:min-h-0 ${capitalView === id ? "bg-panel-2 text-mint" : "text-muted hover:text-bone"}`}
                 >
                   {label}
                 </button>
@@ -670,7 +774,8 @@ export function OrgPanel({
                   valuation={Math.max(1, p.finance.valuation)}
                   board={capital.boardPressure}
                 />
-                {state.player.capital?.restructuring.active && (
+                {state.player.capital?.restructuring.active &&
+                  p.cash < 0 && (
                   <div className="rounded-lg border border-danger/35 bg-danger/10 px-2 py-1.5 text-[0.6875rem] text-danger">
                     Recovery ladder:{" "}
                     {state.player.capital.restructuring.stage.replace("_", " ")}{" "}
@@ -738,7 +843,7 @@ export function OrgPanel({
                                   ),
                                 )
                               }
-                              className="shrink-0 rounded border border-amber/30 px-2 py-1 text-amber hover:bg-amber/10 disabled:opacity-35"
+                              className="min-h-11 shrink-0 rounded border border-amber/30 px-2 py-1 text-amber hover:bg-amber/10 disabled:opacity-35 sm:min-h-0"
                             >
                               Buy {money(quote.cost)}
                             </button>
@@ -767,8 +872,8 @@ export function OrgPanel({
                       key={offer.id}
                       className="rounded-lg border border-line/70 bg-void/35 p-2"
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
+                      <div className="flex flex-col gap-2 min-[420px]:flex-row min-[420px]:items-start min-[420px]:justify-between">
+                        <div className="min-w-0">
                           <div className="text-[0.75rem] text-bone">
                             {offer.investorName}
                           </div>
@@ -791,7 +896,7 @@ export function OrgPanel({
                           onClick={() =>
                             setState(acceptEquityOffer(state, offer))
                           }
-                          className="shrink-0 rounded bg-mint/20 px-2 py-1 font-mono text-[0.6875rem] text-mint disabled:opacity-35"
+                          className="min-h-11 w-full shrink-0 rounded bg-mint/20 px-2 py-1 font-mono text-[0.6875rem] text-mint disabled:opacity-35 min-[420px]:min-h-0 min-[420px]:w-auto"
                         >
                           Raise {money(offer.cashRaised)}
                         </button>
@@ -839,7 +944,7 @@ export function OrgPanel({
                       </div>
                       <button
                         type="button"
-                        className="shrink-0 text-[0.6875rem] text-mint hover:underline"
+                        className="min-h-11 shrink-0 px-2 text-[0.6875rem] text-mint hover:underline sm:min-h-0"
                         onClick={() => setState(repayTypedDebt(state, debt.id))}
                       >
                         Repay
@@ -877,8 +982,8 @@ export function OrgPanel({
 
                 {firmOffer && (
                   <div className="space-y-2 rounded-lg border border-mint/35 bg-mint/5 p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
+                    <div className="flex flex-col gap-2 min-[420px]:flex-row min-[420px]:items-start min-[420px]:justify-between">
+                      <div className="min-w-0">
                         <h4 className="text-[0.8125rem] font-medium text-bone">
                           Credit offer ready
                         </h4>
@@ -905,7 +1010,7 @@ export function OrgPanel({
                       <button
                         type="button"
                         onClick={() => declineLoanOffer(firmOffer.id)}
-                        className="rounded-lg border border-line px-2 py-1.5 text-[0.75rem] text-muted hover:border-danger/40 hover:text-danger"
+                        className="min-h-11 rounded-lg border border-line px-2 py-1.5 text-[0.75rem] text-muted hover:border-danger/40 hover:text-danger"
                       >
                         Decline
                       </button>
@@ -918,7 +1023,7 @@ export function OrgPanel({
                             ? "Accept this credit offer"
                             : "Repay an open facility before accepting"
                         }
-                        className="rounded-lg border border-mint/45 bg-mint/15 px-2 py-1.5 text-[0.75rem] font-medium text-mint hover:bg-mint/25 disabled:cursor-not-allowed disabled:border-line disabled:bg-line/20 disabled:text-muted"
+                        className="min-h-11 rounded-lg border border-mint/45 bg-mint/15 px-2 py-1.5 text-[0.75rem] font-medium text-mint hover:bg-mint/25 disabled:cursor-not-allowed disabled:border-line disabled:bg-line/20 disabled:text-muted"
                       >
                         {canAcceptFirmOffer
                           ? "Accept offer"
@@ -974,7 +1079,7 @@ export function OrgPanel({
                         <button
                           type="button"
                           onClick={() => repayLoan(l.id)}
-                          className="shrink-0 rounded-lg border border-line px-2 py-1 text-[0.75rem] text-mint hover:bg-panel"
+                          className="min-h-11 shrink-0 rounded-lg border border-line px-2 py-1 text-[0.75rem] text-mint hover:bg-panel sm:min-h-0"
                         >
                           Pay off
                         </button>
@@ -994,7 +1099,7 @@ export function OrgPanel({
                     </p>
                     <button
                       type="button"
-                      className="w-full rounded-lg bg-danger/25 py-1.5 text-[0.8125rem] font-medium text-danger hover:bg-danger/35"
+                      className="min-h-11 w-full rounded-lg bg-danger/25 py-1.5 text-[0.8125rem] font-medium text-danger hover:bg-danger/35"
                       onClick={() => takeLoan("bailout")}
                     >
                       Take emergency bailout
@@ -1017,7 +1122,7 @@ export function OrgPanel({
                         <button
                           key={o.id}
                           type="button"
-                          className={`flex w-full items-center justify-between gap-2 rounded-lg border px-2.5 py-2 text-left ${
+                          className={`flex min-h-11 w-full items-center justify-between gap-2 rounded-lg border px-2.5 py-2 text-left ${
                             bail
                               ? "border-danger/40 bg-danger/10 hover:border-danger/60"
                               : "border-line hover:border-mint/40"
@@ -1049,7 +1154,7 @@ export function OrgPanel({
 
                 {!creditRequestOpen && (
                   <div className="space-y-2 rounded-lg border border-mint/20 bg-mint/5 p-3">
-                    <div className="flex items-baseline justify-between gap-2">
+                    <div className="flex flex-col gap-1 min-[420px]:flex-row min-[420px]:items-baseline min-[420px]:justify-between">
                       <h4 className="text-[0.8125rem] font-medium text-bone">
                         Custom draw
                       </h4>
@@ -1122,7 +1227,7 @@ export function OrgPanel({
                         <button
                           type="button"
                           disabled={!canDraw}
-                          className={`w-full rounded-lg py-2 text-[0.8125rem] font-medium ${
+                          className={`min-h-11 w-full rounded-lg py-2 text-[0.8125rem] font-medium ${
                             canDraw
                               ? "bg-mint/25 text-mint hover:bg-mint/35"
                               : "bg-line/40 text-muted cursor-not-allowed"
@@ -1233,7 +1338,7 @@ function BankingOfferCard({
         </span>
       </div>
 
-      <dl className="mt-2 grid grid-cols-3 gap-1.5">
+      <dl className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3">
         <OfferTerm label="Amount" value={available ? money(principal) : "—"} />
         <OfferTerm label="Rate" value={`${(product.apr * 100).toFixed(1)}%`} />
         <OfferTerm
@@ -1252,7 +1357,7 @@ function BankingOfferCard({
           type="button"
           disabled={!available}
           onClick={() => onAccept(principal)}
-          className="shrink-0 rounded-md border border-amber/35 bg-amber/10 px-2.5 py-1 font-mono text-[0.6875rem] text-amber transition hover:border-amber/60 hover:bg-amber/15 active:translate-y-px disabled:cursor-not-allowed disabled:border-line disabled:bg-line/20 disabled:text-muted"
+          className="min-h-11 shrink-0 rounded-md border border-amber/35 bg-amber/10 px-2.5 py-1 font-mono text-[0.6875rem] text-amber transition hover:border-amber/60 hover:bg-amber/15 active:translate-y-px disabled:cursor-not-allowed disabled:border-line disabled:bg-line/20 disabled:text-muted"
         >
           {available ? "Accept offer" : "Unavailable"}
         </button>
@@ -1341,13 +1446,13 @@ function TeamBoard({
           />
         )}
       </div>
-      <div className="grid grid-cols-5 gap-1">
+      <div className="grid grid-cols-2 gap-1 sm:grid-cols-3 xl:grid-cols-5">
         {roles.map(([role, label, , dot]) => (
           <button
             key={role}
             type="button"
             onClick={() => onSelectRole(role)}
-            className={`rounded px-1 py-1.5 text-left transition ${selectedRole === role ? "bg-panel-2 text-bone" : "text-muted hover:bg-panel-2/60"}`}
+            className={`min-h-11 rounded px-1 py-1.5 text-left transition ${selectedRole === role ? "bg-panel-2 text-bone" : "text-muted hover:bg-panel-2/60"}`}
           >
             <span className={`mr-1 ${dot}`}>●</span>
             <span className="text-[0.5625rem]">{label}</span>
@@ -1357,7 +1462,7 @@ function TeamBoard({
           </button>
         ))}
         <div
-          className="rounded border border-dashed border-line px-1 py-1.5 text-left text-muted"
+          className="min-h-11 rounded border border-dashed border-line px-1 py-1.5 text-left text-muted"
           aria-label={`${openSeats} empty seats`}
         >
           <span className="mr-1 text-line">○</span>
@@ -1466,7 +1571,7 @@ function CompanyPulse({
     recent.length > 1 ? (scrubIndex / (recent.length - 1)) * 180 : 180;
   return (
     <section className="overflow-hidden rounded-lg border border-line bg-void/35">
-      <div className="grid grid-cols-4 divide-x divide-line/70">
+      <div className="grid grid-cols-2 divide-x divide-y divide-line/70 sm:grid-cols-4 sm:divide-y-0">
         <PulseStat label="Cash" value={money(cash)} />
         <PulseStat
           label="Day net"
@@ -1481,8 +1586,8 @@ function CompanyPulse({
         <PulseStat label="Team" value={`${team}/${seats}`} />
       </div>
       <div className="border-t border-line/70 px-2.5 py-2">
-        <div className="mb-1.5 flex items-center justify-between gap-2">
-          <div className="flex gap-0.5">
+        <div className="mb-1.5 flex flex-col gap-1.5 min-[420px]:flex-row min-[420px]:items-center min-[420px]:justify-between">
+          <div className="grid w-full grid-cols-5 gap-0.5 min-[420px]:flex min-[420px]:w-auto">
             {(Object.keys(metrics) as (keyof typeof metrics)[]).map((key) => (
               <button
                 key={key}
@@ -1490,7 +1595,7 @@ function CompanyPulse({
                 aria-describedby="company-pulse-detail"
                 title={metrics[key].description}
                 onClick={() => setMetric(key)}
-                className={`rounded px-1.5 py-1 text-[0.5625rem] transition ${activeMetric === key ? "bg-panel-2 text-bone" : "text-muted hover:text-bone"}`}
+                className={`min-h-11 rounded px-1.5 py-1 text-[0.5625rem] transition min-[420px]:min-h-0 ${activeMetric === key ? "bg-panel-2 text-bone" : "text-muted hover:text-bone"}`}
               >
                 {metrics[key].label}
               </button>
@@ -1541,7 +1646,7 @@ function CompanyPulse({
         <div
           id="company-pulse-detail"
           role="status"
-          className="mt-1 flex items-start justify-between gap-2 border-t border-line/60 pt-1.5 text-[0.5625rem] leading-snug text-muted"
+          className="mt-1 flex flex-col gap-1 border-t border-line/60 pt-1.5 text-[0.5625rem] leading-snug text-muted min-[420px]:flex-row min-[420px]:items-start min-[420px]:justify-between"
         >
           <span>{selectedMetric.description}</span>
           <span className={`shrink-0 font-mono ${selectedMetric.color}`}>
@@ -1724,7 +1829,7 @@ function ChannelMixBar({
 
   return (
     <div className="rounded-lg border border-line/70 bg-void/35 p-3">
-      <div className="mb-2 flex items-center justify-between gap-2">
+      <div className="mb-2 flex flex-col gap-1 min-[420px]:flex-row min-[420px]:items-center min-[420px]:justify-between">
         <span className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
           Channel mix
         </span>
@@ -1863,8 +1968,8 @@ function GovernanceSummary({ state }: { state: SimState }) {
 
   return (
     <div className="space-y-3 rounded-lg border border-line bg-panel-2 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div>
+      <div className="flex flex-col gap-2 min-[420px]:flex-row min-[420px]:items-start min-[420px]:justify-between">
+        <div className="min-w-0">
           <h3 className="text-[0.9375rem] font-semibold text-bone">
             Governance & externalities
           </h3>

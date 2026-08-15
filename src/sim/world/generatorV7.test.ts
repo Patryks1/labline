@@ -4,12 +4,15 @@ import {
   TERRAIN_VARIANT_RIVER,
   TRANSPORT_FLAGS,
   WORLD_GENERATOR_VERSION_V7,
+  cityIndexFromFeature,
+  createWorldDescriptorV7,
   generateStaticWorldV6,
   generateStaticWorldV7,
   getTileElevation,
   isRiverTile,
   regenerateStaticWorld,
   staticWorldByteLength,
+  type StaticWorld,
 } from '.'
 
 const OPTIONS = { seed: 0x71a7, width: 160, height: 144, cityCount: 3, waterCoverage: 0.055 }
@@ -79,6 +82,40 @@ describe('world generator V7 rivers', () => {
     for (let id = 0; id < world.transport!.length; id++) {
       if ((world.transport![id]! & TRANSPORT_FLAGS.bridge) === 0) continue
       expect(world.kind[id]).toBe(TERRAIN_KIND.lake)
+    }
+  })
+
+  it('keeps version-5 settlement descriptors byte-stable while version 6 carves roomier lots', () => {
+    // Existing saves persist settlementAlgorithmVersion 5 descriptors; they
+    // must regenerate the identical world (save hash check depends on it).
+    const legacyDescriptor = { ...createWorldDescriptorV7(OPTIONS), settlementAlgorithmVersion: 5 as const }
+    const legacyA = regenerateStaticWorld(legacyDescriptor)
+    const legacyB = regenerateStaticWorld(legacyDescriptor)
+    expect(legacyB.staticHash).toBe(legacyA.staticHash)
+
+    // Fresh games emit version 6, which carves strictly more in-city empty
+    // lots (same hash salt, so v6 is a superset of the v5 lots).
+    const current = generateStaticWorldV7(OPTIONS)
+    if (current.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V7) {
+      throw new Error('expected a V7 descriptor')
+    }
+    expect(current.descriptor.settlementAlgorithmVersion).toBe(6)
+    expect(current.staticHash).not.toBe(legacyA.staticHash)
+
+    const urbanEmptyCount = (world: StaticWorld): number => {
+      let count = 0
+      for (let id = 0; id < world.kind.length; id++) {
+        if (world.kind[id] === TERRAIN_KIND.empty &&
+            cityIndexFromFeature(world.feature[id]!) !== undefined) count++
+      }
+      return count
+    }
+    expect(urbanEmptyCount(current)).toBeGreaterThan(urbanEmptyCount(legacyA))
+    for (let id = 0; id < current.kind.length; id++) {
+      if (legacyA.kind[id] === TERRAIN_KIND.empty &&
+          cityIndexFromFeature(legacyA.feature[id]!) !== undefined) {
+        expect(current.kind[id]).toBe(TERRAIN_KIND.empty)
+      }
     }
   })
 })

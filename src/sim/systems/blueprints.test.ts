@@ -51,11 +51,17 @@ function denseBlueprint(id = 'dense-node'): RackBlueprint {
 }
 
 function withDataHall(state: SimState, includePower = true): SimState {
-  const sites = state.map.tiles.filter(
+  // Prefer dense tile fixtures so hall mutations stay on map.tiles.
+  const base =
+    state.map.storage === 'compact'
+      ? createGame({ seed: state.seed, legacyMapFixture: true })
+      : state
+  const sites = base.map.tiles.filter(
     (tile) => tile.kind === 'empty' && tile.owner === 'neutral' && tile.regionId !== 'void',
   )
   const hall = sites[0]!
   const substation = sites[1]!
+  state = base
   return {
     ...state,
     map: {
@@ -177,7 +183,7 @@ describe('rack blueprint services', () => {
 
     expect(first.player.cash).toBeLessThan(cash)
     expect(first.player.rackFleet[0]).toEqual(
-      expect.objectContaining({ skuId: `design:${blueprint.id}`, count: 3, daysLeft: 5 }),
+      expect.objectContaining({ skuId: `design:${blueprint.id}`, count: 3, status: 'ordered' }),
     )
     expect(first.player.rackFleet).toEqual(second.player.rackFleet)
     expect(first.player.cash).toBe(second.player.cash)

@@ -209,6 +209,30 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     prereqs: ['sys_router'],
     effects: { servingEfficiency: 0.08, utilCap: 0.03 },
   },
+  {
+    id: 'sys_infer_asic',
+    trunk: 'inference',
+    name: 'Inference ASIC Kernels',
+    description:
+      'Custom decode datapaths and SRAM-resident KV. Push serving efficiency past general-purpose GPU stacks.',
+    costPfDays: 55,
+    daysMin: 14,
+    prereqs: ['sys_tensor_rt', 'sys_dist_cache'],
+    effects: { servingEfficiency: 0.22, utilCap: 0.04 },
+    riskLevel: 'elevated',
+  },
+  {
+    id: 'sys_kernel_fusion_v2',
+    trunk: 'inference',
+    name: 'Deep Kernel Fusion',
+    description:
+      'Whole-model fusion across attention, MLP, and sampling. Late-game tokens-per-watt.',
+    costPfDays: 48,
+    daysMin: 12,
+    prereqs: ['sys_infer_asic', 'sys_medusa'],
+    effects: { servingEfficiency: 0.2, utilCap: 0.03 },
+    riskLevel: 'high',
+  },
 
   // ─── TRAIN OPTIMIZATION ──────────────────────────────────
   {
@@ -262,13 +286,24 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     effects: { trainEfficiency: 0.08, utilCap: 0.03 },
   },
   {
+    id: 'opt_fp16',
+    trunk: 'optimize',
+    name: 'FP16 Mixed Precision',
+    description:
+      'Half-precision tensor ops with FP32 master weights and loss scaling. Roughly doubles the FP32/TF32 starter recipe throughput and halves native weight memory.',
+    costPfDays: 8,
+    daysMin: 3,
+    prereqs: [],
+    effects: { trainEfficiency: 0.06 },
+  },
+  {
     id: 'opt_mixed',
     trunk: 'optimize',
     name: 'Mixed Precision Train',
     description: 'Stable BF16/FP16 AMP with master weights and loss scaling.',
     costPfDays: 14,
     daysMin: 5,
-    prereqs: ['opt_flash'],
+    prereqs: ['opt_flash', 'opt_fp16'],
     effects: { trainEfficiency: 0.12 },
   },
   {
@@ -311,7 +346,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 40,
     daysMin: 12,
     prereqs: ['opt_seq_parallel', 'dense_context', 'opt_overlap_comm'],
-    effects: { trainEfficiency: 0.12, capabilityBonus: 1 },
+    effects: { trainEfficiency: 0.12, capabilityBonus: 1, overtrainCapBonus: 0.8 },
   },
   {
     id: 'opt_qlora',
@@ -374,6 +409,17 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     prereqs: ['opt_mixed', 'sys_compile'],
     effects: { trainEfficiency: 0.11, utilCap: 0.03 },
   },
+  {
+    id: 'opt_compute_sched',
+    trunk: 'optimize',
+    name: 'Compute-Optimal Schedules',
+    description:
+      'Long-horizon LR schedules and epoch budgeting so extra FLOPs past the Chinchilla target keep converting into capability.',
+    costPfDays: 32,
+    daysMin: 10,
+    prereqs: ['opt_torch_compile', 'data_eval'],
+    effects: { trainEfficiency: 0.06, overtrainCapBonus: 1.5, capabilityBonus: 1 },
+  },
 
   // ─── DATA (early game — roots sit at top of Data column) ─
   {
@@ -418,7 +464,12 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     daysMin: 9,
     // Mid data trunk: mix → clean → eval → synth (not early free tokens)
     prereqs: ['data_mix', 'data_clean', 'data_eval'],
-    effects: { capabilityBonus: 3, trainEfficiency: 0.05, dataFlywheel: 0.12 },
+    effects: {
+      capabilityBonus: 3,
+      trainEfficiency: 0.05,
+      dataFlywheel: 0.12,
+      overtrainCapBonus: 0.8,
+    },
   },
   {
     id: 'data_pref',
@@ -469,6 +520,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
       trainingBreakthroughBias: 0.1,
       trainingStumbleRisk: 0.07,
       trainingSafetyPenalty: 5,
+      overtrainCapBonus: 1.5,
     },
   },
   {
@@ -619,7 +671,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'dense_basics',
     trunk: 'dense',
     name: 'Dense Scaling Laws',
-    description: 'Foundation for classic transformer training.',
+    description:
+      'Every parameter learns on every token: stable, predictable quality at small and medium scale, but training and serving activate the full model.',
     costPfDays: 10,
     daysMin: 4,
     prereqs: [],
@@ -629,7 +682,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'dense_opt',
     trunk: 'dense',
     name: 'Better Optimizers',
-    description: 'AdamW variants and schedule tricks.',
+    description:
+      'AdamW variants and schedule tuning reach the dense blueprint wall with less wasted compute; they do not raise that fixed frontier.',
     costPfDays: 16,
     daysMin: 5,
     prereqs: ['dense_basics'],
@@ -639,7 +693,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'dense_context',
     trunk: 'dense',
     name: 'Long Context',
-    description: '128k+ context for enterprise fit.',
+    description:
+      '128k+ context wins document-heavy enterprise work, while KV memory and decode latency make every long request more expensive.',
     costPfDays: 24,
     daysMin: 8,
     prereqs: ['dense_opt'],
@@ -649,7 +704,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'dense_mtp',
     trunk: 'dense',
     name: 'Training-Time MTP',
-    description: 'Add auxiliary future-token objectives during pretraining so representations plan beyond the next-token target.',
+    description:
+      'Auxiliary future-token objectives improve planning and sample efficiency, at the cost of extra training heads and a less stable recipe.',
     costPfDays: 34,
     daysMin: 10,
     prereqs: ['dense_opt', 'data_eval'],
@@ -660,7 +716,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'dense_bitnet',
     trunk: 'dense',
     name: 'Ternary Architectures',
-    description: 'Train native 1.58-bit BitLinear weights from scratch with BF16 master state.',
+    description:
+      'Native 1.58-bit weights can slash deployment memory, but demand a new training recipe and risk quality regressions near the frontier.',
     costPfDays: 38,
     daysMin: 12,
     prereqs: ['dense_opt', 'opt_mixed', 'data_eval'],
@@ -671,7 +728,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'dense_synth',
     trunk: 'dense',
     name: 'Dense Synthetic Loop',
-    description: 'Self-play data for dense frontier.',
+    description:
+      'Verified self-play stretches scarce data toward the dense wall; repeated unverified generations amplify blind spots instead.',
     costPfDays: 30,
     daysMin: 9,
     prereqs: ['dense_context', 'data_synth'],
@@ -681,7 +739,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'dense_frontier',
     trunk: 'dense',
     name: 'Frontier Dense Stack',
-    description: 'Push pure dense to the limit. Expensive to run.',
+    description:
+      'Push pure dense to its fixed gameplay blueprint frontier. Every parameter stays active, so crossing the wall needs distillation or a different architecture.',
     costPfDays: 50,
     daysMin: 14,
     prereqs: ['dense_synth', 'opt_pipeline'],
@@ -693,7 +752,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'moe_basics',
     trunk: 'moe',
     name: 'Sparse Basics',
-    description: 'Mixture of Experts fundamentals.',
+    description:
+      'Add total learned capacity without activating every expert per token. The whole expert bank still consumes memory and routing adds failure modes.',
     costPfDays: 14,
     daysMin: 5,
     prereqs: ['dense_basics'],
@@ -703,7 +763,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'moe_routing',
     trunk: 'moe',
     name: 'Expert Routing v1',
-    description: 'Stable top-k routing. Without this, MoE collapses.',
+    description:
+      'Stable top-k routing chooses a cheap active path. Poor gates starve experts, drop tokens, and can collapse the run.',
     costPfDays: 18,
     daysMin: 6,
     prereqs: ['moe_basics'],
@@ -713,7 +774,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'moe_balance',
     trunk: 'moe',
     name: 'Load Balance',
-    description: 'Experts used evenly. Train waste drops.',
+    description:
+      'Auxiliary balance losses keep experts learning evenly, trading some specialization freedom for fewer hot spots and failed runs.',
     costPfDays: 22,
     daysMin: 7,
     prereqs: ['moe_routing'],
@@ -723,7 +785,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'moe_parallel',
     trunk: 'moe',
     name: 'Expert Parallelism',
-    description: 'Scale experts across the cluster.',
+    description:
+      'Shard experts across the cluster to scale total capacity; all-to-all traffic turns network quality into a hard training bottleneck.',
     costPfDays: 28,
     daysMin: 9,
     prereqs: ['moe_balance', 'opt_fsdp'],
@@ -733,7 +796,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'moe_upcycle',
     trunk: 'moe',
     name: 'Dense→MoE Upcycling',
-    description: 'Convert dense checkpoints into sparse giants.',
+    description:
+      'Convert a dense checkpoint into a sparse giant faster than training cold, but inherit teacher blind spots and initially redundant experts.',
     costPfDays: 32,
     daysMin: 10,
     prereqs: ['moe_parallel', 'dense_opt'],
@@ -743,7 +807,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'moe_special',
     trunk: 'moe',
     name: 'Expert Specialization',
-    description: 'Domain experts improve coding and reasoning.',
+    description:
+      'Domain experts raise coding and reasoning capacity, while skewed traffic can leave rare experts weak and general requests inconsistent.',
     costPfDays: 36,
     daysMin: 11,
     prereqs: ['moe_upcycle'],
@@ -753,7 +818,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'moe_hier',
     trunk: 'moe',
     name: 'Hierarchical MoE',
-    description: 'Deep sparse stack. Cheap to run if serving ready.',
+    description:
+      'A higher blueprint frontier per active FLOP, offset by compounded routing, communication, and expert-residency complexity.',
     costPfDays: 45,
     daysMin: 13,
     prereqs: ['moe_special'],
@@ -763,7 +829,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'moe_serve',
     trunk: 'moe',
     name: 'MoE Speculative Decode',
-    description: 'Serving that understands sparse activation.',
+    description:
+      'Exploit the cheap active path during decode. Small batches still suffer unless routing, networking, and expert residency are coordinated.',
     costPfDays: 40,
     daysMin: 12,
     prereqs: ['moe_balance', 'sys_spec_decode'],
@@ -773,7 +840,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'moe_cache',
     trunk: 'moe',
     name: 'Shared Expert Cache',
-    description: 'Hot experts stay resident. Infer margins crush dense.',
+    description:
+      'Keep hot experts resident for strong margins on repeatable traffic; cold or diverse routing still pays full memory and transfer costs.',
     costPfDays: 48,
     daysMin: 14,
     prereqs: ['moe_hier', 'moe_serve'],
@@ -819,7 +887,13 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 36,
     daysMin: 11,
     prereqs: ['align_dpo', 'align_process', 'domain_math'],
-    effects: { rlhfQuality: 0.1, capabilityBonus: 4, benchmarkBoost: { math: 5, coding: 3 }, trainingBreakthroughBias: 0.035 },
+    effects: {
+      rlhfQuality: 0.1,
+      capabilityBonus: 4,
+      benchmarkBoost: { math: 5, coding: 3 },
+      trainingBreakthroughBias: 0.035,
+      overtrainCapBonus: 1.2,
+    },
     riskLevel: 'elevated',
   },
   {
@@ -830,7 +904,12 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 24,
     daysMin: 8,
     prereqs: ['align_rlhf'],
-    effects: { safetyBonus: 3, capabilityBonus: 3, rlhfQuality: 0.15 },
+    effects: {
+      safetyBonus: 3,
+      capabilityBonus: 3,
+      rlhfQuality: 0.15,
+      overtrainCapBonus: 1.0,
+    },
   },
   {
     id: 'align_redteam',
@@ -880,7 +959,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'mm_vision',
     trunk: 'multimodal',
     name: 'Vision Encoders',
-    description: 'Image understanding for omni products.',
+    description:
+      'Image understanding adds visual grounding, but needs carefully aligned captions and far more aggressive quality filtering than text.',
     costPfDays: 22,
     daysMin: 8,
     prereqs: ['dense_basics'],
@@ -890,7 +970,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'mm_diff',
     trunk: 'multimodal',
     name: 'Latent Diffusion',
-    description: 'Image generation product line.',
+    description:
+      'Launch image generation with a specialist quality ceiling; high-volume noisy media data raises pruning, rights, and evaluation costs.',
     costPfDays: 28,
     daysMin: 9,
     prereqs: ['mm_vision'],
@@ -900,7 +981,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'mm_video',
     trunk: 'multimodal',
     name: 'Video Temporal Models',
-    description: 'Video gen — prestige and power hungry.',
+    description:
+      'Temporal generation opens a premium product line, but long outputs make training, evaluation, and serving exceptionally power hungry.',
     costPfDays: 55,
     daysMin: 16,
     prereqs: ['mm_diff', 'sys_cooling'],
@@ -910,11 +992,33 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'mm_omni',
     trunk: 'multimodal',
     name: 'Omni Stack',
-    description: 'Unified multimodal + tools. Sticky ARPU.',
+    description:
+      'Unify language, media, tools, and agents for the highest base blueprint frontier. Cross-modal transfer helps, but data demand, modality interference, output tokens, and hosting cost all surge.',
     costPfDays: 60,
     daysMin: 18,
     prereqs: ['mm_video', 'align_process'],
     effects: { unlockFamily: 'omni', capabilityBonus: 6 },
+  },
+  {
+    id: 'mm_closed_loop_research',
+    trunk: 'multimodal',
+    name: 'Closed-Loop Autonomous Research',
+    description:
+      'Omni-only frontier unlock: agents propose experiments, generate traces, and retain only independently verified gains. It grants no passive capability—each loop needs fresh real data, verifier capacity, agent teams, and heavy train-plus-inference compute; weak checks or recursive synthetic reuse can bank regressions.',
+    costPfDays: 120,
+    daysMin: 32,
+    prereqs: [
+      'mm_omni',
+      'align_agent_redteam',
+      'data_self_train',
+      'domain_agents',
+      'opt_compute_sched',
+      'sys_kernel_fusion_v2',
+    ],
+    minResearchers: 32,
+    cashBurnMult: 2.2,
+    riskLevel: 'high',
+    effects: { unlockClosedLoopResearch: true },
   },
 
   // ─── DOMAIN ──────────────────────────────────────────────
