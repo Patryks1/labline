@@ -132,11 +132,55 @@ describe('world navigator data', () => {
     const state = createGame({ seed: 79, difficulty: 'normal' })
     const cities = state.map.cities ?? []
     const view = navigatorView(state.map.width, state.map.height, 1, state.map.width / 2, state.map.height / 2, 2)
-    const fitLabels = layoutNavigatorCityLabels(cities, 1, view, 280, 140)
+    const pixelWidth = 280
+    const pixelHeight = 140
+    const reserved = { x: 48, y: 102, width: 184, height: 38 }
+    const fitLabels = layoutNavigatorCityLabels(cities, 1, view, pixelWidth, pixelHeight, [reserved])
     expect(fitLabels.every((label) => cities.find((city) => city.id === label.id)?.tier === 'metro')).toBe(true)
-    expect(layoutNavigatorCityLabels(cities, 1, view, 280, 140)).toEqual(fitLabels)
+    expect(layoutNavigatorCityLabels(cities, 1, view, pixelWidth, pixelHeight, [reserved])).toEqual(fitLabels)
+    expect(fitLabels.every((label) =>
+      label.left >= 2 &&
+      label.top >= 2 &&
+      label.left + label.width <= pixelWidth - 2 &&
+      label.top + label.height <= pixelHeight - 2
+    )).toBe(true)
+    const boxesOverlap = (
+      a: { left: number; top: number; width: number; height: number },
+      b: { left: number; top: number; width: number; height: number },
+    ) => a.left < b.left + b.width && a.left + a.width > b.left && a.top < b.top + b.height && a.top + a.height > b.top
+    expect(fitLabels.every((label) => !boxesOverlap(label, {
+      left: reserved.x,
+      top: reserved.y,
+      width: reserved.width,
+      height: reserved.height,
+    }))).toBe(true)
+    expect(fitLabels.every((label, index) =>
+      fitLabels.slice(index + 1).every((other) => !boxesOverlap(label, other))
+    )).toBe(true)
     const detailView = { ...view, zoom: 4 as const }
-    const detailLabels = layoutNavigatorCityLabels(cities, 4, detailView, 280, 140)
+    const detailLabels = layoutNavigatorCityLabels(cities, 4, detailView, pixelWidth, pixelHeight)
     expect(detailLabels.length).toBeGreaterThanOrEqual(fitLabels.length)
+
+    const baseCity = {
+      ...cities[0]!,
+      cx: detailView.x + detailView.width / 2,
+      cy: detailView.y + detailView.height / 2,
+    }
+    const shortLabel = layoutNavigatorCityLabels(
+      [{ ...baseCity, id: 'short', name: 'Ox' }],
+      4,
+      detailView,
+      pixelWidth,
+      pixelHeight,
+    )[0]!
+    const longLabel = layoutNavigatorCityLabels(
+      [{ ...baseCity, id: 'long', name: 'Longchester' }],
+      4,
+      detailView,
+      pixelWidth,
+      pixelHeight,
+    )[0]!
+    expect(shortLabel.height).toBe(13)
+    expect(longLabel.width).toBeGreaterThan(shortLabel.width)
   })
 })

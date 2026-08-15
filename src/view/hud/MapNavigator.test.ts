@@ -1,11 +1,18 @@
-import { createElement } from 'react'
+import { Children, createElement, type ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { createGame } from '../../sim/createGame'
 import {
   CloudVisibilityButton,
+  NavigatorCityLabelLayer,
   NavigatorCompass,
   MapViewportOverlay,
 } from './MapNavigator'
+import {
+  buildMapNavigatorData,
+  navigatorCitySummary,
+  type MapNavigatorCity,
+} from './mapNavigatorData'
 
 describe('CloudVisibilityButton', () => {
   it('exposes its visible state and hide action accessibly', () => {
@@ -36,6 +43,38 @@ describe('NavigatorCompass', () => {
     expect(markup).toContain('role="img"')
     expect(markup).toContain('aria-label="North up"')
     expect(markup).toContain('>N</div>')
+  })
+})
+
+describe('NavigatorCityLabelLayer', () => {
+  it('renders crisp native buttons with loaded font weights and accessible summaries', () => {
+    const data = buildMapNavigatorData(createGame({ seed: 91, difficulty: 'normal' }))
+    const first = data.cities[0]!
+    const second = data.cities[1] ?? first
+    const metro = { ...first, id: 'metro-label', tier: 'metro' as const }
+    const town = { ...second, id: 'town-label', tier: 'town' as const }
+    const cityById = new Map<string, MapNavigatorCity>([[metro.id, metro], [town.id, town]])
+    const labels = [
+      { id: metro.id, text: metro.name, left: 10, top: 12, width: 80, height: 13 },
+      { id: town.id, text: town.name, left: 100, top: 32, width: 72, height: 13 },
+    ]
+    const onPan = vi.fn()
+    const layer = NavigatorCityLabelLayer({ labels, cityById, onPan })
+    const markup = renderToStaticMarkup(layer)
+
+    expect(markup).toContain('data-map-city-label-layer="true"')
+    expect(markup.match(/<button/g)).toHaveLength(2)
+    expect(markup).not.toContain('<text')
+    expect(markup).toContain('font-weight:600')
+    expect(markup).toContain('font-weight:500')
+    expect(markup).toContain(`aria-label="Pan to ${navigatorCitySummary(metro)}`)
+    expect(markup).toContain(`aria-label="Pan to ${navigatorCitySummary(town)}`)
+
+    const buttons = Children.toArray(layer.props.children) as ReactElement<{ onClick: () => void }>[]
+    buttons[0]!.props.onClick()
+    buttons[1]!.props.onClick()
+    expect(onPan).toHaveBeenNthCalledWith(1, metro.cx, metro.cy)
+    expect(onPan).toHaveBeenNthCalledWith(2, town.cx, town.cy)
   })
 })
 
