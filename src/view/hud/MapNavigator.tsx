@@ -172,7 +172,7 @@ export function NavigatorCityLabelLayer({
               event.stopPropagation()
               if (city) onPan(city.cx, city.cy)
             }}
-            className="pointer-events-auto absolute m-0 select-none overflow-visible whitespace-nowrap border-0 bg-transparent p-0 font-mono outline-none focus-visible:rounded-sm focus-visible:ring-1 focus-visible:ring-mint focus-visible:ring-offset-1 focus-visible:ring-offset-void"
+            className="pointer-events-auto absolute m-0 inline-flex select-none items-center justify-center overflow-visible whitespace-nowrap rounded-sm border-0 bg-transparent p-0 font-mono outline-none focus-visible:ring-1 focus-visible:ring-mint focus-visible:ring-offset-1 focus-visible:ring-offset-void"
             style={{
               left: label.left,
               top: label.top,
@@ -182,7 +182,7 @@ export function NavigatorCityLabelLayer({
               lineHeight: '13px',
               color: city?.tier === 'metro' ? '#dceffc' : '#d8dfdc',
               fontWeight: city?.tier === 'metro' ? 600 : 500,
-              textShadow: '0 1px 2px #071319, 0 0 2px rgba(7, 19, 25, 0.9)',
+              textShadow: '-1px 0 #071319, 1px 0 #071319, 0 -1px #071319, 0 1px #071319, 0 1px 2px #071319',
             }}
           >
             {label.text}
