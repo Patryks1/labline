@@ -12,8 +12,10 @@ import {
 } from '@phosphor-icons/react'
 import { ObjectivesButton } from './ObjectivesDock'
 import { useUiStore } from '../../store/uiStore'
-import { formatCampaignClock } from '../../sim/campaign'
+import { formatCampaignDate } from '../../sim/campaign'
 import { KpiHistoryPopover, type KpiHistoryMetric } from './KpiHistoryPopover'
+import { selectFinanceDashboardView } from './data/financeDashboardModel'
+import { CompanyMark } from './NewGameMenu'
 
 /** Play speeds only — pause is a separate control (not crammed as "0"). */
 const PLAY_SPEEDS: Speed[] = [1, 2, 5]
@@ -35,17 +37,25 @@ export function TopBar() {
   const setPauseMenuOpen = useGameStore((s) => s.setPauseMenuOpen)
   const quickSave = useGameStore((s) => s.quickSave)
   const setCommandView = useGameStore((s) => s.setCommandView)
-  const f = state.player.finance
   const pushToast = useUiStore((s) => s.pushToast)
-  const pnl =
-    typeof f.dayNet === 'number' ? f.dayNet : f.dayRevenue - f.dayCogs - f.dayEnergyCost
+  const financeView = selectFinanceDashboardView(state)
+  const { current: finance, history } = financeView
+  const pnl = finance.net
   const paused = state.paused || state.speed === 0
-  const clock = formatCampaignClock(state.calendar, state.day)
-  const [campaignDate, elapsedLabel] = clock.split(' · ')
+  const campaignDate = formatCampaignDate(state.calendar)
+  const companyName = state.config.labName?.trim() || state.player.name?.trim() || 'Labline'
+  const companyMark = state.config.companyMark ?? 'orbit'
 
   return (
     <header className="top-command-bar pointer-events-none p-2 pb-1">
       <div className="top-command-main hud-surface pointer-events-auto relative flex h-full min-w-0 items-center gap-3 overflow-hidden rounded-lg px-3">
+        <div className="top-command-brand shrink-0 items-center gap-2" aria-label={companyName} title={companyName}>
+          <span className="top-command-brand__mark" aria-hidden="true">
+            <CompanyMark mark={companyMark} />
+          </span>
+          <span className="top-command-brand__wordmark truncate">{companyName}</span>
+        </div>
+
         {/* ── Zone 1: day clock + transport ── */}
         <div className="top-command-controls flex shrink-0 items-center gap-2 sm:gap-2.5">
           <div className="top-command-clock" data-paused={paused}>
@@ -56,11 +66,9 @@ export function TopBar() {
               <div className="top-command-clock__row">
                 <span className="top-command-clock__label">DAY</span>
                 <strong className="top-command-clock__day">{state.day.toLocaleString()}</strong>
-                <span className="top-command-clock__elapsed">{elapsedLabel}</span>
               </div>
               <div className="top-command-clock__meta">
                 <time>{campaignDate}</time>
-                <span>{state.player.name || 'Labline'}</span>
               </div>
             </div>
           </div>
@@ -76,6 +84,7 @@ export function TopBar() {
             <button
               type="button"
               aria-label={paused ? 'Resume simulation' : 'Pause simulation'}
+              aria-pressed={paused}
               title={paused ? 'Resume (Space)' : 'Pause (Space)'}
               onClick={togglePause}
               className={`flex h-8 min-w-8 items-center justify-center rounded-lg px-2 font-mono text-[0.75rem] font-semibold transition ${
@@ -92,6 +101,8 @@ export function TopBar() {
                 <button
                   key={sp}
                   type="button"
+                  aria-label={`${sp} times speed`}
+                  aria-pressed={active}
                   title={`${sp}× speed`}
                   onClick={() => {
                     setPaused(false)
@@ -127,20 +138,20 @@ export function TopBar() {
           />
           <Metric
             label="Share"
-            value={pct(f.totalShare, 1)}
+            value={pct(finance.share)}
             active={activeMetric === 'share'}
             onClick={() => setActiveMetric((current) => current === 'share' ? null : 'share')}
           />
           <Metric
             label="Value"
-            value={money(f.valuation)}
+            value={money(finance.valuation)}
             className="hidden md:flex"
             active={activeMetric === 'valuation'}
             onClick={() => setActiveMetric((current) => current === 'valuation' ? null : 'valuation')}
           />
           <Metric
             label="Brand"
-            value={`${Math.round(state.player.brandTrust)}/100`}
+            value={`${(finance.brand ?? 0).toFixed(2)}/100`}
             className="hidden md:flex"
             active={activeMetric === 'brand'}
             onClick={() => setActiveMetric((current) => current === 'brand' ? null : 'brand')}
@@ -167,6 +178,7 @@ export function TopBar() {
           </button>
           <button
             type="button"
+            aria-label="Open hotkey help"
             title="Hotkeys (?)"
             onClick={toggleHotkeyHelp}
             className="top-command-help flex h-8 w-8 items-center justify-center rounded-lg text-muted hover:bg-panel-2 hover:text-bone"
@@ -185,16 +197,17 @@ export function TopBar() {
         </div>
       </div>
       {activeMetric ? (
-        <KpiHistoryPopover
-          metric={activeMetric}
-          history={state.financeHistory}
-          current={{
-            day: state.day,
-            cash: state.player.cash,
-            net: pnl,
-            share: f.totalShare,
-            valuation: f.valuation,
-            brand: state.player.brandTrust,
+        <div id="kpi-history-popover" role="dialog" aria-label="KPI history" className="contents">
+          <KpiHistoryPopover
+            metric={activeMetric}
+            history={history}
+            current={{
+              day: state.day,
+              cash: finance.cash,
+              net: finance.net,
+              share: finance.share,
+              valuation: finance.valuation,
+              brand: finance.brand ?? 0,
           }}
           onClose={() => setActiveMetric(null)}
           onSelectMetric={setActiveMetric}
@@ -208,7 +221,8 @@ export function TopBar() {
             }
             setActiveMetric(null)
           }}
-        />
+          />
+        </div>
       ) : null}
     </header>
   )
@@ -220,6 +234,7 @@ function Metric({
   danger,
   active,
   onClick,
+  controlsId = 'kpi-history-popover',
   className = '',
 }: {
   label: string
@@ -227,6 +242,7 @@ function Metric({
   danger?: boolean
   active?: boolean
   onClick?: () => void
+  controlsId?: string
   className?: string
 }) {
   const Comp = onClick ? 'button' : 'div'
@@ -235,6 +251,8 @@ function Metric({
       type={onClick ? 'button' : undefined}
       onClick={onClick}
       aria-pressed={onClick ? active : undefined}
+      aria-expanded={onClick ? active === true : undefined}
+      aria-controls={onClick ? controlsId : undefined}
       title={onClick ? `View ${label} history` : undefined}
       className={`top-command-metric flex min-w-[4rem] max-w-[7rem] shrink flex-col items-start rounded-md px-1 py-1 leading-none ${
         onClick ? 'text-left hover:opacity-90' : ''

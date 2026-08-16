@@ -7,7 +7,9 @@ import { useUiStore } from "../../../store/uiStore";
 import { money, num, pct } from "../format";
 import { FeedPost } from "../ui/FeedPost";
 import { GameCard, MeterBar, StatRow } from "../ui/kit";
-import { EmptyState, PanelScaffold, StatusChip } from "../ui/HudPrimitives";
+import { EmptyState, HudButton, PanelScaffold, StatusChip } from "../ui/HudPrimitives";
+import { buildFinanceDashboardModel } from "../data/financeDashboardModel";
+import { normalizeTrainingJobs } from "../trainingJobViewModel";
 
 function RangeBar({
   label,
@@ -64,6 +66,8 @@ function RangeBar({
 /** Public-only rival intelligence. Exact private bids, cash, recipes, and research stay hidden. */
 export function RivalIntelPanel() {
   const state = useGameStore((store) => store.state);
+  const financeModel = useMemo(() => buildFinanceDashboardModel(state), [state]);
+  const trainingJobs = useMemo(() => normalizeTrainingJobs(state), [state]);
   const selectedRivalId = useUiStore((store) => store.selectedRivalId);
   const setSelectedRivalId = useUiStore((store) => store.setSelectedRivalId);
   const rivals = state.rivals;
@@ -109,7 +113,7 @@ export function RivalIntelPanel() {
     ) ?? [];
   const competitiveResponse = competitiveCatchUpSnapshot(state);
   const marketRows = [
-    { id: "player", name: "You", share: state.player.finance.totalShare },
+    { id: "player", name: "You", share: financeModel.current.share },
     ...rankedRivals.map((entry) => ({
       id: entry.id,
       name: entry.name,
@@ -154,7 +158,7 @@ export function RivalIntelPanel() {
     <PanelScaffold
       title="Rival intelligence"
       eyebrow={`Day ${state.day}`}
-      description="Public offers, disclosed projects, and uncertain operating ranges."
+      description="Public offers, projects, and operating ranges."
     >
       <div className="space-y-3">
         <GameCard eyebrow="Field" title="Market position" tone="research">
@@ -164,9 +168,10 @@ export function RivalIntelPanel() {
                 entry.id === (isPlayerSelected ? "player" : rival?.id);
               const isPlayer = entry.id === "player";
               return (
-                <button
+                <HudButton
                   key={entry.id}
                   type="button"
+                  variant="ghost"
                   aria-pressed={selected}
                   onClick={() => setSelectedRivalId(entry.id)}
                   className={`flex min-h-12 w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition sm:min-h-11 sm:gap-3 ${
@@ -201,7 +206,7 @@ export function RivalIntelPanel() {
                       detail={pct(entry.share, 0)}
                     />
                   </div>
-                </button>
+                </HudButton>
               );
             })}
           </div>
@@ -218,44 +223,44 @@ export function RivalIntelPanel() {
               <div className="grid gap-x-5 sm:grid-cols-2">
                 <StatRow
                   label="Cash"
-                  value={money(state.player.cash)}
-                  tone={state.player.cash < 0 ? "danger" : "positive"}
+                  value={money(financeModel.current.cash)}
+                  tone={financeModel.current.cash < 0 ? "danger" : "positive"}
                 />
                 <StatRow
                   label="Runway"
                   value={
-                    Number.isFinite(state.player.finance.runwayDays)
-                      ? `${num(state.player.finance.runwayDays, 0)}d`
+                    Number.isFinite(financeModel.current.runwayDays)
+                      ? `${num(financeModel.current.runwayDays, 0)}d`
                       : "Profitable"
                   }
                 />
                 <StatRow
                   label="Revenue / day"
-                  value={money(state.player.finance.dayRevenue)}
+                  value={money(financeModel.current.revenue)}
                 />
                 <StatRow
                   label="Net / day"
-                  value={money(state.player.finance.dayNet)}
-                  tone={state.player.finance.dayNet < 0 ? "danger" : "positive"}
+                  value={money(financeModel.current.net)}
+                  tone={financeModel.current.net < 0 ? "danger" : "positive"}
                 />
                 <StatRow
                   label="Lifetime revenue"
-                  value={money(state.player.finance.lifetimeRevenue)}
+                  value={money(financeModel.current.lifetimeRevenue)}
                 />
                 <StatRow
                   label="Lifetime net"
-                  value={money(state.player.finance.lifetimeNet)}
+                  value={money(financeModel.current.lifetimeNet)}
                   tone={
-                    state.player.finance.lifetimeNet < 0 ? "danger" : "positive"
+                    financeModel.current.lifetimeNet < 0 ? "danger" : "positive"
                   }
                 />
                 <StatRow
                   label="Company value"
-                  value={money(state.player.finance.valuation)}
+                  value={money(financeModel.current.valuation)}
                 />
                 <StatRow
                   label="Debt"
-                  value={money(state.player.finance.debtOutstanding)}
+                  value={money(financeModel.current.debtOutstanding)}
                 />
               </div>
             </GameCard>
@@ -281,8 +286,7 @@ export function RivalIntelPanel() {
                   ],
                   [
                     "Training",
-                    state.player.trainingJobs?.length ??
-                      (state.player.trainingJob ? 1 : 0),
+                    trainingJobs.length,
                   ],
                   [
                     "Subscribers",
@@ -409,11 +413,7 @@ export function RivalIntelPanel() {
               <div className="mt-3 space-y-0.5">
                 <StatRow label="Focus" value={estimate?.focus ?? rival.archetype.replaceAll("_", " ")} />
                 <StatRow
-                  label={
-                    estimate?.currentBetConfidence == null
-                      ? "Current bet"
-                      : `Current bet (${pct(estimate.currentBetConfidence, 0)} conf.)`
-                  }
+                  label="Current bet"
                   value={estimate?.currentBet ?? "Undisclosed"}
                 />
                 <StatRow

@@ -1,4 +1,12 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from 'react'
+import { HudMeter } from './HudPrimitives'
 
 /**
  * UI Revamp kit - the shared building blocks for the gamified HUD.
@@ -14,6 +22,10 @@ export function GameCard({
   tone,
   live,
   pad = true,
+  interactive = false,
+  selected,
+  ariaLabel,
+  onActivate,
   className = '',
   children,
 }: {
@@ -25,25 +37,50 @@ export function GameCard({
   /** Pulsing border for in-progress work. */
   live?: boolean
   pad?: boolean
+  /** Opt into keyboard/click semantics when an activation callback is supplied. */
+  interactive?: boolean
+  /** Selected state for a card used as a single-level choice. */
+  selected?: boolean
+  ariaLabel?: string
+  onActivate?: () => void
   className?: string
   children: ReactNode
 }) {
+  const headingId = `hud-card-title-${useId().replace(/:/g, '')}`
   const toneColor = tone
     ? ({ '--live-glow-color': `var(--color-${tone})` } as React.CSSProperties)
     : undefined
+  const isInteractive = interactive && onActivate != null
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (!isInteractive || !onActivate || (event.key !== 'Enter' && event.key !== ' ')) return
+    event.preventDefault()
+    onActivate()
+  }
   return (
     <section
       style={toneColor}
-      className={`rounded-lg border bg-panel-2/70 ${
+      aria-labelledby={title ? headingId : undefined}
+      aria-label={title ? undefined : ariaLabel}
+      aria-current={selected ? 'true' : undefined}
+      aria-pressed={isInteractive && selected !== undefined ? selected : undefined}
+      data-interactive={interactive ? 'true' : undefined}
+      data-selected={selected !== undefined ? String(selected) : undefined}
+      role={isInteractive ? 'button' : undefined}
+      tabIndex={isInteractive ? 0 : undefined}
+      onClick={isInteractive ? onActivate : undefined}
+      onKeyDown={onKeyDown}
+      className={`hud-card rounded-lg border bg-panel-2/70 ${
         live ? 'live-glow border-transparent' : 'border-line/70'
-      } ${className}`}
+      } ${interactive ? 'hud-card--interactive' : ''} ${selected ? 'hud-card--selected' : ''} ${className}`}
     >
       {title || actions ? (
         <header className="flex items-start justify-between gap-2 border-b border-line/50 px-3 pb-2 pt-2.5">
           <div className="min-w-0">
             {eyebrow ? <p className="hud-eyebrow">{eyebrow}</p> : null}
             {title ? (
-              <h3 className="mt-0.5 truncate text-sm font-semibold text-bone">{title}</h3>
+              <h3 id={headingId} className="mt-0.5 truncate text-sm font-semibold text-bone">
+                {title}
+              </h3>
             ) : null}
           </div>
           {actions ? <div className="flex shrink-0 items-center gap-1.5">{actions}</div> : null}
@@ -62,6 +99,10 @@ export interface SegmentedTabItem {
   icon?: ReactNode
   disabled?: boolean
   title?: string
+  /** Optional spoken label when the visible label includes state-only adornments. */
+  ariaLabel?: string
+  /** Optional ID of the panel controlled by this single-level tab. */
+  panelId?: string
 }
 
 export function SegmentedTabs({
@@ -69,14 +110,39 @@ export function SegmentedTabs({
   active,
   onChange,
   ariaLabel,
+  idPrefix,
 }: {
   items: SegmentedTabItem[]
   active: string
   onChange: (id: string) => void
   ariaLabel?: string
+  idPrefix?: string
 }) {
   const rootRef = useRef<HTMLDivElement>(null)
+  const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({})
   const [indicator, setIndicator] = useState<{ left: number; width: number } | null>(null)
+  const generatedId = useId().replace(/:/g, '')
+  const resolvedIdPrefix = idPrefix ?? `hud-tabs-${generatedId}`
+
+  const moveFocus = (nextId: string) => {
+    onChange(nextId)
+    const focus = () => tabRefs.current[nextId]?.focus()
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(focus)
+    else focus()
+  }
+
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, itemIndex: number) => {
+    if (event.key !== 'ArrowRight' && event.key !== 'ArrowDown' && event.key !== 'ArrowLeft' && event.key !== 'ArrowUp' && event.key !== 'Home' && event.key !== 'End') return
+    const enabledItems = items.filter((item) => !item.disabled)
+    const currentEnabledIndex = enabledItems.findIndex((item) => item.id === items[itemIndex]?.id)
+    if (currentEnabledIndex < 0 || enabledItems.length === 0) return
+    const offset = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 0
+    const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? enabledItems.length - 1 : (currentEnabledIndex + offset + enabledItems.length) % enabledItems.length
+    const nextItem = enabledItems[nextIndex]
+    if (!nextItem) return
+    event.preventDefault()
+    moveFocus(nextItem.id)
+  }
 
   useLayoutEffect(() => {
     const root = rootRef.current
@@ -112,17 +178,25 @@ export function SegmentedTabs({
           style={{ left: indicator.left, width: indicator.width }}
         />
       ) : null}
-      {items.map((item) => {
+      {items.map((item, index) => {
         const on = item.id === active
         return (
           <button
             key={item.id}
+            id={`${resolvedIdPrefix}-${item.id.replace(/[^a-zA-Z0-9_-]/g, '-')}`}
+            ref={(element) => {
+              tabRefs.current[item.id] = element
+            }}
             type="button"
             role="tab"
             aria-selected={on}
+            aria-label={item.ariaLabel}
+            aria-controls={item.panelId}
+            tabIndex={on ? 0 : -1}
             disabled={item.disabled}
             title={item.title}
             onClick={() => onChange(item.id)}
+            onKeyDown={(event) => handleKeyDown(event, index)}
             className="seg-tabs__tab disabled:opacity-40"
           >
             {item.icon}
@@ -146,21 +220,19 @@ export function StatRow({
   label: ReactNode
   value: ReactNode
   hint?: ReactNode
-  tone?: 'neutral' | 'positive' | 'warning' | 'danger' | 'serve' | 'research'
+  tone?: 'neutral' | 'positive' | 'warning' | 'danger' | 'serve' | 'research' | 'train' | 'gold'
   strong?: boolean
 }) {
-  const valueTone =
-    tone === 'positive'
-      ? 'text-mint'
-      : tone === 'warning'
-        ? 'text-amber'
-        : tone === 'danger'
-          ? 'text-danger'
-          : tone === 'serve'
-            ? 'text-infer'
-            : tone === 'research'
-              ? 'text-research'
-              : 'text-bone'
+  const valueTone = {
+    neutral: 'text-bone',
+    positive: 'text-mint',
+    warning: 'text-amber',
+    danger: 'text-danger',
+    serve: 'text-infer',
+    research: 'text-research',
+    train: 'text-train',
+    gold: 'text-gold',
+  }[tone]
   return (
     <div className="flex min-w-0 items-baseline justify-between gap-3 py-1">
       <span className="min-w-0 truncate text-[0.8125rem] text-muted" title={typeof hint === 'string' ? hint : undefined}>
@@ -193,35 +265,7 @@ export function MeterBar({
   tone?: 'positive' | 'warning' | 'danger' | 'serve' | 'research' | 'train'
   live?: boolean
 }) {
-  const clamped = Math.max(0, Math.min(1, value))
-  const fill =
-    tone === 'positive'
-      ? 'bg-mint'
-      : tone === 'warning'
-        ? 'bg-amber'
-        : tone === 'danger'
-          ? 'bg-danger'
-          : tone === 'serve'
-            ? 'bg-infer'
-            : tone === 'train'
-              ? 'bg-train'
-              : 'bg-research'
-  return (
-    <div className="min-w-0">
-      {label || detail ? (
-        <div className="mb-1 flex items-baseline justify-between gap-2 text-[0.6875rem]">
-          <span className="min-w-0 truncate text-muted">{label}</span>
-          <span className="shrink-0 font-mono tabular-nums text-bone">{detail}</span>
-        </div>
-      ) : null}
-      <div className="h-1.5 overflow-hidden rounded-full bg-void/80">
-        <div
-          className={`h-full rounded-full ${fill} ${live ? 'meter-live' : ''} transition-[width] duration-300 ease-out`}
-          style={{ width: `${clamped * 100}%` }}
-        />
-      </div>
-    </div>
-  )
+  return <HudMeter value={value} label={label} detail={detail} tone={tone} live={live} />
 }
 
 /* ── BlockerList: why an action is unavailable ────────────────────── */
@@ -232,10 +276,15 @@ export interface Blocker {
   tone?: 'danger' | 'warning'
 }
 
-export function BlockerList({ items }: { items: Blocker[] }) {
+export function BlockerList({ items, live = false }: { items: Blocker[]; live?: boolean }) {
   if (items.length === 0) return null
   return (
-    <ul className="space-y-1 rounded-md border border-danger/25 bg-danger/5 px-2.5 py-2">
+    <ul
+      className="space-y-1 rounded-md border border-danger/25 bg-danger/5 px-2.5 py-2"
+      role={live ? 'status' : undefined}
+      aria-live={live ? 'polite' : undefined}
+      aria-atomic={live ? 'true' : undefined}
+    >
       {items.map((item, i) => (
         <li
           key={i}

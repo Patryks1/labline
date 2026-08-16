@@ -8,8 +8,10 @@ import { useUiStore } from '../../../store/uiStore'
 import { BuildingNameField } from '../ui/BuildingNameField'
 import { BenchmarksPanel } from './BenchmarksPanel'
 import { BuildingDisposeButtons } from './MapPanel'
-import { DeploymentLimitSummary } from './InfrastructureOverview'
-import { OrgPanel } from './OrgPanel'
+import { DeploymentLimitSummary, InfrastructureOverview } from './InfrastructureOverview'
+import { MarketPanel } from './MarketPanel'
+import { CapitalActionSelector, OrgPanel } from './OrgPanel'
+import { OverloadPolicyControl, PlansPanel } from './PlansPanel'
 import { RivalIntelPanel } from './RivalIntelPanel'
 import { StatsPanel } from './StatsPanel'
 
@@ -40,6 +42,38 @@ describe('dense workspace mobile presentation', () => {
     expect(markup).toContain('min-h-11')
   })
 
+  it('keeps narrow market and strategy summaries from clipping their values', () => {
+    useGameStore.setState({ state: createGame(64_217) })
+    const market = renderToStaticMarkup(createElement(MarketPanel))
+    const strategy = renderToStaticMarkup(
+      createElement(OrgPanel, { workspace: 'marketing' }),
+    )
+
+    expect(market).toContain('grid grid-cols-2 gap-2')
+    expect(market).not.toContain('sm:grid-cols-4')
+    expect(strategy).toContain('grid grid-cols-2 gap-2')
+    expect(strategy).not.toContain('sm:grid-cols-4')
+  })
+
+  it('wraps the Plans workload ledger and keeps rival labels compact', () => {
+    const state = createGame(64_219)
+    useGameStore.setState({ state })
+    useUiStore.getState().setSelectedRivalId(state.rivals[0]?.id ?? null)
+    const rivals = renderToStaticMarkup(createElement(RivalIntelPanel))
+
+    expect(rivals).toContain('>Current bet</span>')
+    expect(rivals).not.toContain('Current bet (')
+  })
+
+  it('stacks Overview capacity ledger rows before the compact-desktop breakpoint', () => {
+    useGameStore.setState({ state: createGame(64_218) })
+    const markup = renderToStaticMarkup(createElement(InfrastructureOverview))
+
+    expect(markup).toContain('grid grid-cols-1 gap-x-4 min-[500px]:grid-cols-2')
+    expect(markup).toContain('Fleet draw (electrical)')
+    expect(markup).toContain('Grid pressure')
+  })
+
   it('keeps rival rows touch-sized without duplicating the share beside its meter', () => {
     const state = createGame(64_211)
     useGameStore.setState({ state })
@@ -52,14 +86,14 @@ describe('dense workspace mobile presentation', () => {
     expect(markup).not.toContain('w-14 shrink-0 text-right')
   })
 
-  it('stacks company talent actions and pulse controls on phones', () => {
+  it('routes team management through HQ floors without duplicating talent controls', () => {
     useGameStore.setState({ state: createGame(64_212) })
     const markup = renderToStaticMarkup(createElement(OrgPanel))
 
-    expect(markup).toContain('min-[500px]:flex-row')
-    expect(markup).toContain('[&amp;&gt;:last-child]:col-span-2')
-    expect(markup).toContain('grid w-full grid-cols-5')
-    expect(markup).toContain('min-h-11')
+    expect(markup).toContain('HQ floor plan')
+    expect(markup).toContain('Team management lives on the floor')
+    expect(markup).not.toContain('Poach rival talent')
+    expect(markup).not.toContain('team seats')
   })
 
   it('uses no more than two plan values per row on phones', () => {
@@ -68,6 +102,49 @@ describe('dense workspace mobile presentation', () => {
 
     expect(markup).toContain('grid-cols-2')
     expect(markup).toContain('sm:grid-cols-3')
+  })
+
+  it('keeps contextual company and capacity controls out of nested tablists', () => {
+    const overload = renderToStaticMarkup(
+      createElement(OverloadPolicyControl, {
+        throttlePolicy: 'balanced',
+        onChange: () => undefined,
+      }),
+    )
+    expect(overload).toContain('role="group" aria-label="Overload policy"')
+    expect(overload).toContain('aria-pressed="true"')
+    expect(overload).not.toContain('role="tablist"')
+
+    const capital = renderToStaticMarkup(
+      createElement(CapitalActionSelector, {
+        active: 'ownership',
+        onChange: () => undefined,
+      }),
+    )
+    expect(capital).toContain('role="group" aria-label="Capital actions"')
+    expect(capital).toContain('aria-pressed="true"')
+    expect(capital).not.toContain('role="tablist"')
+
+    useGameStore.setState({ state: createGame(64_215) })
+    const plans = renderToStaticMarkup(createElement(PlansPanel))
+    expect(plans.match(/role="tablist"/g) ?? []).toHaveLength(1)
+    const company = renderToStaticMarkup(createElement(OrgPanel))
+    // Company is a people-first surface now; HQ fit-out and hiring are inline,
+    // so there is no nested Team / Capital / Policy tablist to trap mobile focus.
+    expect(company.match(/role="tablist"/g) ?? []).toHaveLength(0)
+  })
+
+  it('uses shared HUD controls for ordinary company and commercial actions', () => {
+    useGameStore.setState({ state: createGame(64_216) })
+    const plans = renderToStaticMarkup(createElement(PlansPanel))
+    const company = renderToStaticMarkup(createElement(OrgPanel))
+    const rivals = renderToStaticMarkup(createElement(RivalIntelPanel))
+
+    expect(plans).toContain('hud-button')
+    expect(plans).toContain('hud-input')
+    expect(plans).toContain('hud-range')
+    expect(company).toContain('hud-button')
+    expect(rivals).toContain('hud-button')
   })
 
   it('gives inline building rename controls a 48px mobile target', () => {
@@ -127,5 +204,6 @@ describe('dense workspace mobile presentation', () => {
 
     expect(markup).toContain('!min-h-11')
     expect(markup).toContain('Sell')
+    expect(markup).toContain('data-hud-variant="danger"')
   })
 })

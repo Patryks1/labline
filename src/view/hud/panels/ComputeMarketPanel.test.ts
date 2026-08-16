@@ -10,10 +10,10 @@ describe('OwnedRentedDonut', () => {
     const markup = renderToStaticMarkup(
       createElement(OwnedRentedDonut, { owned: 18, rented: 6 }),
     )
-    expect(markup).toContain('24.0 PF')
+    expect(markup).toContain('24.00 PF')
     expect(markup).toContain('electrical')
-    expect(markup).toContain('#56e1dc')
-    expect(markup).toContain('#7aa2ff')
+    expect(markup).toContain('var(--color-mint)')
+    expect(markup).toContain('var(--color-infer)')
   })
 
   it('caps the svg and keeps long values out of the absolute overlay', () => {
@@ -46,7 +46,7 @@ describe('OwnedRentedDonut', () => {
     expect(markup).toContain('min-[400px]:hidden')
     // The wrapper can shrink inside the grid cell.
     expect(markup).toContain('min-w-0')
-    expect(markup).toContain('Owned 12.0 PF')
+    expect(markup).toContain('Owned 12.00 PF')
     expect(markup).toContain('Rented 4.00 PF')
   })
 })
@@ -57,5 +57,7 @@ describe('ComputeMarketPanel', () => {
     const markup = renderToStaticMarkup(createElement(ComputeMarketPanel))
     expect(markup).toContain('Compute market')
     expect(markup).toContain('min-[400px]:grid-cols-[auto_minmax(0,1fr)]')
+    expect(markup).toContain('grid grid-cols-2 gap-1 font-mono text-[0.6875rem]')
+    expect(markup).not.toContain('sm:grid-cols-5')
   })
 })

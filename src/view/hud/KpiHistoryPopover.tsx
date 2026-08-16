@@ -1,9 +1,10 @@
-import { useMemo, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { ChartLineUp, X } from '@phosphor-icons/react'
+import { useMemo, useState } from 'react'
+import { ChartLineUp } from '@phosphor-icons/react'
 import type { FinanceDaySnapshot } from '../../sim/types'
 import { money, pct } from './format'
 import { SegmentedTabs } from './ui/kit'
 import { HudButton } from './ui/HudPrimitives'
+import { Sparkline } from './ui/dataViz/Sparkline'
 
 export type KpiHistoryMetric = 'cash' | 'net' | 'share' | 'valuation' | 'brand'
 
@@ -68,6 +69,43 @@ const RANGE_OPTIONS = [
   { id: '180', label: '180D' },
 ] as const
 
+/**
+ * Geometry contract mirrored by the mobile inset sheet CSS. Keeping this
+ * calculation exportable lets responsive tests assert containment without
+ * depending on a browser layout engine.
+ */
+// oxlint-disable-next-line react/only-export-components
+export function mobileKpiHistoryRect({
+  viewportWidth,
+  viewportHeight,
+  minInlineInset,
+  topInset,
+  bottomInset,
+  safeLeft = 0,
+  safeRight = 0,
+}: {
+  viewportWidth: number
+  viewportHeight: number
+  minInlineInset: number
+  topInset: number
+  bottomInset: number
+  safeLeft?: number
+  safeRight?: number
+}) {
+  const left = Math.max(minInlineInset, safeLeft)
+  const right = viewportWidth - Math.max(minInlineInset, safeRight)
+  const top = topInset
+  const bottom = viewportHeight - bottomInset
+  return {
+    left,
+    right,
+    top,
+    bottom,
+    width: Math.max(0, right - left),
+    height: Math.max(0, bottom - top),
+  }
+}
+
 export function KpiHistoryPopover({
   metric,
   history,
@@ -84,7 +122,6 @@ export function KpiHistoryPopover({
   onSelectMetric?: (metric: KpiHistoryMetric) => void
 }) {
   const [range, setRange] = useState(90)
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null)
   const definition = METRICS[metric]
   const points = useMemo(() => {
     const historical = history
@@ -99,39 +136,11 @@ export function KpiHistoryPopover({
   const values = points.map((point) => point.value)
   const rawMin = values.length > 0 ? Math.min(...values) : 0
   const rawMax = values.length > 0 ? Math.max(...values) : 1
-  const spread = Math.max(1e-9, rawMax - rawMin)
-  const padding = spread * 0.12
-  const min = rawMin - padding
-  const max = rawMax + padding
-  const width = 640
-  const height = 168
-  const xFor = (index: number) =>
-    points.length <= 1 ? width / 2 : (index / (points.length - 1)) * width
-  const yFor = (value: number) => height - ((value - min) / Math.max(1e-9, max - min)) * height
-  const linePath = points
-    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${xFor(index).toFixed(2)} ${yFor(point.value).toFixed(2)}`)
-    .join(' ')
-  const areaPath =
-    points.length > 0
-      ? `${linePath} L ${xFor(points.length - 1).toFixed(2)} ${height} L ${xFor(0).toFixed(2)} ${height} Z`
-      : ''
-  const selectedIndex =
-    hoverIndex == null
-      ? Math.max(0, points.length - 1)
-      : Math.min(hoverIndex, Math.max(0, points.length - 1))
-  const selected = points[selectedIndex]
   const delta = points.length > 1 ? points.at(-1)!.value - points[0]!.value : 0
-
-  const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
-    if (points.length === 0) return
-    const bounds = event.currentTarget.getBoundingClientRect()
-    const ratio = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width))
-    setHoverIndex(Math.round(ratio * (points.length - 1)))
-  }
 
   return (
     <section
-      className="kpi-history-popover panel-scroll pointer-events-auto fixed left-1/2 top-[3.75rem] z-[90] w-[min(44rem,calc(100vw-1rem))] -translate-x-1/2 overflow-y-auto rounded-lg border border-line bg-panel/95 p-3 shadow-2xl backdrop-blur-xl"
+      className="kpi-history-popover panel-scroll pointer-events-auto fixed left-1/2 top-[3.75rem] z-[90] w-[min(44rem,calc(100vw-1rem))] overflow-y-auto rounded-lg border border-line bg-panel/95 p-3 shadow-2xl backdrop-blur-xl"
       aria-label={`${definition.label} history`}
     >
       <div className="flex items-start justify-between gap-3">
@@ -148,11 +157,10 @@ export function KpiHistoryPopover({
         </div>
         <button
           type="button"
-          aria-label="Close metric history"
           onClick={onClose}
-          className="flex min-h-11 min-w-11 items-center justify-center rounded-md text-muted hover:bg-void hover:text-bone"
+          className="flex min-h-11 items-center justify-center rounded-md px-3 text-[0.6875rem] font-semibold text-muted hover:bg-void hover:text-bone"
         >
-          <X size="1rem" />
+          Done
         </button>
       </div>
 
@@ -188,7 +196,6 @@ export function KpiHistoryPopover({
             active={String(range)}
             onChange={(id) => {
               setRange(Number(id))
-              setHoverIndex(null)
             }}
             items={RANGE_OPTIONS.map((option) => ({ id: option.id, label: option.label }))}
           />
@@ -202,62 +209,22 @@ export function KpiHistoryPopover({
               <span>{definition.format(rawMax)}</span>
               <span>{definition.format(rawMin)}</span>
             </div>
-            <svg
-              viewBox={`0 0 ${width} ${height}`}
-              preserveAspectRatio="none"
-              className="h-full w-full touch-none"
-              onPointerMove={handlePointerMove}
-              onPointerLeave={() => setHoverIndex(null)}
-            >
-              <defs>
-                <linearGradient id={`kpi-fill-${metric}`} x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={definition.color} stopOpacity="0.26" />
-                  <stop offset="100%" stopColor={definition.color} stopOpacity="0" />
-                </linearGradient>
-              </defs>
-              <path d={areaPath} fill={`url(#kpi-fill-${metric})`} />
-              <path
-                d={linePath}
-                fill="none"
-                stroke={definition.color}
-                strokeWidth="2.5"
-                vectorEffect="non-scaling-stroke"
-              />
-              {selected ? (
-                <>
-                  <line
-                    x1={xFor(selectedIndex)}
-                    x2={xFor(selectedIndex)}
-                    y1="0"
-                    y2={height}
-                    stroke={definition.color}
-                    strokeOpacity="0.35"
-                    strokeDasharray="4 4"
-                    vectorEffect="non-scaling-stroke"
-                  />
-                  <circle
-                    cx={xFor(selectedIndex)}
-                    cy={yFor(selected.value)}
-                    r="4"
-                    fill={definition.color}
-                    stroke="#071217"
-                    strokeWidth="2"
-                    vectorEffect="non-scaling-stroke"
-                  />
-                </>
-              ) : null}
-            </svg>
-            {selected ? (
-              <div
-                className="pointer-events-none absolute top-8 -translate-x-1/2 rounded-md border border-line bg-panel px-2 py-1 font-mono text-[0.6875rem] shadow-lg"
-                style={{
-                  left: `${points.length <= 1 ? 50 : (selectedIndex / (points.length - 1)) * 100}%`,
-                }}
-              >
-                <span className="text-muted">D{selected.day}</span>{' '}
-                <span className="text-bone">{definition.format(selected.value)}</span>
-              </div>
-            ) : null}
+            <Sparkline
+              values={values}
+              days={points.map((point) => point.day)}
+              format={definition.format}
+              label={definition.label}
+              color={definition.color}
+              height={152}
+              area
+              ariaLabel={`${definition.label} history`}
+              className="mt-1"
+              renderTooltip={(hover) => (
+                <span className="text-bone">
+                  D{points[hover.pointIndex]?.day ?? hover.point.x} · {definition.format(values[hover.pointIndex] ?? hover.point.y)}
+                </span>
+              )}
+            />
           </>
         ) : (
           <div className="flex h-full items-center justify-center text-center text-[0.8125rem] text-muted">

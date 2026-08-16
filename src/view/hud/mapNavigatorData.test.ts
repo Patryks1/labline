@@ -36,6 +36,20 @@ describe('world navigator data', () => {
     }
   })
 
+  it('uses the canonical finance readout for the player company share', () => {
+    const state = createGame({ seed: 76, difficulty: 'normal' })
+    state.player.finance = {
+      ...state.player.finance,
+      totalShare: 0.37,
+    }
+
+    const player = buildMapNavigatorData(state).companies.find(
+      (company) => company.id === 'player',
+    )
+
+    expect(player?.marketShare).toBe(0.37)
+  })
+
   it('projects authoritative compact-world terrain instead of an empty legacy tile array', () => {
     const base = createGame({ seed: 75, difficulty: 'normal' })
     const compact = createGame({

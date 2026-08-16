@@ -1,13 +1,16 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import gsap from 'gsap'
 import { useGameStore } from '../../store/gameStore'
 import { money, pct } from './format'
 import { continueEndless } from '../../sim/systems/progression'
 import { ConsoleDialog } from './ui/ConsoleDialog'
+import { HudButton } from './ui/HudPrimitives'
+import { buildFinanceDashboardModel } from './data/financeDashboardModel'
 
 export function VictoryOverlay() {
   const victory = useGameStore((s) => s.state.victory)
   const state = useGameStore((s) => s.state)
+  const financeModel = useMemo(() => buildFinanceDashboardModel(state), [state])
   const newGame = useGameStore((s) => s.newGame)
   const ref = useRef<HTMLDivElement>(null)
 
@@ -48,17 +51,18 @@ export function VictoryOverlay() {
       footer={(
         <div className="flex justify-end">
           {showReport ? (
-            <button
+            <HudButton
               type="button"
-              className="btn-primary w-full px-8 py-3 sm:w-auto"
+              variant="primary"
+              className="w-full px-8 py-3 sm:w-auto"
               onClick={() => useGameStore.setState({ state: continueEndless(state) })}
             >
               Continue endlessly
-            </button>
+            </HudButton>
           ) : (
-            <button type="button" className="btn-primary w-full px-8 py-3 sm:w-auto" onClick={() => void newGame()}>
+            <HudButton type="button" variant="primary" className="w-full px-8 py-3 sm:w-auto" onClick={() => void newGame()}>
               New run
-            </button>
+            </HudButton>
           )}
         </div>
       )}
@@ -78,8 +82,8 @@ export function VictoryOverlay() {
         ) : (
           <div className="grid grid-cols-3 gap-2 text-left sm:gap-3">
             <Stat label="Day" value={String(state.day)} />
-            <Stat label="Share" value={pct(state.player.finance.totalShare, 1)} />
-            <Stat label="Valuation" value={money(state.player.finance.valuation)} />
+            <Stat label="Share" value={pct(financeModel.current.share, 1)} />
+            <Stat label="Valuation" value={money(financeModel.current.valuation)} />
           </div>
         )}
       </div>

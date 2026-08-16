@@ -19,7 +19,7 @@ import {
   cityTalentInitial,
 } from '../balance/staff'
 import { getResearchNode } from '../balance/research'
-import type { MapCity, SimState, StaffHeadcount, StaffRole } from '../types'
+import type { BuildableKind, HqOfficeLayoutAnalysis, MapCity, SimState, StaffHeadcount, StaffRole } from '../types'
 import { chargeExpense } from './financeLedger'
 import { isHqAnchor, isHqKind } from './map'
 import {
@@ -28,8 +28,50 @@ import {
   mapTileAtAny,
 } from './worldAccess'
 import { queueTalentOrder } from './sharedMarkets'
+import {
+  hqOfficeEffects,
+  officeProductivityMultiplier,
+} from './hqOffice'
 
 export { STAFF_ROLES, STAFF_LABELS, emptyStaff, staffTotal, talentFromStaff, BASE_REMOTE_TEAM_SEATS }
+
+const emptyOfficeEffects = (): HqOfficeLayoutAnalysis => ({
+  revision: 0,
+  valid: true,
+  hardErrors: [],
+  warnings: [],
+  capacityBonus: 0,
+  productivityBonus: 0,
+  dailyOpex: 0,
+  objectCount: 0,
+})
+
+/** Sum only completed HQ fit-outs owned by a lab. Missing layouts are the
+ * migration-safe zero effect used by every legacy campaign. */
+export function labHqOfficeEffects(state: SimState, labId: string): HqOfficeLayoutAnalysis {
+  const total = emptyOfficeEffects()
+  const layouts = state.hqOfficeLayouts ?? {}
+  const add = (facilityId: string, kind: Parameters<typeof hqOfficeEffects>[1] = 'hq') => {
+    const effects = hqOfficeEffects(layouts[facilityId], kind)
+    total.capacityBonus += effects.capacityBonus
+    total.productivityBonus = Math.min(0.45, total.productivityBonus + effects.productivityBonus)
+    total.dailyOpex += effects.dailyOpex
+    total.objectCount += effects.objectCount
+    total.revision = Math.max(total.revision, effects.revision)
+  }
+  if (state.map.storage === 'compact' && state.map.world) {
+    for (const facility of compactCompletedFacilitiesForOwner(state, labId) ?? []) {
+      if (isHqKind(facility.kind)) add(facility.id, facility.kind as BuildableKind)
+    }
+    return total
+  }
+  for (const tile of facilityAnchorTiles(state, { ownerId: labId })) {
+    if (isHqKind(tile.kind) && isHqAnchor(tile) && tile.buildingProgress >= tile.buildingTarget) {
+      add(tile.campusId ?? `facility:${tile.x},${tile.y}`, tile.kind as BuildableKind)
+    }
+  }
+  return total
+}
 
 export function playerStaff(state: SimState): StaffHeadcount {
   return clampStaff(state.player.staff ?? emptyStaff())
@@ -78,6 +120,23 @@ export function rivalResearcherHiringTarget(
 
 /** Desk seats from completed HQs. Identical for every lab controller. */
 export function labHqStaffCap(state: SimState, labId: string): number {
+  const fittedSeatCount = Math.max(
+    0,
+    Math.floor(labHqOfficeEffects(state, labId).capacityBonus),
+  )
+  // The player office is a spatial system: an HQ shell sets the maximum floor
+  // size, but only placed desks/meeting seats are usable. Rival labs do not
+  // expose editable floors, so their legacy building capacity remains the AI
+  // staffing envelope.
+  if (labId === state.playerLabId) {
+    // Existing campaigns may already have staff from the pre-floor-plan
+    // system. Grandfather occupied seats so loading a save never deletes or
+    // invalidates a team, but expose no new hiring capacity until furniture
+    // provides more seats than current headcount.
+    const occupiedLegacySeats = staffTotal(clampStaff(state.player.staff ?? emptyStaff()))
+    return BASE_REMOTE_TEAM_SEATS + Math.max(occupiedLegacySeats, fittedSeatCount)
+  }
+
   let cap = BASE_REMOTE_TEAM_SEATS
   if (state.map.storage === 'compact' && state.map.world) {
     for (const facility of compactCompletedFacilitiesForOwner(state, labId) ?? []) {
@@ -87,16 +146,16 @@ export function labHqStaffCap(state: SimState, labId: string): number {
       cap += HQ_STAFF_CAP[facility.kind] ?? HQ_STAFF_CAP.hq ?? 12
       cap += Math.max(0, facility.level - 1) * 4
     }
-    return cap
+    return cap + fittedSeatCount
   }
   for (const t of facilityAnchorTiles(state, { ownerId: labId })) {
     if (!isHqKind(t.kind) || !isHqAnchor(t)) continue
     if (t.buildingProgress < t.buildingTarget) continue
     cap += HQ_STAFF_CAP[t.kind] ?? HQ_STAFF_CAP.hq ?? 12
     // Level ups add desks
-    cap += Math.max(0, t.level - 1) * 4
+      cap += Math.max(0, t.level - 1) * 4
   }
-  return cap
+  return cap + fittedSeatCount
 }
 
 /** Team seats from the leased office plus completed player HQs. */
@@ -355,7 +414,9 @@ export function labStaffWagePerDay(state: SimState, labId: string): number {
     }
   }
   hqRelief = Math.min(0.25, hqRelief)
-  return Math.floor(wage * (1 - wageRelief - hqRelief))
+  return Math.floor(
+    wage * (1 - wageRelief - hqRelief) + labHqOfficeEffects(state, labId).dailyOpex,
+  )
 }
 
 /** Daily player wage burn retained as a compatibility wrapper. */
@@ -468,7 +529,8 @@ export function tickStaff(state: SimState): SimState {
  * 1→1.0, 2→1.55, 5→3.0, 10→5.4, 20→9.5 (cap 14).
  */
 export function researchTalentMult(state: SimState): number {
-  return researchTalentMultFromCount(playerStaff(state).researcher ?? 0)
+  return researchTalentMultFromCount(playerStaff(state).researcher ?? 0) *
+    officeProductivityMultiplier(labHqOfficeEffects(state, state.playerLabId))
 }
 
 /** Same formula for player + rivals. */
@@ -482,24 +544,24 @@ export function researchTalentMultFromCount(researchers: number): number {
 /** Data processing throughput from data_processor headcount (ops help a little). */
 export function dataStaffThroughputBonus(state: SimState): number {
   const n = playerStaff(state).data_processor ?? 0
-  if (n <= 0) return 4 // crawl without processors
-  return 6 + n * 18 + (playerStaff(state).ops ?? 0) * 2.5
+  const base = n <= 0 ? 4 : 6 + n * 18 + (playerStaff(state).ops ?? 0) * 2.5
+  return base * officeProductivityMultiplier(labHqOfficeEffects(state, state.playerLabId))
 }
 
 /** Engineers raise effective util / serve conversion (capped). */
 export function engineerUtilBonus(state: SimState): number {
   const n = playerStaff(state).engineer ?? 0
-  return Math.min(0.14, n * 0.012)
+  return Math.min(0.14, n * 0.012) * officeProductivityMultiplier(labHqOfficeEffects(state, state.playerLabId))
 }
 
 export function engineerServeBonus(state: SimState): number {
   const n = playerStaff(state).engineer ?? 0
-  return Math.min(0.2, n * 0.015)
+  return Math.min(0.2, n * 0.015) * officeProductivityMultiplier(labHqOfficeEffects(state, state.playerLabId))
 }
 
 export function engineerTrainBonus(state: SimState): number {
   const n = playerStaff(state).engineer ?? 0
-  return Math.min(0.18, n * 0.012)
+  return Math.min(0.18, n * 0.012) * officeProductivityMultiplier(labHqOfficeEffects(state, state.playerLabId))
 }
 
 /** Fab design quality from engineers. */
@@ -511,7 +573,7 @@ export function engineerFabDesignBonus(state: SimState): number {
 /** Ops brand lift per day (small). */
 export function opsBrandLiftPerDay(state: SimState): number {
   const n = playerStaff(state).ops ?? 0
-  return Math.min(0.08, n * 0.008)
+  return Math.min(0.08, n * 0.008) * officeProductivityMultiplier(labHqOfficeEffects(state, state.playerLabId))
 }
 
 function alert(

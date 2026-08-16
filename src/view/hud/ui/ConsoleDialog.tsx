@@ -5,7 +5,7 @@ import {
   type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { X } from '@phosphor-icons/react'
+import { HudButton } from './HudPrimitives'
 
 const FOCUSABLE = [
   'a[href]',
@@ -132,14 +132,15 @@ export function ConsoleDialog({
             ) : null}
           </div>
           {canClose ? (
-            <button
+            <HudButton
               type="button"
+              variant="ghost"
               aria-label={closeLabel}
               onClick={onClose}
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-line/70 bg-void/50 text-muted transition hover:border-mint/40 hover:text-bone focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/50 sm:h-9 sm:w-9"
+              className="flex h-11 shrink-0 items-center justify-center rounded-md border border-line/70 bg-void/50 px-3 text-[0.6875rem] font-semibold text-muted transition hover:border-mint/40 hover:text-bone focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/50 sm:h-9"
             >
-              <X size="1rem" />
-            </button>
+              Done
+            </HudButton>
           ) : null}
         </header>
         <div className="panel-scroll min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-5 sm:py-4">

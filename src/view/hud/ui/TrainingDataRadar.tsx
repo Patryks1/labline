@@ -14,6 +14,7 @@ import {
   trainingDataDomainFill,
   type TrainingDataDomainAvailability,
 } from "./trainingDataRadarMath";
+import { HudButton, HudInput, HudSelect } from "./HudPrimitives";
 
 const SIZE = 380;
 const CENTER = SIZE / 2;
@@ -72,7 +73,7 @@ function DraftNumberInput({
   };
 
   return (
-    <input
+    <HudInput
       type="text"
       inputMode="decimal"
       data-min={min}
@@ -384,32 +385,35 @@ export function TrainingDataRadar({
     >
       <div className="flex flex-wrap items-center justify-end gap-2 border-b border-line/70 px-3 py-2">
         {previousWeights && onTogglePreviousOverlay ? (
-          <button
+          <HudButton
             type="button"
+            variant="ghost"
             onClick={onTogglePreviousOverlay}
             aria-pressed={showPreviousOverlay}
-            className={`rounded-full border px-3 py-1 text-[0.6875rem] ${
+            className={`!min-h-11 !rounded-full !px-3 !py-1 text-[0.6875rem] ${
               showPreviousOverlay
-                ? "border-amber/50 bg-amber/15 text-amber"
-                : "border-line text-muted hover:text-bone"
+                ? "!border-amber/50 !bg-amber/15 !text-amber"
+                : "!border-line !text-muted hover:!text-bone"
             }`}
           >
             Previous corpus
-          </button>
+          </HudButton>
         ) : null}
-        <button
+        <HudButton
           type="button"
           onClick={useAllData}
-          className="rounded-full border border-sky/40 bg-sky/10 px-3 py-1 text-[0.6875rem] text-sky"
+          variant="ghost"
+          className="!min-h-11 !rounded-full !border-sky/40 !bg-sky/10 !px-3 !py-1 text-[0.6875rem] !text-sky"
           title="MAX — set every domain to its full usable stock (all processed real + enabled synthetic, minus active-job reservations). Does not use synthetic expansion."
         >
           Use all data
-        </button>
-        <button
+        </HudButton>
+        <HudButton
           type="button"
           onClick={onAutoBalance}
           disabled={autoBalanceDisabled}
-          className="rounded-full border border-mint/40 bg-mint/10 px-3 py-1 text-[0.6875rem] text-mint disabled:opacity-40"
+          variant="ghost"
+          className="!min-h-11 !rounded-full !border-mint/40 !bg-mint/10 !px-3 !py-1 text-[0.6875rem] !text-mint disabled:!opacity-40"
           title={
             autoBalanceDisabled
               ? "Research Mixture Engineering to automate this recipe."
@@ -417,14 +421,14 @@ export function TrainingDataRadar({
           }
         >
           Auto-balance · best recipe
-        </button>
+        </HudButton>
       </div>
-      <div className="grid min-w-0 gap-3 p-3 lg:grid-cols-[minmax(280px,1.25fr)_minmax(200px,.85fr)]">
+      <div className="training-data-radar-layout grid min-w-0 gap-3 p-3">
         <div className="min-w-0">
           <svg
             ref={svgRef}
             viewBox={`0 0 ${SIZE} ${SIZE}`}
-            className="mx-auto block h-auto w-full max-w-[420px] touch-none overflow-visible"
+            className="mx-auto block h-auto w-full max-w-[380px] touch-none overflow-visible"
             role="group"
             aria-label="Draggable radar chart for training data domains"
             onPointerMove={(event) => {
@@ -710,22 +714,23 @@ export function TrainingDataRadar({
                 const active = selected === domain;
                 return (
                   <li key={domain}>
-                    <label
+                    <div
                       className={`flex items-center gap-2 rounded-md px-1.5 py-1 text-[0.6875rem] ${
                         active ? "bg-mint/10" : "hover:bg-void/40"
                       }`}
                       title={tip}
                       onFocusCapture={() => setSelected(domain)}
                     >
-                      <button
+                      <HudButton
                         type="button"
                         onClick={() => setSelected(domain)}
-                        className={`min-w-0 flex-1 truncate text-left ${
+                        variant="ghost"
+                        className={`!min-h-11 !min-w-0 !flex-1 !justify-start !border-0 !bg-transparent !px-1.5 !py-1 text-left ${
                           active ? "text-mint" : "text-muted"
                         }`}
                       >
                         {DATA_DOMAIN_META[domain].label}
-                      </button>
+                      </HudButton>
                       <DraftNumberInput
                         value={Math.round(allocations[domain])}
                         min={0}
@@ -743,7 +748,7 @@ export function TrainingDataRadar({
                       <span className="w-8 shrink-0 font-mono text-[0.625rem] text-muted">
                         MTok
                       </span>
-                    </label>
+                    </div>
                   </li>
                 );
               })}
@@ -774,7 +779,7 @@ export function TrainingDataRadar({
                   : "covered"}
               </span>
             </div>
-            <div className="mt-3 space-y-1.5 text-[0.6875rem]">
+            <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5 text-[0.6875rem]">
               <SourceRow label="Needed" value={formatTokens(selectedNeed)} />
               <SourceRow
                 label="Available real"
@@ -864,12 +869,12 @@ export function TrainingDataRadar({
             {syntheticUnlocked ? (
               <label className="mt-3 block text-[0.6875rem] text-muted">
                 Synthetic teacher
-                <select
+                <HudSelect
                   value={syntheticTeacherIds[selected] ?? ""}
                   onChange={(event) =>
                     onTeacherChange(selected, event.target.value || undefined)
                   }
-                  className="mt-1 w-full min-w-0 rounded-md border border-line bg-void px-2 py-1.5 text-xs text-bone outline-none focus:border-mint/50"
+                  className="mt-1 w-full min-w-0 text-xs"
                 >
                   <option value="">Auto · best teacher</option>
                   {teachers.map((teacher) => (
@@ -877,7 +882,7 @@ export function TrainingDataRadar({
                       {teacher.name} · cap {teacher.capability.toFixed(0)}
                     </option>
                   ))}
-                </select>
+                </HudSelect>
               </label>
             ) : null}
             {syntheticUnlocked ? (

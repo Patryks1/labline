@@ -127,5 +127,6 @@ describe("FleetTab checkpoint evidence", () => {
     expect(markup).not.toContain("Tier progress");
     expect(markup).not.toContain("Custom API markup percentage");
     expect(markup).not.toContain("Markup");
+    expect(markup).toMatch(/data-hud-variant="danger"[^>]*>Delete<\/button>/);
   });
 });

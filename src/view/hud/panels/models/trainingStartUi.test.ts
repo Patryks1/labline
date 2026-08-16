@@ -9,7 +9,7 @@ import {
 import { TrainingStartFailureBanner } from './TrainingStartFailureBanner'
 
 describe('training start UI feedback', () => {
-  it('distinguishes a met raw target from reduced effective training signal', () => {
+  it('summarizes data readiness without exposing raw diagnostic jargon', () => {
     expect(
       trainingDataGuidanceText({
         selectedMTok: 21_430,
@@ -21,8 +21,8 @@ describe('training start UI feedback', () => {
         holdoutRetention: 0.8,
       }),
     ).toEqual({
-      headline: 'Raw strong target met · 21.43B / 19.92B · effective 4.91:1',
-      reductions: 'Quality ×0.80 · diversity ×0.95 · verification holdout 20% (×0.80)',
+      headline: 'Ready · 21.43B selected · 4.9× effective',
+      reductions: '',
     })
   })
 

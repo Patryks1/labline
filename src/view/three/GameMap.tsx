@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
-import { canPlaceBuilding, dcFootprint } from '../../sim/systems/map'
-import { selectionFootprintTiles } from '../../sim/systems/worldAccess'
+import { canPlaceBuilding, dcFootprint, getBuildDef } from '../../sim/systems/map'
+import { mapTileAtAny, selectionFootprintTiles } from '../../sim/systems/worldAccess'
 import { transportAccessFactorAt, transportRegionalCongestionAt } from '../../sim/systems/transport'
 import type { BuildableKind, MapOverlayMode, MapRegion, SimState } from '../../sim/types'
 import { useGameStore } from '../../store/gameStore'
@@ -130,6 +130,9 @@ export function GameMap() {
   const placementTooltipRef = useRef<HTMLDivElement>(null)
   const placementLandRef = useRef<HTMLSpanElement>(null)
   const placementGradeRef = useRef<HTMLSpanElement>(null)
+  const placementZoneRef = useRef<HTMLSpanElement>(null)
+  const placementUtilityRef = useRef<HTMLSpanElement>(null)
+  const placementStatusRef = useRef<HTMLSpanElement>(null)
   const placementTotalRef = useRef<HTMLSpanElement>(null)
   // This primitive subscription exists only for the cursor class. All map and
   // simulation updates are consumed imperatively inside the Three lifecycle.
@@ -542,24 +545,55 @@ export function GameMap() {
 
       const cost = placementCostAt(store.state, tile.x, tile.y, kind)
       const tooltip = placementTooltipRef.current
-      if (cost && tooltip && placementLandRef.current && placementGradeRef.current && placementTotalRef.current) {
+      if (
+        cost &&
+        tooltip &&
+        placementLandRef.current &&
+        placementGradeRef.current &&
+        placementZoneRef.current &&
+        placementUtilityRef.current &&
+        placementStatusRef.current &&
+        placementTotalRef.current
+      ) {
         const bounds = renderer.domElement.getBoundingClientRect()
-        const position = placementTooltipPosition(clientX, clientY, bounds)
+        const position = placementTooltipPosition(clientX, clientY, bounds, 238, 116)
+        const definition = getBuildDef(kind)
+        const tileId = tile.y * store.state.map.width + tile.x
+        const regionId = mapTileAtAny(store.state, tile.x, tile.y)?.regionId
+        const region = store.state.map.regions.find((candidate) => candidate.id === regionId)
+        const utilityMw = definition.rack
+          ? definition.rack * 0.006
+          : definition.mw ?? definition.gen ?? 0
+        const utility = definition.gen
+          ? `Power +${utilityMw.toFixed(1)} MW`
+          : utilityMw > 0
+            ? `Power ${utilityMw.toFixed(1)} MW`
+            : 'Power —'
         placementLandRef.current.textContent = `Land ${money(cost.landCash)}`
         placementGradeRef.current.textContent = cost.gradingCash > 0
           ? `Grading ${money(cost.gradingCash)} · ${Math.round(check.maxGrade * 100)}% slope`
           : `Level site · ${Math.round(check.maxGrade * 100)}% slope`
-        const tileId = tile.y * store.state.map.width + tile.x
         const access = transportAccessFactorAt(store.state, tileId)
         const congestion = transportRegionalCongestionAt(store.state, tileId)
-        placementTotalRef.current.textContent = `${money(cost.totalCash)} total · ${
-          check.ok ? 'ready' : 'blocked'
-        } · access ${Math.round(access * 100)}% · traffic ${Math.round(congestion * 100)}%`
+        placementZoneRef.current.textContent = `Zone ${region?.name ?? 'Unzoned'} · ${definition.days}d · ${definition.label}`
+        placementUtilityRef.current.textContent = `${utility} · access ${Math.round(access * 100)}% · traffic ${Math.round(congestion * 100)}%`
+        placementStatusRef.current.textContent = check.ok
+          ? 'Ready to place'
+          : check.reason ?? 'Blocked · parcel unavailable'
+        placementTotalRef.current.textContent = `${money(cost.totalCash)} total`
         tooltip.dataset.placeable = check.ok ? 'true' : 'false'
         tooltip.style.left = `${position.left}px`
         tooltip.style.top = `${position.top}px`
         tooltip.hidden = false
       }
+    }
+
+    function onMapFocus(): void {
+      const bounds = renderer.domElement.getBoundingClientRect()
+      updateBuildPreview(
+        bounds.left + bounds.width / 2,
+        bounds.top + bounds.height / 2,
+      )
     }
 
     function viewportBounds(): TileBounds {
@@ -800,6 +834,10 @@ export function GameMap() {
       if (!hit) return
       event.preventDefault()
       mountRef.current?.focus({ preventScroll: true })
+      // Touch and keyboard users may not produce a hover move before the
+      // placement tap. Refresh the same pre-placement context immediately;
+      // selectTile remains the only authoritative placement callback on up.
+      updateBuildPreview(event.clientX, event.clientY)
       drag.active = true
       drag.onMap = true
       drag.x = event.clientX
@@ -1068,6 +1106,7 @@ export function GameMap() {
         if (delta.surfaceTileIds.length > 0) projection.viewport.updateSurface(delta.surfaceTileIds)
         moveSelectionMarker(next.selectedTile)
         if (!next.buildMode) clearBuildPreview()
+        else if (document.activeElement === mount) onMapFocus()
         if (next.mapOverlay !== previous.mapOverlay || next.state.map.regions !== previous.state.map.regions) {
           rebuildRegionOverlays(regionOverlays, projection.regions, next.mapOverlay, projection.source)
         }
@@ -1128,7 +1167,7 @@ export function GameMap() {
       scheduleAnimation()
     })
 
-    renderer.domElement.addEventListener('pointerdown', onPointerDown)
+      renderer.domElement.addEventListener('pointerdown', onPointerDown)
     renderer.domElement.addEventListener('pointermove', onPointerMove)
     renderer.domElement.addEventListener('pointerleave', onPointerLeave)
     renderer.domElement.addEventListener('wheel', onWheel, { passive: false })
@@ -1136,7 +1175,8 @@ export function GameMap() {
     renderer.domElement.addEventListener('webglcontextrestored', onWebglContextRestored)
     renderer.domElement.addEventListener('dragover', onBlueprintDragOver)
     renderer.domElement.addEventListener('dragleave', onBlueprintDragLeave)
-    renderer.domElement.addEventListener('drop', onBlueprintDrop)
+      renderer.domElement.addEventListener('drop', onBlueprintDrop)
+      mount.addEventListener('focus', onMapFocus, true)
     window.addEventListener('pointermove', onPointerMove)
     window.addEventListener('pointerup', onPointerUp)
     window.addEventListener('dragend', onBlueprintDragEnd)
@@ -1212,6 +1252,7 @@ export function GameMap() {
       renderer.domElement.removeEventListener('dragover', onBlueprintDragOver)
       renderer.domElement.removeEventListener('dragleave', onBlueprintDragLeave)
       renderer.domElement.removeEventListener('drop', onBlueprintDrop)
+      mount.removeEventListener('focus', onMapFocus, true)
       projection.viewport.dispose()
       projection.registry.dispose()
       assetCache.dispose()
@@ -1238,10 +1279,13 @@ export function GameMap() {
       <div
         ref={placementTooltipRef}
         hidden
-        className="build-placement-tooltip pointer-events-none absolute z-30 min-w-40 rounded-lg border border-mint/45 bg-void/95 px-2.5 py-2 font-mono shadow-xl backdrop-blur-md"
+        className="build-placement-tooltip pointer-events-none absolute z-30 w-60 max-w-[calc(100%-1rem)] rounded-lg border border-mint/45 bg-void/95 px-2.5 py-2 font-mono shadow-xl backdrop-blur-md"
       >
         <span ref={placementLandRef} className="block text-[0.6875rem] font-semibold text-bone" />
         <span ref={placementGradeRef} className="mt-0.5 block text-[0.5625rem] text-bone/70" />
+        <span ref={placementZoneRef} className="mt-1 block truncate text-[0.5625rem] text-bone/80" />
+        <span ref={placementUtilityRef} className="mt-0.5 block truncate text-[0.5625rem] text-muted" />
+        <span ref={placementStatusRef} className="build-placement-status mt-1 block text-[0.625rem] font-semibold text-amber" />
         <span ref={placementTotalRef} className="build-placement-total mt-0.5 block text-[0.5625rem] text-mint" />
       </div>
     </div>

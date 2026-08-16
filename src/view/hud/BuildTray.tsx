@@ -5,9 +5,9 @@ import {
   Flask,
   Lightning,
   MagnifyingGlass,
+  Backspace,
   SquaresFour,
   UsersThree,
-  X,
   type Icon,
 } from '@phosphor-icons/react'
 import { BUILD_DEFS, buildingTotalCost, getBuildDef } from '../../sim/systems/map'
@@ -30,6 +30,7 @@ import {
 import {
   EmptyState,
   HudButton,
+  HudInput,
   MetricTile,
   PanelScaffold,
   StatusChip,
@@ -135,7 +136,7 @@ export function BuildPanel() {
       description="Pick a blueprint, then place it on open land."
       actions={
         buildMode ? (
-          <HudButton type="button" variant="danger" onClick={() => setBuildMode(null)}>
+          <HudButton type="button" variant="ghost" onClick={() => setBuildMode(null)}>
             Exit placement
           </HudButton>
         ) : null
@@ -149,11 +150,7 @@ export function BuildPanel() {
               Placing {getBuildDef(buildMode).label} — hover map, click open land, Esc to exit.
             </span>
           </div>
-        ) : (
-          <p className="text-[0.8125rem] text-muted">
-            Select a blueprint below, then place it on an empty parcel.
-          </p>
-        )}
+        ) : null}
 
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <MetricTile label="Cash" value={money(state.player.cash)} tone="positive" />
@@ -175,36 +172,39 @@ export function BuildPanel() {
             size={15}
             weight="bold"
           />
-          <input
+          <HudInput
             type="text"
             role="searchbox"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             placeholder="Search halls, power, research…"
-            className="h-9 w-full rounded-md border border-line/80 bg-panel-2/80 pl-8 pr-8 text-[0.8125rem] text-bone outline-none transition placeholder:text-muted/70 focus:border-mint/60 focus:ring-2 focus:ring-mint/15"
+            className="h-11 w-full pl-8 pr-8 text-[0.8125rem]"
           />
           {search ? (
-            <button
+            <HudButton
               type="button"
+              variant="ghost"
               onClick={() => setSearch('')}
-              className="absolute right-1.5 top-1/2 grid size-6 -translate-y-1/2 place-items-center rounded-md text-muted transition hover:bg-mint/10 hover:text-mint"
+              className="absolute right-0.5 top-1/2 grid size-10 -translate-y-1/2 place-items-center !border-0 !p-0 text-muted"
               aria-label="Clear blueprint search"
             >
-              <X aria-hidden="true" size={13} weight="bold" />
-            </button>
+              <Backspace aria-hidden="true" size={13} weight="bold" />
+            </HudButton>
           ) : null}
         </label>
 
-        <SegmentedTabs
-          ariaLabel="Blueprint category"
-          active={buildCategory}
-          onChange={(id) => setBuildCategory(id as BuildCategoryId)}
-          items={BUILD_CATEGORIES.map((item) => ({
-            id: item.id,
-            label: item.label,
-            icon: <item.icon size={14} weight={buildCategory === item.id ? 'fill' : 'duotone'} />,
-          }))}
-        />
+        <div className="build-category-tabs">
+          <SegmentedTabs
+            ariaLabel="Blueprint category"
+            active={buildCategory}
+            onChange={(id) => setBuildCategory(id as BuildCategoryId)}
+            items={BUILD_CATEGORIES.map((item) => ({
+              id: item.id,
+              label: item.label,
+              icon: <item.icon size={14} weight={buildCategory === item.id ? 'fill' : 'duotone'} />,
+            }))}
+          />
+        </div>
 
         <div key={`${buildCategory}-${query}`} className="panel-swap">
           {visibleDefs.length === 0 ? (
@@ -237,9 +237,10 @@ export function BuildPanel() {
                   BUILD_CATEGORIES.find((c) => c.id !== 'all' && c.kinds.includes(definition.kind))
                     ?.icon ?? SquaresFour
                 return (
-                  <button
+                  <HudButton
                     key={definition.kind}
                     type="button"
+                    variant="ghost"
                     draggable={affordable}
                     aria-pressed={selected}
                     disabled={!affordable}
@@ -261,7 +262,7 @@ export function BuildPanel() {
                       setBuildMode(definition.kind)
                       writeBuildBlueprintDrag(event.dataTransfer, definition.kind)
                     }}
-                    className={`hover-lift rounded-lg border text-left transition disabled:cursor-not-allowed disabled:opacity-55 ${
+                    className={`min-h-11 hover-lift rounded-lg border text-left transition disabled:cursor-not-allowed disabled:opacity-55 ${
                       selected
                         ? 'border-mint ring-2 ring-mint/50 bg-mint/10'
                         : 'border-line/70 bg-panel-2/70 hover:border-mint/30'
@@ -276,7 +277,7 @@ export function BuildPanel() {
                         />
                         <div className="min-w-0">
                           <p className="hud-eyebrow">{cat}</p>
-                          <h3 className="truncate text-sm font-semibold text-bone">{definition.label}</h3>
+                          <h3 className="break-words text-sm font-semibold leading-tight text-bone">{definition.label}</h3>
                         </div>
                       </div>
                       <span
@@ -298,7 +299,7 @@ export function BuildPanel() {
                         </p>
                       ) : null}
                     </div>
-                  </button>
+                  </HudButton>
                 )
               })}
             </CardGrid>

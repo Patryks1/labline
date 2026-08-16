@@ -59,6 +59,7 @@ import {
   defaultTrainingDataWeights,
   playerTrainingResourcePlan,
   trainingArchitectureValidation,
+  trainingMinimumStatus,
   trainingUnlockEligibility,
   trainingRamFitForNewJob,
 } from "../../../sim/systems/training";
@@ -88,20 +89,22 @@ import {
   syntheticTrainingProfile,
   teacherSyntheticHeadroomMTok,
 } from "../../../sim/balance/syntheticTraining";
-import { PanelScaffold, HudButton, MetricTile } from "../ui/HudPrimitives";
 import {
-  BlockerList,
-  CardGrid,
-  GameCard,
-  SegmentedTabs,
-  type Blocker,
-} from "../ui/kit";
+  PanelScaffold,
+  HudButton,
+  HudInput,
+  HudRange,
+  HudSelect,
+  MetricTile,
+} from "../ui/HudPrimitives";
+import { BlockerList, CardGrid, GameCard, type Blocker } from "../ui/kit";
 import { ActiveTrainingCard } from "./models/ActiveTrainingCard";
 import type { TrainingLossCheckpointMarker } from "./models/TrainingLossChart";
 import { FleetTab } from "./models/FleetTab";
 import { SafetyCampaignSection } from "./models/SafetyCampaignSection";
 import { CheckpointWorkspace } from "./models/CheckpointWorkspace";
 import { CheckpointEvaluationDialog } from "./models/CheckpointEvaluationDialog";
+import { BenchmarkEntryPoint } from "./models/BenchmarkEntryPoint";
 import {
   checkpointUiRecordFromCandidate,
   type CheckpointReviewMode,
@@ -117,6 +120,21 @@ import {
   directRunCheckpointRequest,
   ensureCurrentRunCheckpoint,
 } from "./models/directRunCheckpointActions";
+import {
+  normalizeTrainingJobs,
+  selectPrimaryTrainingJob,
+} from "../trainingJobViewModel";
+import {
+  ModelsTrainingQueue,
+  type ModelsWorkspaceView,
+} from "./models/ModelsTrainingQueue";
+import type { ModelsWorkflowStep } from "./models/ModelsWorkflowStepper";
+import { ModelsTrainingModal } from "./models/ModelsTrainingModal";
+import {
+  CheckpointBranchDialog,
+  type CheckpointBranchRequest,
+} from "./models/CheckpointBranchDialog";
+import { resolveModelsFocusJobId } from "./models/modelsFocus";
 
 const TRAINING_FORMAT_OPTIONS: ReadonlyArray<{
   value: TrainingComputeFormat;
@@ -207,7 +225,16 @@ function applyParamsB(paramsB: number): { val: string; unit: "M" | "B" | "T" } {
   return { val: String(paramsB * 1000), unit: "M" };
 }
 
-export function ModelsPanel() {
+export interface ModelsPanelProps {
+  /** One-shot shell handoff from a global training action. */
+  focusJobId?: string | null;
+  onFocusHandled?: () => void;
+}
+
+export function ModelsPanel({
+  focusJobId = null,
+  onFocusHandled,
+}: ModelsPanelProps = {}) {
   const state = useGameStore((s) => s.state);
   const startTraining = useGameStore((s) => s.startTraining);
   const setTrainingPriority = useGameStore((s) => s.setTrainingPriority);
@@ -226,9 +253,7 @@ export function ModelsPanel() {
   const createManualTrainingCheckpoint = useGameStore(
     (s) => s.createManualTrainingCheckpoint,
   );
-  const forkTrainingCheckpoint = useGameStore(
-    (s) => s.forkTrainingCheckpoint,
-  );
+  const forkTrainingCheckpoint = useGameStore((s) => s.forkTrainingCheckpoint);
   const rollbackTrainingJobToCheckpoint = useGameStore(
     (s) => s.rollbackTrainingJobToCheckpoint,
   );
@@ -248,8 +273,13 @@ export function ModelsPanel() {
   const trainingResources = playerTrainingResourcePlan(state, snap);
   const energyPrice = energyPriceForState(state);
 
-  const [panelTab, setPanelTab] =
-    useState<"runs" | "checkpoints" | "fleet">("runs");
+  const [panelTab, setPanelTab] = useState<"runs" | "checkpoints" | "fleet">(
+    "runs",
+  );
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [showNewModel, setShowNewModel] = useState(false);
+  const [newModelStep, setNewModelStep] =
+    useState<ModelsWorkflowStep>("define");
   const [name, setName] = useState("Spark");
   const [backbone, setBackbone] = useState<ModelBackbone>("dense");
   const [productPreset, setProductPreset] =
@@ -280,18 +310,22 @@ export function ModelsPanel() {
   const [safetyIntensity, setSafetyIntensity] =
     useState<SafetyCampaignIntensity>("standard");
   const [safetyResearchers, setSafetyResearchers] = useState(1);
-  const [trainingFormat, setTrainingFormat] =
-    useState<TrainingComputeFormat>(DEFAULT_TRAINING_NUMERICS.computeFormat);
+  const [trainingFormat, setTrainingFormat] = useState<TrainingComputeFormat>(
+    DEFAULT_TRAINING_NUMERICS.computeFormat,
+  );
   const [nativeWeightFormat, setNativeWeightFormat] =
     useState<NativeWeightFormat>("float");
   const [computePriority, setComputePriority] = useState(50);
   const [showPreviousCorpus, setShowPreviousCorpus] = useState(true);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [checkpointEvaluationId, setCheckpointEvaluationId] = useState<
     string | null
   >(null);
   const [checkpointEvaluationMode, setCheckpointEvaluationMode] =
     useState<CheckpointReviewMode>("internal");
+  const [branchCheckpointId, setBranchCheckpointId] = useState<string | null>(
+    null,
+  );
+  const [branchFailure, setBranchFailure] = useState<string | null>(null);
   const [startFailure, setStartFailure] = useState<string | null>(null);
 
   const paramsB = parseSizeInput(sizeVal, sizeUnit);
@@ -341,6 +375,7 @@ export function ModelsPanel() {
   );
   const mixUnlocked = unlocked.includes("data_mix");
   const synthUnlocked = unlocked.includes("data_synth");
+  const jobs = useMemo(() => normalizeTrainingJobs(state), [state]);
   const checkpointCandidates = useMemo(
     () => state.player.trainingCheckpoints ?? [],
     [state.player.trainingCheckpoints],
@@ -361,22 +396,21 @@ export function ModelsPanel() {
           promotedModelId: retained?.id,
           promotedModelName: retained?.name,
           sourceJobActive: Boolean(
-            (state.player.trainingJobs ?? []).some(
-              (job) => job.id === candidate.sourceJobId,
-            ) || state.player.trainingJob?.id === candidate.sourceJobId,
+            jobs.some((job) => job.id === candidate.sourceJobId),
           ),
-          pendingEvaluations: (state.player.privateEvaluationJobs ?? []).flatMap(
-            (evaluation) =>
-              evaluation.kind === "checkpoint_evaluation" &&
-              evaluation.subjectId === candidate.id
-                ? [evaluation.pending]
-                : [],
+          pendingEvaluations: (
+            state.player.privateEvaluationJobs ?? []
+          ).flatMap((evaluation) =>
+            evaluation.kind === "checkpoint_evaluation" &&
+            evaluation.subjectId === candidate.id
+              ? [evaluation.pending]
+              : [],
           ),
         }),
       );
     }
     return records;
-  }, [checkpointCandidates, state.player]);
+  }, [checkpointCandidates, jobs, state.player]);
   const checkpointEvidenceByModelId = useMemo(() => {
     const records: Record<string, CheckpointUiRecord> = {};
     for (const candidate of checkpointCandidates) {
@@ -453,15 +487,32 @@ export function ModelsPanel() {
     () => resolveModelIteration(teachers, name),
     [teachers, name],
   );
-  const jobs = useMemo(
-    () =>
-      state.player.trainingJobs?.length
-        ? state.player.trainingJobs
-        : state.player.trainingJob
-          ? [state.player.trainingJob]
-          : [],
-    [state.player.trainingJobs, state.player.trainingJob],
-  );
+  const selectedJob =
+    jobs.find((job) => job.id === selectedJobId) ??
+    (!showNewModel ? selectPrimaryTrainingJob(jobs) : undefined);
+  const jobIds = jobs.map((job) => job.id).join("|");
+
+  useEffect(() => {
+    if (jobs.length === 0) {
+      setSelectedJobId(null);
+      return;
+    }
+    setSelectedJobId((current) => {
+      if (current && jobs.some((job) => job.id === current)) return current;
+      return selectPrimaryTrainingJob(jobs)?.id ?? jobs[0]?.id ?? null;
+    });
+  }, [jobIds, jobs]);
+
+  useEffect(() => {
+    if (!focusJobId) return;
+    const resolvedJobId = resolveModelsFocusJobId(jobs, focusJobId);
+    if (resolvedJobId) {
+      setPanelTab("runs");
+      setSelectedJobId(resolvedJobId);
+      setShowNewModel(false);
+    }
+    onFocusHandled?.();
+  }, [focusJobId, jobIds, jobs, onFocusHandled]);
   const rivalModels = useMemo(
     () => state.rivals.flatMap((rival) => rival.models),
     [state.rivals],
@@ -584,7 +635,8 @@ export function ModelsPanel() {
         trainEfficiency: state.player.trainEfficiency,
         trainPoolPf: snap.pools.training,
         trainPowerMw: snap.mwForecast.training,
-        teacherParamsB: teachers.find((model) => model.id === teacherId)?.paramsB,
+        teacherParamsB: teachers.find((model) => model.id === teacherId)
+          ?.paramsB,
       }),
     [
       modelIteration.name,
@@ -689,7 +741,9 @@ export function ModelsPanel() {
       setActiveVal(active.val);
       setActiveUnit(active.unit);
     }
-    setBackbone(continueModel.backbone ?? backboneFromFamily(continueModel.family));
+    setBackbone(
+      continueModel.backbone ?? backboneFromFamily(continueModel.family),
+    );
     setProductPreset(
       migrateLegacyProductPreset(
         continueModel.productPreset ?? presetFromFamily(continueModel.family),
@@ -891,7 +945,11 @@ export function ModelsPanel() {
   }, 0);
   const syntheticDataQuality = DATA_DOMAINS.reduce((sum, domain) => {
     const stock = labData.stocks[domain];
-    return sum + Math.max(0, stock?.quality ?? state.player.dataQuality) * (weights[domain] ?? 0);
+    return (
+      sum +
+      Math.max(0, stock?.quality ?? state.player.dataQuality) *
+        (weights[domain] ?? 0)
+    );
   }, 0);
   const syntheticProfile = syntheticTrainingProfile({
     realMTok: Math.min(realDataMTok, processedAvail),
@@ -938,6 +996,15 @@ export function ModelsPanel() {
         (candidate) => candidate.id === checkpointEvaluationId,
       )
     : undefined;
+  const branchCheckpointCandidate = branchCheckpointId
+    ? checkpointCandidates.find(
+        (candidate) => candidate.id === branchCheckpointId,
+      )
+    : undefined;
+  const branchSourceRunName = branchCheckpointCandidate
+    ? (jobs.find((job) => job.id === branchCheckpointCandidate.sourceJobId)
+        ?.name ?? branchCheckpointCandidate.model.name)
+    : "Checkpoint";
   const checkpointArchiveEntries = checkpointCandidates.flatMap((candidate) => {
     const checkpoint = checkpointUiByCandidateId.get(candidate.id);
     return checkpoint
@@ -950,6 +1017,41 @@ export function ModelsPanel() {
       jobId,
     );
     if (request) createManualTrainingCheckpoint(request);
+  };
+  const openCheckpointBranch = (checkpointId: string): void => {
+    setBranchFailure(null);
+    setBranchCheckpointId(checkpointId);
+  };
+  const branchCurrentRun = (jobId: string): void => {
+    const checkpoint = ensureCurrentRunCheckpoint({
+      state: useGameStore.getState().state,
+      jobId,
+      createCheckpoint: createManualTrainingCheckpoint,
+      readState: () => useGameStore.getState().state,
+    });
+    if (!checkpoint || checkpoint.status === "discarded") return;
+    openCheckpointBranch(checkpoint.id);
+  };
+  const startCheckpointBranch = (request: CheckpointBranchRequest): void => {
+    const before = normalizeTrainingJobs(useGameStore.getState().state);
+    const beforeIds = new Set(before.map((job) => job.id));
+    setBranchFailure(null);
+    forkTrainingCheckpoint(request);
+    const afterState = useGameStore.getState().state;
+    const started = normalizeTrainingJobs(afterState).find(
+      (job) => !beforeIds.has(job.id),
+    );
+    if (!started) {
+      setBranchFailure(
+        afterState.alerts[0]?.message ??
+          "The branch could not start. Check fresh data, cash, and compute capacity.",
+      );
+      return;
+    }
+    setSelectedJobId(started.id);
+    setPanelTab("runs");
+    setBranchCheckpointId(null);
+    setBranchFailure(null);
   };
   const benchmarkCurrentRun = (jobId: string): void => {
     const checkpoint = ensureCurrentRunCheckpoint({
@@ -964,9 +1066,9 @@ export function ModelsPanel() {
   };
   const modelEvidenceLabel = (model: Model): string => {
     const evidence = checkpointEvidenceByModelId[model.id];
-    if (!evidence) return `cap ${model.capability.toFixed(0)}`;
+    if (!evidence) return `cap ${model.capability.toFixed(2)}`;
     const measured = evidence.evaluationScore.estimate;
-    return measured == null ? "eval unknown" : `eval ${measured.toFixed(1)}`;
+    return measured == null ? "eval unknown" : `eval ${measured.toFixed(2)}`;
   };
   const researcherCount = playerStaff(state).researcher ?? 0;
   const safetyEstimate = useMemo(
@@ -1035,7 +1137,9 @@ export function ModelsPanel() {
     }
     if (snap.pools.training < 0.05) {
       const stall =
-        snap.stallReason && snap.stallReason !== "ok" && snap.fullRawPool <= 0.05
+        snap.stallReason &&
+        snap.stallReason !== "ok" &&
+        snap.fullRawPool <= 0.05
           ? snap.stallMessage
           : snap.stallReason === "serve_reservation_starved_offline"
             ? snap.stallMessage
@@ -1050,15 +1154,14 @@ export function ModelsPanel() {
     }
     if (!formatHardwareAvailable) {
       const requiredGeneration =
-        TRAINING_PRECISION_PROFILES[trainingFormat]
-          .minimumHardwareGeneration;
+        TRAINING_PRECISION_PROFILES[trainingFormat].minimumHardwareGeneration;
       items.push({
         text:
           maxHardwareGeneration >= requiredGeneration
             ? `${TRAINING_PRECISION_PROFILES[trainingFormat].label} needs generation ${requiredGeneration}+ format support; active generation ${maxHardwareGeneration} hardware exists, but none advertises compatible training kernels.`
             : maxHardwareGeneration > 0
-            ? `${TRAINING_PRECISION_PROFILES[trainingFormat].label} needs generation ${requiredGeneration}+ support; the active fleet tops out at generation ${maxHardwareGeneration}. Switch format or allocate compatible hardware.`
-            : `${TRAINING_PRECISION_PROFILES[trainingFormat].label} needs generation ${requiredGeneration}+ hardware; no active accelerator fleet or contract is available.`,
+              ? `${TRAINING_PRECISION_PROFILES[trainingFormat].label} needs generation ${requiredGeneration}+ support; the active fleet tops out at generation ${maxHardwareGeneration}. Switch format or allocate compatible hardware.`
+              : `${TRAINING_PRECISION_PROFILES[trainingFormat].label} needs generation ${requiredGeneration}+ hardware; no active accelerator fleet or contract is available.`,
         tone: "danger",
       });
     }
@@ -1143,13 +1246,44 @@ export function ModelsPanel() {
     ? [{ text: MODEL_NAME_TAKEN_MESSAGE, tone: "danger" }, ...blockers]
     : blockers;
   const hardBlocked = hasHardTrainingStartNotice(blockersWithName) || nameTaken;
-  const canStart =
-    !hardBlocked &&
-    !nameTaken &&
-    selectedUnlockEligibility.ok;
+  const canStart = !hardBlocked && !nameTaken && selectedUnlockEligibility.ok;
+
+  const selectedJobMinimum = selectedJob
+    ? trainingMinimumStatus(selectedJob)
+    : null;
+  const selectedJobWorkflowStep: ModelsWorkflowStep = (() => {
+    if (!selectedJob) return "define";
+    if (
+      selectedJob.failed ||
+      selectedJob.pendingCampaignEvent ||
+      selectedJobMinimum?.completeReady
+    ) {
+      return "review";
+    }
+    if (selectedJob.progressPfDays > 0 || selectedJob.postTrainProgress > 0) {
+      return "compute";
+    }
+    return "data";
+  })();
+  const workflowStep = showNewModel ? newModelStep : selectedJobWorkflowStep;
+  const workflowCompletedThrough: ModelsWorkflowStep | undefined =
+    workflowStep === "data"
+      ? "define"
+      : workflowStep === "compute"
+        ? "data"
+        : workflowStep === "review"
+          ? "compute"
+          : undefined;
+
+  const openNewModel = () => {
+    setPanelTab("runs");
+    setShowNewModel(true);
+    setNewModelStep("define");
+  };
 
   const prefillContinue = (model: Model) => {
     setPanelTab("runs");
+    openNewModel();
     setMode("continue");
     setContinueFromId(model.id);
     setName(model.name.replace(/\s+v\d+$/i, "") || model.name);
@@ -1160,19 +1294,11 @@ export function ModelsPanel() {
 
   const handleStartTraining = (request: StartTrainingOpts) => {
     const before = useGameStore.getState().state;
-    const beforeJobs = before.player.trainingJobs?.length
-      ? before.player.trainingJobs
-      : before.player.trainingJob
-        ? [before.player.trainingJob]
-        : [];
+    const beforeJobs = normalizeTrainingJobs(before);
     setStartFailure(null);
     startTraining(request);
     const after = useGameStore.getState().state;
-    const afterJobs = after.player.trainingJobs?.length
-      ? after.player.trainingJobs
-      : after.player.trainingJob
-        ? [after.player.trainingJob]
-        : [];
+    const afterJobs = normalizeTrainingJobs(after);
     const failure = trainingStartFailureMessage({
       beforeJobIds: beforeJobs.map((job) => job.id),
       beforeAlertId: before.alerts[0]?.id,
@@ -1182,10 +1308,48 @@ export function ModelsPanel() {
     });
     setStartFailure(failure);
     if (failure) useUiStore.getState().pushToast(failure, "danger");
+    else {
+      const beforeIds = new Set(beforeJobs.map((job) => job.id));
+      const started = afterJobs.find((job) => !beforeIds.has(job.id));
+      if (started) {
+        setSelectedJobId(started.id);
+        setShowNewModel(false);
+      }
+    }
+  };
+
+  const startConfiguredTraining = () => {
+    handleStartTraining({
+      name:
+        modelIteration.name ||
+        `${family}-${formatParams(paramsB)}${
+          mode === "distill" ? "-d" : mode === "continue" ? "-ct" : ""
+        }`,
+      family,
+      backbone,
+      productPreset,
+      io: modelIo,
+      paramsB,
+      activeParamsB,
+      mode,
+      teacherId: mode === "distill" ? teacherId || undefined : undefined,
+      distillTeacherShare: mode === "distill" ? teacherShare : undefined,
+      continueFromId:
+        mode === "continue" ? continueFromId || undefined : undefined,
+      dataPlan: recipePlan,
+      modelStack: selectedStack,
+      trainingNumerics: {
+        computeFormat: trainingFormat,
+        nativeWeightFormat,
+        recipeVersion: 1,
+      },
+      computePriority,
+    });
   };
 
   const prefillDistill = (model: Model) => {
     setPanelTab("runs");
+    openNewModel();
     setMode("distill");
     setTeacherId(model.id);
     setName(`${model.name.replace(/\s+v\d+$/i, "") || model.name}-d`);
@@ -1194,9 +1358,10 @@ export function ModelsPanel() {
   const handleReleaseModel = (id: string) => {
     const model = state.player.models.find((m) => m.id === id);
     releaseModel(id);
-    const released = useGameStore
-      .getState()
-      .state.player.models.find((candidate) => candidate.id === id) ?? model;
+    const released =
+      useGameStore
+        .getState()
+        .state.player.models.find((candidate) => candidate.id === id) ?? model;
     if (released) {
       announceRelease({
         modelId: released.id,
@@ -1234,7 +1399,7 @@ export function ModelsPanel() {
     releaseFromJob(jobId);
     if (job) {
       const nextState = useGameStore.getState().state;
-      const jobStillActive = (nextState.player.trainingJobs ?? []).some(
+      const jobStillActive = normalizeTrainingJobs(nextState).some(
         (candidate) => candidate.id === job.id,
       );
       if (jobStillActive) return;
@@ -1254,9 +1419,9 @@ export function ModelsPanel() {
         family: released?.family ?? job.family,
         productPreset: released?.productPreset ?? job.productPreset,
         benchmarkSuiteIds: released
-          ? Object.keys(
+          ? (Object.keys(
               normalizeModelEvaluations(released).benchmarkSuites ?? {},
-            ) as BenchmarkSuiteId[]
+            ) as BenchmarkSuiteId[])
           : job.benchmarkSnapshots?.at(-1)?.suiteIds,
         ...telemetry,
       });
@@ -1268,17 +1433,51 @@ export function ModelsPanel() {
     if (publicFrontier <= 0)
       return "No public peer yet — this run sets your first bar.";
     if (gap >= 2)
-      return `Likely ahead of the public frontier by +${gap.toFixed(1)} cap.`;
+      return `Likely ahead of the public frontier by +${gap.toFixed(2)} cap.`;
     if (gap >= -1) return "Roughly matches the current public frontier.";
-    return `Trails the public frontier by ${Math.abs(gap).toFixed(1)} cap.`;
+    return `Trails the public frontier by ${Math.abs(gap).toFixed(2)} cap.`;
   })();
 
   return (
     <PanelScaffold
       title="Models"
-      eyebrow="Runs · Checkpoints · Fleet"
-      description="Train weights, branch immutable checkpoints, then manage internal and public versions."
+      actions={
+        panelTab === "runs" ? (
+          <div className="flex flex-wrap items-center justify-end gap-1.5">
+            {selectedJob && !showNewModel ? (
+              <BenchmarkEntryPoint
+                context={{ kind: "training-run", id: selectedJob.id }}
+                disabled={
+                  selectedJob.progressPfDays <= 1e-9 &&
+                  selectedJob.postTrainProgress <= 1e-9
+                }
+                title={
+                  selectedJob.progressPfDays > 1e-9 ||
+                  selectedJob.postTrainProgress > 1e-9
+                    ? "Capture the current run checkpoint, then choose suites and evidence depth."
+                    : "Allocate compute before benchmarking current weights."
+                }
+                onOpen={() => benchmarkCurrentRun(selectedJob.id)}
+              >
+                Benchmark
+              </BenchmarkEntryPoint>
+            ) : null}
+          </div>
+        ) : undefined
+      }
     >
+      <CheckpointBranchDialog
+        open={branchCheckpointCandidate != null}
+        checkpoint={branchCheckpointCandidate}
+        sourceRunName={branchSourceRunName}
+        error={branchFailure}
+        onClose={() => {
+          setBranchCheckpointId(null);
+          setBranchFailure(null);
+        }}
+        onSubmit={startCheckpointBranch}
+      />
+
       {checkpointEvaluationCandidate ? (
         <CheckpointEvaluationDialog
           open
@@ -1296,1160 +1495,1372 @@ export function ModelsPanel() {
         />
       ) : null}
 
-      <div className="mb-3">
-        <SegmentedTabs
-          ariaLabel="Models views"
-          active={panelTab}
-          onChange={(id) =>
-            setPanelTab(id as "runs" | "checkpoints" | "fleet")
-          }
-          items={[
-            {
-              id: "runs",
-              label: `Runs (${jobs.length})`,
-            },
-            {
-              id: "checkpoints",
-              label: `Checkpoints (${checkpointCandidates.length})`,
-            },
-            {
-              id: "fleet",
-              label: (
-                <span className="inline-flex items-center gap-1.5">
-                  Fleet
-                  <span className="font-mono text-[0.625rem] text-muted">
-                    {internal.length + released.length}
-                  </span>
-                </span>
-              ),
-            },
-          ]}
-        />
-      </div>
-
-      <div key={panelTab} className="panel-swap space-y-3">
-        {panelTab === "runs" ? (
-          <>
-            {jobs.map((job) => (
-              <ActiveTrainingCard
-                key={job.id}
-                job={job}
-                trainingPoolPf={snap.pools.training}
-                resources={trainingResources.jobs[job.id]}
-                jobs={jobs}
-                unlocked={unlocked}
-                day={state.day}
-                cash={state.player.cash}
-                onPriority={(jobId, priority, reservedPf) =>
-                  setTrainingPriority(jobId, priority, reservedPf)
-                }
-                onPause={(jobId, paused) => pauseTraining(jobId, paused)}
-                onCancel={(jobId) => cancelTraining(jobId)}
-                onRelease={(jobId) => handleReleaseFromJob(jobId)}
-                onKeepInternal={(jobId) => keepInternal(jobId)}
-                onBenchmark={benchmarkCurrentRun}
-                onSaveCheckpoint={saveCurrentRunCheckpoint}
-                checkpointMarkers={checkpointMarkersByJob.get(job.id) ?? []}
-                onRecoverFromCheckpoint={(jobId, checkpointId) =>
-                  recoverFailedPostTrainFromCheckpoint({ jobId, checkpointId })
-                }
-                onSelectPostTrain={(jobId, stage) =>
-                  selectPostTrain(jobId, stage)
-                }
-              />
-            ))}
-            <GameCard
-              eyebrow="1 · Mode"
-              title="How do you want to train?"
-              tone="train"
-            >
-              <div className="grid gap-2 sm:grid-cols-3">
-                {(["pretrain", "continue", "distill"] as TrainMode[]).map(
-                  (option) => {
-                    const locked =
-                      (option === "continue" || option === "distill") &&
-                      teachers.length === 0;
-                    const on = mode === option;
-                    return (
-                      <button
-                        key={option}
+      <div key={panelTab} className="panel-swap">
+        <div
+          className="models-workbench-layout min-w-0 grid gap-3"
+          data-models-workbench-layout="responsive"
+        >
+          <ModelsTrainingQueue
+            jobs={jobs}
+            resources={trainingResources.jobs}
+            selectedJobId={selectedJobId}
+            activeView={panelTab as ModelsWorkspaceView}
+            viewCounts={{
+              runs: jobs.length,
+              checkpoints: checkpointCandidates.length,
+              fleet: internal.length + released.length,
+            }}
+            onSelect={(jobId) => {
+              setPanelTab("runs");
+              setSelectedJobId(jobId);
+              setShowNewModel(false);
+            }}
+            onViewChange={(view) =>
+              setPanelTab(view as "runs" | "checkpoints" | "fleet")
+            }
+            onNewModel={openNewModel}
+            onResume={(jobId) => pauseTraining(jobId, false)}
+            onRecover={(jobId, checkpointId) =>
+              recoverFailedPostTrainFromCheckpoint({ jobId, checkpointId })
+            }
+          />
+          <div className="models-workbench-detail min-w-0 space-y-3">
+            {panelTab === "runs" ? (
+              <>
+                <div
+                  hidden={showNewModel || !selectedJob}
+                  data-model-selected-run={selectedJob?.id ?? ""}
+                  className="space-y-3"
+                >
+                  {selectedJob ? (
+                    <ActiveTrainingCard
+                      job={selectedJob}
+                      trainingPoolPf={snap.pools.training}
+                      resources={trainingResources.jobs[selectedJob.id]}
+                      jobs={jobs}
+                      unlocked={unlocked}
+                      day={state.day}
+                      cash={state.player.cash}
+                      onPriority={(jobId, priority, reservedPf) =>
+                        setTrainingPriority(jobId, priority, reservedPf)
+                      }
+                      onPause={(jobId, paused) => pauseTraining(jobId, paused)}
+                      onCancel={(jobId) => cancelTraining(jobId)}
+                      onRelease={(jobId) => handleReleaseFromJob(jobId)}
+                      onKeepInternal={(jobId) => keepInternal(jobId)}
+                      onBenchmark={benchmarkCurrentRun}
+                      onSaveCheckpoint={saveCurrentRunCheckpoint}
+                      onBranchCheckpoint={branchCurrentRun}
+                      checkpointMarkers={
+                        checkpointMarkersByJob.get(selectedJob.id) ?? []
+                      }
+                      checkpointEvidence={checkpointArchiveEntries
+                        .filter((entry) => entry.sourceJobId === selectedJob.id)
+                        .map((entry) => entry.checkpoint)}
+                      onOpenCheckpointHistory={() => setPanelTab("checkpoints")}
+                      onRecoverFromCheckpoint={(jobId, checkpointId) =>
+                        recoverFailedPostTrainFromCheckpoint({
+                          jobId,
+                          checkpointId,
+                        })
+                      }
+                      onSelectPostTrain={(jobId, stage) =>
+                        selectPostTrain(jobId, stage)
+                      }
+                    />
+                  ) : null}
+                </div>
+                <ModelsTrainingModal
+                  open={showNewModel}
+                  activeStep={newModelStep}
+                  completedThrough={workflowCompletedThrough}
+                  onStepChange={setNewModelStep}
+                  onCancel={() => setShowNewModel(false)}
+                  footerAction={
+                    newModelStep === "review" ? (
+                      <HudButton
                         type="button"
-                        disabled={locked}
+                        variant="primary"
+                        disabled={!canStart}
                         title={
-                          locked
-                            ? "Need an existing model first"
-                            : MODE_META[option].hint
-                        }
-                        onClick={() => setMode(option)}
-                        className={`rounded-md border px-3 py-2.5 text-left transition ${
-                          on
-                            ? "border-train/50 bg-train/10"
-                            : "border-line/70 bg-void/30 hover:border-train/30"
-                        } disabled:cursor-not-allowed disabled:opacity-40`}
-                      >
-                        <span className="block text-sm font-semibold text-bone">
-                          {MODE_META[option].label}
-                        </span>
-                        <span className="mt-0.5 block text-[0.75rem] text-muted">
-                          {MODE_META[option].hint}
-                        </span>
-                      </button>
-                    );
-                  },
-                )}
-              </div>
-            </GameCard>
-
-            <GameCard
-              eyebrow="2 · Lineage"
-              title={mode === "pretrain" ? "Name & family" : "Base model"}
-            >
-              <div className="space-y-2.5">
-                {mode === "continue" ? (
-                  <div className="space-y-2">
-                    <label className="block text-[0.8125rem] text-muted">
-                      Continue from
-                      <select
-                        value={continueFromId}
-                        onChange={(e) => setContinueFromId(e.target.value)}
-                        className="mt-1 w-full rounded-md border border-line bg-void px-2 py-1.5 text-sm text-bone outline-none"
-                      >
-                        <option value="">Select model…</option>
-                        {teachers.map((t) => (
-                          <option key={t.id} value={t.id}>
-                            {t.name} · {formatParams(t.paramsB)} ·{" "}
-                            {modelEvidenceLabel(t)}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    {continueModel ? (
-                      <div className="rounded-lg border border-mint/30 bg-mint/5 p-3">
-                        <div className="flex flex-wrap items-start justify-between gap-2">
-                          <div>
-                            <p className="hud-eyebrow text-mint">New checkpoint version</p>
-                            <strong className="mt-0.5 block text-sm text-bone">{modelIteration.name}</strong>
-                          </div>
-                          <span className="rounded-full border border-line/70 bg-void/45 px-2 py-1 font-mono text-[0.625rem] uppercase tracking-[0.1em] text-muted">
-                            weights inherited
-                          </span>
-                        </div>
-                        <p className="mt-2 text-[0.6875rem] leading-relaxed text-muted">
-                          Architecture, parameter topology, numerics and model stack are locked to {continueModel.name}. Add fresh data now, then apply SFT, RLHF, process or tools training before releasing this as a new version.
-                        </p>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                {mode === "distill" ? (
-                  <div className="space-y-2 rounded-md border border-research/30 bg-research/5 p-2.5">
-                    <label className="block text-[0.8125rem] text-muted">
-                      Teacher
-                      <select
-                        value={teacherId}
-                        onChange={(e) => setTeacherId(e.target.value)}
-                        className="mt-1 w-full rounded-md border border-line bg-void px-2 py-1.5 text-sm text-bone outline-none"
-                      >
-                        <option value="">Select teacher…</option>
-                        {teachers.map((t) => (
-                          <option key={t.id} value={t.id}>
-                            {t.name} · {formatParams(t.paramsB)} ·{" "}
-                            {t.release === "internal" ? "internal" : "public"} ·
-                            {" "}{modelEvidenceLabel(t)}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="block text-[0.8125rem] text-muted">
-                      Distill mix · teacher {Math.round(teacherShare * 100)}%
-                      <input
-                        type="range"
-                        min={5}
-                        max={95}
-                        step={1}
-                        value={Math.round(teacherShare * 100)}
-                        onChange={(e) =>
-                          setTeacherShare(Number(e.target.value) / 100)
-                        }
-                        className="mt-1 w-full"
-                      />
-                    </label>
-                    {distillTeacher ? (
-                      <p className="text-[0.6875rem] leading-snug text-muted">
-                        Expected transfer ≈{" "}
-                        <span className="font-mono text-mint">
-                          {expectedDistillTransferPct}%
-                        </span>{" "}
-                        of teacher capability (size gap{" "}
-                        {formatParams(distillTeacher.paramsB)} →{" "}
-                        {formatParams(paramsB)}, ±6% from data quality and
-                        run-to-run variance).
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                <div className="space-y-2.5">
-                  <div className="grid items-end gap-2 lg:grid-cols-[minmax(12rem,1fr)_auto]">
-                    <div className="block min-w-0 text-[0.8125rem] text-muted">
-                      <label htmlFor="model-family-name">
-                        {mode === "continue" ? "New version name" : "Model name"}
-                      </label>
-                      <div className={`relative mt-1 flex rounded-md border bg-void focus-within:border-mint/50 ${nameTaken ? "border-danger/60" : "border-line"}`}>
-                        <input
-                          id="model-family-name"
-                          value={name}
-                          onChange={(event) => setName(event.target.value)}
-                          className="min-w-0 flex-1 bg-transparent px-2 py-1.5 pr-12 text-sm text-bone outline-none"
-                          aria-invalid={nameTaken}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setName(generateUniqueModelName({
-                            playerModels: state.player.models,
-                            rivalModels: state.rivals.flatMap((rival) => rival.models),
-                            jobs,
-                          }))}
-                          className="absolute inset-y-0 right-0 grid w-11 place-items-center text-muted transition hover:bg-panel-2 hover:text-mint"
-                          title="Generate a unique name"
-                          aria-label="Generate unique model name"
-                        >
-                          <DiceFive aria-hidden="true" size={18} weight="duotone" />
-                        </button>
-                      </div>
-                    </div>
-                    <fieldset className="min-w-0">
-                      <legend className="text-[0.8125rem] text-muted">
-                        Backbone
-                      </legend>
-                      <div
-                        className="mt-1 flex flex-wrap gap-1"
-                        role="radiogroup"
-                        aria-label="Backbone"
-                      >
-                        {BACKBONE_OPTIONS.map((option) => {
-                          const candidatePreset =
-                            option.value === "diffusion" &&
-                            productPreset !== "image_generation" &&
-                            productPreset !== "video_generation"
-                              ? "image_generation"
-                              : productPreset;
-                          const locked = !trainingUnlockEligibility({
-                            family: familyFromSpec(
-                              option.value,
-                              candidatePreset,
-                            ),
-                            backbone: option.value,
-                            productPreset: candidatePreset,
-                            researchUnlocked: unlocked,
-                          }).ok;
-                          const on = backbone === option.value;
-                          return (
-                            <button
-                              key={option.value}
-                              type="button"
-                              role="radio"
-                              aria-checked={on}
-                              disabled={locked || mode === "continue"}
-                              title={
-                                mode === "continue"
-                                  ? "Inherited from the source checkpoint"
-                                  : locked
-                                    ? "Research required"
-                                    : option.label
-                              }
-                              onClick={() => {
-                                setBackbone(option.value);
-                                const nextPreset = candidatePreset;
-                                if (nextPreset !== productPreset)
-                                  setProductPreset(nextPreset);
-                                setWeights(
-                                  defaultTrainingDataWeights(
-                                    familyFromSpec(option.value, nextPreset),
-                                    nextPreset,
-                                  ),
+                          !canStart
+                            ? (() => {
+                                const firstHard = blockersWithName.find(
+                                  (item) => item.tone !== "warning",
                                 );
-                              }}
-                              className={`min-h-11 rounded-md border px-2.5 py-1.5 text-[0.75rem] transition disabled:cursor-not-allowed disabled:opacity-40 sm:min-h-0 ${
-                                on
-                                  ? "border-train/45 bg-train/15 text-train"
-                                  : "border-line text-muted hover:text-bone"
-                              }`}
-                            >
-                              {option.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </fieldset>
-                  </div>
-                  {nameTaken ? (
-                    <p className="text-[0.75rem] text-danger" role="alert">
-                      {MODEL_NAME_TAKEN_MESSAGE}
-                    </p>
-                  ) : null}
-                  <fieldset>
-                    <legend className="text-[0.8125rem] text-muted">
-                      Product / I/O preset
-                    </legend>
+                                return firstHard
+                                  ? String(firstHard.text)
+                                  : "Cannot start";
+                              })()
+                            : undefined
+                        }
+                        className="w-full sm:w-auto"
+                        onClick={startConfiguredTraining}
+                      >
+                        Start{" "}
+                        {mode === "distill"
+                          ? "distillation"
+                          : mode === "continue"
+                            ? "continue-train"
+                            : "training"}{" "}
+                        · {money(upfront)}
+                      </HudButton>
+                    ) : null
+                  }
+                >
+                  <div data-model-new-workflow="true" className="space-y-3">
                     <div
-                      className="mt-1.5 flex flex-wrap gap-1.5"
-                      role="radiogroup"
-                      aria-label="Product preset"
+                      hidden={newModelStep !== "define"}
+                      data-model-step="define"
+                      className="space-y-3"
                     >
-                      {PRODUCT_OPTIONS.map((option) => {
-                        const locked = !productUnlocked(option.value);
-                        const on = productPreset === option.value;
-                        return (
-                          <button
-                            key={option.value}
-                            type="button"
-                            role="radio"
-                            aria-checked={on}
-                            disabled={locked || mode === "continue"}
-                            title={
-                              mode === "continue"
-                                ? "Inherited from the source checkpoint"
-                                : locked
-                                  ? "Research required"
-                                  : option.label
-                            }
-                            onClick={() => {
-                              setProductPreset(option.value);
-                              const nextBackbone =
-                                option.value === "image_generation" ||
-                                option.value === "video_generation"
-                                  ? "diffusion"
-                                  : backbone === "diffusion"
-                                    ? "dense"
-                                    : backbone;
-                              if (nextBackbone !== backbone)
-                                setBackbone(nextBackbone);
-                              const nextFamily = familyFromSpec(
-                                nextBackbone,
-                                option.value,
-                              );
-                              setWeights(
-                                defaultTrainingDataWeights(
-                                  nextFamily,
-                                  option.value,
-                                ),
-                              );
-                              setRealDataMTok(
-                                Math.min(
-                                  processedAvail,
-                                  recommendedTrainingDataMTok({
-                                    paramsB,
-                                    activeParamsB:
-                                      nextBackbone === "moe"
-                                        ? activeParamsB
-                                        : undefined,
-                                    family: nextFamily,
-                                    backbone: nextBackbone,
-                                    trainShare,
-                                  }),
-                                ),
-                              );
-                            }}
-                            className={`min-h-11 rounded-md border px-2.5 py-1.5 text-[0.75rem] transition disabled:cursor-not-allowed disabled:opacity-40 sm:min-h-0 ${
-                              on
-                                ? "border-mint/45 bg-mint/15 text-mint"
-                                : "border-line text-muted hover:text-bone"
-                            }`}
-                          >
-                            {option.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </fieldset>
-                </div>
-              </div>
-            </GameCard>
-
-            <GameCard
-              eyebrow="3 · Recipe"
-              title="Size, data mix & volume"
-              tone="train"
-            >
-              <div className="space-y-3">
-                <div className="rounded-md border border-line/60 bg-void/25 p-2.5">
-                  <SizeSlider
-                    label={backbone === "moe" ? "Total size" : "Model size"}
-                    value={paramsB}
-                    disabled={mode === "continue"}
-                    disabledReason={
-                      mode === "continue"
-                        ? "Size is locked during continuation — it inherits the base checkpoint."
-                        : undefined
-                    }
-                    onChange={(p) => {
-                      const next = applyParamsB(p);
-                      setSizeVal(next.val);
-                      setSizeUnit(next.unit);
-                      if (backbone === "moe") {
-                        const act = Math.min(p, Math.max(0.1, p * 0.1));
-                        const a = applyParamsB(act);
-                        setActiveVal(a.val);
-                        setActiveUnit(a.unit);
-                      }
-                    }}
-                  />
-                  {backbone === "moe" && mode !== "continue" ? (
-                    <div className="mt-2">
-                      <SizeSlider
-                        label={`Active params (${
-                          paramsB > 0
-                            ? (((activeParamsB ?? 0) / paramsB) * 100).toFixed(
-                                0,
-                              )
-                            : 0
-                        }% of total)`}
-                        value={activeParamsB ?? 1}
-                        onChange={(p) => {
-                          const capped = Math.min(paramsB, Math.max(0.01, p));
-                          const a = applyParamsB(capped);
-                          setActiveVal(a.val);
-                          setActiveUnit(a.unit);
-                        }}
-                        max={paramsB}
-                        min={0.01}
-                        stops={PARAM_PRESETS.filter(
-                          (p) => p.paramsB <= paramsB,
-                        ).map((p) => ({
-                          label: p.label,
-                          paramsB: p.paramsB,
-                        }))}
-                      />
-                    </div>
-                  ) : null}
-                </div>
-
-                <div className="rounded-md border border-mint/25 bg-mint/5 p-2.5">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div>
-                      <span className="hud-eyebrow">Training volume</span>
-                      <strong className="block font-mono text-base text-bone">
-                        {formatTokens(dataMTok)} total
-                      </strong>
-                    </div>
-                    <div className="text-right font-mono text-[0.6875rem]">
-                      <span className="text-mint">
-                        {formatTokens(syntheticProfile.realMTok)} real
-                      </span>
-                      {synthExpansionUnlocked ? (
-                        <>
-                          <span className="mx-1 text-muted">+</span>
-                          <span className="text-research">
-                            {formatTokens(syntheticProfile.syntheticMTok)} synth
-                          </span>
-                        </>
-                      ) : null}
-                    </div>
-                  </div>
-                  <p className="mt-1 text-[0.75rem] text-muted">
-                    {mode === "continue" ? (
-                      <>
-                        New since checkpoint:{" "}
-                        <strong className="text-mint">
-                          {formatTokens(newSinceContinue)}
-                        </strong>
-                        {priorTokens > 0 ? (
-                          <>
-                            {" "}
-                            · lifetime on weights {formatTokens(priorTokens)}
-                          </>
-                        ) : null}
-                      </>
-                    ) : (
-                      <>
-                        Corpus {formatTokens(processedAvail)} · min{" "}
-                        {formatTokens(minMTok)} · suggested{" "}
-                        {formatTokens(recData)}
-                      </>
-                    )}
-                  </p>
-                  {dataGuidance ? (
-                    <div className="mt-2 rounded-md border border-line/60 bg-void/35 px-2.5 py-2 text-[0.6875rem] leading-5">
-                      <p
-                        className={
-                          trainingForecast.dataGuidance?.rawStrongTargetMet
-                            ? "text-mint"
-                            : "text-amber"
-                        }
+                      <GameCard
+                        eyebrow="Define"
+                        title="How do you want to train?"
+                        tone="train"
                       >
-                        {dataGuidance.headline}
-                      </p>
-                      <p className="text-muted">{dataGuidance.reductions}</p>
-                    </div>
-                  ) : null}
-                  {synthExpansionUnlocked ? (
-                    <label className="mt-2 block text-[0.8125rem] text-muted">
-                      Real corpus ·{" "}
-                      {formatTokens(Math.min(realDataMTok, processedAvail))}
-                      <input
-                        type="range"
-                        min={1}
-                        max={Math.max(
-                          1,
-                          Math.round(
-                            mode === "continue"
-                              ? Math.max(1, newSinceContinue)
-                              : realVolMax,
-                          ),
-                        )}
-                        step={Math.max(1, Math.round(realVolMax / 200))}
-                        value={Math.min(
-                          mode === "continue"
-                            ? Math.max(1, newSinceContinue)
-                            : realVolMax,
-                          Math.max(1, realDataMTok),
-                        )}
-                        onChange={(event) =>
-                          setRealDataMTok(Number(event.target.value))
-                        }
-                        className="mt-1 w-full"
-                      />
-                    </label>
-                  ) : null}
-                  <div className="mt-2 rounded-md border border-line/70 bg-void/40 px-2.5 py-2 text-[0.6875rem]">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-muted">Real / synthetic mix</span>
-                      <span className="font-mono tabular-nums text-bone">
-                        {formatTokens(realDataMTok)} real
-                        {effectiveSyntheticMultiplier > 0 ? (
-                          <span className="text-gold">
-                            {" "}
-                            + {formatTokens(
-                              Math.max(0, dataMTok - realDataMTok),
-                            )}{" "}
-                            synthetic ({effectiveSyntheticMultiplier.toFixed(1)}×)
-                          </span>
-                        ) : (
-                          <span> · no synthetic</span>
-                        )}
-                      </span>
-                    </div>
-                    <p className="mt-1 leading-snug text-muted">
-                      {synthExpansionUnlocked && strongestTeacher
-                        ? "Drag any radar domain past its usable stock to draw generated tokens; the real:synthetic ratio follows the chart. Hit Use all data to max out owned corpus first."
-                        : "Unlock Synthetic Generators (or distill from a teacher) to drag past owned stock with generated tokens."}
-                    </p>
-                  </div>
-                  {!synthUnlocked && distillTeacher ? (
-                    <p className="mt-1 text-[0.625rem] leading-snug text-muted">
-                      {distillTeacher.name} is the generator — synthetic tokens
-                      past your owned corpus come from the teacher for this
-                      distill run.
-                    </p>
-                  ) : null}
-                  <label className="mt-2 block text-[0.8125rem] text-muted">
-                    Train {Math.round(trainShare * 100)}% / Verify{" "}
-                    {Math.round((1 - trainShare) * 100)}%
-                    <input
-                      type="range"
-                      min={40}
-                      max={95}
-                      step={1}
-                      value={Math.round(trainShare * 100)}
-                      onChange={(e) =>
-                        setTrainShare(Number(e.target.value) / 100)
-                      }
-                      className="mt-1 w-full"
-                    />
-                  </label>
-                  {!mixUnlocked ? (
-                    <ResearchUnlockLink
-                      className="mt-2"
-                      nodeId="data_mix"
-                      label="Unlock automated Mixture Engineering"
-                    />
-                  ) : null}
-                  {!synthUnlocked ? (
-                    <ResearchUnlockLink
-                      className="mt-1"
-                      nodeId="data_synth"
-                      label="Unlock Synthetic Generators"
-                    />
-                  ) : null}
-                </div>
-
-                <TrainingDataRadar
-                  weights={weights}
-                  totalMTok={dataMTok}
-                  data={labData}
-                  autoBalanceDisabled={!mixUnlocked}
-                  syntheticUnlocked={synthUnlocked}
-                  syntheticMultiplier={effectiveSyntheticMultiplier}
-                  syntheticExpansionAvailable={
-                    synthExpansionUnlocked && !!strongestTeacher
-                  }
-                  syntheticHeadroomMTok={
-                    distillSyntheticHeadroom ?? undefined
-                  }
-                  syntheticSource={distillTeacher ? "teacher" : "lab"}
-                  teachers={teachers}
-                  syntheticTeacherIds={syntheticTeacherIds}
-                  includeSynthHQ={includeSynthHQ && synthUnlocked}
-                  includeSynthLQ={includeSynthLQ && synthUnlocked}
-                  previousWeights={previousCorpusWeights}
-                  showPreviousOverlay={showPreviousCorpus}
-                  onTogglePreviousOverlay={() =>
-                    setShowPreviousCorpus((v) => !v)
-                  }
-                  optimalByDomainMTok={optimalByDomainMTok}
-                  onChange={(nextWeights, nextTotalMTok, meta) => {
-                    setWeights(nextWeights);
-                    if (!meta) {
-                      setRealDataMTok(
-                        nextTotalMTok /
-                          Math.max(1, 1 + effectiveSyntheticMultiplier),
-                      );
-                      return;
-                    }
-                    // Derive the real:synthetic ratio from the drag: real is
-                    // the coverage of owned usable stock; anything past it is
-                    // generated tokens. Keep real within the 8× expansion bound
-                    // so real × (1 + mult) reproduces the dragged total exactly.
-                    const expansionOn =
-                      synthExpansionUnlocked && !!strongestTeacher;
-                    let real = expansionOn
-                      ? Math.min(
-                          nextTotalMTok,
-                          Math.max(meta.realMTok, nextTotalMTok / 8),
-                        )
-                      : nextTotalMTok;
-                    if (real <= 1e-9) real = nextTotalMTok;
-                    const mult = expansionOn
-                      ? Math.max(
-                          0,
-                          Math.min(7, nextTotalMTok / Math.max(1e-9, real) - 1),
-                        )
-                      : 0;
-                    real = nextTotalMTok / (1 + mult);
-                    setSyntheticMultiplier(mult);
-                    setAllowSynthetic(mult > 0);
-                    if (mult > 0) setIncludeSynthHQ(true);
-                    setRealDataMTok(real);
-                  }}
-                  onAutoBalance={() =>
-                    setWeights(
-                      bestRecipeWeights(
-                        family,
-                        productPreset,
-                        dataMTok,
-                        labData,
-                      ),
-                    )
-                  }
-                  onTeacherChange={(domain, teacher) =>
-                    setSyntheticTeacherIds((current) => ({
-                      ...current,
-                      [domain]: teacher,
-                    }))
-                  }
-                  onIncludeSynthHQChange={(value) => {
-                    setAllowSynthetic(value || includeSynthLQ);
-                    setIncludeSynthHQ(value);
-                  }}
-                  onIncludeSynthLQChange={(value) => {
-                    setAllowSynthetic(value || includeSynthHQ);
-                    setIncludeSynthLQ(value);
-                  }}
-                />
-              </div>
-            </GameCard>
-
-            <GameCard
-              eyebrow="4 · Advanced"
-              title="Numerics & model stack"
-              actions={
-                <HudButton
-                  type="button"
-                  variant="ghost"
-                  className="!min-h-9 !px-2.5 !py-1 text-[0.75rem]"
-                  aria-expanded={advancedOpen}
-                  onClick={() => setAdvancedOpen((open) => !open)}
-                >
-                  {advancedOpen ? "Hide" : "Configure"}
-                </HudButton>
-              }
-            >
-              {advancedOpen ? (
-              <div className="space-y-3">
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <label className="text-[0.8125rem] text-muted">
-                    Compute format
-                    <select
-                      value={trainingFormat}
-                      disabled={mode === "continue"}
-                      title={mode === "continue" ? "Inherited from the source checkpoint" : undefined}
-                      onChange={(event) => {
-                        const next = event.target
-                          .value as TrainingComputeFormat;
-                        setTrainingFormat(next);
-                        if (
-                          nativeWeightFormat === "ternary_1_58" &&
-                          next !== "bf16_mixed"
-                        ) {
-                          setNativeWeightFormat("float");
-                        }
-                      }}
-                      className="mt-1 w-full rounded-md border border-line bg-void px-2 py-1.5 text-sm text-bone outline-none disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {TRAINING_FORMAT_OPTIONS.map((option) => {
-                        const locked = Boolean(
-                          option.research &&
-                          !unlocked.includes(option.research),
-                        );
-                        const optionNumerics = {
-                          computeFormat: option.value,
-                          nativeWeightFormat:
-                            nativeWeightFormat === "ternary_1_58" &&
-                            option.value === "bf16_mixed"
-                              ? nativeWeightFormat
-                              : ("float" as const),
-                          recipeVersion: 1,
-                        };
-                        const optionEconomics =
-                          trainingNumericsEconomicsProfile(optionNumerics);
-                        const optionMemory = estimateTrainingMemoryGb({
-                          paramsB: trainParamsB,
-                          activeParamsB,
-                          family: backbone === "moe" ? "moe" : family,
-                          numerics: optionNumerics,
-                          activationCheckpointing:
-                            unlocked.includes("opt_checkpoint"),
-                        });
-                        const optionTradeoff = `quality ${Math.round(optionEconomics.qualityCeilingMultiplier * 100)}% · risk ${optionEconomics.stabilityRisk >= 0.1 || optionEconomics.lossVolatilityMultiplier >= 1.5 ? "high" : optionEconomics.stabilityRisk > 0.02 || optionEconomics.lossVolatilityMultiplier > 1.1 ? "medium" : "low"} · compute ${optionEconomics.trainingWorkMultiplier.toFixed(2)}× · HBM ${num(optionMemory.requiredHbmGb, 0)} GB · cost ${optionEconomics.upfrontCashMultiplier.toFixed(2)}×/${optionEconomics.dailyCashMultiplier.toFixed(2)}×`;
-                        return (
-                          <option
-                            key={option.value}
-                            value={option.value}
-                            disabled={locked}
-                            title={optionTradeoff}
-                          >
-                            {TRAINING_PRECISION_PROFILES[option.value].label}
-                            {` · ${optionTradeoff}`}
-                            {locked ? " · research required" : ""}
-                          </option>
-                        );
-                      })}
-                    </select>
-                  </label>
-                  <label className="text-[0.8125rem] text-muted">
-                    Native weights
-                    <select
-                      value={nativeWeightFormat}
-                      disabled={mode === "continue"}
-                      title={mode === "continue" ? "Inherited from the source checkpoint" : undefined}
-                      onChange={(event) => {
-                        const next = event.target.value as NativeWeightFormat;
-                        setNativeWeightFormat(next);
-                        if (next === "ternary_1_58")
-                          setTrainingFormat("bf16_mixed");
-                      }}
-                      className="mt-1 w-full rounded-md border border-line bg-void px-2 py-1.5 text-sm text-bone outline-none disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      <option value="float">Float weights</option>
-                      <option
-                        value="ternary_1_58"
-                        disabled={
-                          family !== "dense" ||
-                          !unlocked.includes("dense_bitnet")
-                        }
-                      >
-                        1.58-bit native / BitNet
-                        {family !== "dense" ||
-                        !unlocked.includes("dense_bitnet")
-                          ? " · research + dense required"
-                          : ""}
-                      </option>
-                    </select>
-                  </label>
-                </div>
-                <div
-                  className="rounded-md border border-line/60 bg-void/45 p-2 font-mono text-[0.6875rem] leading-relaxed text-muted"
-                  title={`Inference cost ${numericsEconomics.inferenceCostMultiplier.toFixed(2)}× · loss volatility ${numericsEconomics.lossVolatilityMultiplier.toFixed(2)}× · packed checkpoint ${num(trainingMemory.packedCheckpointGb, 1)} GB`}
-                >
-                  <span className="text-bone">{numericsEconomics.label}</span>
-                  {` · quality ${Math.round(numericsEconomics.qualityCeilingMultiplier * 100)}% · ${precisionRisk} stability risk · compute ${numericsEconomics.trainingWorkMultiplier.toFixed(2)}× · HBM ${num(trainingMemory.requiredHbmGb, 0)} GB · host ${num(trainingMemory.requiredSystemRamGb, 0)} GB`}
-                  <span className="block text-[0.625rem] text-muted/90">
-                    Setup {numericsEconomics.upfrontCashMultiplier.toFixed(2)}×
-                    {" · "}daily {numericsEconomics.dailyCashMultiplier.toFixed(2)}×
-                    {" · "}serve {numericsEconomics.inferenceCostMultiplier.toFixed(2)}×
-                    {" · "}volatility {numericsEconomics.lossVolatilityMultiplier.toFixed(2)}×
-                  </span>
-                </div>
-
-                <div>
-                  <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
-                    <h4 className="text-[0.8125rem] font-semibold text-bone">
-                      Model stack
-                    </h4>
-                    <div className="flex flex-wrap gap-1 font-mono text-[0.625rem]">
-                      <span className="rounded-full bg-mint/10 px-2 py-0.5 text-mint">
-                        host −
-                        {Math.round((1 - stackModifiers.hostingMult) * 100)}%
-                      </span>
-                      <span className="rounded-full bg-infer/10 px-2 py-0.5 text-infer">
-                        speed +
-                        {Math.round((stackModifiers.speedMult - 1) * 100)}%
-                      </span>
-                    </div>
-                  </div>
-                  <CardGrid min="10rem" className="anim-stagger">
-                    {stackModules.map((module) => {
-                      const available = unlocked.includes(module.id);
-                      const selected = selectedStack.includes(module.id);
-                      return (
-                        <button
-                          key={module.id}
-                          type="button"
-                          aria-pressed={available ? selected : undefined}
-                          disabled={mode === "continue"}
-                          title={mode === "continue" ? "Inherited from the source checkpoint" : undefined}
-                          onClick={() => {
-                            if (!available) {
-                              openResearchNode(module.id);
-                              return;
-                            }
-                            setModelStack((current) =>
-                              current.includes(module.id)
-                                ? current.filter((id) => id !== module.id)
-                                : [...current, module.id],
+                        <div className="grid gap-2 sm:grid-cols-3">
+                          {(
+                            ["pretrain", "continue", "distill"] as TrainMode[]
+                          ).map((option) => {
+                            const locked =
+                              (option === "continue" || option === "distill") &&
+                              teachers.length === 0;
+                            const on = mode === option;
+                            return (
+                              <HudButton
+                                key={option}
+                                type="button"
+                                variant="ghost"
+                                aria-pressed={on}
+                                disabled={locked}
+                                title={
+                                  locked
+                                    ? "Need an existing model first"
+                                    : MODE_META[option].hint
+                                }
+                                onClick={() => setMode(option)}
+                                className={`!min-h-11 !justify-start !rounded-md !border !px-3 !py-2.5 !text-left !normal-case !tracking-normal !text-bone transition sm:!min-h-0 ${
+                                  on
+                                    ? "!border-train/50 !bg-train/10"
+                                    : "!border-line/70 !bg-void/30 hover:!border-train/30"
+                                } disabled:cursor-not-allowed disabled:opacity-40`}
+                              >
+                                <span className="block text-sm font-semibold text-bone">
+                                  {MODE_META[option].label}
+                                </span>
+                                <span className="mt-0.5 block text-[0.75rem] text-muted">
+                                  {MODE_META[option].hint}
+                                </span>
+                              </HudButton>
                             );
-                          }}
-                          className={`hover-lift rounded-md border p-2 text-left transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                            selected
-                              ? "border-mint/40 bg-mint/10"
-                              : available
-                                ? "border-line bg-panel-2/70"
-                                : "border-line/60 bg-void/45 opacity-65"
-                          }`}
-                        >
-                          <span className="flex items-center justify-between gap-1 text-[0.75rem] font-medium text-bone">
-                            {module.name}
-                            <span
-                              className={`font-mono text-[0.625rem] uppercase tracking-[0.12em] ${
-                                selected
-                                  ? "text-mint"
-                                  : available
-                                    ? "text-muted"
-                                    : "text-amber"
-                              }`}
-                            >
-                              {selected
-                                ? "On"
-                                : available
-                                  ? module.focus
-                                  : "Research"}
-                            </span>
-                          </span>
-                          <span className="mt-0.5 block text-[0.6875rem] leading-snug text-muted">
-                            {module.description}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </CardGrid>
-                </div>
-              </div>
-              ) : (
-                <button
-                  type="button"
-                  className="flex min-h-11 w-full items-center justify-between gap-3 rounded-md border border-line/55 bg-void/35 px-2.5 py-2 text-left"
-                  onClick={() => setAdvancedOpen(true)}
-                >
-                  <span className="min-w-0">
-                    <strong className="block truncate text-[0.8125rem] font-medium text-bone">
-                      {numericsEconomics.label} · {selectedStack.length} stack
-                      modules
-                    </strong>
-                    <span className="mt-0.5 block text-[0.6875rem] text-muted">
-                      Quality, memory, hosting and inference tradeoffs
-                    </span>
-                  </span>
-                  <span className="shrink-0 font-mono text-[0.6875rem] text-mint">
-                    Edit
-                  </span>
-                </button>
-              )}
-            </GameCard>
+                          })}
+                        </div>
+                      </GameCard>
 
-            <GameCard
-              eyebrow="5 · Launch"
-              title="Forecast & start"
-              tone="train"
-            >
-              <div className="space-y-3">
-                <label className="block text-[0.8125rem] text-muted">
-                  Compute priority · {computePriority}/100
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    step={5}
-                    value={computePriority}
-                    onChange={(event) =>
-                      setComputePriority(Number(event.target.value))
-                    }
-                    className="mt-1 w-full"
-                  />
-                </label>
-
-                <div
-                  className="rounded-md border border-line/60 bg-void/35 p-3"
-                  title={`Work ${num(trainingForecast.targetPfDays, 1)} PF·d · power ${mw(trainingForecast.powerMw)} · setup ${money(setupCost)} · data ${money(dataCost)} · daily ${money(dailyCost)}/d · capability ceiling ${capabilityLimit.capability.toFixed(1)} (${capabilityLimit.limitingFactor}) · serving host RAM ${num(hostRamGb, 0)} GB ${hostWeightFormat}`}
-                >
-                  <p className="text-[0.8125rem] text-bone">
-                    {forecastVerdict}
-                  </p>
-                  <div className="mt-2 grid grid-cols-2 gap-2 xl:grid-cols-4">
-                    <MetricTile
-                      label="ETA"
-                      value={
-                        daysEst === Infinity
-                          ? "No pool"
-                          : `${daysEst.toFixed(0)}d`
-                      }
-                      detail={
-                        daysEst === Infinity
-                          ? "need training pool"
-                          : `${num(trainingForecast.targetPfDays, 1)} PF·d · current allocation estimate`
-                      }
-                      tone={
-                        daysEst === Infinity || daysEst > 120
-                          ? "warning"
-                          : "positive"
-                      }
-                    />
-                    <MetricTile
-                      label="Budget"
-                      value={money(upfront)}
-                      detail={
-                        <>
-                          setup {money(setupCost)} · data {money(dataCost)}
-                          <span className="block">burn {money(dailyCost)}/d</span>
-                        </>
-                      }
-                      tone={state.player.cash < upfront ? "danger" : "neutral"}
-                    />
-                    <MetricTile
-                      label="Capability"
-                      value={trainingForecast.expectedCapability.toFixed(1)}
-                      detail={`ceiling ${capabilityLimit.capability.toFixed(1)} · ${trainingForecast.interactiveTokPerSec.toFixed(0)} tok/s`}
-                      tone="positive"
-                    />
-                    <MetricTile
-                      label="Memory"
-                      value={`${num(prospectiveRamFit.candidateAllocatedGb, 0)} / ${num(needVramGb, 0)} GB`}
-                      detail={
-                        <>
-                          HBM assigned / required
-                          <span className="block">
-                            host {num(prospectiveRamFit.candidateSystemRamAllocatedGb, 0)} / {num(trainingMemory.requiredSystemRamGb, 0)} GB
-                          </span>
-                        </>
-                      }
-                      tone={prospectiveRamFit.ready ? "positive" : "danger"}
-                    />
-                  </div>
-                  <div className="mt-2 grid gap-x-4 gap-y-1 rounded-md border border-line/40 bg-panel-2/35 px-2.5 py-2 sm:grid-cols-2">
-                    {[
-                      {
-                        label: "Compute",
-                        value:
-                          snap.pools.training >= 0.05 && formatHardwareAvailable
-                            ? 1
-                            : 0,
-                        text: `${num(snap.pools.training, 2)} PF · gen ${maxHardwareGeneration || "—"}`,
-                        ready:
-                          snap.pools.training >= 0.05 && formatHardwareAvailable,
-                      },
-                      {
-                        label: "HBM",
-                        value:
-                          prospectiveRamFit.candidateAllocatedGb /
-                          Math.max(1, needVramGb),
-                        text: `${num(prospectiveRamFit.candidateAllocatedGb, 0)} / ${num(needVramGb, 0)} GB`,
-                        ready:
-                          prospectiveRamFit.candidateAllocatedGb + 1e-9 >=
-                          needVramGb,
-                      },
-                      {
-                        label: "Host RAM",
-                        value:
-                          prospectiveRamFit.candidateSystemRamAllocatedGb /
-                          Math.max(1, trainingMemory.requiredSystemRamGb),
-                        text: `${num(prospectiveRamFit.candidateSystemRamAllocatedGb, 0)} / ${num(trainingMemory.requiredSystemRamGb, 0)} GB`,
-                        ready:
-                          prospectiveRamFit.candidateSystemRamAllocatedGb +
-                            1e-9 >=
-                          trainingMemory.requiredSystemRamGb,
-                      },
-                      {
-                        label: "Data",
-                        value: trainingForecast.effectiveDataRatio,
-                        text: `${trainingForecast.effectiveDataRatio.toFixed(2)}× · modality ${trainingForecast.modalityComputeMult.toFixed(2)}×`,
-                        ready: trainingForecast.effectiveDataRatio >= 0.85,
-                      },
-                    ].map((readiness) => (
-                      <div
-                        key={readiness.label}
-                        className="grid grid-cols-[4rem_minmax(0,1fr)] items-center gap-2 font-mono text-[0.625rem] sm:grid-cols-[4.5rem_1fr_auto]"
-                        title={`${readiness.label}: ${readiness.text}`}
+                      <GameCard
+                        eyebrow="Define · Lineage"
+                        title={
+                          mode === "pretrain" ? "Name & family" : "Base model"
+                        }
                       >
-                        <span className="text-muted">{readiness.label}</span>
-                        <span className="h-1.5 overflow-hidden rounded-full bg-void">
-                          <span
-                            className={`block h-full rounded-full ${readiness.ready ? "bg-mint" : "bg-amber"}`}
-                            style={{
-                              width: `${Math.max(0, Math.min(1, readiness.value)) * 100}%`,
+                        <div className="space-y-2.5">
+                          {mode === "continue" ? (
+                            <div className="space-y-2">
+                              <label className="block text-[0.8125rem] text-muted">
+                                Continue from
+                                <HudSelect
+                                  value={continueFromId}
+                                  onChange={(e) =>
+                                    setContinueFromId(e.target.value)
+                                  }
+                                  className="mt-1 min-h-11 w-full text-sm"
+                                >
+                                  <option value="">Select model…</option>
+                                  {teachers.map((t) => (
+                                    <option key={t.id} value={t.id}>
+                                      {t.name} · {formatParams(t.paramsB)} ·{" "}
+                                      {modelEvidenceLabel(t)}
+                                    </option>
+                                  ))}
+                                </HudSelect>
+                              </label>
+                              {continueModel ? (
+                                <div className="rounded-lg border border-mint/30 bg-mint/5 p-3">
+                                  <div className="flex flex-wrap items-start justify-between gap-2">
+                                    <div>
+                                      <p className="hud-eyebrow text-mint">
+                                        New checkpoint version
+                                      </p>
+                                      <strong className="mt-0.5 block text-sm text-bone">
+                                        {modelIteration.name}
+                                      </strong>
+                                    </div>
+                                    <span className="rounded-full border border-line/70 bg-void/45 px-2 py-1 font-mono text-[0.625rem] uppercase tracking-[0.1em] text-muted">
+                                      weights inherited
+                                    </span>
+                                  </div>
+                                  <p className="mt-2 text-[0.6875rem] leading-relaxed text-muted">
+                                    Architecture, parameter topology, numerics
+                                    and model stack are locked to{" "}
+                                    {continueModel.name}. Add fresh data now,
+                                    then apply SFT, RLHF, process or tools
+                                    training before releasing this as a new
+                                    version.
+                                  </p>
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+
+                          {mode === "distill" ? (
+                            <div className="space-y-2 rounded-md border border-research/30 bg-research/5 p-2.5">
+                              <label className="block text-[0.8125rem] text-muted">
+                                Teacher
+                                <HudSelect
+                                  value={teacherId}
+                                  onChange={(e) => setTeacherId(e.target.value)}
+                                  className="mt-1 min-h-11 w-full text-sm"
+                                >
+                                  <option value="">Select teacher…</option>
+                                  {teachers.map((t) => (
+                                    <option key={t.id} value={t.id}>
+                                      {t.name} · {formatParams(t.paramsB)} ·{" "}
+                                      {t.release === "internal"
+                                        ? "internal"
+                                        : "public"}{" "}
+                                      · {modelEvidenceLabel(t)}
+                                    </option>
+                                  ))}
+                                </HudSelect>
+                              </label>
+                              <label className="block text-[0.8125rem] text-muted">
+                                Distill mix · teacher{" "}
+                                {(teacherShare * 100).toFixed(2)}%
+                                <HudRange
+                                  type="range"
+                                  min={5}
+                                  max={95}
+                                  step={1}
+                                  value={Math.round(teacherShare * 100)}
+                                  onChange={(e) =>
+                                    setTeacherShare(
+                                      Number(e.target.value) / 100,
+                                    )
+                                  }
+                                  className="mt-1"
+                                />
+                              </label>
+                              {distillTeacher ? (
+                                <p className="text-[0.6875rem] leading-snug text-muted">
+                                  Expected transfer ≈{" "}
+                                  <span className="font-mono text-mint">
+                                    {expectedDistillTransferPct}%
+                                  </span>{" "}
+                                  of teacher capability (size gap{" "}
+                                  {formatParams(distillTeacher.paramsB)} →{" "}
+                                  {formatParams(paramsB)}, ±6% from data quality
+                                  and run-to-run variance).
+                                </p>
+                              ) : null}
+                            </div>
+                          ) : null}
+
+                          <div className="space-y-2.5">
+                            <div className="grid items-end gap-2 lg:grid-cols-[minmax(12rem,1fr)_auto]">
+                              <div className="block min-w-0 text-[0.8125rem] text-muted">
+                                <label htmlFor="model-family-name">
+                                  {mode === "continue"
+                                    ? "New version name"
+                                    : "Model name"}
+                                </label>
+                                <div
+                                  className={`relative mt-1 flex rounded-md border bg-void focus-within:border-mint/50 ${nameTaken ? "border-danger/60" : "border-line"}`}
+                                >
+                                  <HudInput
+                                    id="model-family-name"
+                                    value={name}
+                                    onChange={(event) =>
+                                      setName(event.target.value)
+                                    }
+                                    className="min-h-11 min-w-0 flex-1 !border-0 !bg-transparent px-2 py-1.5 pr-12 text-sm text-bone outline-none"
+                                    aria-invalid={nameTaken}
+                                  />
+                                  <HudButton
+                                    type="button"
+                                    variant="ghost"
+                                    onClick={() =>
+                                      setName(
+                                        generateUniqueModelName({
+                                          playerModels: state.player.models,
+                                          rivalModels: state.rivals.flatMap(
+                                            (rival) => rival.models,
+                                          ),
+                                          jobs,
+                                        }),
+                                      )
+                                    }
+                                    className="!absolute !inset-y-0 !right-0 !grid !h-auto !min-h-11 !w-11 !place-items-center !border-0 !bg-transparent !p-0 !text-muted transition hover:!bg-panel-2 hover:!text-mint"
+                                    title="Generate a unique name"
+                                    aria-label="Generate unique model name"
+                                  >
+                                    <DiceFive
+                                      aria-hidden="true"
+                                      size={18}
+                                      weight="duotone"
+                                    />
+                                  </HudButton>
+                                </div>
+                              </div>
+                              <fieldset className="min-w-0">
+                                <legend className="text-[0.8125rem] text-muted">
+                                  Backbone
+                                </legend>
+                                <div
+                                  className="mt-1 flex flex-wrap gap-1"
+                                  role="radiogroup"
+                                  aria-label="Backbone"
+                                >
+                                  {BACKBONE_OPTIONS.map((option) => {
+                                    const candidatePreset =
+                                      option.value === "diffusion" &&
+                                      productPreset !== "image_generation" &&
+                                      productPreset !== "video_generation"
+                                        ? "image_generation"
+                                        : productPreset;
+                                    const locked = !trainingUnlockEligibility({
+                                      family: familyFromSpec(
+                                        option.value,
+                                        candidatePreset,
+                                      ),
+                                      backbone: option.value,
+                                      productPreset: candidatePreset,
+                                      researchUnlocked: unlocked,
+                                    }).ok;
+                                    const on = backbone === option.value;
+                                    return (
+                                      <HudButton
+                                        key={option.value}
+                                        type="button"
+                                        variant="ghost"
+                                        role="radio"
+                                        aria-checked={on}
+                                        disabled={locked || mode === "continue"}
+                                        title={
+                                          mode === "continue"
+                                            ? "Inherited from the source checkpoint"
+                                            : locked
+                                              ? "Research required"
+                                              : option.label
+                                        }
+                                        onClick={() => {
+                                          setBackbone(option.value);
+                                          const nextPreset = candidatePreset;
+                                          if (nextPreset !== productPreset)
+                                            setProductPreset(nextPreset);
+                                          setWeights(
+                                            defaultTrainingDataWeights(
+                                              familyFromSpec(
+                                                option.value,
+                                                nextPreset,
+                                              ),
+                                              nextPreset,
+                                            ),
+                                          );
+                                        }}
+                                        className={`!min-h-11 !rounded-md !border !px-2.5 !py-1.5 !text-[0.75rem] !normal-case !tracking-normal transition disabled:cursor-not-allowed disabled:opacity-40 sm:!min-h-0 ${
+                                          on
+                                            ? "!border-train/45 !bg-train/15 !text-train"
+                                            : "!border-line !bg-transparent !text-muted hover:!text-bone"
+                                        }`}
+                                      >
+                                        {option.label}
+                                      </HudButton>
+                                    );
+                                  })}
+                                </div>
+                              </fieldset>
+                            </div>
+                            {nameTaken ? (
+                              <p
+                                className="text-[0.75rem] text-danger"
+                                role="alert"
+                              >
+                                {MODEL_NAME_TAKEN_MESSAGE}
+                              </p>
+                            ) : null}
+                            <fieldset>
+                              <legend className="text-[0.8125rem] text-muted">
+                                Product / I/O preset
+                              </legend>
+                              <div
+                                className="mt-1.5 flex flex-wrap gap-1.5"
+                                role="radiogroup"
+                                aria-label="Product preset"
+                              >
+                                {PRODUCT_OPTIONS.map((option) => {
+                                  const locked = !productUnlocked(option.value);
+                                  const on = productPreset === option.value;
+                                  return (
+                                    <HudButton
+                                      key={option.value}
+                                      type="button"
+                                      variant="ghost"
+                                      role="radio"
+                                      aria-checked={on}
+                                      disabled={locked || mode === "continue"}
+                                      title={
+                                        mode === "continue"
+                                          ? "Inherited from the source checkpoint"
+                                          : locked
+                                            ? "Research required"
+                                            : option.label
+                                      }
+                                      onClick={() => {
+                                        setProductPreset(option.value);
+                                        const nextBackbone =
+                                          option.value === "image_generation" ||
+                                          option.value === "video_generation"
+                                            ? "diffusion"
+                                            : backbone === "diffusion"
+                                              ? "dense"
+                                              : backbone;
+                                        if (nextBackbone !== backbone)
+                                          setBackbone(nextBackbone);
+                                        const nextFamily = familyFromSpec(
+                                          nextBackbone,
+                                          option.value,
+                                        );
+                                        setWeights(
+                                          defaultTrainingDataWeights(
+                                            nextFamily,
+                                            option.value,
+                                          ),
+                                        );
+                                        setRealDataMTok(
+                                          Math.min(
+                                            processedAvail,
+                                            recommendedTrainingDataMTok({
+                                              paramsB,
+                                              activeParamsB:
+                                                nextBackbone === "moe"
+                                                  ? activeParamsB
+                                                  : undefined,
+                                              family: nextFamily,
+                                              backbone: nextBackbone,
+                                              trainShare,
+                                            }),
+                                          ),
+                                        );
+                                      }}
+                                      className={`!min-h-11 !rounded-md !border !px-2.5 !py-1.5 !text-[0.75rem] !normal-case !tracking-normal transition disabled:cursor-not-allowed disabled:opacity-40 sm:!min-h-0 ${
+                                        on
+                                          ? "!border-mint/45 !bg-mint/15 !text-mint"
+                                          : "!border-line !bg-transparent !text-muted hover:!text-bone"
+                                      }`}
+                                    >
+                                      {option.label}
+                                    </HudButton>
+                                  );
+                                })}
+                              </div>
+                            </fieldset>
+                          </div>
+                        </div>
+                      </GameCard>
+                    </div>
+                    <div
+                      hidden={newModelStep !== "data"}
+                      data-model-step="data"
+                      className="space-y-3"
+                    >
+                      <GameCard
+                        eyebrow="Data · Recipe"
+                        title="Size, data mix & volume"
+                        tone="train"
+                      >
+                        <div className="space-y-3">
+                          <div className="rounded-md border border-line/60 bg-void/25 p-2.5">
+                            <SizeSlider
+                              label={
+                                backbone === "moe" ? "Total size" : "Model size"
+                              }
+                              value={paramsB}
+                              disabled={mode === "continue"}
+                              disabledReason={
+                                mode === "continue"
+                                  ? "Size is locked during continuation — it inherits the base checkpoint."
+                                  : undefined
+                              }
+                              onChange={(p) => {
+                                const next = applyParamsB(p);
+                                setSizeVal(next.val);
+                                setSizeUnit(next.unit);
+                                if (backbone === "moe") {
+                                  const act = Math.min(
+                                    p,
+                                    Math.max(0.1, p * 0.1),
+                                  );
+                                  const a = applyParamsB(act);
+                                  setActiveVal(a.val);
+                                  setActiveUnit(a.unit);
+                                }
+                              }}
+                            />
+                            {backbone === "moe" && mode !== "continue" ? (
+                              <div className="mt-2">
+                                <SizeSlider
+                                  label={`Active params (${
+                                    paramsB > 0
+                                      ? (
+                                          ((activeParamsB ?? 0) / paramsB) *
+                                          100
+                                        ).toFixed(0)
+                                      : 0
+                                  }% of total)`}
+                                  value={activeParamsB ?? 1}
+                                  onChange={(p) => {
+                                    const capped = Math.min(
+                                      paramsB,
+                                      Math.max(0.01, p),
+                                    );
+                                    const a = applyParamsB(capped);
+                                    setActiveVal(a.val);
+                                    setActiveUnit(a.unit);
+                                  }}
+                                  max={paramsB}
+                                  min={0.01}
+                                  stops={PARAM_PRESETS.filter(
+                                    (p) => p.paramsB <= paramsB,
+                                  ).map((p) => ({
+                                    label: p.label,
+                                    paramsB: p.paramsB,
+                                  }))}
+                                />
+                              </div>
+                            ) : null}
+                          </div>
+
+                          <div className="models-training-volume rounded-md border border-mint/25 bg-mint/5 p-2.5">
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div>
+                                <span className="hud-eyebrow">Volume</span>
+                                <strong className="block font-mono text-base text-bone">
+                                  {formatTokens(dataMTok)} total
+                                </strong>
+                              </div>
+                              <div className="text-right font-mono text-[0.6875rem]">
+                                <span className="text-mint">
+                                  {formatTokens(syntheticProfile.realMTok)} real
+                                </span>
+                                {synthExpansionUnlocked ? (
+                                  <>
+                                    <span className="mx-1 text-muted">+</span>
+                                    <span className="text-research">
+                                      {formatTokens(
+                                        syntheticProfile.syntheticMTok,
+                                      )}{" "}
+                                      synth
+                                    </span>
+                                  </>
+                                ) : null}
+                              </div>
+                            </div>
+                            <div className="mt-2 grid grid-cols-3 gap-1.5 text-[0.6875rem]">
+                              <div className="rounded border border-line/60 bg-void/30 px-2 py-1.5">
+                                <span className="block text-muted">
+                                  Available
+                                </span>
+                                <strong className="font-mono tabular-nums text-bone">
+                                  {formatTokens(processedAvail)}
+                                </strong>
+                              </div>
+                              <div className="rounded border border-line/60 bg-void/30 px-2 py-1.5">
+                                <span className="block text-muted">
+                                  Minimum
+                                </span>
+                                <strong className="font-mono tabular-nums text-bone">
+                                  {formatTokens(minMTok)}
+                                </strong>
+                              </div>
+                              <div className="rounded border border-line/60 bg-void/30 px-2 py-1.5">
+                                <span className="block text-muted">
+                                  Suggested
+                                </span>
+                                <strong className="font-mono tabular-nums text-bone">
+                                  {formatTokens(recData)}
+                                </strong>
+                              </div>
+                            </div>
+                            {mode === "continue" ? (
+                              <p className="mt-1.5 text-[0.6875rem] text-muted">
+                                New since checkpoint{" "}
+                                <strong className="font-mono text-mint">
+                                  {formatTokens(newSinceContinue)}
+                                </strong>
+                                {priorTokens > 0
+                                  ? " · lifetime " + formatTokens(priorTokens)
+                                  : ""}
+                              </p>
+                            ) : null}
+                            {dataGuidance ? (
+                              <div className="mt-2 rounded-md border border-line/60 bg-void/35 px-2.5 py-2 text-[0.6875rem] leading-5">
+                                <p
+                                  className={
+                                    trainingForecast.dataGuidance
+                                      ?.rawStrongTargetMet
+                                      ? "text-mint"
+                                      : "text-amber"
+                                  }
+                                >
+                                  {dataGuidance.headline}
+                                </p>
+                                {dataGuidance.reductions ? (
+                                  <p className="text-muted">
+                                    {dataGuidance.reductions}
+                                  </p>
+                                ) : null}
+                              </div>
+                            ) : null}
+                            {synthExpansionUnlocked ? (
+                              <label className="mt-2 block text-[0.8125rem] text-muted">
+                                Real corpus ·{" "}
+                                {formatTokens(
+                                  Math.min(realDataMTok, processedAvail),
+                                )}
+                                <HudRange
+                                  type="range"
+                                  min={1}
+                                  max={Math.max(
+                                    1,
+                                    Math.round(
+                                      mode === "continue"
+                                        ? Math.max(1, newSinceContinue)
+                                        : realVolMax,
+                                    ),
+                                  )}
+                                  step={Math.max(
+                                    1,
+                                    Math.round(realVolMax / 200),
+                                  )}
+                                  value={Math.min(
+                                    mode === "continue"
+                                      ? Math.max(1, newSinceContinue)
+                                      : realVolMax,
+                                    Math.max(1, realDataMTok),
+                                  )}
+                                  onChange={(event) =>
+                                    setRealDataMTok(Number(event.target.value))
+                                  }
+                                  className="mt-1"
+                                />
+                              </label>
+                            ) : null}
+                            <div className="mt-2 rounded-md border border-line/70 bg-void/40 px-2.5 py-2 text-[0.6875rem]">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-muted">Mix</span>
+                                <span className="font-mono tabular-nums text-bone">
+                                  {formatTokens(realDataMTok)} real
+                                  {effectiveSyntheticMultiplier > 0 ? (
+                                    <span className="text-gold">
+                                      {" "}
+                                      +{" "}
+                                      {formatTokens(
+                                        Math.max(0, dataMTok - realDataMTok),
+                                      )}{" "}
+                                      synthetic (
+                                      {effectiveSyntheticMultiplier.toFixed(2)}
+                                      ×)
+                                    </span>
+                                  ) : (
+                                    <span> · no synthetic</span>
+                                  )}
+                                </span>
+                              </div>
+                              <p
+                                className="mt-1 leading-snug text-muted"
+                                title="The radar controls the domain mix. Use all data fills owned stock before synthetic expansion."
+                              >
+                                {synthExpansionUnlocked && strongestTeacher
+                                  ? "Adjust domain mix in the radar."
+                                  : "Synthetic expansion is locked until research or a teacher is available."}
+                              </p>
+                            </div>
+                            {!synthUnlocked && distillTeacher ? (
+                              <p className="mt-1 text-[0.625rem] leading-snug text-muted">
+                                {distillTeacher.name} supplies synthetic tokens
+                                beyond the owned corpus for this distill run.
+                              </p>
+                            ) : null}
+                            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                              <label className="block text-[0.8125rem] text-muted">
+                                Train {(trainShare * 100).toFixed(2)}%
+                                <HudRange
+                                  type="range"
+                                  min={40}
+                                  max={95}
+                                  step={1}
+                                  value={Math.round(trainShare * 100)}
+                                  onChange={(e) =>
+                                    setTrainShare(Number(e.target.value) / 100)
+                                  }
+                                  className="mt-1"
+                                  aria-label="Training share"
+                                  title={`Verify ${((1 - trainShare) * 100).toFixed(2)}%`}
+                                />
+                              </label>
+                              <div className="rounded border border-line/60 bg-void/25 px-2 py-1.5 text-[0.6875rem] text-muted">
+                                <span className="block">Verify</span>
+                                <strong className="font-mono text-bone">
+                                  {((1 - trainShare) * 100).toFixed(2)}%
+                                </strong>
+                              </div>
+                            </div>
+                            {!mixUnlocked ? (
+                              <ResearchUnlockLink
+                                className="mt-2"
+                                nodeId="data_mix"
+                                label="Unlock automated Mixture Engineering"
+                              />
+                            ) : null}
+                            {!synthUnlocked ? (
+                              <ResearchUnlockLink
+                                className="mt-1"
+                                nodeId="data_synth"
+                                label="Unlock Synthetic Generators"
+                              />
+                            ) : null}
+                          </div>
+
+                          <TrainingDataRadar
+                            weights={weights}
+                            totalMTok={dataMTok}
+                            data={labData}
+                            autoBalanceDisabled={!mixUnlocked}
+                            syntheticUnlocked={synthUnlocked}
+                            syntheticMultiplier={effectiveSyntheticMultiplier}
+                            syntheticExpansionAvailable={
+                              synthExpansionUnlocked && !!strongestTeacher
+                            }
+                            syntheticHeadroomMTok={
+                              distillSyntheticHeadroom ?? undefined
+                            }
+                            syntheticSource={distillTeacher ? "teacher" : "lab"}
+                            teachers={teachers}
+                            syntheticTeacherIds={syntheticTeacherIds}
+                            includeSynthHQ={includeSynthHQ && synthUnlocked}
+                            includeSynthLQ={includeSynthLQ && synthUnlocked}
+                            previousWeights={previousCorpusWeights}
+                            showPreviousOverlay={showPreviousCorpus}
+                            onTogglePreviousOverlay={() =>
+                              setShowPreviousCorpus((v) => !v)
+                            }
+                            optimalByDomainMTok={optimalByDomainMTok}
+                            onChange={(nextWeights, nextTotalMTok, meta) => {
+                              setWeights(nextWeights);
+                              if (!meta) {
+                                setRealDataMTok(
+                                  nextTotalMTok /
+                                    Math.max(
+                                      1,
+                                      1 + effectiveSyntheticMultiplier,
+                                    ),
+                                );
+                                return;
+                              }
+                              // Derive the real:synthetic ratio from the drag: real is
+                              // the coverage of owned usable stock; anything past it is
+                              // generated tokens. Keep real within the 8× expansion bound
+                              // so real × (1 + mult) reproduces the dragged total exactly.
+                              const expansionOn =
+                                synthExpansionUnlocked && !!strongestTeacher;
+                              let real = expansionOn
+                                ? Math.min(
+                                    nextTotalMTok,
+                                    Math.max(meta.realMTok, nextTotalMTok / 8),
+                                  )
+                                : nextTotalMTok;
+                              if (real <= 1e-9) real = nextTotalMTok;
+                              const mult = expansionOn
+                                ? Math.max(
+                                    0,
+                                    Math.min(
+                                      7,
+                                      nextTotalMTok / Math.max(1e-9, real) - 1,
+                                    ),
+                                  )
+                                : 0;
+                              real = nextTotalMTok / (1 + mult);
+                              setSyntheticMultiplier(mult);
+                              setAllowSynthetic(mult > 0);
+                              if (mult > 0) setIncludeSynthHQ(true);
+                              setRealDataMTok(real);
+                            }}
+                            onAutoBalance={() =>
+                              setWeights(
+                                bestRecipeWeights(
+                                  family,
+                                  productPreset,
+                                  dataMTok,
+                                  labData,
+                                ),
+                              )
+                            }
+                            onTeacherChange={(domain, teacher) =>
+                              setSyntheticTeacherIds((current) => ({
+                                ...current,
+                                [domain]: teacher,
+                              }))
+                            }
+                            onIncludeSynthHQChange={(value) => {
+                              setAllowSynthetic(value || includeSynthLQ);
+                              setIncludeSynthHQ(value);
+                            }}
+                            onIncludeSynthLQChange={(value) => {
+                              setAllowSynthetic(value || includeSynthHQ);
+                              setIncludeSynthLQ(value);
                             }}
                           />
-                        </span>
-                        <span
-                          className={`col-span-2 text-right sm:col-span-1 ${readiness.ready ? "text-mint" : "text-amber"}`}
-                        >
-                          {readiness.text}
-                        </span>
-                      </div>
-                    ))}
+                        </div>
+                      </GameCard>
+                    </div>
+                    <div
+                      hidden={newModelStep !== "compute"}
+                      data-model-step="compute"
+                      className="space-y-3"
+                    >
+                      <GameCard
+                        eyebrow="Compute · Advanced"
+                        title="Numerics & model stack"
+                      >
+                        <div className="space-y-3">
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            <label className="models-compute-choice text-[0.8125rem] text-muted">
+                              <span className="flex items-center justify-between gap-2">
+                                <span className="font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">
+                                  Compute format
+                                </span>
+                                <span className="rounded border border-mint/25 bg-mint/10 px-1.5 py-0.5 font-mono text-[0.5625rem] uppercase tracking-[0.1em] text-mint">
+                                  precision
+                                </span>
+                              </span>
+                              <HudSelect
+                                value={trainingFormat}
+                                disabled={mode === "continue"}
+                                title={
+                                  mode === "continue"
+                                    ? "Inherited from the source checkpoint"
+                                    : undefined
+                                }
+                                onChange={(event) => {
+                                  const next = event.target
+                                    .value as TrainingComputeFormat;
+                                  setTrainingFormat(next);
+                                  if (
+                                    nativeWeightFormat === "ternary_1_58" &&
+                                    next !== "bf16_mixed"
+                                  ) {
+                                    setNativeWeightFormat("float");
+                                  }
+                                }}
+                                className="mt-1 min-h-11 w-full text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                {TRAINING_FORMAT_OPTIONS.map((option) => {
+                                  const locked = Boolean(
+                                    option.research &&
+                                    !unlocked.includes(option.research),
+                                  );
+                                  const optionNumerics = {
+                                    computeFormat: option.value,
+                                    nativeWeightFormat:
+                                      nativeWeightFormat === "ternary_1_58" &&
+                                      option.value === "bf16_mixed"
+                                        ? nativeWeightFormat
+                                        : ("float" as const),
+                                    recipeVersion: 1,
+                                  };
+                                  const optionEconomics =
+                                    trainingNumericsEconomicsProfile(
+                                      optionNumerics,
+                                    );
+                                  const optionMemory = estimateTrainingMemoryGb(
+                                    {
+                                      paramsB: trainParamsB,
+                                      activeParamsB,
+                                      family:
+                                        backbone === "moe" ? "moe" : family,
+                                      numerics: optionNumerics,
+                                      activationCheckpointing:
+                                        unlocked.includes("opt_checkpoint"),
+                                    },
+                                  );
+                                  const optionTradeoff = `quality ${(optionEconomics.qualityCeilingMultiplier * 100).toFixed(2)}% · risk ${optionEconomics.stabilityRisk >= 0.1 || optionEconomics.lossVolatilityMultiplier >= 1.5 ? "high" : optionEconomics.stabilityRisk > 0.02 || optionEconomics.lossVolatilityMultiplier > 1.1 ? "medium" : "low"} · compute ${optionEconomics.trainingWorkMultiplier.toFixed(2)}× · HBM ${num(optionMemory.requiredHbmGb, 2)} GB · cost ${optionEconomics.upfrontCashMultiplier.toFixed(2)}×/${optionEconomics.dailyCashMultiplier.toFixed(2)}×`;
+                                  return (
+                                    <option
+                                      key={option.value}
+                                      value={option.value}
+                                      disabled={locked}
+                                      title={optionTradeoff}
+                                    >
+                                      {
+                                        TRAINING_PRECISION_PROFILES[
+                                          option.value
+                                        ].label
+                                      }
+                                      {locked ? " · locked" : ""}
+                                    </option>
+                                  );
+                                })}
+                              </HudSelect>
+                            </label>
+                            <label className="models-compute-choice text-[0.8125rem] text-muted">
+                              <span className="flex items-center justify-between gap-2">
+                                <span className="font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">
+                                  Native weights
+                                </span>
+                                <span className="rounded border border-violet/25 bg-violet/10 px-1.5 py-0.5 font-mono text-[0.5625rem] uppercase tracking-[0.1em] text-violet-200">
+                                  {nativeWeightFormat === "float"
+                                    ? "baseline"
+                                    : "packed"}
+                                </span>
+                              </span>
+                              <HudSelect
+                                value={nativeWeightFormat}
+                                disabled={mode === "continue"}
+                                title={
+                                  mode === "continue"
+                                    ? "Inherited from the source checkpoint"
+                                    : undefined
+                                }
+                                onChange={(event) => {
+                                  const next = event.target
+                                    .value as NativeWeightFormat;
+                                  setNativeWeightFormat(next);
+                                  if (next === "ternary_1_58")
+                                    setTrainingFormat("bf16_mixed");
+                                }}
+                                className="mt-1 min-h-11 w-full text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                <option value="float">Float weights</option>
+                                <option
+                                  value="ternary_1_58"
+                                  disabled={
+                                    family !== "dense" ||
+                                    !unlocked.includes("dense_bitnet")
+                                  }
+                                >
+                                  1.58-bit native
+                                  {family !== "dense" ||
+                                  !unlocked.includes("dense_bitnet")
+                                    ? " · locked"
+                                    : ""}
+                                </option>
+                              </HudSelect>
+                            </label>
+                          </div>
+                          <div
+                            className="models-numerics-summary rounded-md border border-line/60 bg-void/45 p-2"
+                            title={
+                              "Inference " +
+                              numericsEconomics.inferenceCostMultiplier.toFixed(
+                                2,
+                              ) +
+                              "× · loss volatility " +
+                              numericsEconomics.lossVolatilityMultiplier.toFixed(
+                                2,
+                              ) +
+                              "× · packed checkpoint " +
+                              num(trainingMemory.packedCheckpointGb, 2) +
+                              " GB"
+                            }
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">
+                                Selected recipe
+                              </span>
+                              <span className="rounded border border-mint/35 bg-mint/10 px-1.5 py-0.5 font-mono text-[0.625rem] uppercase tracking-[0.1em] text-mint">
+                                {precisionRisk} risk
+                              </span>
+                            </div>
+                            <div className="mt-1.5 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+                              <span className="rounded border border-line/50 bg-panel-2/60 px-1.5 py-1 font-mono text-[0.625rem] text-muted">
+                                Work{" "}
+                                <strong className="text-bone">
+                                  {numericsEconomics.trainingWorkMultiplier.toFixed(
+                                    2,
+                                  )}
+                                  ×
+                                </strong>
+                              </span>
+                              <span className="rounded border border-line/50 bg-panel-2/60 px-1.5 py-1 font-mono text-[0.625rem] text-muted">
+                                HBM{" "}
+                                <strong className="text-bone">
+                                  {num(trainingMemory.requiredHbmGb, 2)} GB
+                                </strong>
+                              </span>
+                              <span className="rounded border border-line/50 bg-panel-2/60 px-1.5 py-1 font-mono text-[0.625rem] text-muted">
+                                Host{" "}
+                                <strong className="text-bone">
+                                  {num(trainingMemory.requiredSystemRamGb, 2)}{" "}
+                                  GB
+                                </strong>
+                              </span>
+                              <span className="rounded border border-line/50 bg-panel-2/60 px-1.5 py-1 font-mono text-[0.625rem] text-muted">
+                                Setup{" "}
+                                <strong className="text-bone">
+                                  {numericsEconomics.upfrontCashMultiplier.toFixed(
+                                    2,
+                                  )}
+                                  ×
+                                </strong>
+                              </span>
+                            </div>
+                          </div>
+
+                          <div>
+                            <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                              <h4 className="text-[0.8125rem] font-semibold text-bone">
+                                Model stack
+                              </h4>
+                              <div className="flex flex-wrap gap-1 font-mono text-[0.625rem]">
+                                <span className="rounded-full bg-mint/10 px-2 py-0.5 text-mint">
+                                  host −
+                                  {(
+                                    (1 - stackModifiers.hostingMult) *
+                                    100
+                                  ).toFixed(2)}
+                                  %
+                                </span>
+                                <span className="rounded-full bg-infer/10 px-2 py-0.5 text-infer">
+                                  speed +
+                                  {(
+                                    (stackModifiers.speedMult - 1) *
+                                    100
+                                  ).toFixed(2)}
+                                  %
+                                </span>
+                              </div>
+                            </div>
+                            <CardGrid min="10rem" className="anim-stagger">
+                              {stackModules.map((module) => {
+                                const available = unlocked.includes(module.id);
+                                const selected = selectedStack.includes(
+                                  module.id,
+                                );
+                                return (
+                                  <HudButton
+                                    key={module.id}
+                                    type="button"
+                                    variant="ghost"
+                                    aria-pressed={
+                                      available ? selected : undefined
+                                    }
+                                    disabled={mode === "continue"}
+                                    title={
+                                      mode === "continue"
+                                        ? "Inherited from the source checkpoint"
+                                        : undefined
+                                    }
+                                    onClick={() => {
+                                      if (!available) {
+                                        openResearchNode(module.id);
+                                        return;
+                                      }
+                                      setModelStack((current) =>
+                                        current.includes(module.id)
+                                          ? current.filter(
+                                              (id) => id !== module.id,
+                                            )
+                                          : [...current, module.id],
+                                      );
+                                    }}
+                                    className={`hover-lift !min-h-11 !justify-start !rounded-md !border !p-2 !text-left !normal-case !tracking-normal !text-bone transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                                      selected
+                                        ? "!border-mint/40 !bg-mint/10"
+                                        : available
+                                          ? "!border-line !bg-panel-2/70"
+                                          : "!border-line/60 !bg-void/45 !opacity-65"
+                                    }`}
+                                  >
+                                    <span className="flex items-center justify-between gap-1 text-[0.75rem] font-medium text-bone">
+                                      {module.name}
+                                      <span
+                                        className={`font-mono text-[0.625rem] uppercase tracking-[0.12em] ${
+                                          selected
+                                            ? "text-mint"
+                                            : available
+                                              ? "text-muted"
+                                              : "text-amber"
+                                        }`}
+                                      >
+                                        {selected
+                                          ? "On"
+                                          : available
+                                            ? module.focus
+                                            : "Research"}
+                                      </span>
+                                    </span>
+                                    <span className="mt-0.5 block text-[0.6875rem] leading-snug text-muted">
+                                      {module.description}
+                                    </span>
+                                  </HudButton>
+                                );
+                              })}
+                            </CardGrid>
+                          </div>
+                        </div>
+                      </GameCard>
+                    </div>
+                    <div
+                      hidden={newModelStep !== "review"}
+                      data-model-step="review"
+                      className="space-y-3"
+                    >
+                      <GameCard
+                        eyebrow="Review · Launch"
+                        title="Forecast & start"
+                        tone="train"
+                      >
+                        <div className="space-y-3">
+                          <label className="block text-[0.8125rem] text-muted">
+                            Compute priority · {computePriority}/100
+                            <HudRange
+                              type="range"
+                              min={0}
+                              max={100}
+                              step={5}
+                              value={computePriority}
+                              onChange={(event) =>
+                                setComputePriority(Number(event.target.value))
+                              }
+                              className="mt-1"
+                            />
+                          </label>
+
+                          <div
+                            className="rounded-md border border-line/60 bg-void/35 p-3"
+                            title={`Work ${num(trainingForecast.targetPfDays, 2)} PF·d · power ${mw(trainingForecast.powerMw)} · setup ${money(setupCost)} · data ${money(dataCost)} · daily ${money(dailyCost)}/d · capability ceiling ${capabilityLimit.capability.toFixed(2)} (${capabilityLimit.limitingFactor}) · serving host RAM ${num(hostRamGb, 2)} GB ${hostWeightFormat}`}
+                          >
+                            <p className="text-[0.8125rem] text-bone">
+                              {forecastVerdict}
+                            </p>
+                            <div className="mt-2 grid grid-cols-2 gap-2 xl:grid-cols-4">
+                              <MetricTile
+                                label="ETA"
+                                value={
+                                  daysEst === Infinity
+                                    ? "No pool"
+                                    : `${daysEst.toFixed(0)}d`
+                                }
+                                detail={
+                                  daysEst === Infinity
+                                    ? "need training pool"
+                                    : `${num(trainingForecast.targetPfDays, 2)} PF·d · ${trainParamsB >= 1_000 ? `${trainingForecast.minCalendarDays.toFixed(0)}d model/data pipeline floor` : "current allocation estimate"}`
+                                }
+                                tone={
+                                  daysEst === Infinity || daysEst > 120
+                                    ? "warning"
+                                    : "positive"
+                                }
+                              />
+                              <MetricTile
+                                label="Budget"
+                                value={money(upfront)}
+                                detail={
+                                  <>
+                                    setup {money(setupCost)} · data{" "}
+                                    {money(dataCost)}
+                                    <span className="block">
+                                      burn {money(dailyCost)}/d
+                                    </span>
+                                  </>
+                                }
+                                tone={
+                                  state.player.cash < upfront
+                                    ? "danger"
+                                    : "neutral"
+                                }
+                              />
+                              <MetricTile
+                                label="Capability"
+                                value={trainingForecast.expectedCapability.toFixed(
+                                  2,
+                                )}
+                                detail={`ceiling ${capabilityLimit.capability.toFixed(2)} · ${trainingForecast.interactiveTokPerSec.toFixed(2)} tok/s`}
+                                tone="positive"
+                              />
+                              <MetricTile
+                                label="Memory"
+                                value={`${num(prospectiveRamFit.candidateAllocatedGb, 0)} / ${num(needVramGb, 0)} GB`}
+                                detail={
+                                  <>
+                                    HBM assigned / required
+                                    <span className="block">
+                                      host{" "}
+                                      {num(
+                                        prospectiveRamFit.candidateSystemRamAllocatedGb,
+                                        0,
+                                      )}{" "}
+                                      /{" "}
+                                      {num(
+                                        trainingMemory.requiredSystemRamGb,
+                                        0,
+                                      )}{" "}
+                                      GB
+                                    </span>
+                                  </>
+                                }
+                                tone={
+                                  prospectiveRamFit.ready
+                                    ? "positive"
+                                    : "danger"
+                                }
+                              />
+                            </div>
+                            <div className="mt-2 grid gap-x-4 gap-y-1 rounded-md border border-line/40 bg-panel-2/35 px-2.5 py-2 sm:grid-cols-2">
+                              {[
+                                {
+                                  label: "Compute",
+                                  value:
+                                    snap.pools.training >= 0.05 &&
+                                    formatHardwareAvailable
+                                      ? 1
+                                      : 0,
+                                  text: `${num(snap.pools.training, 2)} PF · gen ${maxHardwareGeneration || "—"}`,
+                                  ready:
+                                    snap.pools.training >= 0.05 &&
+                                    formatHardwareAvailable,
+                                },
+                                {
+                                  label: "HBM",
+                                  value:
+                                    prospectiveRamFit.candidateAllocatedGb /
+                                    Math.max(1, needVramGb),
+                                  text: `${num(prospectiveRamFit.candidateAllocatedGb, 0)} / ${num(needVramGb, 0)} GB`,
+                                  ready:
+                                    prospectiveRamFit.candidateAllocatedGb +
+                                      1e-9 >=
+                                    needVramGb,
+                                },
+                                {
+                                  label: "Host RAM",
+                                  value:
+                                    prospectiveRamFit.candidateSystemRamAllocatedGb /
+                                    Math.max(
+                                      1,
+                                      trainingMemory.requiredSystemRamGb,
+                                    ),
+                                  text: `${num(prospectiveRamFit.candidateSystemRamAllocatedGb, 0)} / ${num(trainingMemory.requiredSystemRamGb, 0)} GB`,
+                                  ready:
+                                    prospectiveRamFit.candidateSystemRamAllocatedGb +
+                                      1e-9 >=
+                                    trainingMemory.requiredSystemRamGb,
+                                },
+                                {
+                                  label: "Data",
+                                  value: trainingForecast.effectiveDataRatio,
+                                  text: `${trainingForecast.effectiveDataRatio.toFixed(2)}× · modality ${trainingForecast.modalityComputeMult.toFixed(2)}×`,
+                                  ready:
+                                    trainingForecast.effectiveDataRatio >= 0.85,
+                                },
+                              ].map((readiness) => (
+                                <div
+                                  key={readiness.label}
+                                  className="grid grid-cols-[4rem_minmax(0,1fr)] items-center gap-2 font-mono text-[0.625rem] sm:grid-cols-[4.5rem_1fr_auto]"
+                                  title={`${readiness.label}: ${readiness.text}`}
+                                >
+                                  <span className="text-muted">
+                                    {readiness.label}
+                                  </span>
+                                  <span className="h-1.5 overflow-hidden rounded-full bg-void">
+                                    <span
+                                      className={`block h-full rounded-full ${readiness.ready ? "bg-mint" : "bg-amber"}`}
+                                      style={{
+                                        width: `${Math.max(0, Math.min(1, readiness.value)) * 100}%`,
+                                      }}
+                                    />
+                                  </span>
+                                  <span
+                                    className={`col-span-2 text-right sm:col-span-1 ${readiness.ready ? "text-mint" : "text-amber"}`}
+                                  >
+                                    {readiness.text}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          <BlockerList items={blockersWithName} />
+
+                          <TrainingStartFailureBanner message={startFailure} />
+                        </div>
+                      </GameCard>
+                    </div>
                   </div>
-                </div>
-
-                <BlockerList items={blockersWithName} />
-
-                <TrainingStartFailureBanner message={startFailure} />
-
-                <HudButton
-                  type="button"
-                  variant="primary"
-                  disabled={!canStart}
-                  title={
-                    !canStart
-                      ? (() => {
-                          const firstHard = blockersWithName.find(
-                            (item) => item.tone !== "warning",
-                          );
-                          return firstHard
-                            ? String(firstHard.text)
-                            : "Cannot start";
-                        })()
-                      : undefined
-                  }
-                  className="w-full"
-                  onClick={() =>
-                    handleStartTraining({
-                      name:
-                        modelIteration.name ||
-                        `${family}-${formatParams(paramsB)}${
-                          mode === "distill"
-                            ? "-d"
-                            : mode === "continue"
-                              ? "-ct"
-                              : ""
-                        }`,
-                      family,
-                      backbone,
-                      productPreset,
-                      io: modelIo,
-                      paramsB,
-                      activeParamsB,
-                      mode,
-                      teacherId:
-                        mode === "distill" ? teacherId || undefined : undefined,
-                      distillTeacherShare:
-                        mode === "distill" ? teacherShare : undefined,
-                      continueFromId:
-                        mode === "continue"
-                          ? continueFromId || undefined
-                          : undefined,
-                      dataPlan: recipePlan,
-                      modelStack: selectedStack,
-                      trainingNumerics: {
-                        computeFormat: trainingFormat,
-                        nativeWeightFormat,
-                        recipeVersion: 1,
-                      },
-                      computePriority,
-                    })
-                  }
-                >
-                  Start{" "}
-                  {mode === "distill"
-                    ? "distillation"
-                    : mode === "continue"
-                      ? "continue-train"
-                      : "training"}{" "}
-                  · {money(upfront)}
-                </HudButton>
-              </div>
-            </GameCard>
-
-          </>
-        ) : panelTab === "checkpoints" ? (
-          <CheckpointWorkspace
-            entries={checkpointArchiveEntries}
-            jobs={jobs}
-            onCreateManual={createManualTrainingCheckpoint}
-            onBenchmark={(checkpointId) => {
-              setCheckpointEvaluationMode("internal");
-              setCheckpointEvaluationId(checkpointId);
-            }}
-            onReview={(checkpointId) => {
-              setCheckpointEvaluationMode("nda_external");
-              setCheckpointEvaluationId(checkpointId);
-            }}
-            onPromote={promoteTrainingCheckpoint}
-            onDiscard={discardTrainingCheckpoint}
-            onFork={forkTrainingCheckpoint}
-            onRollback={rollbackTrainingJobToCheckpoint}
-          />
-        ) : (
-          <FleetTab
-            internal={internal}
-            released={released}
-            checkpointEvidence={checkpointEvidenceByModelId}
-            pricingId={pricing.activeModelId}
-            frontierCapability={publicFrontier}
-            unitCostForModel={(model) =>
-              apiUnitCostPerMTok(state, snap, model, {
-                energyPricePerMWh: energyPrice,
-              }).blended
-            }
-            onSelect={setActiveModel}
-            onRelease={handleReleaseModel}
-            onDelete={deleteModel}
-            onTrainFurther={prefillContinue}
-            onDistill={prefillDistill}
-            safetySlot={
-              safetyTarget || state.player.safetyCampaign ? (
-                <SafetyCampaignSection
-                  model={safetyTarget}
-                  campaign={state.player.safetyCampaign}
-                  intensity={safetyIntensity}
-                  setIntensity={setSafetyIntensity}
-                  researchers={safetyResearchers}
-                  setResearchers={setSafetyResearchers}
-                  researcherCount={researcherCount}
-                  estimate={safetyEstimate}
-                  onStart={() =>
-                    safetyTarget &&
-                    startSafetyCampaign(
-                      safetyTarget.id,
-                      safetyIntensity,
-                      safetyResearchers,
-                    )
-                  }
-                  onCancel={cancelSafetyCampaign}
-                />
-              ) : null
-            }
-          />
-        )}
+                </ModelsTrainingModal>
+              </>
+            ) : panelTab === "checkpoints" ? (
+              <CheckpointWorkspace
+                entries={checkpointArchiveEntries}
+                jobs={jobs}
+                onCreateManual={createManualTrainingCheckpoint}
+                onBenchmark={(checkpointId) => {
+                  setCheckpointEvaluationMode("internal");
+                  setCheckpointEvaluationId(checkpointId);
+                }}
+                onReview={(checkpointId) => {
+                  setCheckpointEvaluationMode("nda_external");
+                  setCheckpointEvaluationId(checkpointId);
+                }}
+                onPromote={promoteTrainingCheckpoint}
+                onDiscard={discardTrainingCheckpoint}
+                onBranch={openCheckpointBranch}
+                onRollback={rollbackTrainingJobToCheckpoint}
+              />
+            ) : (
+              <FleetTab
+                internal={internal}
+                released={released}
+                checkpointEvidence={checkpointEvidenceByModelId}
+                pricingId={pricing.activeModelId}
+                frontierCapability={publicFrontier}
+                unitCostForModel={(model) =>
+                  apiUnitCostPerMTok(state, snap, model, {
+                    energyPricePerMWh: energyPrice,
+                  }).blended
+                }
+                onSelect={setActiveModel}
+                onRelease={handleReleaseModel}
+                onDelete={deleteModel}
+                onTrainFurther={prefillContinue}
+                onDistill={prefillDistill}
+                safetySlot={
+                  safetyTarget || state.player.safetyCampaign ? (
+                    <SafetyCampaignSection
+                      model={safetyTarget}
+                      campaign={state.player.safetyCampaign}
+                      intensity={safetyIntensity}
+                      setIntensity={setSafetyIntensity}
+                      researchers={safetyResearchers}
+                      setResearchers={setSafetyResearchers}
+                      researcherCount={researcherCount}
+                      estimate={safetyEstimate}
+                      onStart={() =>
+                        safetyTarget &&
+                        startSafetyCampaign(
+                          safetyTarget.id,
+                          safetyIntensity,
+                          safetyResearchers,
+                        )
+                      }
+                      onCancel={cancelSafetyCampaign}
+                    />
+                  ) : null
+                }
+              />
+            )}
+          </div>
+        </div>
       </div>
     </PanelScaffold>
   );

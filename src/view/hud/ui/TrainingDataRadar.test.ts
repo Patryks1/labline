@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'vitest'
-import { DATA_DOMAINS, emptyDomainStock } from '../../../sim/balance/data'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { describe, expect, it, vi } from 'vitest'
+import { DATA_DOMAINS, createEmptyLabData, emptyDomainStock } from '../../../sim/balance/data'
 import type { DataDomain } from '../../../sim/types'
+import { TrainingDataRadar } from './TrainingDataRadar'
 import {
   domainAvailabilityTooltip,
   domainCapReason,
@@ -19,6 +22,32 @@ function blankAllocations(fill = 10): Record<DataDomain, number> {
 }
 
 describe('training data radar', () => {
+  it('keeps direct radar handles keyboard-addressable alongside shared controls', () => {
+    const markup = renderToStaticMarkup(
+      createElement(TrainingDataRadar, {
+        weights: blankAllocations(10),
+        totalMTok: 100,
+        data: createEmptyLabData(),
+        teachers: [],
+        syntheticTeacherIds: {},
+        includeSynthHQ: false,
+        includeSynthLQ: false,
+        onChange: vi.fn(),
+        onAutoBalance: vi.fn(),
+        onTeacherChange: vi.fn(),
+        onIncludeSynthHQChange: vi.fn(),
+        onIncludeSynthLQChange: vi.fn(),
+      }),
+    )
+
+    expect(markup).toContain('aria-label="Draggable radar chart for training data domains"')
+    expect(markup).toContain('training-data-radar-layout')
+    expect(markup).toContain('role="slider"')
+    expect(markup).toContain('aria-label="Code token volume"')
+    expect(markup).toContain('hud-button--ghost')
+    expect(markup).toContain('class="hud-input')
+  })
+
   it('moves one domain without silently changing any other token allocation', () => {
     const initial = Object.fromEntries(
       DATA_DOMAINS.map((domain, index) => [domain, (index + 1) * 10]),

@@ -1,18 +1,20 @@
-import type { ReactNode } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import { useGameStore } from '../../../store/gameStore'
 import { computeSnapshot } from '../../../sim/tick'
 import { fleetHostSnapshot } from '../../../sim/systems/hosting'
 import { hostedModelOpexDay } from '../../../sim/balance/hostingOpex'
 import { formatParams } from '../../../sim/balance/training'
 import { gb, money, num, pct, pf, people } from '../format'
-import { EmptyState, HudButton, MetricTile, PanelScaffold } from '../ui/HudPrimitives'
+import { EmptyState, HudButton, HudRange, MetricTile, PanelScaffold } from '../ui/HudPrimitives'
 import { GameCard, MeterBar, StatRow } from '../ui/kit'
+import { buildFinanceDashboardModel } from '../data/financeDashboardModel'
 
 export function AllocatePanel() {
   const state = useGameStore((s) => s.state)
   const setPanel = useGameStore((s) => s.setPanel)
   const setAllocation = useGameStore((s) => s.setAllocation)
   const autoBalanceHosting = useGameStore((s) => s.autoBalanceHosting)
+  const financeModel = useMemo(() => buildFinanceDashboardModel(state), [state])
   const snap = computeSnapshot(state)
   const host = fleetHostSnapshot(state)
   // Per-model hosting residency + endpoint upkeep (load term shown in finance).
@@ -96,8 +98,8 @@ export function AllocatePanel() {
             />
             <StatRow
               label="Hosting opex"
-              value={`${money(state.player.finance.dayHostingOpex ?? 0)}/d`}
-              tone={(state.player.finance.dayHostingOpex ?? 0) > 0 ? 'warning' : 'neutral'}
+              value={`${money(financeModel.costs.hosting)}/d`}
+              tone={financeModel.costs.hosting > 0 ? 'warning' : 'neutral'}
             />
           </div>
           {serveMemFit < 0.999 ? (
@@ -232,8 +234,7 @@ export function AllocatePanel() {
                     )}
                   </span>
                 </div>
-                <input
-                  type="range"
+                <HudRange
                   min={0.05}
                   max={0.9}
                   step={0.01}
@@ -248,10 +249,10 @@ export function AllocatePanel() {
         </GameCard>
 
         <GameCard>
-          <StatRow label="Valuation" value={money(state.player.finance.valuation)} strong />
+          <StatRow label="Valuation" value={money(financeModel.current.valuation)} strong />
           <StatRow
             label="Share / subs"
-            value={`${pct(state.player.finance.totalShare, 1)} · ${people(
+            value={`${pct(financeModel.current.share, 1)} · ${people(
               state.lastMarket.planStats?.reduce((s, p) => s + p.subscribers, 0) ?? 0,
             )}`}
           />
@@ -259,31 +260,32 @@ export function AllocatePanel() {
 
         <ol className="anim-stagger space-y-1.5 text-[0.8125rem]">
           <Step done={snap.rackCap > 0 && snap.mwAvailable > 0.01} n={1}>
-            <button
+            <HudButton
               type="button"
-              className="text-left hover:text-mint"
+              variant="ghost"
+              className="min-h-11 !p-0 text-left hover:text-mint"
               onClick={() => useGameStore.getState().openSites()}
             >
               Build data hall + interconnect
-            </button>
+            </HudButton>
           </Step>
           <Step done={snap.chipCount > 0} n={2}>
-            <button type="button" className="text-left hover:text-mint" onClick={() => setPanel('racks')}>
+            <HudButton type="button" variant="ghost" className="min-h-11 !p-0 text-left hover:text-mint" onClick={() => setPanel('racks')}>
               Order racks into the hall
-            </button>
+            </HudButton>
           </Step>
           <Step done={state.player.models.length > 0} n={3}>
-            <button type="button" className="text-left hover:text-mint" onClick={() => setPanel('models')}>
+            <HudButton type="button" variant="ghost" className="min-h-11 !p-0 text-left hover:text-mint" onClick={() => setPanel('models')}>
               Train & ship a model
-            </button>
+            </HudButton>
           </Step>
           <Step
             done={state.lastMarket.planStats?.some((p) => p.subscribers > 0) ?? false}
             n={4}
           >
-            <button type="button" className="text-left hover:text-mint" onClick={() => setPanel('plans')}>
+            <HudButton type="button" variant="ghost" className="min-h-11 !p-0 text-left hover:text-mint" onClick={() => setPanel('plans')}>
               Design plans & watch unit economics
-            </button>
+            </HudButton>
           </Step>
         </ol>
       </div>

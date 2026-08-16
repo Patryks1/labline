@@ -21,6 +21,7 @@ import {
   SegmentedTabs,
   StatRow,
 } from '../ui/kit'
+import { buildFinanceDashboardModel } from '../data/financeDashboardModel'
 
 const PRODUCT_CHANNEL_LABELS: Record<ProductChannel, string> = {
   free_assistant: 'Free assistant',
@@ -47,6 +48,7 @@ export function MarketPanel() {
   const state = useGameStore((s) => s.state)
   const setPanel = useGameStore((s) => s.setPanel)
   const portfolio = deriveProductPortfolio(state)
+  const financeModel = useMemo(() => buildFinanceDashboardModel(state), [state])
   const shares = state.lastMarket.sharesByLab
   const [tab, setTab] = useState<MarketTab>('share')
 
@@ -92,14 +94,14 @@ export function MarketPanel() {
     <PanelScaffold
       eyebrow="Commercial"
       title="Market"
-      description="Share, segments, and promoted surfaces."
+      description="Share, segments, and surfaces."
       actions={
         <HudButton type="button" variant="ghost" onClick={() => setPanel('stats')}>
           Command
         </HudButton>
       }
     >
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2">
         <MetricTile label="Your share" value={pct(playerShare, 1)} tone="positive" />
         <MetricTile
           label="Served / demand"
@@ -146,7 +148,7 @@ export function MarketPanel() {
             overloaded={overloaded}
             aiUsers={aiUsers}
             peopleToConvert={peopleToConvert}
-            dayNet={state.player.finance.dayNet ?? 0}
+            dayNet={financeModel.current.net}
             marginPerMTok={state.player.finance.marginPerMTok}
             marginPerSub={state.player.finance.marginPerSub}
             latencyScore={state.lastMarket.latencyScore}
@@ -239,7 +241,7 @@ function ShareView({
             )
           })}
         </div>
-        <div className="mt-3 grid grid-cols-2 gap-2 border-t border-line/50 pt-3 sm:grid-cols-4">
+        <div className="mt-3 grid grid-cols-2 gap-2 border-t border-line/50 pt-3">
           <div>
             <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">You</div>
             <div className="font-mono text-xl font-semibold tabular-nums text-mint">
@@ -356,9 +358,6 @@ function SegmentsView({
 
   return (
     <GameCard eyebrow="Demographics" title="Audience scale" tone="research">
-      <p className="mb-3 text-[0.8125rem] text-muted">
-        Population bars with quality floor, your share, and estimated users.
-      </p>
       <div className="anim-stagger space-y-3">
         {SEGMENTS.map((s) => {
           const st = segments.find((x) => x.id === s.id)
@@ -420,7 +419,6 @@ function ProductsView({
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-[0.8125rem] text-muted">Six public surfaces share your released fleet.</p>
         <StatusChip tone={portfolio.promoted.length === 6 ? 'positive' : 'warning'}>
           {portfolio.promoted.length}/6 live
         </StatusChip>

@@ -1,9 +1,6 @@
 import { useState } from "react";
 import { useGameStore } from "../../../../store/gameStore";
-import type {
-  PostTrainStage,
-  TrainingJob,
-} from "../../../../sim/types";
+import type { PostTrainStage, TrainingJob } from "../../../../sim/types";
 import {
   canReleaseTrainingJob,
   earlyReleasePenalty,
@@ -22,12 +19,15 @@ import {
 } from "../../../../sim/balance/data";
 import { money, num } from "../../format";
 import { GameCard, LiveDot, MeterBar, StatRow } from "../../ui/kit";
-import { HudButton, StatusChip } from "../../ui/HudPrimitives";
+import { HudButton, HudRange, StatusChip } from "../../ui/HudPrimitives";
 import { ResearchUnlockLink } from "../../ui/ResearchUnlockLink";
 import {
   TrainingLossChart,
   type TrainingLossCheckpointMarker,
 } from "./TrainingLossChart";
+import { BenchmarkEntryPoint } from "./BenchmarkEntryPoint";
+import { TrainingEvidencePanel } from "./TrainingEvidencePanel";
+import type { CheckpointUiRecord } from "./checkpointUi";
 import { architectureBlueprintProfile } from "../../../../sim/balance/architectureFrontiers";
 import {
   classifyTrainingStatus,
@@ -80,9 +80,12 @@ export function ActiveTrainingCard({
   onKeepInternal,
   onBenchmark,
   onSaveCheckpoint,
+  onBranchCheckpoint,
   onRecoverFromCheckpoint,
   onSelectPostTrain,
   checkpointMarkers = [],
+  checkpointEvidence = [],
+  onOpenCheckpointHistory,
 }: {
   job: TrainingJob;
   trainingPoolPf: number;
@@ -98,8 +101,11 @@ export function ActiveTrainingCard({
   onKeepInternal: (jobId: string) => void;
   onBenchmark: (jobId: string) => void;
   onSaveCheckpoint: (jobId: string) => void;
+  onBranchCheckpoint: (jobId: string) => void;
   onRecoverFromCheckpoint: (jobId: string, checkpointId: string) => void;
   checkpointMarkers?: TrainingLossCheckpointMarker[];
+  checkpointEvidence?: CheckpointUiRecord[];
+  onOpenCheckpointHistory?: () => void;
   onSelectPostTrain: (
     jobId: string,
     stage: Exclude<PostTrainStage, "none">,
@@ -127,7 +133,7 @@ export function ActiveTrainingCard({
   });
   const progress =
     job.targetPfDays > 0 ? job.progressPfDays / job.targetPfDays : 0;
-  const pct = Math.round(Math.max(0, Math.min(1, progress)) * 100);
+  const pct = (Math.max(0, Math.min(1, progress)) * 100).toFixed(2);
   const prioritySum = Math.max(
     1,
     jobs.reduce(
@@ -144,10 +150,11 @@ export function ActiveTrainingCard({
     : job.failed || job.paused
       ? 0
       : trainingPoolPf * ((job.computePriority ?? 50) / prioritySum);
-  const { computeDone, etaDays } = trainingRemainingTime({
+  const { computeDone, etaDays, paceLimited } = trainingRemainingTime({
     targetPfDays: job.targetPfDays,
     progressPfDays: job.progressPfDays,
     allocatedPf,
+    minCalendarDays: job.minCalendarDays,
   });
   const currentLoss = job.lossHistory?.at(-1)?.loss;
   const recommended = job.recommendedPfDays ?? job.targetPfDays;
@@ -225,10 +232,10 @@ export function ActiveTrainingCard({
   const fundedContinuationLabel =
     investmentMaturity.fundedRatio < 10
       ? `${investmentMaturity.fundedRatio.toFixed(2)}× funded`
-      : `${num(job.progressPfDays, 1)} PF invested · ${
+      : `${num(job.progressPfDays)} PF invested · ${
           investmentMaturity.extraSignal >= 0.995
             ? "maturity saturated"
-            : `maturity ${Math.round(investmentMaturity.extraSignal * 100)}%`
+            : `maturity ${(investmentMaturity.extraSignal * 100).toFixed(2)}%`
         }`;
   const displayedStatusLabel = optimizing
     ? `Optimizing · ${fundedContinuationLabel}`
@@ -238,26 +245,26 @@ export function ActiveTrainingCard({
         ? `Post-training · ${job.postTrain.toUpperCase()}`
         : postTrainingActive && !job.paused && !visuallyBlocked
           ? "Post-training · idle"
-        : statusLabel;
+          : statusLabel;
   const etaDetail =
     etaDays === Infinity
       ? "stalled"
       : computeDone
-          ? optimizing
-            ? `${fundedContinuationLabel} · optimizing`
-            : postTrainingLive
-              ? "base target complete · post-training active"
-              : postTrainingActive && !job.paused
-                ? "base target complete · post-training idle"
+        ? optimizing
+          ? `${fundedContinuationLabel} · optimizing`
+          : postTrainingLive
+            ? "base target complete · post-training active"
+            : postTrainingActive && !job.paused
+              ? "base target complete · post-training idle"
               : targetCompleteIdle
                 ? "target complete · idle"
                 : job.paused
                   ? "target complete · paused"
                   : "target complete"
-          : `~${etaDays.toFixed(0)}d left`;
+        : `~${etaDays.toFixed(0)}d left${paceLimited ? " · data pipeline capped" : ""}`;
   const modeLabel =
     job.mode === "distill"
-      ? `Distill · teacher ${Math.round((job.distillTeacherShare ?? 0.72) * 100)}%`
+      ? `Distill · teacher ${((job.distillTeacherShare ?? 0.72) * 100).toFixed(2)}%`
       : job.mode === "continue"
         ? "Continuation"
         : "Pretrain";
@@ -306,17 +313,11 @@ export function ActiveTrainingCard({
         </span>
       }
       tone={job.failed || visuallyBlocked ? "danger" : "train"}
-      live={
-        !job.failed &&
-        !job.paused &&
-        (!done || optimizing || postTrainingLive) &&
-        !visuallyBlocked
-      }
-      className={
-        !job.failed && (!done || optimizing || postTrainingLive) && !visuallyBlocked
-          ? "live-glow"
-          : ""
-      }
+      /* The live dot and progress meter already communicate activity. Keep the
+         card boundary static so pointer hover/inspection never appears to
+         expand and contract with the old pulsing box shadow. */
+      live={false}
+      className="models-active-training-card"
       actions={
         <div className="flex items-center gap-1.5">
           <StatusChip tone={statusTone}>{displayedStatusLabel}</StatusChip>
@@ -333,7 +334,7 @@ export function ActiveTrainingCard({
           </p>
           <div className="text-right font-mono text-[0.75rem] tabular-nums">
             <p className="text-train">
-              {num(allocatedPf, 1)} PF/d · priority {job.computePriority ?? 50}
+              {num(allocatedPf)} PF/d · priority {job.computePriority ?? 50}
             </p>
             {resources ? (
               <>
@@ -344,10 +345,10 @@ export function ActiveTrainingCard({
                       : "text-danger"
                   }
                 >
-                  HBM {num(resources.ramAllocatedGb, 0)} /{" "}
-                  {num(resources.ramRequiredGb, 0)} GB · host RAM{" "}
-                  {num(resources.systemRamAllocatedGb, 0)} /{" "}
-                  {num(resources.systemRamRequiredGb, 0)} GB
+                  HBM {num(resources.ramAllocatedGb)} /{" "}
+                  {num(resources.ramRequiredGb)} GB · host RAM{" "}
+                  {num(resources.systemRamAllocatedGb)} /{" "}
+                  {num(resources.systemRamRequiredGb)} GB
                 </p>
                 <p
                   className={
@@ -371,8 +372,8 @@ export function ActiveTrainingCard({
           value={progress}
           detail={
             done
-              ? `${etaDetail} · ${num(job.progressPfDays, 1)} / ${num(job.recommendedPfDays ?? job.targetPfDays, 1)} PF funded`
-              : `${pct}% · ${etaDetail} · ${num(Math.max(0, job.targetPfDays - job.progressPfDays), 1)} PF remaining`
+              ? `${etaDetail} · ${num(job.progressPfDays)} / ${num(job.recommendedPfDays ?? job.targetPfDays)} PF funded`
+              : `${pct}% · ${etaDetail} · ${num(Math.max(0, job.targetPfDays - job.progressPfDays))} PF remaining`
           }
           tone="train"
           live={
@@ -386,7 +387,7 @@ export function ActiveTrainingCard({
         <div className="grid grid-cols-2 gap-2 min-[420px]:grid-cols-3">
           <StatRow
             label="Loss"
-            value={currentLoss == null ? "—" : currentLoss.toFixed(3)}
+            value={currentLoss == null ? "—" : currentLoss.toFixed(2)}
             strong
           />
           <StatRow
@@ -421,7 +422,8 @@ export function ActiveTrainingCard({
           <div className="border-t border-line/40 px-2.5 pb-2.5 pt-2">
             {blueprint.id === "omni" ? (
               <p className="font-mono text-[0.625rem] text-research">
-                Verified recursive ceiling {blueprint.verifiedRecursiveCapabilityCap}
+                Verified recursive ceiling{" "}
+                {blueprint.verifiedRecursiveCapabilityCap}
               </p>
             ) : null}
             <p className="mt-1 text-[0.6875rem] leading-5 text-muted">
@@ -454,11 +456,11 @@ export function ActiveTrainingCard({
               <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
                 <StatRow
                   label="Frozen risk"
-                  value={`${Math.round(job.failureRecord.probability * 100)}% · ${job.failureRecord.riskBand}`}
+                  value={`${(job.failureRecord.probability * 100).toFixed(2)}% · ${job.failureRecord.riskBand}`}
                 />
                 <StatRow
                   label="Failed at"
-                  value={`${Math.round(job.failureRecord.stageProgress * 100)}%`}
+                  value={`${(job.failureRecord.stageProgress * 100).toFixed(2)}%`}
                 />
                 <StatRow
                   label="Recovery"
@@ -489,7 +491,7 @@ export function ActiveTrainingCard({
               <div>
                 <p className="hud-eyebrow">
                   Campaign decision ·{" "}
-                  {Math.round(job.pendingCampaignEvent.milestone * 100)}%
+                  {(job.pendingCampaignEvent.milestone * 100).toFixed(2)}%
                   checkpoint
                 </p>
                 <strong className="mt-1 block text-[0.875rem] text-bone">
@@ -508,9 +510,9 @@ export function ActiveTrainingCard({
             </p>
             <p className="mt-1 font-mono text-[0.625rem] leading-5 text-muted">
               Decision evidence{" "}
-              {Math.round(
-                (job.pendingCampaignEvent.evidenceAccuracy ?? 0.35) * 100,
-              )}
+              {(
+                (job.pendingCampaignEvent.evidenceAccuracy ?? 0.35) * 100
+              ).toFixed(2)}
               %
               {job.benchmarkSnapshots?.length
                 ? " · paid checkpoint measurements improve interventions without rerolling the run"
@@ -591,6 +593,12 @@ export function ActiveTrainingCard({
           </details>
         ) : null}
 
+        <TrainingEvidencePanel
+          job={job}
+          checkpoints={checkpointEvidence}
+          onOpenCheckpointHistory={onOpenCheckpointHistory}
+        />
+
         {diagnosticStall ? (
           <p className="text-[0.75rem] text-amber">{diagnosticStall}</p>
         ) : null}
@@ -607,7 +615,7 @@ export function ActiveTrainingCard({
             {DATA_DOMAINS.filter((d) => (job.dataPlan!.weights[d] ?? 0) >= 0.05)
               .map(
                 (d) =>
-                  `${DATA_DOMAIN_META[d].label} ${Math.round((job.dataPlan!.weights[d] ?? 0) * 100)}%`,
+                  `${DATA_DOMAIN_META[d].label} ${((job.dataPlan!.weights[d] ?? 0) * 100).toFixed(2)}%`,
               )
               .join(" · ")}
           </p>
@@ -624,40 +632,43 @@ export function ActiveTrainingCard({
               </span>
             </summary>
             <div className="border-t border-line/40 px-2.5 pb-2.5 pt-2">
-            <div className="grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-3">
-              <StatRow
-                label="Unique"
-                value={formatTokens(dataManifest?.uniqueMTok ?? job.trainMTok)}
-              />
-              <StatRow
-                label="Repeated"
-                value={formatTokens(dataManifest?.repeatedMTok ?? 0)}
-              />
-              <StatRow
-                label="Learnable value"
-                value={`${Math.round((dataEvidence.effectiveTrainingValue ?? 0) * 100)}%`}
-              />
-              <StatRow
-                label="Diversity"
-                value={`${Math.round((dataEvidence.effectiveDiversity ?? 0) * 100)}%`}
-              />
-              <StatRow
-                label="Freshness"
-                value={`${Math.round((dataEvidence.effectiveFreshness ?? 0) * 100)}%`}
-              />
-              <StatRow
-                label="Human anchor"
-                value={`${Math.round((dataEvidence.humanAnchorShare ?? 1) * 100)}%`}
-              />
-            </div>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-3">
+                <StatRow
+                  label="Unique"
+                  value={formatTokens(
+                    dataManifest?.uniqueMTok ?? job.trainMTok,
+                  )}
+                />
+                <StatRow
+                  label="Repeated"
+                  value={formatTokens(dataManifest?.repeatedMTok ?? 0)}
+                />
+                <StatRow
+                  label="Learnable value"
+                  value={`${((dataEvidence.effectiveTrainingValue ?? 0) * 100).toFixed(2)}%`}
+                />
+                <StatRow
+                  label="Diversity"
+                  value={`${((dataEvidence.effectiveDiversity ?? 0) * 100).toFixed(2)}%`}
+                />
+                <StatRow
+                  label="Freshness"
+                  value={`${((dataEvidence.effectiveFreshness ?? 0) * 100).toFixed(2)}%`}
+                />
+                <StatRow
+                  label="Human anchor"
+                  value={`${((dataEvidence.humanAnchorShare ?? 1) * 100).toFixed(2)}%`}
+                />
+              </div>
               <p className="mt-2 font-mono text-[0.625rem] leading-5 text-muted">
-              Contamination {Math.round(dataEvidence.contaminationRisk * 100)}%
-              · rights exposure{" "}
-              {Math.round((dataEvidence.rightsRisk ?? 0) * 100)}% · synthetic{" "}
-              {Math.round((dataEvidence.syntheticShare ?? 0) * 100)}%
-              {(dataEvidence.syntheticGenerationDepth ?? 0) > 0
-                ? ` at ${dataEvidence.syntheticGenerationDepth!.toFixed(1)} generation depth`
-                : ""}
+                Contamination{" "}
+                {(dataEvidence.contaminationRisk * 100).toFixed(2)}% · rights
+                exposure {((dataEvidence.rightsRisk ?? 0) * 100).toFixed(2)}% ·
+                synthetic{" "}
+                {((dataEvidence.syntheticShare ?? 0) * 100).toFixed(2)}%
+                {(dataEvidence.syntheticGenerationDepth ?? 0) > 0
+                  ? ` at ${dataEvidence.syntheticGenerationDepth!.toFixed(2)} generation depth`
+                  : ""}
               </p>
             </div>
           </details>
@@ -671,7 +682,7 @@ export function ActiveTrainingCard({
                 ? job.postTrainProgress / job.postTrainTarget
                 : 0
             }
-            detail={`${num(job.postTrainProgress, 1)} / ${num(job.postTrainTarget, 1)} PF`}
+            detail={`${num(job.postTrainProgress)} / ${num(job.postTrainTarget)} PF`}
             tone="research"
           />
         ) : null}
@@ -691,7 +702,7 @@ export function ActiveTrainingCard({
             ) : null}
             <StatRow
               label="Recommended"
-              value={`${Math.round(Math.min(100, recommendedProgress * 100))}%`}
+              value={`${Math.min(100, recommendedProgress * 100).toFixed(2)}%`}
             />
           </div>
         ) : null}
@@ -709,7 +720,7 @@ export function ActiveTrainingCard({
         {!job.failed ? (
           <label className="block text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
             Compute priority · {job.computePriority ?? 50}/100
-            <input
+            <HudRange
               type="range"
               min={0}
               max={100}
@@ -718,7 +729,7 @@ export function ActiveTrainingCard({
               onChange={(event) =>
                 onPriority(job.id, Number(event.target.value), job.reservedPf)
               }
-              className="mt-1 w-full"
+              className="mt-1"
             />
           </label>
         ) : null}
@@ -774,17 +785,19 @@ export function ActiveTrainingCard({
               <HudButton onClick={() => onKeepInternal(job.id)}>
                 Keep internal
               </HudButton>
-              <HudButton
+              <BenchmarkEntryPoint
+                context={{ kind: "training-run", id: job.id }}
+                icon={false}
                 disabled={!checkpointEligible}
                 title={
                   checkpointEligible
                     ? "Capture these exact weights, then choose benchmark suites and measurement spend."
                     : "Allocate compute before benchmarking current weights."
                 }
-                onClick={() => onBenchmark(job.id)}
+                onOpen={() => onBenchmark(job.id)}
               >
                 Benchmark
-              </HudButton>
+              </BenchmarkEntryPoint>
               <HudButton
                 disabled={!checkpointEligible}
                 title={
@@ -797,7 +810,19 @@ export function ActiveTrainingCard({
                 Save checkpoint
               </HudButton>
               <HudButton
-                variant={cancelConfirm ? "danger" : "ghost"}
+                variant="secondary"
+                disabled={!checkpointEligible}
+                title={
+                  checkpointEligible
+                    ? "Save these exact weights and configure a separate child model while this run continues."
+                    : "Allocate compute before branching from the current weights."
+                }
+                onClick={() => onBranchCheckpoint(job.id)}
+              >
+                Branch model
+              </HudButton>
+              <HudButton
+                variant="danger"
                 onClick={() => {
                   if (cancelConfirm) onCancel(job.id);
                   else setCancelConfirm(true);
@@ -820,17 +845,19 @@ export function ActiveTrainingCard({
               <HudButton onClick={() => onPause(job.id, !job.paused)}>
                 {job.paused ? "Resume" : "Pause"}
               </HudButton>
-              <HudButton
+              <BenchmarkEntryPoint
+                context={{ kind: "training-run", id: job.id }}
+                icon={false}
                 disabled={!checkpointEligible}
                 title={
                   checkpointEligible
                     ? "Capture these exact weights, then choose benchmark suites and measurement spend."
                     : "Allocate compute before benchmarking current weights."
                 }
-                onClick={() => onBenchmark(job.id)}
+                onOpen={() => onBenchmark(job.id)}
               >
                 Benchmark
-              </HudButton>
+              </BenchmarkEntryPoint>
               <HudButton
                 disabled={!checkpointEligible}
                 title={
@@ -841,6 +868,18 @@ export function ActiveTrainingCard({
                 onClick={() => onSaveCheckpoint(job.id)}
               >
                 Save checkpoint
+              </HudButton>
+              <HudButton
+                variant="secondary"
+                disabled={!checkpointEligible}
+                title={
+                  checkpointEligible
+                    ? "Save these exact weights and configure a separate child model while this run continues."
+                    : "Allocate compute before branching from the current weights."
+                }
+                onClick={() => onBranchCheckpoint(job.id)}
+              >
+                Branch model
               </HudButton>
               <HudButton
                 variant="primary"
@@ -867,7 +906,7 @@ export function ActiveTrainingCard({
                 {launchConfirm ? "Confirm launch" : "Launch now"}
               </HudButton>
               <HudButton
-                variant={cancelConfirm ? "danger" : "ghost"}
+                variant="danger"
                 onClick={() => {
                   if (cancelConfirm) onCancel(job.id);
                   else setCancelConfirm(true);
@@ -986,7 +1025,6 @@ export function ActiveTrainingCard({
             ) : null}
           </div>
         ) : null}
-
       </div>
     </GameCard>
   );

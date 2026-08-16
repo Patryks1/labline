@@ -1,4 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { Trash } from "@phosphor-icons/react";
 import { ECONOMY } from "../../../sim/balance/economy";
 import {
   analyzeApiPricing,
@@ -43,6 +44,7 @@ import {
   maxPlanDataCollectionShare,
   PAID_DATA_COLLECTION_PRICE_CAP,
   PLAN_PRO_WORKLOAD_MESSAGES_PER_DAY,
+  MAX_PLANS,
 } from "../../../sim/systems/plans";
 import type { PlanOfferingBreadth } from "../../../sim/systems/plans";
 import { useGameStore } from "../../../store/gameStore";
@@ -63,6 +65,8 @@ import { ResearchUnlockLink } from "../ui/ResearchUnlockLink";
 import {
   EmptyState,
   HudButton,
+  HudInput,
+  HudRange,
   MetricTile,
   PanelScaffold,
   StatusChip,
@@ -70,8 +74,13 @@ import {
 import { GameCard, MeterBar, SegmentedTabs, StatRow } from "../ui/kit";
 import { LineChart, type LineChartSeries } from "../ui/LineChart";
 import { effectiveApiPeerPricing, formatApiListPrice } from "./apiPriceUi";
-
-type PlansTabId = "demand" | "tiers" | "api" | "usage";
+import { buildFinanceDashboardModel } from "../data/financeDashboardModel";
+import {
+  NEW_PLAN_SELECTOR_ID,
+  PLANS_TAB_IDS,
+  planSelectorOrder,
+  type PlansTabId,
+} from "./plansPanelNavigation";
 
 export function ApiCostSummary({
   estimatedCostPerMTok,
@@ -101,8 +110,8 @@ export function ApiCostSummary({
       />
       <MetricTile
         label="API traffic / day"
-        value={`${num(servedMTok, 1)} MTok`}
-        detail={`${num(requestedMTok, 1)} MTok requested`}
+        value={`${num(servedMTok)} MTok`}
+        detail={`${num(requestedMTok)} MTok requested`}
       />
     </div>
   );
@@ -142,7 +151,6 @@ function DraftNumberInput({
   const [draft, setDraft] = useState(() =>
     formatNumberDraft(value, decimals, trimTrailingZeros),
   );
-  const inputRef = useRef<HTMLInputElement>(null);
   const editingRef = useRef(false);
 
   useEffect(() => {
@@ -170,8 +178,7 @@ function DraftNumberInput({
   };
 
   return (
-    <input
-      ref={inputRef}
+    <HudInput
       type="text"
       inputMode="decimal"
       data-min={min}
@@ -206,7 +213,8 @@ export function PlansPanel() {
   const deletePlan = useGameStore((s) => s.deletePlan);
   const setModelApiInOut = useGameStore((s) => s.setModelApiInOut);
   const setPricing = useGameStore((s) => s.setPricing);
-  const stats = state.lastMarket.planStats;
+  const financeModel = useMemo(() => buildFinanceDashboardModel(state), [state]);
+  const stats = financeModel.stats.plans;
   const models = state.player.models.filter(
     (m) => m.release === "released" || m.shipped,
   );
@@ -220,7 +228,7 @@ export function PlansPanel() {
     0,
     state.lastMarket.playerDemandMTok - apiRequested,
   );
-  const subServed = state.lastMarket.planStats.reduce(
+  const subServed = stats.reduce(
     (sum, plan) => sum + plan.dayMTok,
     0,
   );
@@ -286,6 +294,9 @@ export function PlansPanel() {
   );
   const [creatingPlan, setCreatingPlan] = useState(false);
   const [plansTab, setPlansTab] = useState<PlansTabId>("tiers");
+  const planCount = state.player.pricing.plans.length;
+  const canCreatePlan = planCount < MAX_PLANS;
+  const planSelectorIds = planSelectorOrder(state.player.pricing.plans);
 
   const blendedList = blendApiPrice(
     active?.apiPriceInPerMTok ??
@@ -320,7 +331,7 @@ export function PlansPanel() {
   const paidSubs = stats
     .filter((p) => !p.isFree)
     .reduce((s, p) => s + p.subscribers, 0);
-  const subRevDay = state.player.finance.subRevenue;
+  const subRevDay = financeModel.revenue.subscription;
   const arpuMo =
     paidSubs > 0 ? (subRevDay * ECONOMY.daysPerMonth) / paidSubs : 0;
   const autoApiPriority = Math.max(
@@ -335,41 +346,88 @@ export function PlansPanel() {
 
   const unservedDemand = Math.max(
     0,
-    state.lastMarket.playerDemandMTok - state.lastMarket.servedMTok,
+    financeModel.current.demandMTok - financeModel.current.servedMTok,
   );
-  const mtokServed = state.lastMarket.servedMTok;
+  const mtokServed = financeModel.current.servedMTok;
 
   return (
     <PanelScaffold
       eyebrow="Commercial"
       title="Plans"
-      description="Tiers, API pricing, and capacity routing."
+      description="Tiers, API, and capacity."
     >
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <MetricTile
-          label="Subscribers"
+          label="Portfolio seats"
           value={people(totalSubs)}
           detail={`${people(paidSubs)} paid`}
         />
         <MetricTile
-          label="Sub revenue / day"
+          label="Portfolio rev / day"
           value={money(subRevDay)}
           detail={paidSubs > 0 ? `ARPU ${money(arpuMo)}/mo` : "no paid seats"}
           tone="positive"
         />
         <MetricTile
-          label="MTok served"
-          value={num(mtokServed, 1)}
-          detail={`${num(apiServed, 1)} API · ${num(subServed, 1)} seats`}
+          label="Portfolio served"
+          value={num(mtokServed)}
+          detail={`${num(apiServed)} API · ${num(subServed)} seats`}
           tone="serve"
         />
         <MetricTile
           label="Unserved demand"
-          value={num(unservedDemand, 1)}
+          value={num(unservedDemand)}
           detail="MTok / day"
           tone={unservedDemand > 0.5 ? "danger" : "neutral"}
         />
       </div>
+
+      <PlansCapacitySummary
+        apiServed={apiServed}
+        apiRequested={apiRequested}
+        subServed={subServed}
+        subRequested={subRequested}
+        apiPf={Math.max(
+          0,
+          (state.lastMarket.servedPf ?? 0) -
+            stats.reduce((sum, plan) => sum + (plan.dayInferPf ?? 0), 0),
+        )}
+        apiModelUsage={state.lastMarket.apiModelUsage ?? []}
+        stats={stats}
+        ledger={state.lastMarket.computeLedger}
+        headroom={state.industryDataPack.compute.onlineHeadroom ?? 0.25}
+        apiPriority={pricing.apiVsSubPriority ?? 0.68}
+        autoApiPriority={autoApiPriority}
+        apiServeFraction={
+          apiRequested > 0 ? Math.min(1, apiServed / apiRequested) : 1
+        }
+        subscriptionServeFraction={
+          subRequested > 0 ? Math.min(1, subServed / subRequested) : 1
+        }
+        apiBacklogMTok={Math.max(0, apiRequested - apiServed)}
+        subscriptionBacklogMTok={Math.max(0, subRequested - subServed)}
+        unservedRatio={
+          apiRequested + subRequested > 0
+            ? Math.min(
+                1,
+                (Math.max(0, apiRequested - apiServed) +
+                  Math.max(0, subRequested - subServed)) /
+                  (apiRequested + subRequested),
+              )
+            : 0
+        }
+        onPriorityChange={(apiVsSubPriority) =>
+          setPricing({ apiVsSubPriority })
+        }
+        throttlePolicy={pricing.serveThrottlePolicy ?? "balanced"}
+        onThrottlePolicyChange={(serveThrottlePolicy) =>
+          setPricing({ serveThrottlePolicy })
+        }
+        apiLoad={state.lastMarket.apiLoad ?? 0}
+        subLoad={state.lastMarket.subLoad ?? 0}
+        apiStrain={state.lastMarket.apiSpeedStrain ?? 0}
+        subStrain={state.lastMarket.subSpeedStrain ?? 0}
+      />
 
       <div className="mt-3">
         <SegmentedTabs
@@ -377,13 +435,12 @@ export function PlansPanel() {
           active={plansTab}
           onChange={(id) => setPlansTab(id as PlansTabId)}
           items={[
-            { id: "demand", label: "Demand" },
+            { id: PLANS_TAB_IDS[0], label: "Demand" },
             {
-              id: "tiers",
+              id: PLANS_TAB_IDS[1],
               label: `Tiers (${state.player.pricing.plans.length})`,
             },
-            { id: "api", label: `API (${models.length})` },
-            { id: "usage", label: "Usage" },
+            { id: PLANS_TAB_IDS[2], label: `API (${models.length})` },
           ]}
         />
       </div>
@@ -391,9 +448,9 @@ export function PlansPanel() {
       <div key={plansTab} className="panel-swap mt-3 space-y-3">
         {plansTab === "demand" ? (
           <PlanDemandSection
-            history={state.planStatsHistory}
+            history={financeModel.planHistory}
             stats={stats}
-            finance={state.financeHistory}
+            finance={financeModel.history}
             overflowMTok={state.lastMarket.overflowMTok}
             trickledMTok={state.lastMarket.trickledMTok}
           />
@@ -401,35 +458,68 @@ export function PlansPanel() {
 
         {plansTab === "tiers" ? (
           <>
-            <div className="flex items-center justify-end gap-3">
-              <HudButton
-                type="button"
-                variant="primary"
-                className="!px-3 !py-1.5 text-[0.75rem]"
-                onClick={() => setCreatingPlan(true)}
-              >
-                New plan
-              </HudButton>
-            </div>
+            <div
+              className="grid min-w-0 grid-cols-1 gap-1.5 rounded-lg bg-void/45 p-1.5 min-[360px]:grid-cols-2 sm:grid-cols-3 lg:grid-cols-4"
+              role="list"
+              aria-label="Subscription plans"
+            >
+              {planSelectorIds.map((entryId) => {
+                if (entryId === NEW_PLAN_SELECTOR_ID) {
+                  return (
+                    <HudButton
+                      key={entryId}
+                      type="button"
+                      variant={canCreatePlan ? "primary" : "secondary"}
+                      disabled={!canCreatePlan}
+                      disabledReason={`Plan limit reached (${MAX_PLANS}). Delete a plan before creating another.`}
+                      aria-label={
+                        canCreatePlan
+                          ? "Create a new subscription plan"
+                          : `Plan limit reached: ${MAX_PLANS} plans`
+                      }
+                      data-testid="new-plan-button"
+                      onClick={() => {
+                        setSelectedPlanId(null);
+                        setCreatingPlan(true);
+                      }}
+                      className="flex min-h-11 min-w-0 w-full items-center justify-between gap-2 rounded-md border px-3 text-left text-[0.75rem] font-medium sm:min-h-9"
+                    >
+                      <span className="truncate">
+                        {canCreatePlan ? "New plan" : "Plan limit reached"}
+                      </span>
+                      <span className="shrink-0 font-mono text-[0.625rem] text-muted">
+                        {planCount}/{MAX_PLANS}
+                      </span>
+                    </HudButton>
+                  );
+                }
 
-            <div className="flex gap-1.5 overflow-x-auto rounded-lg bg-void/45 p-1.5">
-              {state.player.pricing.plans.map((plan) => (
-                <button
-                  key={plan.id}
-                  type="button"
-                  onClick={() => {
-                    setSelectedPlanId(plan.id);
-                    setCreatingPlan(false);
-                  }}
-                  className={`min-h-11 shrink-0 rounded-md border px-3 text-[0.75rem] font-medium sm:min-h-9 ${
-                    selectedPlanId === plan.id && !creatingPlan
-                      ? "border-mint/45 bg-mint/15 text-mint"
-                      : "border-line/70 bg-panel-2 text-muted hover:text-bone"
-                  }`}
-                >
-                  {plan.name} · {plan.enabled ? "Live" : "Paused"}
-                </button>
-              ))}
+                const plan = state.player.pricing.plans.find(
+                  (candidate) => candidate.id === entryId,
+                );
+                if (!plan) return null;
+                return (
+                  <HudButton
+                    key={plan.id}
+                    type="button"
+                    variant="ghost"
+                    onClick={() => {
+                      setSelectedPlanId(plan.id);
+                      setCreatingPlan(false);
+                    }}
+                    className={`flex min-h-11 min-w-0 w-full items-center justify-between gap-2 rounded-md border px-3 text-left text-[0.75rem] font-medium sm:min-h-9 ${
+                      selectedPlanId === plan.id && !creatingPlan
+                        ? "border-mint/45 bg-mint/15 text-mint"
+                        : "border-line/70 bg-panel-2 text-muted hover:text-bone"
+                    }`}
+                  >
+                    <span className="min-w-0 truncate">{plan.name}</span>
+                    <span className="shrink-0 text-[0.625rem] uppercase tracking-[0.1em] text-muted">
+                      {plan.enabled ? "Live" : "Paused"}
+                    </span>
+                  </HudButton>
+                );
+              })}
             </div>
 
             <div className="anim-stagger space-y-2.5">
@@ -475,15 +565,15 @@ export function PlansPanel() {
                 })}
             </div>
 
-            {creatingPlan ? (
+            {creatingPlan && canCreatePlan ? (
               <GameCard eyebrow="Create" title="New plan" tone="mint">
                 <div className="grid gap-2 sm:grid-cols-2">
                   <label className="text-[0.8125rem] text-muted">
                     Name
-                    <input
+                    <HudInput
                       value={name}
                       onChange={(e) => setName(e.target.value)}
-                      className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 text-[0.8125rem] text-bone outline-none"
+                      className="mt-0.5 w-full text-[0.8125rem]"
                     />
                   </label>
                   <label className="text-[0.8125rem] text-muted">
@@ -719,7 +809,7 @@ export function PlansPanel() {
                               Traffic
                             </div>
                             <div className="font-mono text-[0.8125rem] tabular-nums text-bone">
-                              {num(dayMTok, 1)} MTok
+                              {num(dayMTok)} MTok
                             </div>
                           </div>
                         </div>
@@ -783,15 +873,16 @@ export function PlansPanel() {
                             <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
                               {apiServeMods.label} · PF ×
                               {apiServeMods.computeMult.toFixed(2)} · cap{" "}
-                              {apiServedModel.capability.toFixed(0)}
+                              {apiServedModel.capability.toFixed(2)}
                             </span>
                           </summary>
                           <div className="border-t border-line/40 px-2.5 pb-2.5 pt-2">
                           <div className="mt-1.5 flex flex-wrap gap-1">
                             {apiPrecisionOptions.map((precision) => (
-                              <button
+                              <HudButton
                                 key={precision}
                                 type="button"
+                                variant="ghost"
                                 aria-label={`${m.name} API ${precision === "fp16" ? "Full" : precision.toUpperCase()}`}
                                 onClick={() =>
                                   setPricing({
@@ -811,7 +902,7 @@ export function PlansPanel() {
                                 {precision === "fp16"
                                   ? "Full"
                                   : precision.toUpperCase()}
-                              </button>
+                              </HudButton>
                             ))}
                           </div>
                           {apiPrecisionOptions.length === 1 ? (
@@ -841,7 +932,7 @@ export function PlansPanel() {
                                 >
                                   {(
                                     apiServedModel.benchmarks[benchmarkId] ?? 0
-                                  ).toFixed(0)}
+                                  ).toFixed(2)}
                                   {apiServeMods.benchmarkDeltas[benchmarkId] ? (
                                     <span className="ml-0.5 text-muted">
                                       (
@@ -934,58 +1025,148 @@ export function PlansPanel() {
           </section>
         ) : null}
 
-        {plansTab === "usage" ? (
-          <div className="space-y-3">
-            <ComputeAllocationChart
-              apiMTok={apiServed}
-              apiPf={Math.max(
-                0,
-                (state.lastMarket.servedPf ?? 0) -
-                  stats.reduce((sum, plan) => sum + (plan.dayInferPf ?? 0), 0),
-              )}
-              apiModelUsage={state.lastMarket.apiModelUsage ?? []}
-              plans={stats}
-              ledger={state.lastMarket.computeLedger}
-              headroom={state.industryDataPack.compute.onlineHeadroom ?? 0.25}
-            >
-              <CapacityRoutingControl
-                value={pricing.apiVsSubPriority ?? 0.68}
-                autoValue={autoApiPriority}
-                apiServeFraction={
-                  apiRequested > 0 ? Math.min(1, apiServed / apiRequested) : 1
-                }
-                subscriptionServeFraction={
-                  subRequested > 0 ? Math.min(1, subServed / subRequested) : 1
-                }
-                apiBacklogMTok={Math.max(0, apiRequested - apiServed)}
-                subscriptionBacklogMTok={Math.max(0, subRequested - subServed)}
-                unservedRatio={
-                  apiRequested + subRequested > 0
-                    ? Math.min(
-                        1,
-                        (Math.max(0, apiRequested - apiServed) +
-                          Math.max(0, subRequested - subServed)) /
-                          (apiRequested + subRequested),
-                      )
-                    : 0
-                }
-                onChange={(apiVsSubPriority) =>
-                  setPricing({ apiVsSubPriority })
-                }
-                throttlePolicy={pricing.serveThrottlePolicy ?? "balanced"}
-                onThrottlePolicyChange={(serveThrottlePolicy) =>
-                  setPricing({ serveThrottlePolicy })
-                }
-                apiLoad={state.lastMarket.apiLoad ?? 0}
-                subLoad={state.lastMarket.subLoad ?? 0}
-                apiStrain={state.lastMarket.apiSpeedStrain ?? 0}
-                subStrain={state.lastMarket.subSpeedStrain ?? 0}
-              />
-            </ComputeAllocationChart>
-          </div>
-        ) : null}
       </div>
     </PanelScaffold>
+  );
+}
+
+export function PlansCapacitySummary({
+  apiServed,
+  apiRequested,
+  subServed,
+  subRequested,
+  apiPf,
+  apiModelUsage,
+  stats,
+  ledger,
+  headroom,
+  apiPriority,
+  autoApiPriority,
+  apiServeFraction,
+  subscriptionServeFraction,
+  apiBacklogMTok,
+  subscriptionBacklogMTok,
+  unservedRatio,
+  onPriorityChange,
+  throttlePolicy,
+  onThrottlePolicyChange,
+  apiLoad,
+  subLoad,
+  apiStrain,
+  subStrain,
+}: {
+  apiServed: number;
+  apiRequested: number;
+  subServed: number;
+  subRequested: number;
+  apiPf: number;
+  apiModelUsage: NonNullable<PlanDayStats["modelUsage"]>;
+  stats: PlanDayStats[];
+  ledger?: ComputeLedger;
+  headroom: number;
+  apiPriority: number;
+  autoApiPriority: number;
+  apiServeFraction: number;
+  subscriptionServeFraction: number;
+  apiBacklogMTok: number;
+  subscriptionBacklogMTok: number;
+  unservedRatio: number;
+  onPriorityChange: (value: number) => void;
+  throttlePolicy: ServeThrottlePolicy;
+  onThrottlePolicyChange: (value: ServeThrottlePolicy) => void;
+  apiLoad: number;
+  subLoad: number;
+  apiStrain: number;
+  subStrain: number;
+}) {
+  const totalRequested = apiRequested + subRequested;
+  const totalBacklog = apiBacklogMTok + subscriptionBacklogMTok;
+  const priorityPct = apiPriority * 100;
+  const serveRatio = totalRequested
+    ? (totalRequested - totalBacklog) / totalRequested
+    : 1;
+
+  return (
+    <section
+      className="mt-3 min-w-0 overflow-hidden rounded-lg border border-line/70 bg-panel-2/60"
+      aria-labelledby="plans-capacity-summary-title"
+      data-testid="plans-capacity-summary"
+    >
+      <div className="border-b border-line/50 px-3 py-2">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <div>
+            <h2
+              id="plans-capacity-summary-title"
+              className="text-[0.75rem] font-semibold text-bone"
+            >
+              Capacity at a glance
+            </h2>
+            <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">
+              Channel demand and serving health stay visible while you edit
+              plans or API pricing.
+            </p>
+          </div>
+          <StatusChip tone={unservedRatio > 0.1 ? "warning" : "positive"}>
+            {pct(serveRatio)} served
+          </StatusChip>
+        </div>
+      </div>
+
+      <div className="grid min-w-0 grid-cols-2 gap-px bg-line/40 sm:grid-cols-4">
+        <UsageCell
+          label="API channel"
+          value={`${num(apiServed)} MTok/d`}
+          sub={`${num(apiRequested)} requested`}
+          accent="text-infer"
+        />
+        <UsageCell
+          label="Plan traffic"
+          value={`${num(subServed)} MTok/d`}
+          sub={`${num(subRequested)} requested`}
+          accent="text-mint"
+        />
+        <UsageCell
+          label="Backlog"
+          value={`${num(totalBacklog)} MTok`}
+          sub={`${num(apiBacklogMTok)} API · ${num(subscriptionBacklogMTok)} plans`}
+          accent={totalBacklog > 0 ? "text-amber" : "text-bone"}
+        />
+        <UsageCell
+          label="Routing priority"
+          value={`${priorityPct.toFixed(2)}% API`}
+          sub={`${(100 - priorityPct).toFixed(2)}% plans · auto ${(autoApiPriority * 100).toFixed(2)}%`}
+          accent="text-research"
+        />
+      </div>
+
+      <div className="min-w-0 border-t border-line/50 bg-void/25 px-2 pb-2">
+        <ComputeAllocationChart
+          apiMTok={apiServed}
+          apiPf={apiPf}
+          apiModelUsage={apiModelUsage}
+          plans={stats}
+          ledger={ledger}
+          headroom={headroom}
+        >
+          <CapacityRoutingControl
+            value={apiPriority}
+            autoValue={autoApiPriority}
+            apiServeFraction={apiServeFraction}
+            subscriptionServeFraction={subscriptionServeFraction}
+            apiBacklogMTok={apiBacklogMTok}
+            subscriptionBacklogMTok={subscriptionBacklogMTok}
+            unservedRatio={unservedRatio}
+            onChange={onPriorityChange}
+            throttlePolicy={throttlePolicy}
+            onThrottlePolicyChange={onThrottlePolicyChange}
+            apiLoad={apiLoad}
+            subLoad={subLoad}
+            apiStrain={apiStrain}
+            subStrain={subStrain}
+          />
+        </ComputeAllocationChart>
+      </div>
+    </section>
   );
 }
 
@@ -1137,9 +1318,10 @@ function PlanDemandSection({
         {plansMeta.map((meta) => {
           const hidden = hiddenPlanIds.includes(meta.planId);
           return (
-            <button
+            <HudButton
               key={meta.planId}
               type="button"
+              variant="ghost"
               aria-pressed={!hidden}
               title={hidden ? `Show ${meta.name}` : `Hide ${meta.name}`}
               onClick={() =>
@@ -1166,7 +1348,7 @@ function PlanDemandSection({
                 }}
               />
               <span className="max-w-[8rem] truncate">{meta.name}</span>
-            </button>
+            </HudButton>
           );
         })}
       </div>
@@ -1317,7 +1499,7 @@ function PlanDemandSection({
   );
 }
 
-/** Overload policy options for the segmented control; hint shows for the active one. */
+/** Overload policy options for the contextual button group; hint shows for the active one. */
 const THROTTLE_POLICY_OPTIONS: {
   id: ServeThrottlePolicy;
   label: string;
@@ -1339,6 +1521,43 @@ const THROTTLE_POLICY_OPTIONS: {
     hint: "Serve everyone; streams slow down and demand cools tomorrow.",
   },
 ];
+
+export function OverloadPolicyControl({
+  throttlePolicy,
+  onChange,
+}: {
+  throttlePolicy: ServeThrottlePolicy;
+  onChange: (policy: ServeThrottlePolicy) => void;
+}) {
+  return (
+    <div
+      className="mt-1.5 grid gap-1 sm:grid-cols-3"
+      role="group"
+      aria-label="Overload policy"
+    >
+      {THROTTLE_POLICY_OPTIONS.map((option) => {
+        const active = throttlePolicy === option.id;
+        return (
+          <HudButton
+            key={option.id}
+            type="button"
+            variant="ghost"
+            aria-pressed={active}
+            title={option.hint}
+            onClick={() => onChange(option.id)}
+            className={`min-h-11 rounded-md border px-2 py-1.5 text-left text-[0.6875rem] transition sm:min-h-0 ${
+              active
+                ? "border-mint/50 bg-mint/10 text-mint"
+                : "border-line/70 bg-panel-2 text-muted hover:border-line hover:text-bone"
+            }`}
+          >
+            {option.label}
+          </HudButton>
+        );
+      })}
+    </div>
+  );
+}
 
 /** Channel load (demand ÷ reserved capacity): calm ≤90%, strained ≤115%, overloaded above. */
 function channelLoadTone(load: number): "positive" | "warning" | "danger" {
@@ -1410,7 +1629,7 @@ function CapacityRoutingControl({
     >
       <div className="flex items-center justify-between gap-2 border-b border-line/60 px-2.5 py-1.5">
         <div className="flex min-w-0 items-center gap-2">
-          <h3 className="truncate text-[0.75rem] font-semibold text-bone">
+          <h3 className="min-w-0 whitespace-normal break-words text-[0.75rem] font-semibold leading-snug text-bone">
             Capacity routing
           </h3>
           <span
@@ -1419,14 +1638,15 @@ function CapacityRoutingControl({
             {pressure.label}
           </span>
         </div>
-        <button
+        <HudButton
           type="button"
-          className="shrink-0 rounded-md border border-mint/35 bg-mint/10 px-2 py-1 text-[0.6875rem] font-medium text-mint transition-colors hover:bg-mint/20"
+          variant="secondary"
+          className="min-h-11 shrink-0 rounded-md border border-mint/35 bg-mint/10 px-2 py-1 text-[0.6875rem] font-medium text-mint transition-colors hover:bg-mint/20 sm:min-h-0"
           onClick={() => onChange(autoValue)}
           title="Match API and seat capacity to current token demand"
         >
           Auto-balance
-        </button>
+        </HudButton>
       </div>
 
       <div className="px-2.5 py-2">
@@ -1446,8 +1666,7 @@ function CapacityRoutingControl({
             <div className="text-sm font-semibold text-infer">{apiShare}%</div>
           </div>
         </div>
-        <input
-          type="range"
+        <HudRange
           min={12}
           max={88}
           step={1}
@@ -1547,20 +1766,10 @@ function CapacityRoutingControl({
           <p className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
             Overload policy
           </p>
-          <div className="mt-1.5">
-            <SegmentedTabs
-              ariaLabel="Overload policy"
-              active={throttlePolicy}
-              onChange={(id) =>
-                onThrottlePolicyChange(id as ServeThrottlePolicy)
-              }
-              items={THROTTLE_POLICY_OPTIONS.map((option) => ({
-                id: option.id,
-                label: option.label,
-                title: option.hint,
-              }))}
-            />
-          </div>
+          <OverloadPolicyControl
+            throttlePolicy={throttlePolicy}
+            onChange={onThrottlePolicyChange}
+          />
           <p
             aria-live="polite"
             className="mt-1.5 text-[0.6875rem] leading-snug text-muted"
@@ -1622,7 +1831,9 @@ function UsageCell({
         {value}
       </div>
       {sub && (
-        <div className="mt-0.5 truncate text-[0.6875rem] text-muted">{sub}</div>
+        <div className="mt-0.5 min-w-0 whitespace-normal break-words text-[0.6875rem] leading-snug text-muted">
+          {sub}
+        </div>
       )}
     </div>
   );
@@ -1679,7 +1890,7 @@ function ComputeAllocationChart({
 
   return (
     <section
-      className="rounded-lg border border-line bg-panel-2 p-3"
+      className="plans-compute-allocation rounded-lg border border-line bg-panel-2 p-3"
       aria-label="Compute allocation"
     >
       <div className="flex items-start justify-between gap-3">
@@ -1697,7 +1908,7 @@ function ComputeAllocationChart({
             {num(totalMTok, 2)} MTok/d
           </div>
           <div className="text-[0.625rem] text-muted">
-            {num(totalPf, 1)} PF served
+            {num(totalPf)} PF served
           </div>
         </div>
       </div>
@@ -1711,27 +1922,34 @@ function ComputeAllocationChart({
                 ? segment.pf / totalPf
                 : segment.mtok / Math.max(totalMTok, 1e-9);
             return (
-              <button
+              <HudButton
                 key={segment.id}
                 type="button"
+                variant="ghost"
                 onMouseEnter={() => setSelectedId(segment.id)}
                 onFocus={() => setSelectedId(segment.id)}
                 onClick={() => setSelectedId(segment.id)}
                 aria-pressed={selected.id === segment.id}
-                className={`min-w-[3.5rem] border-r border-void/50 px-1.5 text-center transition last:border-r-0 ${selected.id === segment.id ? "brightness-125" : "hover:brightness-110"}`}
+                aria-label={segment.label}
+                className={`!px-0 min-w-0 overflow-hidden border-r border-void/50 text-center transition last:border-r-0 ${selected.id === segment.id ? "brightness-125" : "hover:brightness-110"}`}
                 style={{
                   width: `${Math.max(7, basis * 100)}%`,
                   backgroundColor: colors[index % colors.length],
                 }}
                 title={`${segment.label}: ${num(segment.mtok, 2)} MTok/day · ${num(segment.pf, 2)} PF`}
               >
-                <span className="block truncate text-[0.6875rem] font-semibold text-white">
-                  {segment.label}
+                <span className="block min-w-0 text-[0.6875rem] font-semibold text-white">
+                  <span className="plans-compute-allocation__lane-full block truncate">
+                    {segment.label}
+                  </span>
+                  <span className="plans-compute-allocation__lane-short" aria-hidden="true">
+                    {segment.label.slice(0, 2)}
+                  </span>
                 </span>
                 <span className="block font-mono text-[0.625rem] text-white/80">
-                  {Math.round(basis * 100)}%
+                  {(basis * 100).toFixed(2)}%
                 </span>
-              </button>
+              </HudButton>
             );
           })}
       </div>
@@ -1765,9 +1983,9 @@ function ComputeAllocationChart({
               >
                 <div className="min-w-0">
                   <div className="flex justify-between gap-2">
-                    <span className="truncate text-bone">{usage.name}</span>
+                    <span className="min-w-0 whitespace-normal break-words text-bone">{usage.name}</span>
                     <span className="text-muted">
-                      {Math.round(usage.share * 100)}%
+                      {(usage.share * 100).toFixed(2)}%
                     </span>
                   </div>
                   <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-line/50">
@@ -1925,7 +2143,7 @@ function WorkloadLedger({
               {stage.label}
             </div>
             <div
-              className={`mt-0.5 truncate font-mono text-[0.75rem] font-semibold ${stage.tone}`}
+                className={`mt-0.5 min-w-0 whitespace-normal break-words font-mono text-[0.75rem] font-semibold leading-snug ${stage.tone}`}
             >
               {stage.summary}
             </div>
@@ -2069,22 +2287,24 @@ function PlanModelRoster({
             Add released models, then open one to choose its serving precision.
           </p>
         </div>
-        <button
+        <HudButton
           type="button"
+          variant="secondary"
           onClick={() => setAddOpen((open) => !open)}
           disabled={availableModels.length === 0}
           className="shrink-0 rounded-full border border-mint/35 bg-mint/10 px-2.5 py-1 text-[0.75rem] font-medium text-mint disabled:cursor-not-allowed disabled:opacity-40"
         >
           + Add model
-        </button>
+        </HudButton>
       </div>
 
       {addOpen ? (
         <div className="mt-2 grid grid-cols-1 gap-1 rounded-lg border border-mint/25 bg-panel-2/70 p-1.5 sm:grid-cols-2">
           {availableModels.map((model) => (
-            <button
+            <HudButton
               key={model.id}
               type="button"
+              variant="ghost"
               onClick={() => addModel(model)}
               className="flex min-w-0 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left hover:bg-mint/10"
             >
@@ -2094,10 +2314,10 @@ function PlanModelRoster({
               <span className="shrink-0 font-mono text-[0.625rem] text-muted">
                 {model.paramsB < 1
                   ? `${Math.round(model.paramsB * 1_000)}M`
-                  : `${num(model.paramsB, 1)}B`}{" "}
-                · cap {num(model.capability, 0)}
+                  : `${num(model.paramsB)}B`}{" "}
+                · cap {num(model.capability)}
               </span>
-            </button>
+            </HudButton>
           ))}
         </div>
       ) : null}
@@ -2125,8 +2345,9 @@ function PlanModelRoster({
                 className="overflow-hidden rounded-lg border border-line/50 bg-panel-2/55"
               >
                 <div className="flex items-center gap-1.5 p-1.5">
-                  <button
+                  <HudButton
                     type="button"
+                    variant="ghost"
                     aria-expanded={expanded}
                     onClick={() =>
                       setExpandedModelId(expanded ? null : model.id)
@@ -2137,7 +2358,7 @@ function PlanModelRoster({
                       <span className="block truncate text-[0.75rem] font-semibold text-bone">
                         {model.name}
                       </span>
-                      <span className="block truncate text-[0.625rem] capitalize text-muted">
+                      <span className="block min-w-0 whitespace-normal break-words text-[0.625rem] capitalize leading-snug text-muted">
                         {modalityLabel}
                       </span>
                     </span>
@@ -2149,16 +2370,17 @@ function PlanModelRoster({
                         compute ×{modifiers.computeMult.toFixed(2)}
                       </span>
                     </span>
-                  </button>
-                  <button
+                  </HudButton>
+                  <HudButton
                     type="button"
+                    variant="ghost"
                     aria-label={`Remove ${model.name} from ${plan.name}`}
                     title="Remove model from plan"
                     onClick={() => removeModel(model.id)}
-                    className="rounded-md px-1.5 py-1 text-[0.75rem] text-muted hover:bg-danger/10 hover:text-danger"
+                    className="rounded-md px-1.5 py-1 text-[0.75rem] text-muted hover:bg-panel-2 hover:text-bone"
                   >
-                    ×
-                  </button>
+                    <Trash aria-hidden="true" size="0.8rem" weight="bold" />
+                  </HudButton>
                 </div>
 
                 {expanded ? (
@@ -2168,10 +2390,11 @@ function PlanModelRoster({
                         const active = option === precision;
                         const preview = planServeModifiers(option, unlocked);
                         return (
-                          <button
+                          <HudButton
                             key={option}
                             type="button"
-                            title={`${preview.label} · ${Math.round(preview.computeMult * 100)}% serving compute`}
+                            variant="ghost"
+                            title={`${preview.label} · ${(preview.computeMult * 100).toFixed(2)}% serving compute`}
                             onClick={() => setPrecision(model.id, option)}
                             className={`rounded-full px-2 py-1 font-mono text-[0.6875rem] ${
                               active
@@ -2180,13 +2403,13 @@ function PlanModelRoster({
                             }`}
                           >
                             {PLAN_PRECISION_LABELS[option]}
-                          </button>
+                          </HudButton>
                         );
                       })}
                     </div>
                     <p className="mt-1.5 text-[0.625rem] leading-snug text-muted">
                       {modifiers.label} uses{" "}
-                      {Math.round(modifiers.computeMult * 100)}% of
+                      {(modifiers.computeMult * 100).toFixed(2)}% of
                       full-precision serve compute
                       {modifiers.capabilityDelta
                         ? ` · capability ${modifiers.capabilityDelta}`
@@ -2244,7 +2467,7 @@ export function PlanEntitlementBreakdown({
                 {row.name}
               </strong>
               <span className="shrink-0 text-muted">
-                {Math.round(row.trafficShare * 100)}% traffic
+                {(row.trafficShare * 100).toFixed(2)}% traffic
               </span>
             </div>
             <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 text-muted">
@@ -2252,7 +2475,7 @@ export function PlanEntitlementBreakdown({
               <span className="text-right">
                 ~{num(row.interactionsPerDay, 0)} msg/d
               </span>
-              <span>Util {Math.round(row.expectedUtilization * 100)}%</span>
+              <span>Util {(row.expectedUtilization * 100).toFixed(2)}%</span>
               <span className="text-right text-danger">
                 COGS{" "}
                 {row.rawServingCostPerMonth != null
@@ -2280,7 +2503,7 @@ export function PlanEntitlementBreakdown({
                 <td className="max-w-[8rem] truncate py-1 pr-2 text-bone">
                   {row.name}
                   <span className="text-muted">
-                    {" "}· {Math.round(row.trafficShare * 100)}%
+                    {" "}· {(row.trafficShare * 100).toFixed(2)}%
                   </span>
                 </td>
                 <td className="py-1 pr-2 text-bone">
@@ -2290,7 +2513,7 @@ export function PlanEntitlementBreakdown({
                   ~{num(row.interactionsPerDay, 0)}
                 </td>
                 <td className="py-1 pr-2 text-muted">
-                  {Math.round(row.expectedUtilization * 100)}%
+                  {(row.expectedUtilization * 100).toFixed(2)}%
                 </td>
                 <td className="py-1 text-danger">
                   {row.rawServingCostPerMonth != null
@@ -2369,9 +2592,11 @@ function PlanCard({
       : allowanceDay * unitCogs * ECONOMY.daysPerMonth;
   const computePfPerUser = stats?.computePfPerSubscriber ?? 0;
   const computePfPerUserLabel =
-    computePfPerUser > 0 && computePfPerUser < 0.001
-      ? computePfPerUser.toExponential(2)
-      : num(computePfPerUser, 3);
+    computePfPerUser >= 1
+      ? `${num(computePfPerUser)} PF`
+      : computePfPerUser >= 0.001
+        ? `${(computePfPerUser * 1_000).toFixed(2)} TF`
+        : `${(computePfPerUser * 1_000_000).toFixed(2)} GF`;
 
   const util = 0.65; // sim default for pricing scores only
   const apiEq =
@@ -2454,10 +2679,10 @@ function PlanCard({
     >
       {/* Header */}
       <div className="flex flex-wrap items-center gap-2 border-b border-line/50 px-3 py-2">
-        <input
+        <HudInput
           value={plan.name}
           onChange={(e) => onChange({ name: e.target.value })}
-          className="min-w-0 basis-full bg-transparent text-sm font-semibold text-bone outline-none sm:flex-1 sm:basis-auto"
+          className="min-w-0 basis-full border-transparent bg-transparent text-sm font-semibold sm:flex-1 sm:basis-auto"
         />
         {free && (
           <span className="shrink-0 rounded-full bg-amber/20 px-2 py-0.5 text-[0.6875rem] font-medium text-amber">
@@ -2482,12 +2707,12 @@ function PlanCard({
                   : "Reliability or available compute is reducing satisfaction."
               }
             >
-              {Math.round(dissatisfaction * 100)}% dissatisfied
+              {pct(dissatisfaction)} dissatisfied
             </span>
           </StatusChip>
         ) : null}
         <label className="flex min-h-11 shrink-0 items-center gap-2 px-1 text-[0.75rem] text-muted">
-          <input
+          <HudInput
             type="checkbox"
             checked={plan.enabled}
             onChange={(e) => onChange({ enabled: e.target.checked })}
@@ -2499,7 +2724,7 @@ function PlanCard({
       {/* Live KPIs — the things you glance at */}
       <div className="grid grid-cols-2 gap-px bg-line/40 sm:grid-cols-4">
         <KpiCell
-          label="Subscribers"
+          label="Plan subscribers"
           value={people(subs)}
           sub={
             seatCap != null && seatCap < 1e8
@@ -2509,7 +2734,7 @@ function PlanCard({
           bar={seatFill}
         />
         <KpiCell
-          label="Rev / user / mo"
+          label="Plan rev / seat / mo"
           value={free ? "$0" : money(revPerUserMo)}
           sub={free ? "no charge" : `list ${money(plan.pricePerMonth)}`}
           accent={free ? "text-muted" : "text-bone"}
@@ -2525,11 +2750,11 @@ function PlanCard({
           accent={marginBad ? "text-danger" : "text-mint"}
         />
         <KpiCell
-          label="Usage / user"
-          value={subs > 0.5 ? `${num(usedPerUserDay, 3)} MTok/d` : "—"}
+          label="Plan usage / seat"
+          value={subs > 0.5 ? `${num(usedPerUserDay)} MTok/d` : "—"}
           sub={
             subs > 0.5
-              ? `${num(usedPerUserMo, 1)} MTok/mo · ${Math.round(fill * 100)}% of include`
+              ? `${num(usedPerUserMo)} MTok/mo · ${pct(fill)} of include`
               : `include ${formatAllowance(plan)}`
           }
           bar={subs > 0.5 ? Math.min(1, fill) : null}
@@ -2592,7 +2817,7 @@ function PlanCard({
             <div className="shrink-0 text-right font-mono text-[0.6875rem]">
               <div className="text-mint">{planComputePriority(plan)}/100</div>
               <div className="text-muted">
-                served {Math.round((stats?.serveFraction ?? 1) * 100)}%
+                served {pct(stats?.serveFraction ?? 1)}
               </div>
             </div>
           </div>
@@ -2631,8 +2856,7 @@ function PlanCard({
             </label>
             <div className="text-[0.75rem] text-muted">
               Compute priority
-              <input
-                type="range"
+              <HudRange
                 min={10}
                 max={100}
                 step={5}
@@ -2668,11 +2892,11 @@ function PlanCard({
             <div className="mt-1.5">
               <div className="mb-0.5 flex justify-between text-[0.6875rem] text-muted">
                 <span>
-                  Used {num(usedPerUserDay, 3)} MTok/user ·{" "}
-                  {num(allowanceDay, 3)} MTok/d include
+                  Used {num(usedPerUserDay)} MTok/user ·{" "}
+                  {num(allowanceDay)} MTok/d include
                 </span>
                 <span className={fill > 1 ? "text-amber" : "text-mint"}>
-                  {Math.round(fill * 100)}%
+                  {pct(fill)}
                 </span>
               </div>
               <div className="h-1.5 overflow-hidden rounded-full bg-void">
@@ -2704,11 +2928,10 @@ function PlanCard({
                 <strong className="font-mono tabular-nums text-bone">
                   {collectLocked
                     ? "Locked"
-                    : `${Math.round(collectEffective * 100)}% eff.`}
+                    : `${(collectEffective * 100).toFixed(2)}% eff.`}
                 </strong>
               </span>
-              <input
-                type="range"
+              <HudRange
                 min={0}
                 max={100}
                 step={5}
@@ -2727,7 +2950,7 @@ function PlanCard({
                   ? `Plans above $${PAID_DATA_COLLECTION_PRICE_CAP}/mo cannot retain traffic.`
                   : free
                     ? "Free traffic may be collected up to 100%."
-                    : `Paid cap ${Math.round(collectCap * 100)}% at $${plan.pricePerMonth.toFixed(0)}/mo (lerp 20%→10% through $${PAID_DATA_COLLECTION_PRICE_CAP}).`}
+                    : `Paid cap ${(collectCap * 100).toFixed(2)}% at $${plan.pricePerMonth.toFixed(2)}/mo (lerp 20%→10% through $${PAID_DATA_COLLECTION_PRICE_CAP.toFixed(2)}).`}
               </span>
             </label>
           );
@@ -2748,7 +2971,7 @@ function PlanCard({
             value={money(stats?.dayCogs ?? 0)}
             danger
           />
-          <Mini label="PF / served user" value={computePfPerUserLabel} />
+          <Mini label="Compute / served user" value={computePfPerUserLabel} />
           <Mini label="Day MTok" value={num(stats?.dayMTok ?? 0, 2)} />
         </div>
 
@@ -2768,8 +2991,8 @@ function PlanCard({
                   key={usage.modelId}
                   className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-2 gap-y-0.5 font-mono text-[0.6875rem] sm:grid-cols-[minmax(0,1fr)_auto_auto]"
                 >
-                  <span className="truncate text-bone">
-                    {usage.name} · {Math.round(usage.share * 100)}%
+                  <span className="min-w-0 whitespace-normal break-words text-bone">
+                    {usage.name} · {(usage.share * 100).toFixed(2)}%
                   </span>
                   <span className="text-muted">
                     {num(usage.dayMTok, 2)} MTok
@@ -2794,8 +3017,8 @@ function PlanCard({
                 Premium-plan scrutiny
               </span>
               <span className="font-mono text-[0.6875rem] text-bone">
-                {premiumScrutiny.actualUsageRatio.toFixed(1)}× /{" "}
-                {premiumScrutiny.expectedUsageRatio}× expected
+                {premiumScrutiny.actualUsageRatio.toFixed(2)}× /{" "}
+                {premiumScrutiny.expectedUsageRatio.toFixed(2)}× expected
               </span>
             </div>
             <p className="mt-1 text-[0.6875rem] leading-snug text-muted">
@@ -2831,7 +3054,7 @@ function PlanCard({
             </span>
             {tooHigh > 0.25 && (
               <span className="text-danger">
-                price pressure {Math.round(tooHigh * 100)}%
+                price pressure {(tooHigh * 100).toFixed(2)}%
               </span>
             )}
             {planStatus.primary !== "fair" && (
@@ -2903,9 +3126,10 @@ function PlanCard({
               {models.map((m) => {
                 const on = plan.modelIds.includes(m.id);
                 return (
-                  <button
+                  <HudButton
                     key={m.id}
                     type="button"
+                    variant="ghost"
                     onClick={() => {
                       const modelIds = on
                         ? plan.modelIds.filter((id) => id !== m.id)
@@ -2917,20 +3141,21 @@ function PlanCard({
                     }`}
                   >
                     {m.name}
-                  </button>
+                  </HudButton>
                 );
               })}
             </div>
           )}
         </div>
 
-        <button
+        <HudButton
           type="button"
+          variant="danger"
           className="rounded-md border border-danger/35 bg-danger/10 px-2.5 py-1.5 text-[0.75rem] font-medium text-danger hover:bg-danger/20"
           onClick={onDelete}
         >
           Delete plan
-        </button>
+        </HudButton>
       </div>
     </div>
   );
@@ -2964,7 +3189,7 @@ function KpiCell({
       {sub && (
         <div
           title={sub}
-          className="mt-0.5 truncate font-mono text-[0.6875rem] leading-snug text-muted"
+          className="mt-0.5 min-w-0 whitespace-normal break-words font-mono text-[0.6875rem] leading-snug text-muted"
         >
           {sub}
         </div>

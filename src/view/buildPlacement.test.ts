@@ -97,4 +97,14 @@ describe('build blueprint placement helpers', () => {
     expect(nearEdge.top).toBeGreaterThanOrEqual(8)
     expect(nearEdge.top + 54).toBeLessThanOrEqual(bounds.height - 8)
   })
+
+  it('keeps the richer pre-placement context tooltip inside the map', () => {
+    const bounds = { left: 0, top: 0, width: 420, height: 260 }
+    const position = placementTooltipPosition(410, 250, bounds, 238, 116)
+
+    expect(position.left).toBeGreaterThanOrEqual(8)
+    expect(position.left + 238).toBeLessThanOrEqual(bounds.width - 8)
+    expect(position.top).toBeGreaterThanOrEqual(8)
+    expect(position.top + 116).toBeLessThanOrEqual(bounds.height - 8)
+  })
 })

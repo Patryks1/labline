@@ -14,6 +14,7 @@ import { MeterBar, SegmentedTabs, StatRow } from './ui/kit'
 import { EmptyState, HudButton, StatusChip } from './ui/HudPrimitives'
 import { FeedPost } from './ui/FeedPost'
 import { useUiStore } from '../../store/uiStore'
+import { selectFinanceDashboardReadouts } from './data/financeDashboardModel'
 
 /**
  * Floating right intelligence dock over the map.
@@ -28,11 +29,19 @@ export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boole
   const expanded = open && !forceCollapsed
 
   return (
-    <div className="intel-shell pointer-events-none">
+    <div
+      id="command-dock-panel"
+      className="intel-shell pointer-events-none"
+      role="region"
+      aria-label="Intel dock"
+    >
       {!expanded ? (
         <aside className="command-dock command-dock--collapsed hud-surface pointer-events-auto relative m-2 ml-1 flex h-[calc(100%-1rem)] flex-col items-center gap-1 rounded-lg py-2">
           <button
             type="button"
+            aria-label="Open intel dock"
+            aria-expanded={false}
+            aria-controls="command-dock-panel"
             title="Open intel dock"
             onClick={() => setOpen(true)}
             className="flex min-h-11 min-w-11 items-center justify-center rounded-md text-muted transition hover:bg-panel-2 hover:text-bone"
@@ -44,6 +53,7 @@ export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boole
               key={v.id}
               type="button"
               aria-label={v.label}
+              aria-pressed={view === v.id}
               title={v.label}
               onClick={() => setView(v.id)}
               className={`flex min-h-11 min-w-11 items-center justify-center rounded-md transition ${
@@ -71,6 +81,9 @@ export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boole
             </div>
             <button
               type="button"
+              aria-label="Collapse intel dock"
+              aria-expanded={true}
+              aria-controls="command-dock-panel"
               title="Collapse"
               onClick={() => setOpen(false)}
               className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md text-muted transition hover:bg-panel-2 hover:text-bone"
@@ -106,19 +119,18 @@ function CommandIcon({ id }: { id: CommandViewId }) {
 }
 
 function PnlView({ onOpenStats }: { onOpenStats: () => void }) {
-  const f = useGameStore((s) => s.state.player.finance)
-  const market = useGameStore((s) => s.state.lastMarket)
+  const state = useGameStore((s) => s.state)
+  const { finance: f, current, revenue, costs } = selectFinanceDashboardReadouts(state)
+  const market = state.lastMarket
   const planStats = market.planStats
   const apiModels = market.modelFinance.filter(
     (model) => model.dayApiRevenue > 0 || model.dayApiCogs > 0 || model.dayApiMTok > 0,
   )
   const subMTok = planStats.reduce((sum, plan) => sum + plan.dayMTok, 0)
   const subUsers = planStats.reduce((sum, plan) => sum + plan.subscribers, 0)
-  const enterpriseApiRevenue = f.enterpriseRevenue * 0.5
-  const enterpriseSubRevenue = f.enterpriseRevenue - enterpriseApiRevenue
-  const dayNet =
-    typeof f.dayNet === 'number' ? f.dayNet : f.dayRevenue - f.dayCogs - f.dayEnergyCost
-  const opex = Math.abs(f.dayWageCost) + Math.abs(f.dayBuildingOpex) + Math.abs(f.dayMarketing) + Math.abs(f.dayEnergyOther) + Math.abs(f.dayChipAmortOther) + Math.abs(f.dayLoanPayment)
+  const enterpriseApiRevenue = revenue.enterprise * 0.5
+  const enterpriseSubRevenue = revenue.enterprise - enterpriseApiRevenue
+  const dayNet = current.net
 
   return (
     <div className="space-y-3">
@@ -139,18 +151,18 @@ function PnlView({ onOpenStats }: { onOpenStats: () => void }) {
       </div>
 
       <div className="space-y-1">
-        <StatRow label="Revenue" value={money(f.dayRevenue)} tone="positive" />
-        <StatRow label="Product COGS" value={money(-Math.abs(f.dayCogs))} tone="danger" />
-        <StatRow label="Operations" value={money(-opex)} tone="danger" />
+        <StatRow label="Revenue" value={money(revenue.total)} tone="positive" />
+        <StatRow label="Product COGS" value={money(-costs.productCogs)} tone="danger" />
+        <StatRow label="Operations" value={money(-costs.operatingCashOut)} tone="danger" />
         <StatRow label="Net / day" value={money(dayNet)} tone={dayNet < 0 ? 'danger' : 'positive'} strong />
-        <StatRow label="Cash" value={money(f.cash)} tone={f.cash < 2e6 ? 'danger' : 'neutral'} />
+        <StatRow label="Cash" value={money(current.cash)} tone={current.cash < 2e6 ? 'danger' : 'neutral'} />
       </div>
 
       <div className="anim-stagger space-y-2">
         <ChannelBreakdown
           label="API"
-          revenue={f.apiRevenue + enterpriseApiRevenue}
-          cogs={f.apiCogs}
+          revenue={revenue.api + enterpriseApiRevenue}
+          cogs={f.apiCogs ?? 0}
           usage={`${num(market.apiDayMTok, 2)} MTok`}
         >
           {apiModels.length > 0 ? (
@@ -173,8 +185,8 @@ function PnlView({ onOpenStats }: { onOpenStats: () => void }) {
 
         <ChannelBreakdown
           label="Subs"
-          revenue={f.subRevenue + enterpriseSubRevenue}
-          cogs={f.subCogs}
+          revenue={revenue.subscription + enterpriseSubRevenue}
+          cogs={f.subCogs ?? 0}
           usage={`${num(subMTok, 2)} MTok · ${compactPeople(subUsers)} users`}
         >
           {planStats.length > 0 ? (
@@ -214,10 +226,13 @@ function ChannelBreakdown({
 }) {
   const [expanded, setExpanded] = useState(false)
   const net = revenue - cogs
+  const panelId = `command-channel-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
   return (
     <div className="rounded-lg border border-line/70 bg-panel-2/70">
       <button
         type="button"
+        aria-expanded={expanded}
+        aria-controls={panelId}
         onClick={() => setExpanded((value) => !value)}
         className="flex w-full items-center gap-2 px-2.5 py-2 text-left transition hover:bg-void/30"
       >
@@ -230,19 +245,27 @@ function ChannelBreakdown({
           {money(net)}
         </span>
       </button>
-      {expanded ? (
-        <div className="space-y-1.5 border-t border-line/60 px-2.5 py-2">
-          <div className="grid grid-cols-3 gap-1.5">
-            <BreakdownMetric label="Revenue" value={money(revenue)} />
-            <BreakdownMetric label="Compute" value={money(-cogs)} danger />
-            <BreakdownMetric label="Net" value={money(net)} danger={net < 0} />
-          </div>
-          <div className="truncate text-[0.6875rem] text-muted" title={usage}>
-            {usage}
-          </div>
-          <div className="space-y-1 border-t border-line/50 pt-1.5">{children}</div>
-        </div>
-      ) : null}
+      <div
+        id={panelId}
+        role="region"
+        aria-label={`${label} breakdown`}
+        hidden={!expanded}
+        className="space-y-1.5 border-t border-line/60 px-2.5 py-2"
+      >
+        {expanded ? (
+          <>
+            <div className="grid grid-cols-3 gap-1.5">
+              <BreakdownMetric label="Revenue" value={money(revenue)} />
+              <BreakdownMetric label="Compute" value={money(-cogs)} danger />
+              <BreakdownMetric label="Net" value={money(net)} danger={net < 0} />
+            </div>
+            <div className="truncate text-[0.6875rem] text-muted" title={usage}>
+              {usage}
+            </div>
+            <div className="space-y-1 border-t border-line/50 pt-1.5">{children}</div>
+          </>
+        ) : null}
+      </div>
     </div>
   )
 }
@@ -304,7 +327,7 @@ function RivalsView({
   onInspect: (rivalId: string) => void
 }) {
   const state = useGameStore((s) => s.state)
-  const share = state.player.finance.totalShare
+  const share = selectFinanceDashboardReadouts(state).current.share
   const competitiveResponse = competitiveCatchUpSnapshot(state)
   const rows = [
     { id: 'player', name: 'You', share, flopsPf: null as number | null, short: 0, model: null as string | null, isPlayer: true },

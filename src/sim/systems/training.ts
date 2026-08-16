@@ -53,6 +53,7 @@ import {
   estimateTrainingEconomics,
   formatParams,
   fundedTrainingMaturity,
+  pacedTrainingPfPerDay,
   sizeGate,
   suggestedApiPricePerMTok,
   trainCostPfDays,
@@ -579,11 +580,15 @@ function liveTrainingDaysRemaining(
   _daysElapsed = job.daysElapsed ?? 0,
 ): number {
   const remainingPfDays = Math.max(0, job.targetPfDays - progressPfDays);
+  const usefulPfPerDay = Math.min(
+    Math.max(0, effectivePf),
+    pacedTrainingPfPerDay(job.targetPfDays, job.minCalendarDays),
+  );
   const computeDays =
     remainingPfDays <= 1e-9
       ? 0
-      : effectivePf > 1e-9
-        ? remainingPfDays / effectivePf
+      : usefulPfPerDay > 1e-9
+        ? remainingPfDays / usefulPfPerDay
         : Number.POSITIVE_INFINITY;
   return computeDays;
 }
@@ -2233,6 +2238,12 @@ export function startTraining(
     );
   }
   const recommendedPfDays = target;
+  const minCalendarDays =
+    paramsB >= 1_000 ? trainingEconomics.minCalendarDays : 0;
+  const initialUsefulPf = Math.min(
+    initialEffectivePf,
+    pacedTrainingPfPerDay(target, minCalendarDays),
+  );
 
   const job: TrainingJob = {
     id: jobId,
@@ -2248,10 +2259,10 @@ export function startTraining(
     energyMwDays: 0,
     energyMWh: 0,
     daysRemaining:
-      initialEffectivePf > 1e-9
-        ? target / initialEffectivePf
+      initialUsefulPf > 1e-9
+        ? target / initialUsefulPf
         : Number.POSITIVE_INFINITY,
-    minCalendarDays: 0,
+    minCalendarDays,
     daysElapsed: 0,
     postTrain: "none",
     postTrainProgress: 0,
@@ -3453,6 +3464,10 @@ function branchDataWeights(
   };
   if (direction === "chat") boost(["chat"], 2.4);
   if (direction === "code") boost(["code", "math"], 2.1);
+  if (direction === "cyber") {
+    boost(["code"], 2.2);
+    boost(["law", "chat"], 1.55);
+  }
   if (direction === "agents") boost(["code", "chat"], 1.8);
   if (direction === "reasoning") boost(["math", "science"], 2.2);
   if (direction === "safety") boost(["law", "health", "chat"], 1.8);
@@ -5432,6 +5447,10 @@ export function tickTraining(state: SimState): SimState {
     const resource = resources.jobs[job.id];
     const trainPool = resource?.effectivePf ?? 0;
     const allocatedPf = active ? Math.max(0, trainPool) : 0;
+    const usefulBasePf = Math.min(
+      allocatedPf,
+      pacedTrainingPfPerDay(job.targetPfDays, job.minCalendarDays),
+    );
     const telemetry = (
       progressPfDays = job.progressPfDays,
       elapsed = daysElapsed,
@@ -5459,7 +5478,7 @@ export function tickTraining(state: SimState): SimState {
     };
     const proposedBaseProgress = Math.min(
       job.targetPfDays,
-      job.progressPfDays + Math.max(0, trainPool),
+      job.progressPfDays + usefulBasePf,
     );
     const imminentCampaignMilestone =
       job.postTrain === "none" && job.progressPfDays < job.targetPfDays
@@ -5581,7 +5600,7 @@ export function tickTraining(state: SimState): SimState {
       }
       return {
         ...job,
-        ...telemetry(nextProgress),
+        ...telemetry(nextProgress, daysElapsed, usefulBasePf),
         economics,
         daysElapsed,
         stallReason,

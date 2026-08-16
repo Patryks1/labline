@@ -873,6 +873,47 @@ export interface DataHallLayout {
   constructionProject?: DataHallConstructionProject;
 }
 
+/**
+ * Small, saveable office-fitout model for headquarters.  HQ furniture is
+ * deliberately separate from data-hall equipment: it affects people
+ * capacity and operating productivity, never compute or utility routing.
+ */
+export type HqOfficeObjectKind =
+  "desk" | "plant" | "copier" | "meeting_room" | "whiteboard";
+
+export interface HqOfficeObjectPlacement {
+  id: string;
+  kind: HqOfficeObjectKind;
+  catalogId: string;
+  x: number;
+  z: number;
+  rotation: HallRotation;
+  purchasePrice: number;
+}
+
+export interface HqOfficeLayoutAnalysis {
+  revision: number;
+  valid: boolean;
+  hardErrors: string[];
+  warnings: string[];
+  capacityBonus: number;
+  productivityBonus: number;
+  dailyOpex: number;
+  objectCount: number;
+}
+
+export interface HqOfficeLayout {
+  version: 1;
+  facilityId: string;
+  /** Grid dimensions are derived from HQ kind at creation and persisted so
+   * legacy facilities retain their original fit-out after a balance change. */
+  width: number;
+  depth: number;
+  revision: number;
+  objects: HqOfficeObjectPlacement[];
+  analysis: HqOfficeLayoutAnalysis;
+}
+
 export interface DataHallEditPlan {
   facilityId: string;
   expectedRevision: number;
@@ -1127,6 +1168,8 @@ export interface DataPruneJob {
   /** PF-days required per MTok removed. */
   pfDaysPerMTok: number;
   researchersRequired: number;
+  /** Data-engineer slots required while this audit is active. */
+  engineersRequired?: number;
   /** Share of the physical research pool reserved while this job is active. */
   researchShare: number;
   qualityBefore: number;
@@ -1423,6 +1466,13 @@ export interface Model {
   deploymentArtifacts?: DeploymentArtifact[];
   /** Version of the physical training-work formula used by this model. */
   trainingFormulaVersion?: 1 | 2;
+  /**
+   * Bounded daily capability drag from leaving contaminated corpus in flight.
+   * This is operational state, not a rewrite of the immutable training
+   * evidence captured by the checkpoint.
+   */
+  corpusDriftTotal?: number;
+  corpusDriftLastDay?: number;
 }
 
 export interface SyntheticFillRecord {
@@ -1568,7 +1618,14 @@ export type TrainingCheckpointStatus = "stealth" | "promoted" | "discarded";
 export type TrainingCheckpointKind = "milestone" | "manual";
 
 export type TrainingCheckpointBranchDirection =
-  "general" | "chat" | "code" | "agents" | "reasoning" | "safety" | "custom";
+  | "general"
+  | "chat"
+  | "code"
+  | "cyber"
+  | "agents"
+  | "reasoning"
+  | "safety"
+  | "custom";
 
 /** Immutable telemetry frozen when an in-flight campaign writes a checkpoint. */
 export interface TrainingCheckpointTelemetry {
@@ -1723,9 +1780,12 @@ export interface TrainingJob {
   energyMwDays?: number;
   /** Cumulative accelerator energy in MWh (`energyMwDays × 24`). */
   energyMWh?: number;
-  /** Live ETA from remaining PF divided by current effective PF. */
+  /** Live ETA from remaining PF divided by useful current effective PF. */
   daysRemaining?: number;
-  /** @deprecated Forecast-only integration duration; never a completion gate. */
+  /**
+   * Minimum active base-training days. For trillion-scale jobs this paces useful
+   * PF progress; it is not a separate release gate and paused days do not count.
+   */
   minCalendarDays?: number;
   /** Active-day telemetry retained for charts and legacy saves. */
   daysElapsed?: number;
@@ -3203,9 +3263,9 @@ export interface RivalTrainJob {
   activeParamsB?: number;
   targetPfDays: number;
   progressPfDays: number;
-  /** Calendar integration/validation floor, independent of PF work. */
+  /** Minimum active days used to pace useful PF for trillion-scale base training. */
   minCalendarDays?: number;
-  /** Funded, unpaused active days accrued toward the calendar floor. */
+  /** Funded, unpaused active-day telemetry. */
   daysElapsed?: number;
   modalities: Modality[];
   /** Planned volume vs min for size (can be &lt;1 if risking undertrain) */
@@ -3785,6 +3845,8 @@ export interface SimState {
   facilityMarket?: FacilityMarketState;
   /** Facility-local free-placement rooms. Absent in v10 and older saves. */
   dataHallLayouts?: Record<string, DataHallLayout>;
+  /** HQ furniture layouts. Missing on older saves and normalized on load. */
+  hqOfficeLayouts?: Record<string, HqOfficeLayout>;
   /** Long-term utility and PPA commitments settled take-or-pay. */
   energyContracts: EnergyContract[];
   /** Authoritative finite interconnection ledger by map region. */

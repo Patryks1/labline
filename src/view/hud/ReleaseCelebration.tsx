@@ -6,7 +6,7 @@ import { useGameStore } from '../../store/gameStore'
 import { type ReleaseEvent, useUiStore } from '../../store/uiStore'
 import { money } from './format'
 import { ConsoleDialog } from './ui/ConsoleDialog'
-import { HudButton, StatusChip } from './ui/HudPrimitives'
+import { HudButton, MetricTile, StatusChip } from './ui/HudPrimitives'
 import { TrainingLossChart } from './panels/models/TrainingLossChart'
 import { BENCHMARK_SUITE_UI } from './panels/models/benchmarkRunUi'
 import { measuredReleaseEvidence, releasedModelForEvent } from './releaseReview'
@@ -71,30 +71,29 @@ export function ReleaseCelebration() {
       }
     >
       <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <div className="rounded-lg border border-gold/35 bg-gold/10 p-3">
-          <span className="flex items-center gap-1.5 font-mono text-[0.625rem] uppercase tracking-[0.13em] text-gold">
-            <RocketLaunch size="0.875rem" weight="fill" /> Release status
-          </span>
-          <strong className="mt-1 block font-mono text-xl tabular-nums text-bone">Public</strong>
-        </div>
-        <div className="rounded-lg border border-mint/25 bg-mint/5 p-3">
-          <span className="font-mono text-[0.625rem] uppercase tracking-[0.13em] text-muted">Evaluation score</span>
-          <strong className="mt-1 block font-mono text-xl tabular-nums text-mint">
-            {review.evidence ? review.evidence.suite.score.toFixed(1) : 'Unknown'}
-          </strong>
-        </div>
-        <div className="rounded-lg border border-line/70 bg-void/35 p-3">
-          <span className="font-mono text-[0.625rem] uppercase tracking-[0.13em] text-muted">Measured position</span>
-          <strong className="mt-1 block font-mono text-xl tabular-nums text-bone">
-            {review.evidence?.rankLabel ?? '—'}
-          </strong>
-        </div>
-        <div className="rounded-lg border border-line/70 bg-void/35 p-3">
-          <span className="font-mono text-[0.625rem] uppercase tracking-[0.13em] text-muted">API list / MTok</span>
-          <strong className="mt-1 block truncate font-mono text-sm tabular-nums text-bone">
-            {apiIn != null && apiOut != null ? `${money(apiIn)} in · ${money(apiOut)} out` : 'Not listed'}
-          </strong>
-        </div>
+        <MetricTile
+          label="Release status"
+          value={
+            <span className="flex items-center gap-1.5">
+              <RocketLaunch aria-hidden size="0.875rem" weight="fill" />
+              Public
+            </span>
+          }
+          tone="gold"
+        />
+        <MetricTile
+          label="Evaluation score"
+          value={review.evidence ? review.evidence.suite.score.toFixed(1) : 'Unknown'}
+          tone="positive"
+        />
+        <MetricTile
+          label="Measured position"
+          value={review.evidence?.rankLabel ?? '—'}
+        />
+        <MetricTile
+          label="API list / MTok"
+          value={apiIn != null && apiOut != null ? `${money(apiIn)} in · ${money(apiOut)} out` : 'Not listed'}
+        />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(20rem,0.82fr)_minmax(32rem,1.18fr)]">

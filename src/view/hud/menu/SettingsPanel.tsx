@@ -20,6 +20,7 @@ import {
 } from '../../../store/uiStore'
 import { money } from '../format'
 import { parseCheatMoneyAmount } from './cheatMoney'
+import { HudButton, HudInput, HudRange } from '../ui/HudPrimitives'
 
 export type SettingsCategory = 'interface' | 'video' | 'audio' | 'gameplay' | 'cheats'
 
@@ -61,33 +62,31 @@ export function SettingsPanel({ gameplay, cheats }: { gameplay?: GameplaySetting
 
   return (
     <div className="settings-panel mt-5 grid min-h-0 gap-4 md:grid-cols-[9rem_minmax(0,1fr)]">
-      <div
-        role="tablist"
-        aria-label="Settings categories"
-        className="grid grid-cols-3 gap-1 border border-line/80 bg-void/45 p-1 md:block md:space-y-1"
+      <nav
+        aria-label="Settings sections"
+        className="settings-section-nav flex gap-1 border border-line/80 bg-void/45 p-1 md:block md:space-y-1"
       >
         {categories.map((item) => (
-          <button
+          <HudButton
             key={item.id}
             type="button"
-            role="tab"
             id={`settings-tab-${item.id}`}
-            aria-controls={`settings-panel-${item.id}`}
-            aria-selected={category === item.id}
+            aria-current={category === item.id ? 'page' : undefined}
             onClick={() => setCategory(item.id)}
-            className={`min-h-10 w-full px-2.5 text-left text-[0.75rem] font-semibold transition ${
+            variant="ghost"
+            className={`min-h-11 min-w-[6rem] flex-1 justify-start px-2.5 text-left text-[0.75rem] font-semibold transition md:w-full md:min-w-0 md:flex-none ${
               category === item.id
                 ? 'bg-mint/15 text-mint shadow-[inset_2px_0_0_#48d7d1]'
                 : 'text-muted hover:bg-panel-2/70 hover:text-bone'
             }`}
           >
             {item.label}
-          </button>
+          </HudButton>
         ))}
-      </div>
+      </nav>
 
-      <div
-        role="tabpanel"
+      <section
+        role="region"
         id={`settings-panel-${category}`}
         aria-labelledby={`settings-tab-${category}`}
         className="min-w-0"
@@ -97,7 +96,7 @@ export function SettingsPanel({ gameplay, cheats }: { gameplay?: GameplaySetting
         {category === 'audio' && <AudioSettings />}
         {category === 'gameplay' && gameplay ? <GameplaySettings gameplay={gameplay} /> : null}
         {category === 'cheats' && cheats ? <CheatSettings cheats={cheats} /> : null}
-      </div>
+      </section>
     </div>
   )
 }
@@ -256,9 +255,8 @@ function VolumeControl({ label, value, onChange }: { label: string; value: numbe
         <label htmlFor={id} className="text-[0.75rem] font-medium text-bone">{label}</label>
         <output id={outputId} htmlFor={id} className="font-mono text-[0.6875rem] tabular-nums text-muted">{Math.round(value * 100)}%</output>
       </div>
-      <input
+      <HudRange
         id={id}
-        type="range"
         min="0"
         max="1"
         step="0.05"
@@ -364,7 +362,7 @@ function CheatSettings({ cheats }: { cheats: CheatSettingsContext }) {
             <label htmlFor={inputId} className="font-medium text-bone">Amount</label>
             <span className="font-mono tabular-nums text-muted">Balance {money(cheats.cash)}</span>
           </div>
-          <input
+          <HudInput
             id={inputId}
             type="text"
             inputMode="decimal"
@@ -389,8 +387,8 @@ function CheatSettings({ cheats }: { cheats: CheatSettingsContext }) {
             </p>
           ) : null}
           <div className="mt-2 grid grid-cols-2 gap-2">
-            <button type="button" className="hud-button hud-button--secondary" onClick={() => apply(-1)}>Remove money</button>
-            <button type="button" className="hud-button hud-button--primary" onClick={() => apply(1)}>Add money</button>
+            <HudButton variant="secondary" onClick={() => apply(-1)}>Remove money</HudButton>
+            <HudButton variant="primary" onClick={() => apply(1)}>Add money</HudButton>
           </div>
         </div>
       </SettingCard>
@@ -406,14 +404,14 @@ function CheatSettings({ cheats }: { cheats: CheatSettingsContext }) {
             ['training', 'Complete training'],
             ['rackDelivery', 'Deliver rack orders'],
           ] as const).map(([action, label]) => (
-            <button
+            <HudButton
               key={action}
-              type="button"
-              className="hud-button hud-button--secondary min-h-11"
+              variant="secondary"
+              className="min-h-11"
               onClick={() => runInstant(action, label)}
             >
               {label}
-            </button>
+            </HudButton>
           ))}
         </div>
       </SettingCard>

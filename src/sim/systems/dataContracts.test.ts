@@ -135,6 +135,38 @@ describe('data marketplace delivery states', () => {
     expect(ensureLabData(state).stocks.math.fromBought).toBeCloseTo(40, 8)
     expect(state.dataMarket!.offers[0]!.mTokLeft).toBe(60)
   })
+
+  it('handles zero, partial, full, and sold-out quantity actions exactly once', () => {
+    let state = withMarket(game(), [
+      offer({
+        id: 'lot-quantity',
+        domain: 'math',
+        source: 'licensed',
+        cash: 1_000_000,
+        lotMTok: 100,
+        mTokTotal: 100,
+        mTokLeft: 80,
+      }),
+    ])
+    const initialCash = state.player.cash
+
+    state = buyDataLotAmount(state, 'lot-quantity', 0)
+    expect(state.player.cash).toBe(initialCash)
+    expect(state.dataMarket!.offers[0]!.mTokLeft).toBe(80)
+
+    state = buyDataLotAmount(state, 'lot-quantity', 30)
+    expect(state.player.cash).toBeCloseTo(initialCash - 300_000, 5)
+    expect(state.dataMarket!.offers[0]!.mTokLeft).toBe(50)
+
+    state = buyDataLotAmount(state, 'lot-quantity', 50)
+    expect(state.player.cash).toBeCloseTo(initialCash - 800_000, 5)
+    expect(state.dataMarket!.offers[0]!.mTokLeft).toBe(0)
+
+    const soldOutCash = state.player.cash
+    state = buyDataLotAmount(state, 'lot-quantity', 50)
+    expect(state.player.cash).toBe(soldOutCash)
+    expect(state.dataMarket!.offers[0]!.mTokLeft).toBe(0)
+  })
 })
 
 describe('bulk buy-all', () => {

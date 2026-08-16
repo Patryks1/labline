@@ -4,8 +4,20 @@ import { describe, expect, it } from "vitest";
 import { buildScaledModel } from "../../../sim/balance/modelBuild";
 import { blendApiPrice } from "../../../sim/balance/pricing";
 import { createGame } from "../../../sim/createGame";
-import { ApiCostSummary, PlanEntitlementBreakdown } from "./PlansPanel";
+import { useGameStore } from "../../../store/gameStore";
+import type { ComputeLedger } from "../../../sim/types";
+import {
+  ApiCostSummary,
+  PlansCapacitySummary,
+  PlanEntitlementBreakdown,
+  PlansPanel,
+} from "./PlansPanel";
 import { effectiveApiPeerPricing, formatApiListPrice } from "./apiPriceUi";
+import {
+  NEW_PLAN_SELECTOR_ID,
+  PLANS_TAB_IDS,
+  planSelectorOrder,
+} from "./plansPanelNavigation";
 
 describe("ApiCostSummary", () => {
   it("leads with estimated per-million serving cost without a markup control", () => {
@@ -22,7 +34,7 @@ describe("ApiCostSummary", () => {
     expect(markup).toContain("Estimated cost / 1M tokens");
     expect(markup).toContain("$2.47");
     expect(markup).toContain("2 live endpoints");
-    expect(markup).toContain("24.8 MTok requested");
+    expect(markup).toContain("24.80 MTok requested");
     expect(markup).not.toContain("Markup over unit cost");
     expect(markup).not.toContain("markup percent");
   });
@@ -97,5 +109,102 @@ describe("PlansPanel mobile presentation", () => {
     expect(markup).toContain("Pocket Aster");
     expect(markup).toContain("sm:hidden");
     expect(markup).toContain("hidden overflow-x-auto sm:block");
+  });
+});
+
+describe("PlansPanel navigation and capacity summary", () => {
+  it("keeps usage information outside the section tabs", () => {
+    const ledger: ComputeLedger = {
+      day: 42,
+      labId: "player",
+      items: [
+        {
+          id: "api-ledger-test",
+          labId: "player",
+          channel: "api",
+          kind: "api_text",
+          requested: { inputMTok: 498.85, images: 83, videoSeconds: 45.1 },
+          admitted: { inputMTok: 498.85, images: 83, videoSeconds: 45.1 },
+          served: { inputMTok: 498.85, images: 83, videoSeconds: 45.1 },
+          billed: { inputMTok: 498.85, images: 83, videoSeconds: 45.1 },
+          requestedPfDays: 1,
+          servedPfDays: 0.8,
+          revenue: 0,
+          directCogs: 0,
+        },
+      ],
+      requestedPfDays: 1,
+      admittedPfDays: 1,
+      servedPfDays: 0.8,
+      billedPfDays: 0.8,
+      capacityPfDays: 2,
+      reservedPfDays: 0,
+      backfilledPfDays: 0,
+    };
+    const markup = renderToStaticMarkup(
+      createElement(PlansCapacitySummary, {
+        apiServed: 12.4,
+        apiRequested: 16.8,
+        subServed: 7.2,
+        subRequested: 9.1,
+        apiPf: 3.4,
+        apiModelUsage: [],
+        stats: [],
+        ledger,
+        headroom: 0.25,
+        apiPriority: 0.68,
+        autoApiPriority: 0.7,
+        apiServeFraction: 0.74,
+        subscriptionServeFraction: 0.79,
+        apiBacklogMTok: 4.4,
+        subscriptionBacklogMTok: 1.9,
+        unservedRatio: 0.23,
+        onPriorityChange: () => undefined,
+        throttlePolicy: "balanced",
+        onThrottlePolicyChange: () => undefined,
+        apiLoad: 0.8,
+        subLoad: 0.6,
+        apiStrain: 0.1,
+        subStrain: 0.05,
+      }),
+    );
+
+    expect(markup).toContain("Capacity at a glance");
+    expect(markup).not.toContain("Capacity routing details");
+    expect(markup).not.toContain("<details");
+    expect(markup).not.toContain("<summary");
+    expect(markup).toContain("API channel");
+    expect(markup).toContain("Serving compute allocation");
+    expect(markup).toContain("plans-compute-allocation__lane-short");
+    expect(markup).not.toContain(">Usage<");
+    expect(PLANS_TAB_IDS).toEqual(["demand", "tiers", "api"]);
+  });
+
+  it("places the new-plan action after every existing plan", () => {
+    expect(
+      planSelectorOrder([{ id: "free" }, { id: "pro" }, { id: "max" }]),
+    ).toEqual(["free", "pro", "max", NEW_PLAN_SELECTOR_ID]);
+  });
+
+  it("keeps permanent plan deletion on the shared danger action", () => {
+    const state = createGame(9_906);
+    useGameStore.setState({ state });
+
+    const markup = renderToStaticMarkup(createElement(PlansPanel));
+
+    expect(markup).toContain("Delete plan");
+    expect(markup).toContain('data-hud-variant="danger"');
+  });
+
+  it("wraps plan KPI details instead of clipping the usage-per-seat readout", () => {
+    useGameStore.setState({ state: createGame(9_907) });
+
+    const markup = renderToStaticMarkup(createElement(PlansPanel));
+
+    expect(markup).toContain(
+      "whitespace-normal break-words font-mono text-[0.6875rem] leading-snug text-muted",
+    );
+    expect(markup).toContain("Plan usage / seat");
+    expect(markup).toContain("include");
   });
 });

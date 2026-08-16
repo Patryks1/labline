@@ -73,6 +73,109 @@ export function cloneLabData(data: LabData): LabData {
   };
 }
 
+export interface DataHygieneSnapshot {
+  /** Raw stock plus work waiting in the cleaning queue. */
+  exposedMTok: number;
+  processedMTok: number;
+  rawShare: number;
+  lowQualityProcessedShare: number;
+  lowQualitySyntheticShare: number;
+  /** 0–1 pressure from untreated or known low-quality corpus. */
+  pressure: number;
+  /** Global quality target before the daily smoothing step. */
+  qualityTarget: number;
+  /** Bounded per-day drag applied to already released models. */
+  modelDriftRate: number;
+}
+
+/**
+ * Canonical corpus-hygiene readout shared by the simulator and HUD.
+ *
+ * Raw stock is not yet known to be useful, and queued work is still exposed
+ * to contamination risk. Low-quality processed stock and LQ synthetic stock
+ * add pressure even after the raw queue is empty. Keeping this calculation in
+ * the runtime prevents the panel from inventing a cosmetic risk score.
+ */
+export function dataHygieneSnapshot(data: LabData): DataHygieneSnapshot {
+  let processedMTok = 0;
+  let weightedQuality = 0;
+  let lowQualityProcessedMTok = 0;
+  let lowQualitySyntheticMTok = 0;
+  let rawMTok = 0;
+
+  for (const domain of DATA_DOMAINS) {
+    const stock = normalizeDomainStock(data.stocks[domain]);
+    const processed = Math.max(0, stock.processed);
+    const raw = Math.max(0, stock.raw);
+    processedMTok += processed;
+    rawMTok += raw;
+    weightedQuality += processed * Math.max(0, Math.min(100, stock.quality));
+    lowQualityProcessedMTok +=
+      processed * Math.max(0, Math.min(1, (65 - stock.quality) / 65));
+    lowQualitySyntheticMTok += Math.max(0, stock.fromSynthLQ ?? 0);
+  }
+
+  const queuedMTok = (data.processQueue ?? []).reduce(
+    (sum, job) => sum + Math.max(0, job.remaining),
+    0,
+  );
+  const exposedMTok = rawMTok + queuedMTok;
+  const corpusMTok = Math.max(1e-9, exposedMTok + processedMTok);
+  const rawShare = Math.min(1, exposedMTok / corpusMTok);
+  const lowQualityProcessedShare =
+    processedMTok > 0
+      ? Math.min(1, lowQualityProcessedMTok / processedMTok)
+      : 0;
+  const lowQualitySyntheticShare =
+    processedMTok > 0
+      ? Math.min(1, lowQualitySyntheticMTok / processedMTok)
+      : 0;
+  // Untreated material is the largest risk; low-Q and recursive synthetic
+  // material are meaningful secondary pressures. The weights are deliberately
+  // bounded so early games can recover by cleaning or pruning.
+  const pressure = Math.max(
+    0,
+    Math.min(
+      1,
+      rawShare * 0.72 +
+        lowQualityProcessedShare * 0.2 +
+        lowQualitySyntheticShare * 0.08,
+    ),
+  );
+  const averageQuality =
+    processedMTok > 0 ? weightedQuality / processedMTok : 40;
+  const qualityTarget = Math.max(
+    0.8,
+    Math.min(
+      2.8,
+      0.8 + averageQuality / 100 - rawShare * 0.46 - lowQualityProcessedShare * 0.18 - lowQualitySyntheticShare * 0.08,
+    ),
+  );
+  const modelDriftRate =
+    pressure > 0.25
+      ? Math.min(0.012, (pressure - 0.25) * 0.012)
+      : 0;
+
+  return {
+    exposedMTok,
+    processedMTok,
+    rawShare,
+    lowQualityProcessedShare,
+    lowQualitySyntheticShare,
+    pressure,
+    qualityTarget,
+    modelDriftRate,
+  };
+}
+
+export function dataContaminationPressure(data: LabData): number {
+  return dataHygieneSnapshot(data).pressure;
+}
+
+export function dataModelDriftRate(data: LabData): number {
+  return dataHygieneSnapshot(data).modelDriftRate;
+}
+
 /** Per-plan served traffic used to apply free/paid collection caps. */
 export interface TrafficPlanSlice {
   id: string;
@@ -652,17 +755,9 @@ export function processDataJobs(input: {
 
 /** Same aggregate quality update for every lab after processing/synthesis. */
 export function updateDataQualityIndex(current: number, data: LabData): number {
-  let weightedQuality = 0;
-  let weight = 0;
-  for (const domain of DATA_DOMAINS) {
-    const stock = data.stocks[domain];
-    if (stock.processed <= 0) continue;
-    weightedQuality += stock.quality * stock.processed;
-    weight += stock.processed;
-  }
-  if (weight <= 0) return current;
-  const target = 0.8 + weightedQuality / weight / 100;
-  return clamp(current * 0.97 + target * 0.03, 0.8, 2.8);
+  const hygiene = dataHygieneSnapshot(data);
+  if (hygiene.processedMTok <= 0 && hygiene.exposedMTok <= 0) return current;
+  return clamp(current * 0.97 + hygiene.qualityTarget * 0.03, 0.8, 2.8);
 }
 
 /** Domain-aware synthetic volume conversion; policy only chooses its inputs. */

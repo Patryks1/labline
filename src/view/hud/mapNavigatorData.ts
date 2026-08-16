@@ -17,6 +17,7 @@ import {
   type BiomeKindName,
 } from '../../sim/world/types'
 import { rivalMapSites, rivalSiteKindLabel } from '../three/rivalMapSites'
+import { selectFinanceDashboardReadouts } from './data/financeDashboardModel'
 
 /** Navigator overlays share the store MapOverlayMode (zones/power/latency/risk). */
 export type MapNavigatorOverlay = Exclude<MapOverlayMode, 'none'>
@@ -562,6 +563,7 @@ export function buildMapNavigatorData(
   state: SimState,
   terrain = buildMinimapTerrain(state),
 ): MapNavigatorData {
+  const share = selectFinanceDashboardReadouts(state).current.share
   const statsById = new Map(deriveCityStats(state).map((stats) => [stats.cityId, stats]))
   const cities: MapNavigatorCity[] = (state.map.cities ?? []).flatMap((city) => {
     const stats = statsById.get(city.id)
@@ -606,7 +608,7 @@ export function buildMapNavigatorData(
       id: 'player',
       name: state.player.name,
       color: '#48d7d1',
-      marketShare: state.player.finance.totalShare,
+      marketShare: share,
       siteCount: playerSites.length,
       x: playerSites[0]?.x ?? fallback.cx,
       y: playerSites[0]?.y ?? fallback.cy,

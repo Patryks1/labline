@@ -1,25 +1,25 @@
 import type { Allocation, PanelId } from '../../sim/types'
-import { NAV_GROUPS, type NavGroupId } from './navConfig'
+import { SHELL_NAV_GROUPS, type ShellNavGroupId } from './navConfig'
 
 export interface MobileNavTab {
   id: PanelId
   label: string
   hint: string
-  group: NavGroupId
+  group: ShellNavGroupId
 }
 
 /** The commercial core loop stays one tap away on compact screens. */
 export const MOBILE_PRIMARY_TABS: readonly MobileNavTab[] = [
   { id: 'build', label: 'Build', hint: 'Place and expand', group: 'build' },
-  { id: 'models', label: 'Models', hint: 'Train and release', group: 'lab' },
-  { id: 'plans', label: 'Plans', hint: 'Price and sell', group: 'market' },
-  { id: 'data', label: 'Data', hint: 'Prepare corpora', group: 'lab' },
+  { id: 'models', label: 'Models', hint: 'Train and release', group: 'products' },
+  { id: 'plans', label: 'Plans', hint: 'Price and sell', group: 'products' },
+  { id: 'data', label: 'Data', hint: 'Prepare corpora', group: 'products' },
 ] as const
 
 const primaryIds = new Set<PanelId>(MOBILE_PRIMARY_TABS.map((tab) => tab.id))
 
 /** Everything outside the primary loop remains available in the More sheet. */
-export const MOBILE_MORE_SECTIONS = NAV_GROUPS.map((group) => ({
+export const MOBILE_MORE_SECTIONS = SHELL_NAV_GROUPS.map((group) => ({
   group: group.id,
   label: group.label,
   tabs: group.items

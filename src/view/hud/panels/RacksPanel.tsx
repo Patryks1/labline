@@ -26,6 +26,7 @@ import { facilityAnchorTiles } from '../../../sim/systems/worldAccess'
 import {
   EmptyState,
   HudButton,
+  HudInput,
   MetricTile,
   PanelScaffold,
   StatusChip,
@@ -34,7 +35,6 @@ import {
   BlockerList,
   GameCard,
   MeterBar,
-  SegmentedTabs,
   StatRow,
 } from '../ui/kit'
 import { fleetStats } from '../../../sim/systems/racks'
@@ -180,15 +180,26 @@ export function RacksPanel() {
           <MetricTile label="Fleet draw" value={mw(fleet.mw)} detail={`${num(fleet.vramGb, 0)} GB VRAM`} />
         </div>
 
-        <SegmentedTabs
-          ariaLabel="Racks sections"
-          active={tab === 'blueprints' ? 'blueprints' : 'fleet'}
-          onChange={(id) => setTab(id as 'fleet' | 'blueprints')}
-          items={[
-            { id: 'fleet', label: `Halls (${hallCards.length})` },
-            { id: 'blueprints', label: `Blueprints (${state.player.rackDesigns.length})` },
-          ]}
-        />
+        <div className="grid grid-cols-2 gap-1" role="group" aria-label="Racks workspace">
+          <HudButton
+            type="button"
+            variant={tab === 'fleet' ? 'primary' : 'ghost'}
+            aria-pressed={tab === 'fleet'}
+            className="min-h-11"
+            onClick={() => setTab('fleet')}
+          >
+            Halls ({hallCards.length})
+          </HudButton>
+          <HudButton
+            type="button"
+            variant={tab === 'blueprints' ? 'primary' : 'ghost'}
+            aria-pressed={tab === 'blueprints'}
+            className="min-h-11"
+            onClick={() => setTab('blueprints')}
+          >
+            Blueprints ({state.player.rackDesigns.length})
+          </HudButton>
+        </div>
 
         <div key={tab === 'blueprints' ? 'blueprints' : 'fleet'} className="panel-swap">
           {tab !== 'blueprints' ? (
@@ -251,7 +262,7 @@ export function RacksPanel() {
                       <label className="block font-mono text-[0.6875rem] uppercase tracking-wider text-muted" htmlFor="facility-bid">
                         Offer amount ($M)
                       </label>
-                      <input
+                      <HudInput
                         id="facility-bid"
                         type="number"
                         min="0.01"
@@ -259,7 +270,7 @@ export function RacksPanel() {
                         value={facilityBidMillions}
                         onChange={(event) => setFacilityBidMillions(event.target.value)}
                         placeholder="Enter a positive bid"
-                        className="w-full rounded-lg border border-line bg-void/60 px-3 py-2 font-mono text-sm text-bone outline-none focus:border-mint/60"
+                        className="min-h-11 w-full font-mono text-sm"
                       />
                       <HudButton
                         type="button"
@@ -366,21 +377,24 @@ export function RacksPanel() {
               <GameCard eyebrow="Automation" title="Auto-design rack" tone="mint">
                 <div className="mb-2 flex flex-wrap gap-1" role="group" aria-label="Auto-design goal">
                   {(['balanced', 'training', 'inference', 'memory'] as RackDesignGoal[]).map((goal) => (
-                    <button
+                    <HudButton
                       key={goal}
                       type="button"
+                      variant={autoDesignGoal === goal ? 'primary' : 'ghost'}
                       aria-pressed={autoDesignGoal === goal}
                       onClick={() => setAutoDesignGoal(goal)}
-                      className={`rounded-md px-2.5 py-1 text-[0.75rem] capitalize transition ${autoDesignGoal === goal ? 'bg-mint text-void' : 'bg-void text-muted hover:text-bone'}`}
-                    >{goal}</button>
+                      className={`min-h-11 rounded-md px-2.5 py-1 text-[0.75rem] capitalize transition ${autoDesignGoal === goal ? 'bg-mint text-void' : 'bg-void text-muted hover:text-bone'}`}
+                    >{goal}
+                    </HudButton>
                   ))}
                 </div>
                 <p className="mb-2 text-[0.75rem] text-muted">Recommendations are deterministic previews. Choosing one loads it into the editor; nothing is saved or ordered automatically.</p>
                 <div className="space-y-1.5">
                   {autoDesigns.map((recommendation) => (
-                    <button
+                    <HudButton
                       key={recommendation.blueprint.id}
                       type="button"
+                      variant="ghost"
                       className="w-full rounded-lg border border-line/70 bg-void/45 px-2.5 py-2 text-left transition hover:border-mint/45"
                       onClick={() => {
                         setDesign({ ...recommendation.blueprint, id: emptyDesign(recommendation.blueprint.chassisId).id })
@@ -392,7 +406,7 @@ export function RacksPanel() {
                         <span className="font-mono text-mint">{recommendation.stats.flopsPf.toFixed(2)} PF</span>
                       </span>
                       <span className="mt-0.5 block text-[0.6875rem] text-muted">{recommendation.reason} · {money(recommendation.stats.buildCost)}</span>
-                    </button>
+                    </HudButton>
                   ))}
                 </div>
               </GameCard>
@@ -423,27 +437,28 @@ export function RacksPanel() {
               <GameCard eyebrow="Designer" title="Custom rack" tone="mint">
                 <div className="mb-2 flex flex-wrap gap-1">
                   {CHASSIS_CATALOG.map((c) => (
-                    <button
+                    <HudButton
                       key={c.id}
                       type="button"
+                      variant={design.chassisId === c.id ? 'primary' : 'ghost'}
                       onClick={() => {
                         setDesign(emptyDesign(c.id, design.name || c.name))
                         setMsg(`New ${c.name}`)
                       }}
-                      className={`rounded-md px-2.5 py-1 text-[0.75rem] transition ${
+                      className={`min-h-11 rounded-md px-2.5 py-1 text-[0.75rem] transition ${
                         design.chassisId === c.id ? 'bg-mint text-void' : 'bg-void text-muted hover:text-bone'
                       }`}
                     >
                       {c.name}
-                    </button>
+                    </HudButton>
                   ))}
                 </div>
                 <label className="block text-[0.8125rem] text-muted">
                   Blueprint name
-                  <input
+                  <HudInput
                     value={design.name}
                     onChange={(e) => setDesign({ ...design, name: e.target.value })}
-                    className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1 text-sm text-bone outline-none"
+                    className="mt-0.5 w-full text-sm"
                   />
                 </label>
                 <div className="mt-2 rounded-lg border border-line/70 bg-void/60 p-2">
@@ -456,17 +471,18 @@ export function RacksPanel() {
                       const placed = design.placements.find((p) => p.slotId === slot.id)
                       const mod = placed ? getModule(placed.moduleId) : null
                       return (
-                        <button
+                        <HudButton
                           key={slot.id}
                           type="button"
+                          variant="ghost"
                           onClick={() => onSlotClick(slot.id)}
-                          className="relative flex flex-col items-center justify-center rounded-md border text-[0.6875rem]"
+                          className="relative min-h-11 flex flex-col items-center justify-center rounded-md border text-[0.6875rem]"
                           style={{
                             gridColumn: `${slot.col + 1} / span ${slot.w}`,
                             gridRow: `${slot.row + 1} / span ${slot.h}`,
                             minHeight: slot.h * 26,
-                            background: mod ? `${mod.color}22` : '#12141a',
-                            borderColor: mod ? mod.color : '#2a2f3a',
+                            background: mod ? `${mod.color}22` : 'var(--color-void)',
+                            borderColor: mod ? mod.color : 'var(--color-line)',
                           }}
                         >
                           {mod ? (
@@ -477,7 +493,7 @@ export function RacksPanel() {
                           ) : (
                             <span className="text-muted">{slot.size}u</span>
                           )}
-                        </button>
+                        </HudButton>
                       )
                     })}
                   </div>
@@ -510,11 +526,12 @@ export function RacksPanel() {
                         <div className="mb-0.5 text-[0.6875rem] uppercase text-muted">{kind}</div>
                         <div className="flex flex-wrap gap-1">
                           {mods.map((m) => (
-                            <button
+                            <HudButton
                               key={m.id}
                               type="button"
+                              variant={selectedModule === m.id ? 'primary' : 'ghost'}
                               onClick={() => setSelectedModule(m.id)}
-                              className={`rounded-lg border px-2 py-1 text-left text-[0.75rem] transition ${
+                              className={`min-h-11 rounded-lg border px-2 py-1 text-left text-[0.75rem] transition ${
                                 selectedModule === m.id
                                   ? 'border-mint bg-mint/10'
                                   : 'border-line bg-void hover:border-mint/30'
@@ -527,7 +544,7 @@ export function RacksPanel() {
                                 {m.flopsPf ? ` · ${m.flopsPf}PF` : ''}
                                 {m.mw ? ` · ${mw(m.mw)}` : ''}
                               </div>
-                            </button>
+                            </HudButton>
                           ))}
                         </div>
                       </div>

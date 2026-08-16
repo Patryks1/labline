@@ -37,7 +37,7 @@ export function BottomBar() {
   }
 
   const poolSub = (p: PoolBreakdown) =>
-    `${pf(p.poolPf)} · ${mw(p.powerMw)} · ${p.utilizationLabel} ${pct(Math.min(1, p.utilization), 0)}`
+    `${pf(p.poolPf)} · ${mw(p.powerMw)} · ${p.utilizationLabel} ${pct(Math.min(1, p.utilization))}`
 
   const servedRatio = state.lastMarket.playerDemandMTok > 0
     ? Math.min(1, state.lastMarket.servedMTok / state.lastMarket.playerDemandMTok)
@@ -49,6 +49,7 @@ export function BottomBar() {
     <footer
       className="operations-shell pointer-events-none"
       data-expanded={expanded ? 'true' : 'false'}
+      aria-label="Live operations"
     >
       {expanded ? (
         <button
@@ -70,7 +71,7 @@ export function BottomBar() {
             }
             danger={snap.effectiveFlopsPf < 0.05 && snap.rawFlopsPf > 0.05}
             className="hidden sm:inline-flex"
-            title={`Effective ${pf(snap.effectiveFlopsPf)} · raw ${pf(snap.rawFlopsPf)} · train ${pf(snap.pools.training)} · serve ${pf(snap.pools.inference)} · research ${pf(snap.pools.research)} · yield ${pct(breakdown.fleetYield, 0)}${snap.stallMessage ? ` · ${snap.stallMessage}` : ''} · 1 EF = 1,000 PF`}
+            title={`Effective ${pf(snap.effectiveFlopsPf)} · raw ${pf(snap.rawFlopsPf)} · train ${pf(snap.pools.training)} · serve ${pf(snap.pools.inference)} · research ${pf(snap.pools.research)} · yield ${pct(breakdown.fleetYield)}${snap.stallMessage ? ` · ${snap.stallMessage}` : ''} · 1 EF = 1,000 PF`}
           />
           <Stat
             label="Power"
@@ -82,13 +83,13 @@ export function BottomBar() {
           />
           <Stat
             label="Demand served"
-            value={pct(servedRatio, 0)}
+            value={pct(servedRatio)}
             danger={unserved > 0.08}
-            title={`${num(state.lastMarket.servedMTok, 1)} of ${num(state.lastMarket.playerDemandMTok, 1)} MTok · max ${num(cap, 1)} MTok/day`}
+            title={`${num(state.lastMarket.servedMTok)} of ${num(state.lastMarket.playerDemandMTok)} MTok · max ${num(cap)} MTok/day`}
           />
           {snap.throttled && <StatusChip tone="danger">Power throttled</StatusChip>}
           {unserved > 0.08 && (
-            <StatusChip tone="warning">Plans/API short {pct(unserved, 0)}</StatusChip>
+            <StatusChip tone="warning">Plans/API short {pct(unserved)}</StatusChip>
           )}
           {!snap.throttled && powerTight && (
             <StatusChip tone="warning">Power headroom low</StatusChip>
@@ -131,7 +132,7 @@ export function BottomBar() {
             max={0.9}
             colorClass="bg-train"
             accentClass="text-train"
-            format={(v) => pct(v, 0)}
+            format={(v) => pct(v)}
             sublabel={poolSub(breakdown.train)}
             hoverContent={<PoolTooltip pool={breakdown.train} accent="text-train" />}
           />
@@ -143,7 +144,7 @@ export function BottomBar() {
             max={0.9}
             colorClass="bg-infer"
             accentClass="text-infer"
-            format={(v) => pct(v, 0)}
+            format={(v) => pct(v)}
             sublabel={poolSub(breakdown.serve)}
             hoverContent={<PoolTooltip pool={breakdown.serve} accent="text-infer" />}
           />
@@ -155,7 +156,7 @@ export function BottomBar() {
             max={0.9}
             colorClass="bg-research"
             accentClass="text-research"
-            format={(v) => pct(v, 0)}
+            format={(v) => pct(v)}
             sublabel={poolSub(breakdown.research)}
             hoverContent={<PoolTooltip pool={breakdown.research} accent="text-research" />}
           />
@@ -170,27 +171,27 @@ export function BottomBar() {
         {expanded ? (
           <div className="relative z-10 mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line/50 pt-2 font-mono text-[0.6875rem] text-muted">
             <span>
-              Util cap <strong className="text-bone">{pct(state.player.utilCap, 0)}</strong>
+              Util cap <strong className="text-bone">{pct(state.player.utilCap)}</strong>
             </span>
             <span>
               Serve{' '}
-              <strong className="text-infer">{pct(state.player.servingEfficiency, 0)}</strong>
+              <strong className="text-infer">{pct(state.player.servingEfficiency)}</strong>
             </span>
             <span>
               Train{' '}
-              <strong className="text-train">{pct(state.player.trainEfficiency, 0)}</strong>
+              <strong className="text-train">{pct(state.player.trainEfficiency)}</strong>
             </span>
             <span>
               Fleet yield{' '}
               <strong className="text-mint">
-                {pct(snap.rawFlopsPf > 0 ? snap.effectiveFlopsPf / snap.rawFlopsPf : 0, 0)}
+                {pct(snap.rawFlopsPf > 0 ? snap.effectiveFlopsPf / snap.rawFlopsPf : 0)}
               </strong>{' '}
               of raw compute
             </span>
             <span>
               Shared grid{' '}
               <strong className={grid.priceMult > 1.35 ? 'text-amber' : 'text-bone'}>
-                {num(grid.gridDemandMw, 0)}/{num(grid.gridCapMw, 0)} MW
+                {num(grid.gridDemandMw)}/{num(grid.gridCapMw)} MW
               </strong>
               {' · '}
               <strong className={grid.industryDcCount > grid.softCap ? 'text-amber' : 'text-bone'}>
@@ -217,7 +218,7 @@ function PoolTooltip({ pool, accent }: { pool: PoolBreakdown; accent: string }) 
       <div className={`text-[0.8125rem] font-semibold ${accent}`}>{pool.title}</div>
       <div className="flex items-baseline justify-between gap-3 font-mono text-[0.75rem]">
         <span className="text-muted">Allocation</span>
-        <span className="text-bone">{pct(pool.allocShare, 0)}</span>
+        <span className="text-bone">{pct(pool.allocShare)}</span>
       </div>
       <div className="flex items-baseline justify-between gap-3 font-mono text-[0.75rem]">
         <span className="text-muted">Effective work</span>

@@ -60,13 +60,14 @@ export function ChipsPanel() {
         <GameCard eyebrow="Architecture lab" title="Workload focus" tone="research">
           <div className="grid grid-cols-3 gap-1.5">
             {CHIP_FOCUSES.map((item) => (
-              <button
+              <HudButton
                 key={item.id}
                 type="button"
+                variant="ghost"
                 disabled={!editable}
                 aria-pressed={focus === item.id}
                 onClick={() => setChipDesignFocus(item.id)}
-                className={`rounded-md border px-2 py-2 text-left transition disabled:opacity-45 ${
+                className={`min-h-11 rounded-md border px-2 py-2 text-left transition disabled:opacity-45 ${
                   focus === item.id
                     ? 'border-research/55 bg-research/15 text-bone'
                     : 'border-line/70 bg-void/45 text-muted hover:border-research/30 hover:text-bone'
@@ -74,7 +75,7 @@ export function ChipsPanel() {
               >
                 <span className="block text-[0.75rem] font-semibold">{item.label}</span>
                 <span className="mt-0.5 block text-[0.6875rem] leading-tight">{item.detail}</span>
-              </button>
+              </HudButton>
             ))}
           </div>
 
@@ -90,9 +91,10 @@ export function ChipsPanel() {
               const wouldOverflow = !selected && design.usedArea + tech.area > CHIP_DESIGN_AREA_BUDGET
               const disabled = !editable || !unlocked || wouldOverflow
               return (
-                <button
+                <HudButton
                   key={tech.id}
                   type="button"
+                  variant="ghost"
                   disabled={disabled}
                   aria-pressed={selected}
                   title={
@@ -105,7 +107,7 @@ export function ChipsPanel() {
                           : undefined
                   }
                   onClick={() => toggleChipDesignTech(tech.id)}
-                  className={`rounded-lg border p-2.5 text-left transition hover-lift disabled:cursor-not-allowed ${
+                  className={`min-h-11 rounded-lg border p-2.5 text-left transition hover-lift disabled:cursor-not-allowed ${
                     selected
                       ? 'border-research/55 bg-research/15 ring-1 ring-research/40'
                       : unlocked
@@ -120,7 +122,7 @@ export function ChipsPanel() {
                   <span className="mt-1 block text-[0.6875rem] leading-snug text-muted">
                     {unlocked ? tech.description : `Locked · ${getResearchNode(tech.requiredResearch).name}`}
                   </span>
-                </button>
+                </HudButton>
               )
             })}
           </CardGrid>

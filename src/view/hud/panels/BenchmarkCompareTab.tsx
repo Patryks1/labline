@@ -8,9 +8,14 @@ import {
 } from '../../../sim/balance/evaluationSuites'
 import type { collectLeaderboardModels } from '../../../sim/systems/rivals'
 import { num } from '../format'
+import {
+  publicBenchmarkScore,
+  publicBenchmarkScores,
+} from '../data/benchmarkViewModel'
 import { GameCard, StatRow } from '../ui/kit'
+import { HudFilterBar } from '../ui/HudFilterBar'
 import { EmptyState } from '../ui/HudPrimitives'
-import { LineChart, type LineChartSeries } from '../ui/LineChart'
+import { LineChart, type LineChartHover, type LineChartSeries } from '../ui/LineChart'
 import { RadarChart } from '../ui/RadarChart'
 
 type LeaderboardRow = ReturnType<typeof collectLeaderboardModels>[number]
@@ -49,6 +54,7 @@ export function BenchmarkCompareTab({
 }) {
   const [hiddenLabIds, setHiddenLabIds] = useState<string[]>([])
   const [pinned, setPinned] = useState<string[]>([])
+  const [pinnedPoint, setPinnedPoint] = useState<LineChartHover | null>(null)
 
   /* ── Frontier series: one per lab ─────────────────────────────── */
   const labs = useMemo(() => {
@@ -82,6 +88,9 @@ export function BenchmarkCompareTab({
     [labs],
   )
   const rowsByLab = useMemo(() => new Map(labs.map((lab) => [lab.id, lab.rows])), [labs])
+  const pinnedRow = pinnedPoint
+    ? rowsByLab.get(pinnedPoint.series.id)?.[pinnedPoint.pointIndex]
+    : undefined
 
   /* ── Head-to-head pinning ─────────────────────────────────────── */
   const rowByKey = useMemo(() => new Map(rows.map((row) => [keyFor(row), row])), [rows])
@@ -111,6 +120,7 @@ export function BenchmarkCompareTab({
 
   const changeMarket = (candidate: EvaluationMarket) => {
     setPinned([])
+    setPinnedPoint(null)
     onMarketChange(candidate)
   }
 
@@ -125,23 +135,27 @@ export function BenchmarkCompareTab({
 
   return (
     <>
-      <div className="flex flex-wrap gap-1" aria-label="Evaluation market">
-        {EVALUATION_MARKETS.map((candidate) => (
-          <button
-            key={candidate.id}
-            type="button"
-            onClick={() => changeMarket(candidate.id)}
-            className={`min-h-11 rounded-md px-2.5 py-1 text-[0.75rem] transition sm:min-h-0 ${
-              market === candidate.id ? 'bg-mint text-void' : 'bg-panel-2 text-muted hover:text-bone'
-            }`}
-          >
-            {candidate.label}
-          </button>
-        ))}
-      </div>
+      <HudFilterBar
+        ariaLabel="Benchmark comparison filters"
+        activeCount={market === 'language' ? 0 : 1}
+        onClear={() => changeMarket('language')}
+        groups={[
+          {
+            id: 'market',
+            label: 'Market',
+            description: 'Public evaluation suite',
+            options: EVALUATION_MARKETS.map((candidate) => ({
+              id: candidate.id,
+              label: candidate.label,
+              active: market === candidate.id,
+              onSelect: () => changeMarket(candidate.id),
+            })),
+          },
+        ]}
+      />
 
       <GameCard eyebrow="Frontier" title="Capability over time" tone="mint">
-        <div className="mb-2 flex flex-wrap gap-1" aria-label="Toggle labs">
+        <div className="mb-2 flex flex-wrap gap-1" role="group" aria-label="Toggle labs">
           {labs.map((lab) => {
             const hidden = hiddenLabIds.includes(lab.id)
             return (
@@ -188,6 +202,7 @@ export function BenchmarkCompareTab({
             yLabel="Cap"
             formatX={(value) => `D${Math.round(value)}`}
             ariaLabel="Frontier progress: capability by release day"
+            onPinChange={setPinnedPoint}
             renderTooltip={(hover) => {
               const row = rowsByLab.get(hover.series.id)?.[hover.pointIndex]
               if (!row) return null
@@ -206,10 +221,19 @@ export function BenchmarkCompareTab({
             }}
           />
         </div>
+        <p
+          aria-live="polite"
+          data-benchmark-pinned-point
+          className="mt-1.5 min-h-5 text-[0.6875rem] leading-snug text-muted"
+        >
+          {pinnedPoint && pinnedRow
+            ? `Pinned ${pinnedRow.model.name} · ${pinnedRow.labName} · cap ${num(pinnedRow.model.capability, 0)} · D${pinnedRow.model.releaseDay}`
+            : 'Hover or select a point to inspect it; click or tap to pin the readout.'}
+        </p>
       </GameCard>
 
       <GameCard eyebrow="Head to head" title="Suite face-off" tone="mint">
-        <div className="mb-3 flex flex-wrap gap-1" aria-label="Pin models to compare">
+        <div className="mb-3 flex flex-wrap gap-1" role="group" aria-label="Pin models to compare">
           {pinPool.map((row) => {
             const key = keyFor(row)
             const slot = pinned.indexOf(key)
@@ -271,8 +295,8 @@ export function BenchmarkCompareTab({
             </div>
             <RadarChart
               suiteId={suiteId}
-              scores={pinnedRows[0]!.model.benchmarkSuites?.[suiteId] ?? {}}
-              comparison={pinnedRows[1]!.model.benchmarkSuites?.[suiteId] ?? {}}
+              scores={publicBenchmarkScores(pinnedRows[0]!.model, suiteId)}
+              comparison={publicBenchmarkScores(pinnedRows[1]!.model, suiteId)}
               comparisonLabel={pinnedRows[1]!.model.name}
             />
             <div className="mt-3 border-t border-line/60 pt-2">
@@ -294,7 +318,7 @@ export function BenchmarkCompareTab({
                     <PinnedValues
                       rows={pinnedRows}
                       read={(row) => {
-                        const score = row.model.benchmarkSuites?.[suiteId]?.[metric.id] ?? 0
+                        const score = publicBenchmarkScore(row.model, suiteId, metric.id) ?? 0
                         return score > 0 ? score.toFixed(0) : '—'
                       }}
                     />

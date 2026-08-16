@@ -1,3 +1,5 @@
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../../sim/createGame'
 import { useGameStore } from '../../store/gameStore'
@@ -5,6 +7,7 @@ import { resolveAutoScale } from '../../store/uiStore'
 import { buildObjectives } from './objectives'
 import { FULL_BLEED_MAP_STYLE } from './layout'
 import { groupForPanel, panelPresentation } from './navConfig'
+import { BuildPanel } from './BuildTray'
 
 describe('interface scaling', () => {
   it('uses display height and keeps ultrawide 1080p at the base scale', () => {
@@ -119,6 +122,17 @@ describe('map navigation', () => {
 
     useGameStore.getState().focusMapTile(17, 23)
     expect(useGameStore.getState().mapFocusRequest?.sequence).toBe(2)
+  })
+})
+
+describe('construction guidance', () => {
+  it('shows one idle instruction without a duplicate status banner', () => {
+    const state = createGame({ seed: 8_216, difficulty: 'easy' })
+    useGameStore.setState({ state, selectedTile: null, buildMode: null })
+
+    const idleMarkup = renderToStaticMarkup(createElement(BuildPanel))
+    expect(idleMarkup.match(/Pick a blueprint/g)).toHaveLength(1)
+    expect(idleMarkup).not.toContain('Select a blueprint below')
   })
 })
 

@@ -38,6 +38,8 @@ import {
   type Facility,
   type TileId,
 } from '../world/types'
+import { isHqKind } from './hqKinds'
+import { hqOfficeStarterLayout } from './hqOffice'
 import { urbanUseAt } from '../world/urbanInfill'
 import {
   facilityTransportAccess,
@@ -117,10 +119,7 @@ const compactGridScarcityCaches = new WeakMap<
   { revision: number; snapshot: GridScarcitySnapshot }
 >()
 
-/** HQ buildings (talent desks). Legacy `office` counts as small HQ. */
-export function isHqKind(kind: string): boolean {
-  return kind === 'hq' || kind === 'hq_m' || kind === 'hq_l' || kind === 'office'
-}
+export { isHqAnchor, isHqKind } from './hqKinds'
 
 /**
  * Builds allowed on commercial_infill city parcels (HQ / office / research).
@@ -148,11 +147,6 @@ function urbanZoningReason(
     return 'Commercial city parcels allow HQ, offices, and research labs only.'
   }
   return undefined
-}
-
-export function isHqAnchor(t: { kind: string; campusRole?: string }): boolean {
-  if (!isHqKind(t.kind)) return false
-  return t.campusRole !== 'pad'
 }
 
 /**
@@ -1130,6 +1124,12 @@ export function placeBuilding(
     cash: state.player.cash - totalCash,
     ...(starterHqGrant ? { starterHqGrant: false } : {}),
   }
+  const nextHqOfficeLayouts = starterHqGrant
+    ? {
+        ...(state.hqOfficeLayouts ?? {}),
+        [campusId]: hqOfficeStarterLayout(campusId, kind),
+      }
+    : state.hqOfficeLayouts
 
   const buildAlert = starterHqGrant
     ? `Starter HQ online: ${name} — free grant, desks ready to hire.`
@@ -1170,7 +1170,10 @@ export function placeBuilding(
       },
     }
     const batch = world.beginBatch().addFacility(facility)
-    const committed = commitWorldBatch({ ...state, player: nextPlayer }, batch)
+    const committed = commitWorldBatch(
+      { ...state, player: nextPlayer, hqOfficeLayouts: nextHqOfficeLayouts },
+      batch,
+    )
     return {
       ...committed,
       map: { ...committed.map, activeRegionId: cells[0]!.tile.regionId },
@@ -1221,6 +1224,7 @@ export function placeBuilding(
     ...state,
     map: { ...state.map, tiles, activeRegionId: anchorTile.regionId },
     player: nextPlayer,
+    hqOfficeLayouts: nextHqOfficeLayouts,
     alerts: [
       {
         id: `build-${kind}-${x}-${y}-${state.day}`,

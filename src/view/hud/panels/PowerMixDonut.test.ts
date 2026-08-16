@@ -17,8 +17,8 @@ describe('PowerMixDonut', () => {
       }),
     )
     expect(markup).toContain('Power supply mix')
-    expect(markup).toContain('80%')
-    expect(markup).toContain('10.0 MW')
+    expect(markup).toContain('80.00%')
+    expect(markup).toContain('10.00 MW')
     expect(markup).toContain('#ffd166')
     expect(markup).toContain('#8babb1')
   })
@@ -32,7 +32,7 @@ describe('PowerMixDonut', () => {
       }),
     )
     expect(markup).toContain('Power supply mix')
-    expect(markup).toContain('100%')
+    expect(markup).toContain('100.00%')
   })
 
   it('caps the svg and keeps long values out of the absolute overlay', () => {
@@ -55,7 +55,7 @@ describe('PowerMixDonut', () => {
       /<div class="pointer-events-none absolute[^"]*"[^>]*>(.*?)<\/div>/s,
     )
     expect(overlay).not.toBeNull()
-    expect(overlay![1]).toContain('80%')
+    expect(overlay![1]).toContain('80.00%')
     expect(overlay![1]).not.toContain('GW')
     expect(overlay![1]).not.toContain('demand')
     // The long demand value moved below the chart as truncated flow text.

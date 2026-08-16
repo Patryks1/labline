@@ -4,9 +4,18 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
+  type CSSProperties,
 } from "react";
+import {
+  ArrowCounterClockwise,
+  CornersOut,
+  Minus,
+  Plus,
+  Trash,
+} from "@phosphor-icons/react";
 import {
   RESEARCH_NODES,
   RESEARCH_BRANCHES,
@@ -20,7 +29,13 @@ import {
   layoutResearchTree,
   type ResearchTreeLayout,
 } from "../../../sim/balance/researchLayout";
-import type { ResearchEffects } from "../../../sim/types";
+import type {
+  ResearchEffects,
+  ResearchNodeDef,
+  ResearchPod,
+  ResearchProgram,
+  SimState,
+} from "../../../sim/types";
 import {
   dequeueResearch,
   enqueueResearch,
@@ -49,9 +64,18 @@ import { GameCard, LiveDot, MeterBar, StatRow } from "../ui/kit";
 import {
   HudButton,
   MetricTile,
+  PanelScaffold,
   StatusChip,
 } from "../ui/HudPrimitives";
 import { scrollMobileResearchSelection } from "./researchPanelMobile";
+import {
+  RESEARCH_TREE_DEFAULT_ZOOM,
+  RESEARCH_TREE_MIN_ZOOM,
+} from "./researchCanvasLayout";
+import {
+  researchNodeSummaryId,
+  researchRelationshipTargets,
+} from "./researchPanelA11y";
 
 const FULL_RESEARCH_LAYOUT = layoutResearchTree();
 
@@ -89,7 +113,7 @@ export function ResearchPanel() {
     () => state.player.researchPods?.[0]?.id ?? "",
   );
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
-  const mobileSelectedMethodRef = useRef<HTMLElement | null>(null);
+  const selectedMethodRef = useRef<HTMLDivElement | null>(null);
 
   const active = state.player.activeResearch;
   const legacyQueue = state.player.researchQueue;
@@ -140,6 +164,35 @@ export function ResearchPanel() {
   const layout = FULL_RESEARCH_LAYOUT;
   const canvas = useResearchCanvas(layout);
   const centerResearchNode = canvas.centerNode;
+  const relationshipTargets = useMemo(
+    () =>
+      new Map(
+        layout.nodes.map((node) => [
+          node.id,
+          researchRelationshipTargets(layout, node.id),
+        ]),
+      ),
+    [layout],
+  );
+
+  const moveResearchRelationship = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    nodeId: string,
+  ) => {
+    const relation = relationshipTargets.get(nodeId);
+    if (!relation) return;
+    const targetIds =
+      event.key === "ArrowLeft" || event.key === "ArrowUp"
+        ? relation.incoming
+        : event.key === "ArrowRight" || event.key === "ArrowDown"
+          ? relation.outgoing
+          : [];
+    const nextId = targetIds[0];
+    if (!nextId) return;
+    event.preventDefault();
+    setSelectedId(nextId);
+    centerResearchNode(nextId);
+  };
 
   const activePrograms = programs.filter(
     (program) => program.phase !== "complete",
@@ -169,7 +222,7 @@ export function ResearchPanel() {
   useEffect(() => {
     if (!selectedId || !window.matchMedia("(max-width: 900px)").matches) return;
     const frame = window.requestAnimationFrame(() => {
-      scrollMobileResearchSelection(mobileSelectedMethodRef.current, true);
+      scrollMobileResearchSelection(selectedMethodRef.current, true);
     });
     return () => window.cancelAnimationFrame(frame);
   }, [selectedId]);
@@ -178,20 +231,14 @@ export function ResearchPanel() {
   const L = RESEARCH_LAYOUT;
 
   return (
-    <div className="flex min-h-full flex-col gap-2 overflow-y-auto overscroll-contain pb-2 xl:h-full xl:min-h-0 xl:overflow-hidden xl:pb-0">
-      <header className="shrink-0">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <p className="hud-eyebrow">Leads · pods · methods</p>
-            <h2 className="hud-title hidden sm:block">Research</h2>
-            <p className="hud-description hidden sm:block">
-              Burn research PF and cash for unlocks.
-            </p>
-          </div>
-          <StatusChip tone="research">
-            {num(snap.pools.research, 2)} PF
-          </StatusChip>
-        </div>
+    <PanelScaffold
+      eyebrow="Leads · pods · methods"
+      title="Research"
+      description="Burn research PF and cash for unlocks."
+      actions={<StatusChip tone="research">{num(snap.pools.research, 2)} PF</StatusChip>}
+      className="research-panel-section"
+    >
+      <div className="research-panel-body flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain pb-2 xl:pb-0">
         <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
           <MetricTile
             label="Pool"
@@ -221,10 +268,9 @@ export function ResearchPanel() {
             tone={activePrograms.length > 0 || active ? "research" : "neutral"}
           />
         </div>
-      </header>
 
-      <div className="flex min-h-0 flex-none flex-col gap-2 overflow-visible xl:flex-1 xl:flex-row xl:overflow-hidden">
-        <aside className="order-2 flex shrink-0 flex-col gap-2 overflow-visible xl:order-1 xl:max-h-none xl:w-72 xl:overflow-hidden">
+      <div className="research-workbench-layout flex min-h-0 flex-1 flex-col gap-2 overflow-visible">
+        <aside className="research-workbench-queue order-1 flex min-h-0 w-full shrink-0 flex-col gap-2 overflow-visible">
           <div className="panel-scroll min-h-0 flex-1 space-y-2 pr-0.5 xl:overflow-y-auto">
             {usesPodPrograms ? (
               <>
@@ -246,45 +292,39 @@ export function ResearchPanel() {
                     );
                     const progress = program ? programProgress(program) : 0;
                     return (
-                      <button
+                      <GameCard
                         key={pod.id}
-                        type="button"
-                        onClick={() => setSelectedPodId(pod.id)}
-                        className="text-left"
+                        eyebrow={lead?.name ?? "No lead"}
+                        title={pod.name}
+                        tone="research"
+                        live={!!program}
+                        interactive
+                        selected={pod.id === selectedPodId}
+                        ariaLabel={`Select research pod ${pod.name}`}
+                        onActivate={() => setSelectedPodId(pod.id)}
+                        className="min-h-11"
+                        actions={
+                          <StatusChip tone={program ? "research" : "neutral"}>
+                            {program?.phase ?? "available"}
+                          </StatusChip>
+                        }
                       >
-                        <GameCard
-                          eyebrow={lead?.name ?? "No lead"}
-                          title={pod.name}
-                          tone="research"
-                          live={!!program}
-                          className={
-                            pod.id === selectedPodId
-                              ? "ring-1 ring-research/40"
-                              : "hover-lift"
-                          }
-                          actions={
-                            <StatusChip tone={program ? "research" : "neutral"}>
-                              {program?.phase ?? "available"}
-                            </StatusChip>
-                          }
-                        >
-                          <p className="truncate text-[0.8125rem] text-muted">
-                            {pod.researchers} research · {pod.engineers} eng ·{" "}
-                            {pod.dataStaff} data
-                          </p>
-                          {program && (
-                            <div className="mt-2">
-                              <MeterBar
-                                label={getResearchNode(program.methodId).name}
-                                value={progress}
-                                detail={`${Math.round(progress * 100)}%`}
-                                tone="research"
-                                live
-                              />
-                            </div>
-                          )}
-                        </GameCard>
-                      </button>
+                        <p className="truncate text-[0.8125rem] text-muted">
+                          {pod.researchers} research · {pod.engineers} eng ·{" "}
+                          {pod.dataStaff} data
+                        </p>
+                        {program && (
+                          <div className="mt-2">
+                            <MeterBar
+                              label={getResearchNode(program.methodId).name}
+                              value={progress}
+                              detail={`${Math.round(progress * 100)}%`}
+                              tone="research"
+                              live
+                            />
+                          </div>
+                        )}
+                      </GameCard>
                     );
                   })}
                 </div>
@@ -296,17 +336,18 @@ export function ResearchPanel() {
                   >
                     <div className="anim-stagger flex flex-wrap gap-1.5">
                       {queue.map((id) => (
-                        <button
+                        <HudButton
                           key={id}
                           type="button"
-                          className="rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[0.75rem] text-bone hover:border-research/50"
+                          variant="ghost"
+                          className="min-h-11 rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[0.75rem] text-bone hover:border-research/50"
                           onClick={() => {
                             setSelectedId(id);
                             centerResearchNode(id);
                           }}
                         >
                           {getResearchNode(id).name}
-                        </button>
+                        </HudButton>
                       ))}
                     </div>
                   </GameCard>
@@ -323,16 +364,17 @@ export function ResearchPanel() {
                 ) : (
                   <div className="anim-stagger flex flex-wrap gap-1.5">
                     {active ? (
-                      <button
+                      <HudButton
                         type="button"
-                        className="rounded-full border border-research/40 bg-research/10 px-2 py-0.5 text-[0.75rem] text-research"
+                        variant="ghost"
+                        className="min-h-11 rounded-full border border-research/40 bg-research/10 px-2 py-0.5 text-[0.75rem] text-research"
                         onClick={() => {
                           setSelectedId(active.nodeId);
                           centerResearchNode(active.nodeId);
                         }}
                       >
                         {getResearchNode(active.nodeId).name}
-                      </button>
+                      </HudButton>
                     ) : null}
                     {queue.map((id, index) => (
                       <div
@@ -342,37 +384,44 @@ export function ResearchPanel() {
                         <span className="font-mono tabular-nums text-muted">
                           {index + 1}.
                         </span>
-                        <button
+                        <HudButton
                           type="button"
-                          className="max-w-[90px] truncate text-bone"
+                          variant="ghost"
+                          className="min-h-11 max-w-[90px] truncate text-bone"
                           onClick={() => {
                             setSelectedId(id);
                             centerResearchNode(id);
                           }}
                         >
                           {getResearchNode(id).name}
-                        </button>
-                        <button
+                        </HudButton>
+                        <HudButton
                           type="button"
-                          className="px-1 text-muted hover:text-bone"
+                          variant="ghost"
+                          aria-label={"Move " + getResearchNode(id).name + " earlier"}
+                          className="min-h-11 min-w-11 px-1 text-muted hover:text-bone"
                           onClick={() => apply(moveQueue(state, id, -1))}
                         >
                           ↑
-                        </button>
-                        <button
+                        </HudButton>
+                        <HudButton
                           type="button"
-                          className="px-1 text-muted hover:text-bone"
+                          variant="ghost"
+                          aria-label={"Move " + getResearchNode(id).name + " later"}
+                          className="min-h-11 min-w-11 px-1 text-muted hover:text-bone"
                           onClick={() => apply(moveQueue(state, id, 1))}
                         >
                           ↓
-                        </button>
-                        <button
+                        </HudButton>
+                        <HudButton
                           type="button"
-                          className="pr-1.5 text-muted hover:text-danger"
+                          variant="ghost"
+                          aria-label={"Remove " + getResearchNode(id).name + " from research queue"}
+                          className="min-h-11 min-w-11 pr-1.5 text-muted hover:text-danger"
                           onClick={() => apply(dequeueResearch(state, id))}
                         >
-                          ×
-                        </button>
+                          <Trash aria-hidden="true" size="0.8rem" weight="bold" />
+                        </HudButton>
                       </div>
                     ))}
                   </div>
@@ -382,8 +431,10 @@ export function ResearchPanel() {
           </div>
         </aside>
 
-        <div className="order-1 flex min-h-0 min-w-0 flex-none flex-col gap-2 overflow-visible xl:order-2 xl:flex-1 xl:overflow-hidden">
-          <div className="grid min-h-0 flex-1 grid-cols-1 overflow-visible xl:overflow-hidden">
+        <div className="research-workbench-main order-2 flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-visible">
+          <div
+            className={`research-canvas-column grid min-h-0 flex-1 grid-cols-1 gap-2 overflow-visible${selected && status ? " research-canvas-column--detail" : ""}`}
+          >
             <div
               ref={canvas.viewportRef}
               onPointerDown={canvas.onPointerDown}
@@ -391,43 +442,60 @@ export function ResearchPanel() {
               onPointerUp={canvas.onPointerUp}
               onPointerCancel={canvas.onPointerUp}
               onWheel={canvas.onWheel}
-              className="relative h-[min(62dvh,34rem)] min-h-[24rem] touch-pan-y select-none overflow-hidden rounded-lg border border-line bg-void/90 cursor-grab data-[dragging=true]:cursor-grabbing sm:touch-none xl:h-full xl:min-h-0"
+                className="research-tree-stage relative touch-pan-y select-none overflow-hidden rounded-lg border border-line bg-void/90 cursor-grab data-[dragging=true]:cursor-grabbing sm:touch-none"
+              role="group"
+              aria-roledescription="research tree"
               aria-label="Interactive research tree. Drag to pan and use the zoom controls to inspect methods."
+              aria-describedby="research-tree-summary"
             >
-              <div className="absolute right-2 top-2 z-20 grid grid-cols-4 gap-1 rounded-lg border border-line bg-panel/95 p-1.5 shadow-lg backdrop-blur-md sm:right-3 sm:top-3">
-                <span className="col-span-4 rounded bg-void/70 px-2 py-1 text-center font-mono text-[0.6875rem] tabular-nums text-bone">
+              <div id="research-tree-summary" className="sr-only">
+                Research tree with {layout.nodes.length} methods and {layout.edges.length} prerequisite connections. Select a method to inspect its requirements, effects, and queue actions.
+                <span>Research prerequisite relationships:</span>
+                <ul>
+                  {layout.edges.map((edge) => (
+                    <li key={"summary-" + edge.from + "-" + edge.to}>
+                      {getResearchNode(edge.from).name} unlocks {getResearchNode(edge.to).name}.
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div className="research-tree-toolbar absolute right-2 top-2 z-20 flex items-center gap-1 rounded-lg border border-line bg-panel/95 p-1.5 shadow-lg backdrop-blur-md sm:right-3 sm:top-3">
+                <span className="min-w-12 rounded bg-void/70 px-2 py-1 text-center font-mono text-[0.6875rem] tabular-nums text-bone">
                   {Math.round(canvas.zoom * 100)}%
                 </span>
                 <HudButton
                   variant="ghost"
-                  className="!h-11 !min-h-0 !w-11 !p-0 text-base lg:!h-8 lg:!w-8"
+                  className="!h-11 !min-h-0 !w-11 !p-0 lg:!h-8 lg:!w-8"
                   onClick={() => canvas.zoomBy(0.84)}
                   aria-label="Zoom research tree out"
                 >
-                  −
+                  <Minus size="0.9rem" weight="bold" aria-hidden />
                 </HudButton>
                 <HudButton
                   variant="ghost"
-                  className="!h-11 !min-h-0 !w-11 !p-0 text-base lg:!h-8 lg:!w-8"
+                  className="!h-11 !min-h-0 !w-11 !p-0 lg:!h-8 lg:!w-8"
                   onClick={() => canvas.zoomBy(1.19)}
                   aria-label="Zoom research tree in"
                 >
-                  +
+                  <Plus size="0.9rem" weight="bold" aria-hidden />
                 </HudButton>
                 <HudButton
                   variant="ghost"
-                  className="!h-11 !min-h-0 !px-3 text-[0.6875rem] lg:!h-8 lg:!px-2"
+                  className="!h-11 !min-h-0 !w-11 !p-0 lg:!h-8 lg:!w-8"
                   onClick={canvas.fit}
+                  title="Fit the full research tree"
+                  aria-label="Fit the full research tree"
                 >
-                  Fit
+                  <CornersOut size="0.9rem" aria-hidden />
                 </HudButton>
                 <HudButton
                   variant="ghost"
-                  className="!h-11 !min-h-0 !px-2 text-[0.6875rem] lg:!h-8"
+                  className="!h-11 !min-h-0 !w-11 !p-0 lg:!h-8 lg:!w-8"
                   onClick={canvas.reset}
                   aria-label="Reset research tree view"
+                  title="Reset view"
                 >
-                  Reset
+                  <ArrowCounterClockwise size="0.9rem" aria-hidden />
                 </HudButton>
               </div>
               <div className="pointer-events-none absolute bottom-2 left-2 z-20 rounded-md border border-line/70 bg-panel/85 px-2 py-1 font-mono text-[0.625rem] text-muted backdrop-blur-md">
@@ -467,6 +535,7 @@ export function ResearchPanel() {
                   className="pointer-events-none absolute left-0 top-0 z-[2]"
                   width={layout.width}
                   height={layout.height}
+                  aria-hidden="true"
                 >
                   {layout.edges.map((e) => {
                     const horizontal =
@@ -527,25 +596,32 @@ export function ResearchPanel() {
                       : nodeVisualStatus(state, n.id);
                   const sel = selectedId === n.id;
                   const highlighted = highlightedId === n.id;
-                  const expandedWidth = 340;
-                  const expandedLeft =
-                    n.x + expandedWidth > layout.width - 12
-                      ? Math.max(12, n.x + n.w - expandedWidth)
-                      : n.x;
+                  const relation = relationshipTargets.get(n.id) ?? {
+                    incoming: [],
+                    outgoing: [],
+                  };
+                  const summaryId = researchNodeSummaryId(n.id);
+                  const nodeStyle = {
+                    "--research-node-height": `${n.h}px`,
+                    "--research-tree-zoom": canvas.zoom,
+                  } as CSSProperties;
                   return (
                     <div
                       key={n.id}
                       className={`absolute ${sel ? "z-30" : "z-10"}`}
                       style={{
-                        left: sel ? expandedLeft : n.x,
+                        left: n.x,
                         top: n.y,
-                        width: sel ? expandedWidth : n.w,
+                        width: n.w,
                       }}
                     >
                       <button
                         type="button"
                         aria-expanded={sel}
+                        aria-describedby={summaryId}
+                        aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown"
                         onClick={() => setSelectedId(sel ? null : n.id)}
+                        onKeyDown={(event) => moveResearchRelationship(event, n.id)}
                         onDoubleClick={(event) => {
                           event.stopPropagation();
                           setSelectedId(n.id);
@@ -555,391 +631,298 @@ export function ResearchPanel() {
                             startOrQueue(n.id);
                           }
                         }}
-                        className={`relative block w-full rounded-lg border px-2 py-1.5 text-left transition ${nodeClass(st, sel, def.riskLevel)} ${sel ? "rounded-b-none !overflow-visible opacity-100" : ""} ${highlighted ? "ring-2 ring-research shadow-[0_0_1.5rem_rgba(147,116,255,0.45)]" : ""}`}
-                        style={{ height: n.h }}
+                        className="research-node-hit relative block min-h-11 w-full border-0 bg-transparent p-0 text-left"
+                        style={nodeStyle}
                         title={sel ? "Collapse research details" : def.description}
                       >
-                        {def.riskLevel && (
-                          <span className="absolute right-1.5 top-1 rounded border border-danger/50 bg-danger/15 px-1 font-mono text-[0.5rem] font-semibold uppercase tracking-wider text-danger">
-                            {def.riskLevel} risk
-                          </span>
-                        )}
-                        <div
-                          className={`truncate text-[0.8125rem] font-medium leading-tight text-bone ${def.riskLevel ? "pr-14" : ""}`}
+                        <span
+                          aria-hidden="true"
+                          className={`research-node-surface relative block w-full rounded-lg border px-2 py-1.5 text-left transition ${nodeClass(st, sel, def.riskLevel)} ${sel ? "rounded-b-none !overflow-visible opacity-100" : ""} ${highlighted ? "ring-2 ring-research shadow-[0_0_1.5rem_rgba(147,116,255,0.45)]" : ""}`}
+                          style={{ height: n.h }}
                         >
-                          {def.name}
-                        </div>
-                        <div className="mt-0.5 flex items-center justify-between gap-2 font-mono text-[0.6875rem] tabular-nums text-muted">
-                          <span>
-                            {st === "done" ? (
-                              <span className="text-mint">DONE</span>
-                            ) : (
-                              <>
-                                {def.costPfDays} PF
-                                {st === "queued" ? " · Q" : ""}
-                                {st === "active" ? " · …" : ""}
-                                {st === "blocked" || st === "locked"
-                                  ? " · locked"
-                                  : ""}
-                              </>
-                            )}
-                          </span>
-                          {sel && (
-                            <span className="text-research">details ↑</span>
+                          {def.riskLevel && (
+                            <span className="absolute right-1.5 top-1 rounded border border-danger/50 bg-danger/15 px-1 font-mono text-[0.5rem] font-semibold uppercase tracking-wider text-danger">
+                              {def.riskLevel} risk
+                            </span>
                           )}
-                        </div>
+                          <span
+                            className={`truncate text-[0.8125rem] font-medium leading-tight text-bone ${def.riskLevel ? "pr-14" : ""}`}
+                          >
+                            {def.name}
+                          </span>
+                          <span className="mt-0.5 flex items-center justify-between gap-2 font-mono text-[0.6875rem] tabular-nums text-muted">
+                            <span>
+                              {st === "done" ? (
+                                <span className="text-mint">DONE</span>
+                              ) : (
+                                <>
+                                  {def.costPfDays} PF
+                                  {st === "queued" ? " · Q" : ""}
+                                  {st === "active" ? " · …" : ""}
+                                  {st === "blocked" || st === "locked"
+                                    ? " · locked"
+                                    : ""}
+                                </>
+                              )}
+                            </span>
+                            {sel && (
+                              <span className="text-research">details below</span>
+                            )}
+                          </span>
+                        </span>
                       </button>
-
-                      {sel && selected && status && (
-                        <div
-                          className="panel-scroll hidden max-h-[30rem] overflow-y-auto rounded-b-lg border border-t-0 border-research/50 bg-panel-2 p-3 text-left shadow-[0_1rem_2.5rem_rgba(0,0,0,0.55)] backdrop-blur-md xl:block"
-                          onPointerDown={(event) => event.stopPropagation()}
-                          onWheel={(event) => event.stopPropagation()}
-                        >
-                          <div className="mb-2 flex items-start justify-between gap-2">
-                            <p className="hud-eyebrow">
-                              {
-                                RESEARCH_BRANCHES[
-                                  researchBranchForNode(selected.id)
-                                ].label
-                              }
-                            </p>
-                            <StatusChip tone={statusTone(status)}>
-                              {status}
-                            </StatusChip>
-                          </div>
-
-                          <div className="space-y-2">
-                            {!usesPodPrograms && (
-                              <div className="flex flex-wrap gap-1.5">
-                                {status !== "done" &&
-                                  status !== "active" &&
-                                  status !== "queued" &&
-                                  status !== "blocked" && (
-                                    <HudButton
-                                      variant="primary"
-                                      className="!px-3 !py-1 text-[0.8125rem]"
-                                      onClick={() => startOrQueue(selected.id)}
-                                    >
-                                      {status === "locked"
-                                        ? `Queue unlock path${selectedPath.length > 1 ? ` (${selectedPath.length})` : ""}`
-                                        : active
-                                          ? "Queue"
-                                          : "Start"}
-                                    </HudButton>
-                                  )}
-                                {status === "available" && active && (
-                                  <HudButton
-                                    variant="ghost"
-                                    className="!px-2 !py-1 text-[0.8125rem]"
-                                    onClick={() =>
-                                      apply(enqueueResearch(state, selected.id))
-                                    }
-                                  >
-                                    Queue
-                                  </HudButton>
-                                )}
-                                {status === "queued" && (
-                                  <HudButton
-                                    variant="ghost"
-                                    className="!px-2 !py-1 text-[0.8125rem]"
-                                    onClick={() =>
-                                      apply(dequeueResearch(state, selected.id))
-                                    }
-                                  >
-                                    Remove
-                                  </HudButton>
-                                )}
-                              </div>
-                            )}
-
-                            {status === "available" &&
-                              selectedPod &&
-                              !selectedPod.assignmentId &&
-                              !selectedProgram && (
-                                <HudButton
-                                  variant="primary"
-                                  className="w-full"
-                                  onClick={() =>
-                                    apply(
-                                      startResearchProgram(
-                                        state,
-                                        selected.id,
-                                        selectedPod.id,
-                                      ),
-                                    )
-                                  }
-                                >
-                                  Assign {selectedPod.name}
-                                </HudButton>
-                              )}
-                            {usesPodPrograms &&
-                              (status === "available" ||
-                                status === "locked") && (
-                                <HudButton
-                                  variant="secondary"
-                                  className="w-full"
-                                  onClick={() =>
-                                    apply(
-                                      queueResearchProgram(state, selected.id),
-                                    )
-                                  }
-                                >
-                                  {status === "locked"
-                                    ? `Queue unlock path${selectedPath.length > 1 ? ` · ${selectedPath.length} methods` : ""}`
-                                    : "Queue for next available pod"}
-                                </HudButton>
-                              )}
-                            {usesPodPrograms && status === "queued" && (
-                              <HudButton
-                                variant="ghost"
-                                className="w-full"
-                                onClick={() =>
-                                  apply(
-                                    dequeueResearchProgram(state, selected.id),
-                                  )
-                                }
-                              >
-                                Remove from queue
-                              </HudButton>
-                            )}
-
-                            {selectedPod?.assignmentId &&
-                              status === "available" && (
-                                <div className="rounded-md border border-amber/30 bg-amber/10 px-2 py-1.5 text-[0.75rem] text-amber">
-                                  {selectedPod.name} is already assigned. Select
-                                  an available pod card.
-                                </div>
-                              )}
-                            {selectedProgram && (
-                              <div className="rounded-md border border-research/30 bg-research/10 px-2 py-1.5 text-[0.75rem] text-research">
-                                In {selectedProgram.phase} with{" "}
-                                {pods.find(
-                                  (pod) => pod.id === selectedProgram.podId,
-                                )?.name ?? "assigned pod"}{" "}
-                                · {selectedProgram.evidence.length} evidence
-                              </div>
-                            )}
-
-                            <p className="text-[0.8125rem] leading-snug text-muted">
-                              {selected.description}
-                            </p>
-
-                            <div className="grid grid-cols-2 gap-x-3">
-                              <StatRow
-                                label="PF target"
-                                value={`~${num(researchPfTarget(state, selected), 0)}`}
-                                strong
-                              />
-                              <StatRow
-                                label="Days"
-                                value={`≥${researchDaysTarget(selected, researcherCount)}`}
-                              />
-                              <StatRow
-                                label="Cash"
-                                value={`~${money(researchCashEstimate(state, selected))}`}
-                              />
-                              <StatRow
-                                label="Staff"
-                                value={selectedStaffNeed
-                                  ? `${selectedStaffNeed.researchers}R · ${selectedStaffNeed.engineers}E · ${selectedStaffNeed.dataStaff}D`
-                                  : `${minResearchersForNode(selected.id)}R`}
-                                tone={
-                                  selectedStaffNeed &&
-                                  researcherCount >= selectedStaffNeed.researchers &&
-                                  (staff.engineer ?? 0) >= selectedStaffNeed.engineers &&
-                                  (staff.data_processor ?? 0) >= selectedStaffNeed.dataStaff
-                                    ? "positive"
-                                    : "warning"
-                                }
-                              />
-                              <StatRow
-                                label="Rate now"
-                                value={`${num(estimateResearchRate(state, selected.id).pfPerDay, 2)} PF/d`}
-                                tone="research"
-                              />
-                              <StatRow
-                                label="Power"
-                                value={mw(snap.mwForecast.research)}
-                              />
-                            </div>
-
-                            {selected.prereqs.length > 0 && (
-                              <p className="text-[0.75rem] text-muted">
-                                Needs{" "}
-                                {selected.prereqs
-                                  .map((p) => getResearchNode(p).name)
-                                  .join(", ")}
-                              </p>
-                            )}
-
-                            <EffectsLine effects={selected.effects} />
-
-                            {selected.riskLevel && (
-                              <div className="rounded-md border border-danger/40 bg-danger/10 px-2.5 py-2">
-                                <div className="font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.12em] text-danger">
-                                  {selected.riskLevel} variance
-                                </div>
-                                <p className="mt-1 text-[0.75rem] leading-snug text-muted">
-                                  Higher breakthrough odds and capability
-                                  upside, with more failed runs and a safety
-                                  penalty.
-                                </p>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      )}
+                      <span id={summaryId} className="sr-only">
+                        {def.name}. Status: {st}.{" "}
+                        {relation.incoming.length > 0
+                          ? "Requires " +
+                            relation.incoming
+                              .map((id) => getResearchNode(id).name)
+                              .join(", ") +
+                            ". "
+                          : "No prerequisites. "}
+                        {relation.outgoing.length > 0
+                          ? "Unlocks " +
+                            relation.outgoing
+                              .map((id) => getResearchNode(id).name)
+                              .join(", ") +
+                            "."
+                          : "Unlocks no further methods."}
+                      </span>
                     </div>
                   );
                 })}
               </div>
             </div>
             {selected && status ? (
-              <section
-                ref={mobileSelectedMethodRef}
-                className="mt-2 rounded-lg border border-research/45 bg-panel-2/95 p-3 xl:hidden"
-                aria-label={`Selected research method: ${selected.name}`}
+              <div
+                ref={selectedMethodRef}
+                className="research-method-detail mt-2 min-w-0"
               >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="hud-eyebrow">
-                      {RESEARCH_BRANCHES[researchBranchForNode(selected.id)].label}
-                    </p>
-                    <h3 className="mt-0.5 text-sm font-semibold text-bone">
-                      {selected.name}
-                    </h3>
-                  </div>
-                  <StatusChip tone={statusTone(status)}>{status}</StatusChip>
-                </div>
-
-                <p className="mt-2 text-[0.8125rem] leading-5 text-muted">
-                  {selected.description}
-                </p>
-
-                <div className="mt-2 grid grid-cols-2 gap-x-3">
-                  <StatRow
-                    label="PF target"
-                    value={`~${num(researchPfTarget(state, selected), 0)}`}
-                    strong
-                  />
-                  <StatRow
-                    label="Days"
-                    value={`≥${researchDaysTarget(selected, researcherCount)}`}
-                  />
-                  <StatRow
-                    label="Cash"
-                    value={`~${money(researchCashEstimate(state, selected))}`}
-                  />
-                  <StatRow
-                    label="Staff"
-                    value={
-                      selectedStaffNeed
-                        ? `${selectedStaffNeed.researchers}R · ${selectedStaffNeed.engineers}E · ${selectedStaffNeed.dataStaff}D`
-                        : `${minResearchersForNode(selected.id)}R`
-                    }
-                    tone={
-                      selectedStaffNeed &&
-                      researcherCount >= selectedStaffNeed.researchers &&
-                      (staff.engineer ?? 0) >= selectedStaffNeed.engineers &&
-                      (staff.data_processor ?? 0) >= selectedStaffNeed.dataStaff
-                        ? "positive"
-                        : "warning"
-                    }
-                  />
-                </div>
-
-                {selectedProgram ? (
-                  <p className="mt-2 rounded-md border border-research/30 bg-research/10 px-2 py-1.5 text-[0.75rem] text-research">
-                    In {selectedProgram.phase} · {selectedProgram.evidence.length}{" "}
-                    evidence
-                  </p>
-                ) : null}
-
-                <div className="mt-3 grid gap-2 min-[420px]:grid-cols-2">
-                  {!usesPodPrograms &&
-                  status !== "done" &&
-                  status !== "active" &&
-                  status !== "queued" &&
-                  status !== "blocked" ? (
-                    <HudButton
-                      variant="primary"
-                      className="w-full"
-                      onClick={() => startOrQueue(selected.id)}
-                    >
-                      {status === "locked"
-                        ? `Queue unlock path${selectedPath.length > 1 ? ` (${selectedPath.length})` : ""}`
-                        : active
-                          ? "Queue"
-                          : "Start"}
-                    </HudButton>
-                  ) : null}
-                  {!usesPodPrograms && status === "queued" ? (
-                    <HudButton
-                      variant="ghost"
-                      className="w-full"
-                      onClick={() => apply(dequeueResearch(state, selected.id))}
-                    >
-                      Remove from queue
-                    </HudButton>
-                  ) : null}
-                  {usesPodPrograms &&
-                  status === "available" &&
-                  selectedPod &&
-                  !selectedPod.assignmentId &&
-                  !selectedProgram ? (
-                    <HudButton
-                      variant="primary"
-                      className="w-full"
-                      onClick={() =>
-                        apply(
-                          startResearchProgram(state, selected.id, selectedPod.id),
-                        )
-                      }
-                    >
-                      Assign {selectedPod.name}
-                    </HudButton>
-                  ) : null}
-                  {usesPodPrograms &&
-                  (status === "available" || status === "locked") ? (
-                    <HudButton
-                      variant="secondary"
-                      className="w-full"
-                      onClick={() =>
-                        apply(queueResearchProgram(state, selected.id))
-                      }
-                    >
-                      Queue for next pod
-                    </HudButton>
-                  ) : null}
-                  {usesPodPrograms && status === "queued" ? (
-                    <HudButton
-                      variant="ghost"
-                      className="w-full"
-                      onClick={() =>
-                        apply(dequeueResearchProgram(state, selected.id))
-                      }
-                    >
-                      Remove from queue
-                    </HudButton>
-                  ) : null}
-                </div>
-
-                {selected.prereqs.length > 0 ? (
-                  <p className="mt-2 text-[0.75rem] text-muted">
-                    Needs{" "}
-                    {selected.prereqs
-                      .map((prereq) => getResearchNode(prereq).name)
-                      .join(", ")}
-                  </p>
-                ) : null}
-                <div className="mt-2">
-                  <EffectsLine effects={selected.effects} />
-                </div>
-              </section>
+                <ResearchMethodDetail
+                  state={state}
+                  selected={selected}
+                  status={status}
+                  usesPodPrograms={usesPodPrograms}
+                  selectedPath={selectedPath}
+                  selectedPod={selectedPod}
+                  selectedProgram={selectedProgram}
+                  active={Boolean(active)}
+                  pods={pods}
+                  researcherCount={researcherCount}
+                  selectedStaffNeed={selectedStaffNeed}
+                  staff={staff}
+                  snap={snap}
+                  apply={apply}
+                  startOrQueue={startOrQueue}
+                  showTitle
+                />
+              </div>
             ) : null}
           </div>
         </div>
+      </div>
+      </div>
+    </PanelScaffold>
+  );
+}
+
+type ResearchDetailStatus = NodeVisualStatus | "active" | "queued";
+
+type ResearchMethodDetailProps = {
+  state: SimState;
+  selected: ResearchNodeDef;
+  status: ResearchDetailStatus;
+  usesPodPrograms: boolean;
+  selectedPath: string[];
+  selectedPod?: ResearchPod;
+  selectedProgram?: ResearchProgram;
+  active: boolean;
+  pods: ResearchPod[];
+  researcherCount: number;
+  selectedStaffNeed: ReturnType<typeof researchPodStaffRequirements> | null;
+  staff: ReturnType<typeof playerStaff>;
+  snap: ReturnType<typeof computeSnapshot>;
+  apply: (next: SimState) => void;
+  startOrQueue: (id: string) => void;
+  showTitle?: boolean;
+};
+
+function ResearchMethodDetail({
+  state,
+  selected,
+  status,
+  usesPodPrograms,
+  selectedPath,
+  selectedPod,
+  selectedProgram,
+  active,
+  pods,
+  researcherCount,
+  selectedStaffNeed,
+  staff,
+  snap,
+  apply,
+  startOrQueue,
+  showTitle = true,
+}: ResearchMethodDetailProps) {
+  const buttonClass = "min-h-11 w-full";
+  return (
+    <div
+      className="rounded-lg border border-research/45 bg-panel-2/95 p-3 text-left"
+      aria-label={showTitle ? `Selected research method: ${selected.name}` : undefined}
+    >
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="hud-eyebrow">
+            {RESEARCH_BRANCHES[researchBranchForNode(selected.id)].label}
+          </p>
+          {showTitle ? (
+            <h3 className="mt-0.5 truncate text-sm font-semibold text-bone">
+              {selected.name}
+            </h3>
+          ) : null}
+        </div>
+        <StatusChip tone={statusTone(status)}>{status}</StatusChip>
+      </div>
+
+      <div className="space-y-2">
+        {!usesPodPrograms ? (
+          <div className="flex flex-wrap gap-1.5">
+            {status !== "done" &&
+            status !== "active" &&
+            status !== "queued" &&
+            status !== "blocked" ? (
+              <HudButton
+                variant="primary"
+                className={buttonClass}
+                onClick={() => startOrQueue(selected.id)}
+              >
+                {status === "locked"
+                  ? `Queue unlock path${selectedPath.length > 1 ? ` (${selectedPath.length})` : ""}`
+                  : active
+                    ? "Queue"
+                    : "Start"}
+              </HudButton>
+            ) : null}
+            {status === "available" && active ? (
+              <HudButton
+                variant="ghost"
+                className={buttonClass}
+                onClick={() => apply(enqueueResearch(state, selected.id))}
+              >
+                Queue
+              </HudButton>
+            ) : null}
+            {status === "queued" ? (
+              <HudButton
+                variant="ghost"
+                className={buttonClass}
+                onClick={() => apply(dequeueResearch(state, selected.id))}
+              >
+                Remove
+              </HudButton>
+            ) : null}
+          </div>
+        ) : null}
+
+        {status === "available" &&
+        selectedPod &&
+        !selectedPod.assignmentId &&
+        !selectedProgram ? (
+          <HudButton
+            variant="primary"
+            className={buttonClass}
+            onClick={() =>
+              apply(startResearchProgram(state, selected.id, selectedPod.id))
+            }
+          >
+            Assign {selectedPod.name}
+          </HudButton>
+        ) : null}
+        {usesPodPrograms && (status === "available" || status === "locked") ? (
+          <HudButton
+            variant="secondary"
+            className={buttonClass}
+            onClick={() => apply(queueResearchProgram(state, selected.id))}
+          >
+            {status === "locked"
+              ? `Queue unlock path${selectedPath.length > 1 ? ` · ${selectedPath.length} methods` : ""}`
+              : "Queue for next available pod"}
+          </HudButton>
+        ) : null}
+        {usesPodPrograms && status === "queued" ? (
+          <HudButton
+            variant="ghost"
+            className={buttonClass}
+            onClick={() => apply(dequeueResearchProgram(state, selected.id))}
+          >
+            Remove from queue
+          </HudButton>
+        ) : null}
+
+        {selectedPod?.assignmentId && status === "available" ? (
+          <div className="rounded-md border border-amber/30 bg-amber/10 px-2 py-1.5 text-[0.75rem] text-amber">
+            {selectedPod.name} is already assigned. Select an available pod card.
+          </div>
+        ) : null}
+        {selectedProgram ? (
+          <div className="rounded-md border border-research/30 bg-research/10 px-2 py-1.5 text-[0.75rem] text-research">
+            In {selectedProgram.phase} with{" "}
+            {pods.find((pod) => pod.id === selectedProgram.podId)?.name ?? "assigned pod"}{" "}
+            · {selectedProgram.evidence.length} evidence
+          </div>
+        ) : null}
+
+        <p className="text-[0.8125rem] leading-snug text-muted">{selected.description}</p>
+
+        <div className="grid grid-cols-2 gap-x-3">
+          <StatRow
+            label="PF target"
+            value={`~${num(researchPfTarget(state, selected), 0)}`}
+            strong
+          />
+          <StatRow label="Days" value={`≥${researchDaysTarget(selected, researcherCount)}`} />
+          <StatRow label="Cash" value={`~${money(researchCashEstimate(state, selected))}`} />
+          <StatRow
+            label="Staff"
+            value={
+              selectedStaffNeed
+                ? `${selectedStaffNeed.researchers}R · ${selectedStaffNeed.engineers}E · ${selectedStaffNeed.dataStaff}D`
+                : `${minResearchersForNode(selected.id)}R`
+            }
+            tone={
+              selectedStaffNeed &&
+              researcherCount >= selectedStaffNeed.researchers &&
+              (staff.engineer ?? 0) >= selectedStaffNeed.engineers &&
+              (staff.data_processor ?? 0) >= selectedStaffNeed.dataStaff
+                ? "positive"
+                : "warning"
+            }
+          />
+          <StatRow
+            label="Rate now"
+            value={`${num(estimateResearchRate(state, selected.id).pfPerDay, 2)} PF/d`}
+            tone="research"
+          />
+          <StatRow label="Power" value={mw(snap.mwForecast.research)} />
+        </div>
+
+        {selected.prereqs.length > 0 ? (
+          <p className="text-[0.75rem] text-muted">
+            Needs {selected.prereqs.map((prereq) => getResearchNode(prereq).name).join(", ")}
+          </p>
+        ) : null}
+        <EffectsLine effects={selected.effects} />
+        {selected.riskLevel ? (
+          <div className="rounded-md border border-danger/40 bg-danger/10 px-2.5 py-2">
+            <div className="font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.12em] text-danger">
+              {selected.riskLevel} variance
+            </div>
+            <p className="mt-1 text-[0.75rem] leading-snug text-muted">
+              Higher breakthrough odds and capability upside, with more failed runs and a safety penalty.
+            </p>
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -950,7 +933,11 @@ type CanvasView = { x: number; y: number; scale: number };
 function useResearchCanvas(layout: ResearchTreeLayout) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
-  const viewRef = useRef<CanvasView>({ x: 24, y: 24, scale: 0.72 });
+  const viewRef = useRef<CanvasView>({
+    x: 24,
+    y: 24,
+    scale: RESEARCH_TREE_DEFAULT_ZOOM,
+  });
   const dragRef = useRef<{ pointerId: number; x: number; y: number } | null>(
     null,
   );
@@ -973,7 +960,7 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
     if (!viewport) return;
     const bounds = viewport.getBoundingClientRect();
     const scale = Math.max(
-      0.38,
+      RESEARCH_TREE_MIN_ZOOM,
       Math.min(
         1.05,
         Math.min(
@@ -989,31 +976,36 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
     });
   }, [applyView, layout.height, layout.width]);
 
-  const focus = useCallback(() => {
-    const viewport = viewportRef.current;
-    if (!viewport) return;
-    const bounds = viewport.getBoundingClientRect();
-    const fitScale = Math.min(
-      1.05,
-      Math.min(
-        (bounds.width - 32) / layout.width,
-        (bounds.height - 32) / layout.height,
-      ),
-    );
-    const scale = Math.max(0.78, fitScale);
-    applyView({
-      x: 20,
-      y: (bounds.height - layout.height * scale) / 2,
-      scale,
-    });
-  }, [applyView, layout.height, layout.width]);
+  const centerAtScale = useCallback(
+    (scale: number) => {
+      const viewport = viewportRef.current;
+      if (!viewport) return;
+      const bounds = viewport.getBoundingClientRect();
+      applyView({
+        x: (bounds.width - layout.width * scale) / 2,
+        y: (bounds.height - layout.height * scale) / 2,
+        scale,
+      });
+    },
+    [applyView, layout.height, layout.width],
+  );
+
+  const readableDefault = useCallback(
+    () => centerAtScale(RESEARCH_TREE_DEFAULT_ZOOM),
+    [centerAtScale],
+  );
 
   useEffect(() => {
-    const frame = window.requestAnimationFrame(focus);
-    return () => window.cancelAnimationFrame(frame);
-  }, [focus]);
+    // Initialize once. Selecting a method can resize the graph when its detail
+    // column opens; observing that resize used to re-center the entire canvas
+    // and made a normal click appear to teleport to another branch.
+    const frame = window.requestAnimationFrame(readableDefault);
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [readableDefault]);
 
-  const reset = useCallback(() => focus(), [focus]);
+  const reset = useCallback(() => readableDefault(), [readableDefault]);
 
   const zoomAt = useCallback(
     (factor: number, clientX?: number, clientY?: number) => {
@@ -1021,7 +1013,7 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
       if (!viewport) return;
       const bounds = viewport.getBoundingClientRect();
       const current = viewRef.current;
-      const nextScale = Math.max(0.42, Math.min(1.6, current.scale * factor));
+      const nextScale = Math.max(RESEARCH_TREE_MIN_ZOOM, Math.min(1.6, current.scale * factor));
       const anchorX = (clientX ?? bounds.left + bounds.width / 2) - bounds.left;
       const anchorY = (clientY ?? bounds.top + bounds.height / 2) - bounds.top;
       const contentX = (anchorX - current.x) / current.scale;

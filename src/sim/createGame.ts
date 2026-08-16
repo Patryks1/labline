@@ -12,6 +12,7 @@ import {
 import { createRivals } from './systems/rivals'
 import { createWorldMarkets, refreshPublicEstimates, syncLabIndex } from './systems/labEngine'
 import { migrateDataHallLayouts } from './systems/dataHallLayouts'
+import { migrateHqOfficeLayouts } from './systems/hqOffice'
 import { createInitialMap } from './systems/map'
 import { defaultPlans } from './systems/plans'
 import {
@@ -600,5 +601,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
     evaluations: [],
     reviews: [],
   }
-  return refreshPublicEstimates(syncLabIndex(migrateDataHallLayouts(normalizeSiteEnergyState(state))))
+  return refreshPublicEstimates(
+    syncLabIndex(migrateHqOfficeLayouts(migrateDataHallLayouts(normalizeSiteEnergyState(state)))),
+  )
 }

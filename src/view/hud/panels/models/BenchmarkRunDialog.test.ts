@@ -26,6 +26,7 @@ describe('BenchmarkRunDialog', () => {
     expect(markup).toContain('Image generation')
     expect(markup).not.toContain('Language &amp; reasoning')
     expect(markup).toContain('Benchmark spend per suite')
+    expect(markup).toContain('class="hud-range mt-2')
     expect(markup).toContain('Est. accuracy')
   })
 

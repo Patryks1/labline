@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { buildLabStats, sparkPath, type StatsSectionId } from '../../../sim/systems/stats'
+import { buildLabStats, type StatsSectionId } from '../../../sim/systems/stats'
 import type { Model, PanelId } from '../../../sim/types'
 import { useGameStore } from '../../../store/gameStore'
 import { money, num, pct } from '../format'
@@ -11,7 +11,12 @@ import {
   PanelScaffold,
   StatusChip,
 } from '../ui/HudPrimitives'
+import { RadarChart } from '../ui/RadarChart'
+import { buildBenchmarkViewModel } from '../data/benchmarkViewModel'
+import { buildFinanceDashboardModel, type FinanceDashboardModel } from '../data/financeDashboardModel'
+import { capitalSnapshot } from '../../../sim/systems/capital'
 import { SparkTrendCard } from './command/SparkTrendCard'
+import { OrgPanel } from './OrgPanel'
 
 const SECTIONS: { id: StatsSectionId; label: string }[] = [
   { id: 'pnl', label: 'P&L' },
@@ -24,17 +29,19 @@ export function StatsPanel() {
   const setPanel = useGameStore((s) => s.setPanel)
   const setCommandView = useGameStore((s) => s.setCommandView)
   const [section, setSection] = useState<StatsSectionId>('pnl')
-  const stats = useMemo(() => buildLabStats(state), [state])
+  const dashboard = useMemo(() => buildFinanceDashboardModel(state), [state])
+  const capital = useMemo(() => capitalSnapshot(state), [state])
+  const stats = dashboard.stats
   const runwayLabel =
-    Number.isFinite(stats.kpis.runwayDays) && stats.kpis.runwayDays < 9000
-      ? `${Math.floor(stats.kpis.runwayDays)}d`
+    Number.isFinite(dashboard.current.runwayDays) && dashboard.current.runwayDays < 9000
+      ? `${Math.floor(dashboard.current.runwayDays)}d`
       : '∞'
 
   return (
     <PanelScaffold
       eyebrow={`Day ${stats.day}`}
-      title="Command"
-      description="Decisions, performance, and operational risk."
+      title="Finances"
+      description="P&L, capital, models, and compute."
       actions={
         <HudButton
           variant="ghost"
@@ -49,20 +56,25 @@ export function StatsPanel() {
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
         <MetricTile
           label="Cash"
-          value={money(stats.kpis.cash)}
-          tone={stats.kpis.cash < 2e6 ? 'danger' : 'neutral'}
+          value={money(dashboard.current.cash)}
+          tone={dashboard.current.cash < 2e6 ? 'danger' : 'neutral'}
         />
         <MetricTile
           label="Net / day"
-          value={money(stats.kpis.dayNet)}
-          tone={stats.kpis.dayNet < 0 ? 'danger' : stats.kpis.dayNet > 0 ? 'positive' : 'neutral'}
+          value={money(dashboard.current.net)}
+          tone={dashboard.current.net < 0 ? 'danger' : dashboard.current.net > 0 ? 'positive' : 'neutral'}
         />
-        <MetricTile label="Market share" value={pct(stats.kpis.share, 1)} tone="serve" />
-        <MetricTile label="Valuation" value={money(stats.kpis.valuation)} />
+        <MetricTile label="Market share" value={pct(dashboard.current.share, 1)} tone="serve" />
+        <MetricTile label="Valuation" value={money(dashboard.current.valuation)} />
+        <MetricTile
+          label="Ownership"
+          value={pct(capital.founderOwnership, 1)}
+          tone={capital.founderOwnership < 0.1 ? 'danger' : 'positive'}
+        />
         <MetricTile
           label="Runway"
           value={runwayLabel}
-          tone={stats.kpis.runwayDays < 30 ? 'danger' : stats.kpis.runwayDays < 90 ? 'warning' : 'neutral'}
+          tone={dashboard.current.runwayDays < 30 ? 'danger' : dashboard.current.runwayDays < 90 ? 'warning' : 'neutral'}
         />
       </div>
 
@@ -76,9 +88,9 @@ export function StatsPanel() {
       </div>
 
       <div key={section} className="panel-swap mt-3">
-        {section === 'pnl' && <PnlSection stats={stats} setPanel={setPanel} />}
+        {section === 'pnl' && <PnlSection stats={stats} financeModel={dashboard} setPanel={setPanel} />}
         {section === 'models' && <ModelsSection stats={stats} setPanel={setPanel} />}
-        {section === 'compute' && <ComputeSection stats={stats} setPanel={setPanel} />}
+        {section === 'compute' && <ComputeSection stats={stats} financeModel={dashboard} setPanel={setPanel} />}
       </div>
     </PanelScaffold>
   )
@@ -86,29 +98,27 @@ export function StatsPanel() {
 
 function PnlSection({
   stats,
+  financeModel,
   setPanel,
 }: {
   stats: ReturnType<typeof buildLabStats>
+  financeModel: FinanceDashboardModel
   setPanel: (p: PanelId) => void
 }) {
-  const dayCosts = Math.abs(
-    stats.finance.dayCogs + stats.operatingCosts.reduce((sum, line) => sum + Math.abs(line.amount), 0),
-  )
-
   return (
     <div className="space-y-3">
       <SparkTrendCard
         label="Money over time"
-        values={stats.trends.net}
-        secondaryValues={stats.trends.revenue}
-        days={stats.trends.days}
+        values={financeModel.trends.net}
+        secondaryValues={financeModel.trends.revenue}
+        days={financeModel.trends.days}
         format={money}
         secondaryLabel="Revenue"
         tall
       />
 
       <GameCard eyebrow="Ledger" title="Money in" tone="mint">
-        <StatRow label="Total" value={money(stats.finance.dayRevenue)} tone="positive" strong />
+        <StatRow label="Total" value={money(financeModel.revenue.total)} tone="positive" strong />
         <div className="anim-stagger mt-1 border-t border-line/50 pt-1">
           {stats.income.map((line) => (
             <div key={line.id}>
@@ -153,7 +163,7 @@ function PnlSection({
         title="Costs"
         tone={(stats.finance.dayGrossProfit ?? 0) < 0 ? 'danger' : 'train'}
       >
-        <StatRow label="Product COGS" value={money(-Math.abs(stats.finance.dayCogs))} tone="danger" strong />
+        <StatRow label="Product COGS" value={money(-financeModel.costs.productCogs)} tone="danger" strong />
         <div className="anim-stagger mt-1 border-t border-line/50 pt-1">
           {stats.productCosts.map((line) => (
             <StatRow key={line.id} label={line.label} value={money(line.amount)} hint={line.hint} tone="danger" />
@@ -161,8 +171,8 @@ function PnlSection({
         </div>
         <div className="mt-2 border-t border-line/50 pt-2">
           <StatRow
-            label="Operations"
-            value={money(-stats.operatingCosts.reduce((sum, line) => sum + Math.abs(line.amount), 0))}
+            label="Operations (cash)"
+            value={money(-financeModel.costs.operatingCashOut)}
             tone="danger"
             strong
           />
@@ -181,11 +191,11 @@ function PnlSection({
           </div>
         </div>
         <div className="mt-2 border-t border-line/50 pt-2">
-          <StatRow label="Total costs / day" value={money(-dayCosts)} tone="danger" strong />
+          <StatRow label="Total cash out / day" value={money(-financeModel.costs.totalCashOut)} tone="danger" strong />
           <StatRow
             label="Net / day"
-            value={money(stats.kpis.dayNet)}
-            tone={stats.kpis.dayNet < 0 ? 'danger' : 'positive'}
+            value={money(financeModel.current.net)}
+            tone={financeModel.current.net < 0 ? 'danger' : 'positive'}
             strong
           />
         </div>
@@ -237,6 +247,10 @@ function PnlSection({
           </div>
         </GameCard>
       ) : null}
+
+      <div className="border-t border-line/70 pt-3">
+        <OrgPanel workspace="capital" />
+      </div>
     </div>
   )
 }
@@ -346,48 +360,27 @@ function ModelCard({ m }: { m: ReturnType<typeof buildLabStats>['models'][0] }) 
 }
 
 function MiniCapabilityRadar({ model }: { model: Model }) {
-  const axes = [
-    ['Knowledge', model.benchmarks.mmlu ?? 0],
-    ['Code', model.benchmarks.coding ?? 0],
-    ['Reason', model.benchmarks.math ?? 0],
-    ['Safety', model.benchmarks.safety ?? model.quality.safety],
-    ['Speed', Math.min(100, (model.serviceProfile?.interactiveTokPerSec ?? 0) / 3)],
-  ] as const
-  const center = 55
-  const radius = 38
-  const points = axes
-    .map(([, value], index) => {
-      const angle = -Math.PI / 2 + (index / axes.length) * Math.PI * 2
-      const r = radius * Math.max(0, Math.min(1, value / 100))
-      return `${center + Math.cos(angle) * r},${center + Math.sin(angle) * r}`
-    })
-    .join(' ')
-
+  const benchmark = buildBenchmarkViewModel(model, 'language', { kind: 'public' })
   return (
-    <div className="mt-2 grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-2 rounded-md border border-line/60 bg-void/30 p-2">
-      <svg viewBox="0 0 110 110" className="h-24 w-24" role="img" aria-label={`${model.name} evaluation radar`}>
-        {[0.33, 0.66, 1].map((ring) => (
-          <circle key={ring} cx={center} cy={center} r={radius * ring} fill="none" stroke="rgba(139,171,181,.2)" />
-        ))}
-        <polygon points={points} fill="rgba(86,225,220,.2)" stroke="#56e1dc" strokeWidth="1.5" />
-      </svg>
-      <div className="grid grid-cols-2 gap-1">
-        {axes.map(([label, value]) => (
-          <div key={label} className="rounded-md bg-panel-2 px-1.5 py-1">
-            <span className="block text-[0.6875rem] uppercase tracking-[0.12em] text-muted">{label}</span>
-            <strong className="font-mono text-[0.8125rem] tabular-nums text-bone">{value.toFixed(0)}</strong>
-          </div>
-        ))}
-      </div>
+    <div className="mt-2">
+      <RadarChart
+        suiteId={benchmark.suiteId}
+        scores={benchmark.scores}
+        profile={benchmark.profile}
+        ariaLabel={`${model.name} public evaluation radar`}
+        compact
+      />
     </div>
   )
 }
 
 function ComputeSection({
   stats,
+  financeModel,
   setPanel,
 }: {
   stats: ReturnType<typeof buildLabStats>
+  financeModel: FinanceDashboardModel
   setPanel: (p: PanelId) => void
 }) {
   const c = stats.compute
@@ -410,9 +403,9 @@ function ComputeSection({
 
       <SparkTrendCard
         label="Serving demand"
-        values={stats.trends.servedMTok}
-        secondaryValues={stats.trends.effectivePf}
-        days={stats.trends.days}
+        values={financeModel.trends.servedMTok}
+        secondaryValues={financeModel.trends.effectivePf}
+        days={financeModel.trends.days}
         format={(value) => `${num(value, 1)} MTok`}
         secondaryLabel="Effective PF"
         secondaryFormat={(value) => `${num(value, 1)} PF`}
@@ -507,6 +500,3 @@ function ComputeSection({
     </div>
   )
 }
-
-// Keep sparkPath import live for typecheck of shared trend helper usage site.
-void sparkPath

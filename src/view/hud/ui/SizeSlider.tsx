@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { formatParams, PARAM_PRESETS } from '../../../sim/balance/training'
 import { parseParamsBox, type SizeUnit } from './modelSize'
+import { HudInput, HudRange, HudSelect } from './HudPrimitives'
 
 const MAJOR_MODEL_MARKS = new Set(['7M', '400M', '1B', '7B', '70B', '405B', '1T', '7T', '30T'])
 
@@ -66,7 +67,7 @@ export function SizeSlider({
       <div className="flex items-center justify-between gap-3">
         <span className="text-[0.8125rem] text-muted">{label}</span>
         <div className={`flex overflow-hidden rounded-md border bg-void ${invalid ? 'border-danger' : 'border-line focus-within:border-mint/50'}`}>
-          <input
+          <HudInput
             type="text"
             inputMode="decimal"
             value={box}
@@ -89,11 +90,11 @@ export function SizeSlider({
             onKeyDown={(event) => {
               if (event.key === 'Enter') (event.target as HTMLInputElement).blur()
             }}
-            className="w-20 bg-transparent px-2 py-1 text-right font-mono text-xs text-bone outline-none"
+            className="w-20 border-0 bg-transparent px-2 py-1 text-right font-mono text-xs outline-none"
             aria-label={`${label} exact`}
             aria-invalid={invalid}
           />
-          <select
+          <HudSelect
             value={unit}
             disabled={disabled}
             onChange={(event) => {
@@ -101,18 +102,18 @@ export function SizeSlider({
               setUnit(nextUnit)
               commit(box, nextUnit)
             }}
-            className="border-l border-line bg-panel-2 px-1.5 font-mono text-[0.6875rem] text-mint outline-none disabled:cursor-not-allowed"
+            className="rounded-none border-0 border-l border-line bg-panel-2 px-1.5 font-mono text-[0.6875rem] text-mint outline-none disabled:cursor-not-allowed"
             aria-label={`${label} unit`}
           >
             <option value="M">M</option>
             <option value="B">B</option>
             <option value="T">T</option>
-          </select>
+          </HudSelect>
         </div>
       </div>
 
-      <div className="relative px-0.5 pb-5 pt-1">
-        <input
+      <div className="relative overflow-x-hidden px-0.5 pb-5 pt-1">
+        <HudRange
           type="range"
           min={logMin}
           max={logMax}
@@ -124,13 +125,18 @@ export function SizeSlider({
             const mark = marks[nearestIndex(marks, target)]
             if (mark) onChange(mark.paramsB)
           }}
-          className="model-size-timeline w-full disabled:cursor-not-allowed"
+          className="model-size-timeline disabled:cursor-not-allowed"
           aria-label={label}
           aria-valuetext={formatParams(value)}
         />
         <div className="pointer-events-none absolute inset-x-0 top-6 h-4">
           {marks.map((mark, index) => {
             const show = MAJOR_MODEL_MARKS.has(mark.label) || marks.length <= 8
+            const edgePosition = index === 0
+              ? 'translate-x-0'
+              : index === marks.length - 1
+                ? '-translate-x-full'
+                : '-translate-x-1/2'
             const position = logMax === logMin
               ? 0
               : ((Math.log10(mark.paramsB) - logMin) / (logMax - logMin)) * 100
@@ -138,7 +144,7 @@ export function SizeSlider({
               <span
                 key={mark.label}
                 title={mark.label}
-                className={`absolute -translate-x-1/2 font-mono text-[0.5rem] ${index === idx ? 'text-bone' : show ? 'text-muted' : 'text-transparent'}`}
+                className={`absolute z-10 ${edgePosition} whitespace-nowrap rounded bg-panel/95 px-0.5 py-0.5 font-mono text-[0.5rem] leading-none shadow-sm ${index === idx ? 'text-bone' : show ? 'text-muted' : 'text-transparent'}`}
                 style={{ left: `${position}%` }}
               >
                 {show || index === idx ? mark.label : '·'}

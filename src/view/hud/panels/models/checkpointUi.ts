@@ -512,7 +512,7 @@ export function checkpointUiRecordFromCandidate(
               : pending
                 ? `Evaluation still running until day ${pending.readyDay}.`
                 : undefined,
-        label: "Promote internal",
+        label: "Keep weights in Fleet",
       },
       discard: {
         enabled: canDiscard,
@@ -531,7 +531,7 @@ export function checkpointUiRecordFromCandidate(
           candidate.status === "discarded"
             ? "Discarded weights cannot seed a new branch."
             : undefined,
-        label: "Fork direction",
+        label: "Branch new model",
       },
       rollback: {
         enabled:
@@ -542,7 +542,7 @@ export function checkpointUiRecordFromCandidate(
             : !options.sourceJobActive
               ? "Rollback requires the original training run to still be active."
               : undefined,
-        label: "Restore as branch",
+        label: "Restart source here",
       },
     },
   };

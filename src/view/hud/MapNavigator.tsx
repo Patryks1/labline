@@ -8,7 +8,6 @@ import {
   MapTrifold,
   ShieldWarning,
   Timer,
-  X,
 } from '@phosphor-icons/react'
 import {
   useCallback,
@@ -40,6 +39,7 @@ import {
   type NavigatorView,
   type NavigatorZoom,
 } from './mapNavigatorData'
+import { HudButton, HudCloseButton } from './ui/HudPrimitives'
 
 const OVERLAYS: Array<{
   id: Exclude<MapOverlayMode, 'none'>
@@ -54,6 +54,7 @@ const OVERLAYS: Array<{
 ]
 
 const ZOOM_STOPS: readonly NavigatorZoom[] = [1, 2, 4]
+const MAP_CONTROL_SIZE = 'min-h-11 min-w-11 sm:h-7 sm:min-h-0 sm:min-w-0'
 type BuildingFilter = 'all' | 'player' | 'rival'
 type DragState = {
   pointerId: number
@@ -119,16 +120,17 @@ export function CloudVisibilityButton({
   onToggle: () => void
 }) {
   return (
-    <button
+    <HudButton
       type="button"
+      variant="ghost"
       aria-label="Show clouds"
       aria-pressed={cloudsVisible}
       title={cloudsVisible ? 'Hide clouds' : 'Show clouds'}
       onClick={onToggle}
-      className={`flex h-7 w-7 items-center justify-center rounded-md ${cloudsVisible ? 'bg-mint/15 text-mint' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}
+      className={`${MAP_CONTROL_SIZE} flex items-center justify-center border-transparent rounded-md ${cloudsVisible ? 'bg-mint/15 text-mint' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}
     >
       <Cloud size="0.95rem" weight={cloudsVisible ? 'fill' : 'duotone'} />
-    </button>
+    </HudButton>
   )
 }
 
@@ -344,6 +346,7 @@ export function MapNavigator() {
   const [size, setSize] = useState({ width: 268, height: 144 })
   const [zoomAnnouncement, setZoomAnnouncement] = useState('Minimap zoom 2 times, following camera')
   const [navigatorExpanded, setNavigatorExpanded] = useState(false)
+  const navigatorBottom = 'calc(var(--hud-bottom-telemetry-bottom) + max(var(--hud-training-height, 0px), 4rem))'
   const frameRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement>(null)
   const dragRef = useRef<DragState | null>(null)
@@ -539,7 +542,8 @@ export function MapNavigator() {
         aria-expanded={navigatorExpanded}
         aria-controls="world-navigator-panel"
         onClick={openNavigator}
-        className="map-navigator-launcher hud-surface pointer-events-auto absolute z-[18] min-h-11 items-center gap-2 rounded-lg px-3 text-[0.75rem] font-semibold text-mint"
+        style={{ bottom: navigatorBottom }}
+        className="map-navigator-launcher hud-surface pointer-events-auto absolute z-[18] min-h-11 items-center gap-2 rounded-lg border-mint/35 px-3 text-[0.75rem] font-semibold text-mint"
       >
         <MapTrifold size="1rem" weight="duotone" /> Map
       </button>
@@ -548,67 +552,65 @@ export function MapNavigator() {
         className="map-navigator hud-surface pointer-events-auto absolute z-[18] overflow-hidden rounded-lg"
         data-expanded={navigatorExpanded ? 'true' : 'false'}
         aria-label="World navigator"
+        style={{ bottom: navigatorBottom }}
       >
       <div className="map-navigator-compact-heading min-h-10 items-center border-b border-line/70 px-3 font-mono text-[0.625rem] uppercase tracking-[0.14em] text-mint">
         World navigator
       </div>
-      <button
+      <HudCloseButton
         ref={compactCloseRef}
-        type="button"
-        aria-label="Close world navigator"
+        label="Close world navigator"
         onClick={closeNavigator}
-        className="map-navigator-compact-close absolute right-1.5 top-1.5 z-20 min-h-11 min-w-11 items-center justify-center rounded-md border border-line bg-void/90 text-muted hover:text-bone"
-      >
-        <X size="0.95rem" />
-      </button>
+        className="map-navigator-compact-close absolute right-1.5 top-1.5 z-20"
+      />
       <div className="relative z-10">
         <div className="map-navigator-sitebar flex items-center gap-1.5 border-b border-line/70 px-2 py-1.5">
-          <button type="button" aria-label="Previous building" disabled={sites.length === 0} onClick={() => {
+          <HudButton variant="ghost" type="button" aria-label="Previous building" disabled={sites.length === 0} onClick={() => {
             if (sites.length === 0) return
             const next = (buildingIndex - 1 + sites.length) % sites.length
             setBuildingIndex(next)
             focus(sites[next]!.x, sites[next]!.y)
-          }} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-line/70 text-muted hover:bg-panel-2 hover:text-bone disabled:opacity-40">
+          }} className={`${MAP_CONTROL_SIZE} flex shrink-0 items-center justify-center rounded-md border-line/70 text-muted hover:bg-panel-2 hover:text-bone disabled:opacity-40`}>
             <CaretLeft size="0.9rem" />
-          </button>
-          <button type="button" disabled={!activeSite} onClick={() => activeSite && focus(activeSite.x, activeSite.y)} className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md border border-line/70 bg-panel-2/50 px-2 text-left hover:border-mint/40 disabled:opacity-50">
+          </HudButton>
+          <HudButton variant="secondary" type="button" disabled={!activeSite} aria-label={activeSite ? `Focus ${activeSite.label}, ${activeSite.ownerName}` : 'No facilities'} onClick={() => activeSite && focus(activeSite.x, activeSite.y)} className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md border-line/70 bg-panel-2/50 px-2 text-left hover:border-mint/40 disabled:opacity-50 sm:h-8 sm:min-h-0">
             {activeSite ? <>
               <Factory size="0.8rem" className="shrink-0" style={{ color: activeSite.color }} />
               <span className="min-w-0 flex-1 truncate text-[0.6875rem] font-semibold uppercase tracking-[0.06em] text-bone">{activeSite.label}</span>
               <span className="shrink-0 truncate font-mono text-[0.625rem] text-muted">{activeSite.ownerName} · {buildingIndex % sites.length + 1}/{sites.length}</span>
             </> : <span className="flex items-center gap-1.5 text-[0.6875rem] text-muted"><Buildings size="0.85rem" /> No facilities</span>}
-          </button>
-          <button type="button" aria-label="Next building" disabled={sites.length === 0} onClick={() => {
+          </HudButton>
+          <HudButton variant="ghost" type="button" aria-label="Next building" disabled={sites.length === 0} onClick={() => {
             if (sites.length === 0) return
             const next = (buildingIndex + 1) % sites.length
             setBuildingIndex(next)
             focus(sites[next]!.x, sites[next]!.y)
-          }} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-line/70 text-muted hover:bg-panel-2 hover:text-bone disabled:opacity-40">
+          }} className={`${MAP_CONTROL_SIZE} flex shrink-0 items-center justify-center rounded-md border-line/70 text-muted hover:bg-panel-2 hover:text-bone disabled:opacity-40`}>
             <CaretRight size="0.9rem" />
-          </button>
+          </HudButton>
         </div>
 
-        <div className="map-navigator-commandbar flex items-center gap-1 border-b border-line/70 bg-void/35 px-2 py-1.5">
-          <div className="flex shrink-0 items-center rounded-md border border-line/70 bg-void/45 p-0.5">
+        <div className="map-navigator-commandbar flex items-center gap-1 overflow-x-auto border-b border-line/70 bg-void/35 px-2 py-1.5">
+          <div className="flex shrink-0 items-center rounded-md border border-line/70 bg-void/45 p-0.5" role="group" aria-label="Building filter">
             {([['all', 'All'], ['player', 'Yours'], ['rival', 'Rivals']] as const).map(([id, label]) => (
-              <button key={id} type="button" aria-pressed={buildingFilter === id} onClick={() => {
+              <HudButton variant="ghost" key={id} type="button" aria-pressed={buildingFilter === id} onClick={() => {
                 setBuildingFilter(id)
                 setBuildingIndex(0)
-              }} className={`h-7 rounded px-2 text-[0.625rem] font-medium uppercase tracking-[0.04em] ${buildingFilter === id ? 'bg-mint/15 text-mint shadow-[inset_0_0_0_1px_rgba(72,215,209,.28)]' : id === 'rival' ? 'text-danger/80 hover:bg-panel-2' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}>{label}</button>
+              }} className={`${MAP_CONTROL_SIZE} rounded border-transparent px-2 text-[0.625rem] font-medium uppercase tracking-[0.04em] ${buildingFilter === id ? 'bg-mint/15 text-mint shadow-[inset_0_0_0_1px_rgba(72,215,209,.28)]' : id === 'rival' ? 'text-danger/80 hover:bg-panel-2' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}>{label}</HudButton>
             ))}
           </div>
           <span aria-hidden="true" className="mx-0.5 h-5 w-px shrink-0 bg-line/70" />
           <div className="flex min-w-0 flex-1 items-center justify-between gap-0.5">
             {OVERLAYS.map(({ id, label, title, icon: Icon }) => (
-              <button key={id} type="button" title={title} aria-label={label} aria-pressed={overlay === id} onClick={() => setOverlay(id)} className={`flex h-7 w-7 items-center justify-center rounded-md ${overlay === id ? 'bg-mint/15 text-mint' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}>
+              <HudButton variant="ghost" key={id} type="button" title={title} aria-label={label} aria-pressed={overlay === id} onClick={() => setOverlay(id)} className={`${MAP_CONTROL_SIZE} flex items-center justify-center rounded-md border-transparent ${overlay === id ? 'bg-mint/15 text-mint' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}>
                 <Icon size="0.92rem" weight={overlay === id ? 'fill' : 'duotone'} />
-              </button>
+              </HudButton>
             ))}
             <CloudVisibilityToggle />
-            <button type="button" aria-label="Rotate map left" title="Rotate left (Q)" onClick={() => rotateMapCamera(-1)} className="h-7 w-7 rounded-md text-xs text-muted hover:bg-panel-2 hover:text-bone">↶</button>
-            <button type="button" aria-label={`Cycle map tilt, current ${mapCameraTilt}`} title="Cycle tilt (T)" onClick={cycleMapCameraTilt} className="h-7 min-w-7 rounded-md px-0.5 font-mono text-[0.5rem] uppercase text-muted hover:bg-panel-2 hover:text-bone">{mapCameraTilt.slice(0, 3)}</button>
-            <button type="button" aria-label="Rotate map right" title="Rotate right (E)" onClick={() => rotateMapCamera(1)} className="h-7 w-7 rounded-md text-xs text-muted hover:bg-panel-2 hover:text-bone">↷</button>
-            <button type="button" aria-label="Reset map perspective" title="Reset perspective (R)" onClick={resetMapCamera} className="h-7 w-7 rounded-md font-mono text-[0.5625rem] text-muted hover:bg-panel-2 hover:text-bone">R</button>
+            <HudButton variant="ghost" type="button" aria-label="Rotate map left" title="Rotate left (Q)" onClick={() => rotateMapCamera(-1)} className={`${MAP_CONTROL_SIZE} rounded-md border-transparent px-0 text-xs text-muted hover:bg-panel-2 hover:text-bone`}>↶</HudButton>
+            <HudButton variant="ghost" type="button" aria-label={`Cycle map tilt, current ${mapCameraTilt}`} title="Cycle tilt (T)" onClick={cycleMapCameraTilt} className={`${MAP_CONTROL_SIZE} rounded-md border-transparent px-0.5 font-mono text-[0.5rem] uppercase text-muted hover:bg-panel-2 hover:text-bone`}>{mapCameraTilt.slice(0, 3)}</HudButton>
+            <HudButton variant="ghost" type="button" aria-label="Rotate map right" title="Rotate right (E)" onClick={() => rotateMapCamera(1)} className={`${MAP_CONTROL_SIZE} rounded-md border-transparent px-0 text-xs text-muted hover:bg-panel-2 hover:text-bone`}>↷</HudButton>
+            <HudButton variant="ghost" type="button" aria-label="Reset map perspective" title="Reset perspective (R)" onClick={resetMapCamera} className={`${MAP_CONTROL_SIZE} rounded-md border-transparent px-0 font-mono text-[0.5625rem] text-muted hover:bg-panel-2 hover:text-bone`}>R</HudButton>
           </div>
         </div>
 
@@ -640,6 +642,7 @@ export function MapNavigator() {
                   event.preventDefault()
                   pan(city.cx, city.cy)
                 }} className="cursor-pointer outline-none">
+                  <circle cx={city.cx} cy={city.cy} r={Math.max(city.radius * 0.18, markerScale * 0.52, worldPerPixel * 22)} fill="#000" fillOpacity={0.001} stroke="none" />
                   <circle cx={city.cx} cy={city.cy} r={Math.max(markerScale * 0.52, city.radius * 0.18)} fill={city.tier === 'metro' ? 'rgba(95,167,232,0.24)' : 'rgba(192,209,205,0.14)'} stroke={city.tier === 'metro' ? '#7bbdf0' : city.tier === 'satellite' ? '#9fbfc4' : '#8fa6a5'} strokeWidth={worldPerPixel * (city.tier === 'metro' ? 1.2 : 0.8)} />
                   <circle cx={city.cx} cy={city.cy} r={city.tier === 'metro' ? markerScale * 0.22 : markerScale * 0.14} fill={city.tier === 'metro' ? '#b9dcf5' : '#a9b9b7'} />
                   <title>{navigatorCitySummary(city)}</title>
@@ -655,11 +658,11 @@ export function MapNavigator() {
             </svg>
             <NavigatorCityLabelLayer labels={labels} cities={data.cities} onPan={pan} />
             <div className="absolute bottom-1.5 left-1/2 flex -translate-x-1/2 items-center gap-0.5 rounded-md border border-line/70 bg-void/90 p-0.5 shadow backdrop-blur-sm">
-              <button type="button" aria-label="Zoom minimap out" disabled={zoom === 1} onClick={() => applyZoom(zoomStep(zoom, -1))} className="h-7 w-7 rounded text-sm text-bone hover:bg-panel-2 disabled:opacity-35">−</button>
+              <HudButton variant="ghost" type="button" aria-label="Zoom minimap out" disabled={zoom === 1} onClick={() => applyZoom(zoomStep(zoom, -1))} className={`${MAP_CONTROL_SIZE} rounded border-transparent text-sm text-bone hover:bg-panel-2 disabled:opacity-35`}>−</HudButton>
               <span className="min-w-7 text-center font-mono text-[0.5625rem] text-muted" aria-hidden="true">{zoom}×</span>
-              <button type="button" aria-label="Zoom minimap in" disabled={zoom === 4} onClick={() => applyZoom(zoomStep(zoom, 1))} className="h-7 w-7 rounded text-sm text-bone hover:bg-panel-2 disabled:opacity-35">+</button>
-              <button type="button" aria-label="Fit minimap to world" onClick={fit} className="h-7 rounded px-1.5 font-mono text-[0.5rem] uppercase text-muted hover:bg-panel-2 hover:text-bone">Fit</button>
-              <button type="button" aria-label="Follow main map camera" aria-pressed={followViewport} onClick={follow} className={`h-7 rounded px-1.5 font-mono text-[0.5rem] uppercase ${followViewport ? 'bg-mint/15 text-mint' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}>Follow</button>
+              <HudButton variant="ghost" type="button" aria-label="Zoom minimap in" disabled={zoom === 4} onClick={() => applyZoom(zoomStep(zoom, 1))} className={`${MAP_CONTROL_SIZE} rounded border-transparent text-sm text-bone hover:bg-panel-2 disabled:opacity-35`}>+</HudButton>
+              <HudButton variant="ghost" type="button" aria-label="Fit minimap to world" onClick={fit} className={`${MAP_CONTROL_SIZE} rounded border-transparent px-1.5 font-mono text-[0.5rem] uppercase text-muted hover:bg-panel-2 hover:text-bone`}>Fit</HudButton>
+              <HudButton variant="ghost" type="button" aria-label="Follow main map camera" aria-pressed={followViewport} onClick={follow} className={`${MAP_CONTROL_SIZE} rounded border-transparent px-1.5 font-mono text-[0.5rem] uppercase ${followViewport ? 'bg-mint/15 text-mint' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}>Follow</HudButton>
             </div>
           </div>
           <div className="map-navigator-legend pointer-events-none flex h-6 items-center gap-2 px-1.5 font-mono text-[0.5rem] uppercase tracking-[0.06em] text-muted">
@@ -690,6 +693,7 @@ function SiteMarker({ site, active, markerScale, strokeScale, onFocus }: { site:
       event.preventDefault()
       onFocus(site.x, site.y)
     }} className="cursor-pointer outline-none">
+      <circle cx={cx} cy={cy} r={Math.max(size + strokeScale * 1.2, strokeScale * 22)} fill="#000" fillOpacity={0.001} stroke="none" />
       <circle cx={cx} cy={cy} r={size + strokeScale * 1.2} fill="rgba(7,17,23,0.82)" />
       {active ? <circle cx={cx} cy={cy} r={size + strokeScale * 0.8} fill="rgba(72,215,209,0.12)" stroke="#e8f2f2" strokeWidth={strokeScale * 0.75} /> : null}
       <polygon points={`${cx},${cy - half} ${cx + half},${cy} ${cx},${cy + half} ${cx - half},${cy}`} fill={site.color} stroke="#e8f2f2" strokeWidth={strokeScale * 0.55} />

@@ -47,5 +47,12 @@ describe("TrainingLossChart checkpoints", () => {
     expect(markup).toContain("D10");
     expect(markup).toContain("milestone");
     expect(markup).toContain("manual");
+    expect(markup).toContain('aria-describedby="');
+    expect(markup).toContain('role="button"');
+    expect(markup).toContain('aria-live="polite"');
+    expect(markup).toContain('data-training-chart-plot="true"');
+    expect(markup).toContain('relative h-40 w-full');
+    expect(markup).toContain('observed min 3.70');
+    expect(markup).not.toContain('observed min 3.700');
   });
 });

@@ -4,6 +4,12 @@ import { isDcAnchor, isDcKind, isHqAnchor, isHqKind } from '../../sim/systems/ma
 import { playerHqStaffCap, playerStaff, staffTotal } from '../../sim/systems/staff'
 import { facilityAnchorTiles } from '../../sim/systems/worldAccess'
 import { money } from './format'
+import {
+  buildTrainingJobViewModel,
+  normalizeTrainingJobs,
+  selectPrimaryTrainingJob,
+} from './trainingJobViewModel'
+import { selectFinanceDashboardReadouts } from './data/financeDashboardModel'
 
 export type ObjectiveSeverity = 'info' | 'warning' | 'danger'
 
@@ -57,13 +63,19 @@ export function buildObjectives(state: SimState, includeGuidance = true): Object
   const hasHq = playerHasCompletedHq(state)
   const researchers = playerStaff(state).researcher ?? 0
   const seats = playerHqStaffCap(state)
+  const trainingJobs = normalizeTrainingJobs(state)
+  const primaryTrainingJob = selectPrimaryTrainingJob(trainingJobs)
+  const primaryTrainingView = primaryTrainingJob
+    ? buildTrainingJobViewModel(primaryTrainingJob)
+    : undefined
+  const finance = selectFinanceDashboardReadouts(state).current
 
-  if (state.player.finance.runwayDays < 30) {
+  if (finance.runwayDays < 30) {
     objectives.push({
       id: 'runway-risk',
       title: 'Protect the cash runway',
       description: 'Current spending leaves fewer than 30 days of runway.',
-      progress: `${Math.max(0, Math.floor(state.player.finance.runwayDays))} days left`,
+      progress: `${Math.max(0, Math.floor(finance.runwayDays))} days left`,
       severity: 'danger',
       panel: 'org',
       actionLabel: 'Review funding',
@@ -140,7 +152,7 @@ export function buildObjectives(state: SimState, includeGuidance = true): Object
         panel: 'computeMarket',
         actionLabel: 'Open compute market',
       })
-    } else if (state.day <= 7 && publicModels.length === 0 && !state.player.trainingJob) {
+    } else if (state.day <= 7 && publicModels.length === 0 && trainingJobs.length === 0) {
       objectives.push({
         id: 'secure-cloud',
         title: 'Review your cloud runway',
@@ -153,16 +165,16 @@ export function buildObjectives(state: SimState, includeGuidance = true): Object
     } else if (publicModels.length === 0) {
       objectives.push({
         id: 'ship-model',
-        title: state.player.trainingJob ? 'Finish and ship the model' : 'Train your first model',
-        description: state.player.trainingJob
+        title: primaryTrainingJob ? 'Finish and ship the model' : 'Train your first model',
+        description: primaryTrainingJob
           ? 'The active training job needs compute before it can be released.'
           : 'Turn rented compute and your foundation corpus into a marketable model.',
-        progress: state.player.trainingJob
-          ? `${Math.round((state.player.trainingJob.progressPfDays / Math.max(1, state.player.trainingJob.targetPfDays)) * 100)}% trained`
+        progress: primaryTrainingJob
+          ? `${Math.round((primaryTrainingView?.computeProgress ?? 0) * 100)}% trained`
           : 'No training job active',
         severity: 'info',
         panel: 'models',
-        actionLabel: state.player.trainingJob ? 'Review training' : 'Configure training',
+        actionLabel: primaryTrainingJob ? 'Review training' : 'Configure training',
       })
     } else if (!hasPublishedProduct) {
       objectives.push({
@@ -184,12 +196,12 @@ export function buildObjectives(state: SimState, includeGuidance = true): Object
         panel: 'research',
         actionLabel: 'Open research',
       })
-    } else if (state.player.finance.totalShare < 0.01) {
+    } else if (finance.share < 0.01) {
       objectives.push({
         id: 'gain-share',
         title: 'Win the first market share',
         description: 'Improve the offer, capacity, or brand until customers switch.',
-        progress: `${(state.player.finance.totalShare * 100).toFixed(1)}% share`,
+        progress: `${(finance.share * 100).toFixed(1)}% share`,
         severity: 'info',
         panel: 'market',
         actionLabel: 'Review the market',

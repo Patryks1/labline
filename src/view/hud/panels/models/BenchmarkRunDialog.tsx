@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Flask, Gauge, Stack } from '@phosphor-icons/react'
 import type { BenchmarkSuiteId, TrainingBenchmarkRequest, TrainingJob } from '../../../../sim/types'
 import { money } from '../../format'
-import { HudButton } from '../../ui/HudPrimitives'
+import { HudButton, HudRange } from '../../ui/HudPrimitives'
 import { ConsoleDialog } from '../../ui/ConsoleDialog'
 import {
   BENCHMARK_MAX_SPEND,
@@ -99,13 +99,14 @@ export function BenchmarkRunDialog({
               </p>
             </div>
             {eligible.length > 1 ? (
-              <button
+              <HudButton
                 type="button"
+                variant="ghost"
                 onClick={() => setSelected(selected.length === eligible.length ? [] : eligible)}
-                className="font-mono text-[0.625rem] uppercase tracking-[0.12em] text-mint hover:text-bone"
+                className="!min-h-11 !px-2 !py-1 font-mono text-[0.625rem] uppercase tracking-[0.12em] text-mint hover:text-bone sm:!min-h-0"
               >
                 {selected.length === eligible.length ? 'Clear all' : 'Select all'}
-              </button>
+              </HudButton>
             ) : null}
           </div>
           <div className="grid gap-2 sm:grid-cols-2">
@@ -160,7 +161,7 @@ export function BenchmarkRunDialog({
             <span className="text-[0.75rem] text-muted">Per selected suite</span>
             <strong className="font-mono text-lg tabular-nums text-bone">{money(spendPerSuite)}</strong>
           </div>
-          <input
+          <HudRange
             type="range"
             min={BENCHMARK_MIN_SPEND}
             max={BENCHMARK_MAX_SPEND}
@@ -169,7 +170,7 @@ export function BenchmarkRunDialog({
             aria-label="Benchmark spend per suite"
             aria-valuetext={money(spendPerSuite)}
             onChange={(event) => setSpendPerSuite(Number(event.target.value))}
-            className="mt-2 w-full"
+            className="mt-2"
           />
           <div className="mt-1 flex justify-between font-mono text-[0.625rem] tabular-nums text-muted">
             <span>{money(BENCHMARK_MIN_SPEND)}</span>

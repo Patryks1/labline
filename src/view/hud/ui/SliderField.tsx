@@ -3,6 +3,7 @@
  * Optional hover panel for dense breakdowns (compute pools).
  */
 import type { ReactNode } from 'react'
+import { HudRange } from './HudPrimitives'
 
 export function SliderField({
   label,
@@ -61,14 +62,13 @@ export function SliderField({
           className={`absolute inset-y-0 left-0 ${colorClass} opacity-90`}
           style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
         />
-        <input
-          type="range"
+        <HudRange
           min={min}
           max={max}
           step={step}
           value={value}
           onChange={(e) => onChange(Number(e.target.value))}
-          className="absolute inset-0 w-full cursor-pointer opacity-0"
+          className="absolute inset-x-0 top-1/2 h-11 w-full -translate-y-1/2 cursor-pointer opacity-0"
         />
       </div>
     </label>

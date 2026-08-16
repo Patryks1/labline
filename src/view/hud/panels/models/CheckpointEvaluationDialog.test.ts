@@ -54,12 +54,13 @@ describe("CheckpointEvaluationDialog", () => {
     expect(markup).toContain("Internal lab");
     expect(markup).toContain("NDA external");
     expect(markup).toContain("Partner pilot");
-    expect(markup).toContain("$50.0K/suite");
-    expect(markup).toContain("$100.0K/suite");
-    expect(markup).toContain("$150.0K/suite");
+    expect(markup).toContain("$50.00K/suite");
+    expect(markup).toContain("$100.00K/suite");
+    expect(markup).toContain("$150.00K/suite");
     expect(markup).toContain("Accuracy");
     expect(markup).toContain("Confidence");
     expect(markup).toContain("No external leak surface");
+    expect(markup).toContain("hud-button--ghost");
   });
 
   it("disables scheduling when the quoted study is unaffordable", () => {

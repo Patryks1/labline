@@ -296,6 +296,10 @@ need to narrow this same latent forecast in the next slice.
   minimum calendar time; legacy and pod systems cannot progress simultaneously
 - Manifest-level diversity, freshness, contamination, provenance, rights, and
   effective-value accounting
+- Trillion-scale base training has a real 100–150 active-day throughput floor:
+  parameter scale and the frozen train/verification corpus each contribute to
+  the duration, excess PF cannot bypass the data/optimizer pipeline, and player
+  and rival jobs use the same pacing rule. Sub-trillion PF pacing is unchanged.
 - Four seeded training checkpoints with explainable architecture/data/ops events
 - Three player interventions per event, cash/compute/rollback effects, and
   five-day safe auto-resolution

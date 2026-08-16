@@ -1,25 +1,17 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Camera, GitFork } from "@phosphor-icons/react";
 import type { TrainingJob } from "../../../../sim/types";
-import { EmptyState, HudButton } from "../../ui/HudPrimitives";
+import {
+  EmptyState,
+  HudButton,
+  HudInput,
+  HudSelect,
+} from "../../ui/HudPrimitives";
 import { CheckpointRail } from "./CheckpointRail";
 import type {
   CheckpointBranchDirection,
   CheckpointUiRecord,
 } from "./checkpointUi";
-
-const DIRECTIONS: ReadonlyArray<{
-  id: CheckpointBranchDirection;
-  label: string;
-}> = [
-  { id: "general", label: "General" },
-  { id: "chat", label: "Chat" },
-  { id: "code", label: "Code" },
-  { id: "agents", label: "Agents" },
-  { id: "reasoning", label: "Reasoning" },
-  { id: "safety", label: "Safety" },
-  { id: "custom", label: "Custom" },
-];
 
 export interface CheckpointWorkspaceEntry {
   sourceJobId: string;
@@ -34,11 +26,21 @@ export function CheckpointWorkspace({
   onReview,
   onPromote,
   onDiscard,
-  onFork,
+  onBranch,
   onRollback,
 }: {
   entries: CheckpointWorkspaceEntry[];
-  jobs: Pick<TrainingJob, "id" | "name" | "progressPfDays" | "targetPfDays">[];
+  jobs: Pick<
+    TrainingJob,
+    | "id"
+    | "name"
+    | "progressPfDays"
+    | "targetPfDays"
+    | "parentCheckpointId"
+    | "branchDirection"
+    | "paused"
+    | "failed"
+  >[];
   onCreateManual?: (request: {
     sourceJobId: string;
     label?: string;
@@ -48,17 +50,11 @@ export function CheckpointWorkspace({
   onReview?: (checkpointId: string) => void;
   onPromote?: (checkpointId: string) => void;
   onDiscard?: (checkpointId: string) => void;
-  onFork?: (request: {
-    checkpointId: string;
-    direction: CheckpointBranchDirection;
-    label?: string;
-  }) => void;
+  onBranch?: (checkpointId: string) => void;
   onRollback?: (request: { jobId: string; checkpointId: string }) => void;
 }) {
   const [sourceJobId, setSourceJobId] = useState(() => jobs[0]?.id ?? "");
   const [label, setLabel] = useState("");
-  const [direction, setDirection] =
-    useState<CheckpointBranchDirection>("general");
   const selectedJob =
     jobs.find((job) => job.id === sourceJobId) ?? jobs[0];
   const grouped = useMemo(() => {
@@ -70,11 +66,24 @@ export function CheckpointWorkspace({
     }
     return [...result.entries()].map(([jobId, checkpoints]) => ({
       jobId,
+      name:
+        jobs.find((job) => job.id === jobId)?.name ??
+        checkpoints[0]?.label.split(" · ")[0] ??
+        "Archived run",
       checkpoints: [...checkpoints].sort(
         (a, b) => a.progress - b.progress || a.day - b.day,
       ),
     }));
-  }, [entries]);
+  }, [entries, jobs]);
+  const [selectedHistoryJobId, setSelectedHistoryJobId] = useState(
+    () => entries[0]?.sourceJobId ?? "",
+  );
+  useEffect(() => {
+    if (grouped.some((group) => group.jobId === selectedHistoryJobId)) return;
+    setSelectedHistoryJobId(grouped[0]?.jobId ?? "");
+  }, [grouped, selectedHistoryJobId]);
+  const selectedGroup =
+    grouped.find((group) => group.jobId === selectedHistoryJobId) ?? grouped[0];
 
   return (
     <div className="space-y-3">
@@ -86,54 +95,38 @@ export function CheckpointWorkspace({
               Save the current weights without stopping the run
             </h3>
             <p className="mt-1 hidden max-w-3xl text-[0.6875rem] leading-5 text-muted sm:block">
-              Creates an immutable stealth checkpoint at the run’s current
-              position, even between automatic milestones. Use labels and directions to keep parallel code, chat,
-              agent, reasoning, and safety experiments legible.
+              Save the exact current weights while the source run keeps going.
+              Select the checkpoint below when you are ready to branch a new
+              Code, Cyber, Chat, Agents, Reasoning, Safety, or custom model.
             </p>
           </div>
           <GitFork size="1.25rem" className="text-research" weight="duotone" />
         </div>
         {jobs.length > 0 ? (
-          <div className="mt-3 grid gap-2 lg:grid-cols-[minmax(11rem,0.7fr)_minmax(12rem,1fr)_minmax(16rem,1.3fr)_auto] lg:items-end">
+          <div className="mt-3 grid gap-2 lg:grid-cols-[minmax(12rem,0.8fr)_minmax(18rem,1.4fr)_auto] lg:items-end">
             <label className="text-[0.6875rem] text-muted">
               Active run
-              <select
+              <HudSelect
                 value={selectedJob?.id ?? ""}
                 onChange={(event) => setSourceJobId(event.target.value)}
-                className="mt-1 min-h-11 w-full rounded-md border border-line bg-void px-2.5 py-1.5 text-[0.75rem] text-bone outline-none focus:border-mint/50"
+                className="mt-1 min-h-11 w-full text-[0.75rem]"
               >
                 {jobs.map((job) => (
                   <option key={job.id} value={job.id}>
                     {job.name} · {Math.round((job.progressPfDays / Math.max(1e-9, job.targetPfDays)) * 100)}%
                   </option>
                 ))}
-              </select>
-            </label>
-            <label className="text-[0.6875rem] text-muted">
-              Direction
-              <select
-                value={direction}
-                onChange={(event) =>
-                  setDirection(event.target.value as CheckpointBranchDirection)
-                }
-                className="mt-1 min-h-11 w-full rounded-md border border-line bg-void px-2.5 py-1.5 text-[0.75rem] text-bone outline-none focus:border-mint/50"
-              >
-                {DIRECTIONS.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+              </HudSelect>
             </label>
             <label className="text-[0.6875rem] text-muted">
               Checkpoint label (optional)
-              <input
+              <HudInput
                 type="text"
                 maxLength={48}
                 value={label}
                 onChange={(event) => setLabel(event.target.value)}
-                placeholder={`${selectedJob?.name ?? "Run"} · ${direction}`}
-                className="mt-1 min-h-11 w-full rounded-md border border-line bg-void px-2.5 py-1.5 text-[0.75rem] text-bone outline-none focus:border-mint/50"
+                placeholder={`${selectedJob?.name ?? "Run"} · current weights`}
+                className="mt-1 min-h-11 w-full text-[0.75rem]"
               />
             </label>
             <HudButton
@@ -150,14 +143,13 @@ export function CheckpointWorkspace({
                 onCreateManual({
                   sourceJobId: selectedJob.id,
                   label: label.trim() || undefined,
-                  branchDirection: direction,
                 });
                 setLabel("");
               }}
               className="w-full lg:w-auto"
             >
               <Camera size="0.875rem" />
-              Create checkpoint
+              Save current weights
             </HudButton>
           </div>
         ) : (
@@ -168,24 +160,61 @@ export function CheckpointWorkspace({
         )}
       </section>
 
-      {grouped.length > 0 ? (
-        grouped.map((group) => {
-          const job = jobs.find((candidate) => candidate.id === group.jobId);
-          const fallbackName = group.checkpoints[0]?.label ?? "Archived run";
-          return (
-            <CheckpointRail
-              key={group.jobId}
-              checkpoints={group.checkpoints}
-              title={`${job?.name ?? fallbackName} · checkpoint graph`}
-              onBenchmark={onBenchmark}
-              onReview={onReview}
-              onPromote={onPromote}
-              onDiscard={onDiscard}
-              onFork={onFork}
-              onRollback={onRollback}
-            />
-          );
-        })
+      {selectedGroup ? (
+        <>
+          <nav
+            aria-label="Checkpoint run histories"
+            className="rounded-lg border border-line/65 bg-panel-2/45 p-2"
+          >
+            <p className="hud-eyebrow px-1 pb-1.5">Run histories</p>
+            <ul className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3">
+              {grouped.map((group) => {
+                const active = group.jobId === selectedGroup.jobId;
+                const latest = group.checkpoints.at(-1);
+                return (
+                  <li key={group.jobId}>
+                    <HudButton
+                      type="button"
+                      variant="ghost"
+                      aria-current={active ? "page" : undefined}
+                      onClick={() => setSelectedHistoryJobId(group.jobId)}
+                      className={`!min-h-11 !w-full !justify-between !rounded-md !border !px-2.5 !text-left !normal-case !tracking-normal ${
+                        active
+                          ? "!border-mint/55 !bg-mint/10 !text-bone"
+                          : "!border-line/55 !bg-void/25 !text-muted hover:!border-line hover:!text-bone"
+                      }`}
+                    >
+                      <span className="min-w-0">
+                        <strong className="block truncate text-[0.75rem]">
+                          {group.name}
+                        </strong>
+                        <span className="mt-0.5 block font-mono text-[0.5625rem] uppercase tracking-[0.09em] text-muted">
+                          {group.checkpoints.length} checkpoint
+                          {group.checkpoints.length === 1 ? "" : "s"}
+                        </span>
+                      </span>
+                      <span className="shrink-0 font-mono text-[0.6875rem] tabular-nums text-mint">
+                        {Math.round((latest?.progress ?? 0) * 100)}%
+                      </span>
+                    </HudButton>
+                  </li>
+                );
+              })}
+            </ul>
+          </nav>
+          <CheckpointRail
+            key={selectedGroup.jobId}
+            checkpoints={selectedGroup.checkpoints}
+            title={`${selectedGroup.name} · checkpoints`}
+            onBenchmark={onBenchmark}
+            onReview={onReview}
+            onPromote={onPromote}
+            onDiscard={onDiscard}
+            onBranch={onBranch}
+            onRollback={onRollback}
+            jobs={jobs}
+          />
+        </>
       ) : (
         <EmptyState
           title="No checkpoints yet"

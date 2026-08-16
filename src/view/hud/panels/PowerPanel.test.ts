@@ -111,7 +111,7 @@ describe('Utility desk organization', () => {
     expect(markup).toContain('Import')
     expect(markup).toContain('Export')
     expect(markup).toContain('Meridian Falls')
-    expect(markup).toContain('8.0 MW')
+    expect(markup).toContain('8.00 MW')
     expect(markup).toContain('$54.00/MWh')
     expect(markup).toContain('$61.00/MWh')
     expect(markup).toContain('42 of 60d remaining')

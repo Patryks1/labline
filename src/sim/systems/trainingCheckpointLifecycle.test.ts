@@ -394,6 +394,52 @@ describe("stealth training checkpoint lifecycle", () => {
     }
   });
 
+  it("starts a cyber-specialised child while the source run continues", () => {
+    const captured = tickTraining(campaignAtTenPercent(7123));
+    const checkpoint = captured.player.trainingCheckpoints![0]!;
+    const source = captured.player.trainingJob!;
+    const prepared: SimState = {
+      ...captured,
+      player: {
+        ...captured.player,
+        trainingCheckpoints: [
+          {
+            ...checkpoint,
+            model: { ...checkpoint.model, dataWatermarkMTok: 0 },
+          },
+        ],
+      },
+    };
+
+    const branched = forkTrainingCheckpoint(prepared, {
+      checkpointId: checkpoint.id,
+      direction: "cyber",
+      label: "Aster Cyber",
+    });
+    const child = branched.player.trainingJobs!.find(
+      (job) => job.id !== source.id,
+    )!;
+    const unchangedParent = branched.player.trainingJobs!.find(
+      (job) => job.id === source.id,
+    )!;
+
+    expect(child).toMatchObject({
+      name: "Aster Cyber",
+      mode: "continue",
+      parentCheckpointId: checkpoint.id,
+      branchDirection: "cyber",
+      progressPfDays: 0,
+    });
+    expect(child.dataPlan.weights.code ?? 0).toBeGreaterThan(
+      checkpoint.model.dataPlan!.weights.code ?? 0,
+    );
+    expect(child.dataPlan.weights.law ?? 0).toBeGreaterThan(
+      checkpoint.model.dataPlan!.weights.law ?? 0,
+    );
+    expect(unchangedParent.paused).not.toBe(true);
+    expect(unchangedParent.progressPfDays).toBe(source.progressPfDays);
+  });
+
   it("blocks promotion but discard cancels an in-flight private evaluation", () => {
     const captured = tickTraining(campaignAtTenPercent(7107));
     const candidate = captured.player.trainingCheckpoints![0]!;

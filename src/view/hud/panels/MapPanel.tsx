@@ -3,6 +3,8 @@ import {
   isBuildableKind,
   isDcAnchor,
   isDcKind,
+  isHqAnchor,
+  isHqKind,
   isScenicKind,
   ownerLabel,
   scenicLabel,
@@ -26,6 +28,7 @@ import {
 } from '../../../sim/systems/worldAccess'
 import { ECONOMY } from '../../../sim/balance/economy'
 import { InfrastructureOverview } from './InfrastructureOverview'
+import { OverviewGovernance } from './OverviewGovernance'
 import { EmptyState, HudButton, PanelScaffold, StatusChip } from '../ui/HudPrimitives'
 import { BlockerList, GameCard, LiveDot, MeterBar, StatRow } from '../ui/kit'
 
@@ -67,6 +70,13 @@ export function MapPanel() {
     isDcAnchor(tile) &&
     !constructing &&
     tile.buildingProgress >= tile.buildingTarget
+  const isLiveHq =
+    tile &&
+    isOurs &&
+    isHqKind(tile.kind) &&
+    isHqAnchor(tile) &&
+    !constructing &&
+    tile.buildingProgress >= tile.buildingTarget
   const isDcPad = tile && isDcKind(tile.kind) && tile.campusRole === 'pad'
   const campusTiles = tile?.campusId ? facilityFootprintTiles(state, tile.campusId) : []
   const upgradeDef = tile && isBuildableKind(tile.kind) ? getBuildDef(tile.kind) : null
@@ -94,6 +104,7 @@ export function MapPanel() {
     >
       <div className="space-y-3">
         <InfrastructureOverview />
+        <OverviewGovernance state={state} />
 
         {tile && tile.kind !== 'empty' ? (
           <GameCard
@@ -237,6 +248,21 @@ export function MapPanel() {
               </HudButton>
             ) : null}
 
+            {isLiveHq ? (
+              <HudButton
+                type="button"
+                variant="ghost"
+                className="mt-3 w-full text-mint"
+                onClick={() =>
+                  useGameStore
+                    .getState()
+                    .openHqOfficeEditor(tile.campusId ?? `facility:${tile.x},${tile.y}`)
+                }
+              >
+                Open HQ office editor →
+              </HudButton>
+            ) : null}
+
             {isOurs && isBuildableKind(tile.kind) ? (
               <div className="mt-3">
                 <BuildingDisposeButtons x={tile.x} y={tile.y} constructing={!!constructing} />
@@ -324,15 +350,15 @@ export function BuildingDisposeButtons({
         ) : null}
         <HudButton
           type="button"
-          variant="secondary"
-          className={`${compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full !min-h-11'} border border-amber/30 text-amber`}
+          variant="danger"
+          className={compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full !min-h-11'}
           onClick={(e) => {
             e.stopPropagation()
             requestConfirm({
               title: 'Cancel this construction?',
               body: `The lab will recover approximately ${money(refund)}. Work already completed is only partly refunded.`,
               actionLabel: 'Cancel construction',
-              tone: 'warning',
+              tone: 'danger',
               onConfirm: () => setState(cancelConstruction(state, x, y)),
             })
           }}
@@ -365,10 +391,10 @@ export function BuildingDisposeButtons({
       {isCompletedDc ? (
         <HudButton
           type="button"
-          variant="ghost"
+          variant="danger"
           disabled={state.player.cash < demolitionCost}
           title={state.player.cash < demolitionCost ? `Need ${money(demolitionCost)} to demolish` : undefined}
-          className={`${compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full !min-h-11'} border border-amber/30 text-amber`}
+          className={`${compact ? 'px-2 py-1 text-[0.75rem]' : 'w-full !min-h-11'} border border-danger/35`}
           onClick={(e) => {
             e.stopPropagation()
             requestConfirm({

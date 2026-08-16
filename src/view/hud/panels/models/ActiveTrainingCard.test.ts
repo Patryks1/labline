@@ -55,6 +55,7 @@ function markup(job: TrainingJob): string {
       onKeepInternal: vi.fn(),
       onBenchmark: vi.fn(),
       onSaveCheckpoint: vi.fn(),
+      onBranchCheckpoint: vi.fn(),
       onRecoverFromCheckpoint: vi.fn(),
       onSelectPostTrain: vi.fn(),
     }),
@@ -62,17 +63,21 @@ function markup(job: TrainingJob): string {
 }
 
 describe("ActiveTrainingCard direct checkpoint actions", () => {
-  it("shows Benchmark and Save checkpoint on progressed active weights", () => {
+  it("shows Benchmark, checkpoint save, and branch actions on progressed active weights", () => {
     const rendered = markup(trainingJob());
     expect(rendered).toContain(">Benchmark</button>");
     expect(rendered).toContain(">Save checkpoint</button>");
+    expect(rendered).toContain(">Branch model</button>");
     expect(rendered).toContain("Capture these exact weights");
+    expect(rendered).not.toContain('class="live-glow');
+    expect(rendered).not.toContain(" live-glow ");
   });
 
-  it("disables both actions until the run has produced weights", () => {
+  it("disables checkpoint actions until the run has produced weights", () => {
     const rendered = markup(trainingJob({ progressPfDays: 0 }));
     expect(rendered).toMatch(/<button[^>]*disabled=""[^>]*>Benchmark<\/button>/);
     expect(rendered).toMatch(/<button[^>]*disabled=""[^>]*>Save checkpoint<\/button>/);
+    expect(rendered).toMatch(/<button[^>]*disabled=""[^>]*>Branch model<\/button>/);
     expect(rendered).toContain("Allocate compute before saving a checkpoint.");
   });
 
@@ -82,7 +87,7 @@ describe("ActiveTrainingCard direct checkpoint actions", () => {
       trainingJob({ progressPfDays: 123, computePriority: 0 }),
     );
     expect(optimizing).toContain("Optimizing · 1.23× funded");
-    expect(optimizing).toContain("123 / 100 PF funded");
+    expect(optimizing).toContain("123.00 / 100.00 PF funded");
     expect(idle).toContain("Target complete · idle");
     expect(idle).not.toContain("Optimizing · 1.23× funded");
   });
@@ -90,7 +95,7 @@ describe("ActiveTrainingCard direct checkpoint actions", () => {
   it("keeps very long optimization runs readable once maturity saturates", () => {
     const rendered = markup(trainingJob({ progressPfDays: 12_300 }));
     expect(rendered).toContain(
-      "Optimizing · 12.3K PF invested · maturity saturated",
+      "Optimizing · 12.30K PF invested · maturity saturated",
     );
     expect(rendered).not.toContain("123.00× funded");
   });
@@ -130,6 +135,20 @@ describe("ActiveTrainingCard direct checkpoint actions", () => {
     expect(rendered).toContain("Delete failed run");
     expect(rendered).not.toContain(">Benchmark</button>");
     expect(rendered).not.toContain(">Save checkpoint</button>");
+  });
+
+  it("marks run cancellation as destructive before the confirmation click", () => {
+    const active = markup(trainingJob());
+    expect(active).toMatch(
+      /data-hud-variant="danger"[^>]*>Cancel<\/button>/,
+    );
+
+    const completed = markup(
+      trainingJob({ progressPfDays: 120, computePriority: 0 }),
+    );
+    expect(completed).toMatch(
+      /data-hud-variant="danger"[^>]*>Delete run<\/button>/,
+    );
   });
 
   it("offers checkpoint recovery for a failed post-training stage", () => {
@@ -175,12 +194,13 @@ describe("ActiveTrainingCard direct checkpoint actions", () => {
         onKeepInternal: vi.fn(),
         onBenchmark: vi.fn(),
         onSaveCheckpoint: vi.fn(),
+        onBranchCheckpoint: vi.fn(),
         onRecoverFromCheckpoint: vi.fn(),
         onSelectPostTrain: vi.fn(),
       }),
     );
     expect(rendered).toContain("Recover from RLHF safe point");
-    expect(rendered).toContain("18% · high");
+    expect(rendered).toContain("18.00% · high");
     expect(rendered).toContain("Refund");
     expect(rendered).toContain("thin relevant dataset");
   });

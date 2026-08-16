@@ -13,6 +13,7 @@ import {
   confidenceLabel,
   type CheckpointUiRecord,
 } from "./checkpointUi";
+import { buildPublicBenchmarkData } from "../../data/benchmarkViewModel";
 
 function modelTier(capability: number) {
   if (capability >= 80)
@@ -81,6 +82,9 @@ export function FleetTab({
               const model = normalizeModelEvaluations(source);
               const selected = pricingId === model.id;
               const evidence = checkpointEvidence?.[model.id];
+              const publicBenchmark = evidence
+                ? null
+                : buildPublicBenchmarkData(model);
               const tier = evidence ? null : modelTier(model.capability);
               const nextAt = tier?.nextAt;
               const progress =
@@ -99,25 +103,23 @@ export function FleetTab({
               const speed =
                 model.serviceProfile?.interactiveTokPerSec ??
                 52 * model.tokPerSecMult;
-              const primarySuite = evidence
-                ? undefined
-                : model.benchmarkSuites?.omni_overview ??
-                  model.benchmarkSuites?.image_generation ??
-                  model.benchmarkSuites?.video_generation ??
-                  model.benchmarkSuites?.audio_generation ??
-                  model.benchmarkSuites?.language;
-              const suiteScore = evidence ? null : suiteComposite(primarySuite);
+              const preferredSuiteIds = [
+                "omni_overview",
+                "image_generation",
+                "video_generation",
+                "audio_generation",
+                "language",
+              ] as const;
               const suiteId = evidence
                 ? null
-                : model.benchmarkSuites?.omni_overview
-                  ? "omni_overview"
-                  : model.benchmarkSuites?.image_generation
-                    ? "image_generation"
-                    : model.benchmarkSuites?.video_generation
-                      ? "video_generation"
-                      : model.benchmarkSuites?.audio_generation
-                        ? "audio_generation"
-                        : "language";
+                : preferredSuiteIds.find((candidate) =>
+                    Boolean(publicBenchmark?.suites[candidate]),
+                  ) ?? "language";
+              const primarySuite =
+                evidence || !publicBenchmark
+                  ? undefined
+                  : publicBenchmark.suites[suiteId!];
+              const suiteScore = evidence ? null : suiteComposite(primarySuite);
               const measuredScore = evidence?.evaluationScore.estimate;
               const measuredLow = evidence?.evaluationScore.low;
               const measuredHigh = evidence?.evaluationScore.high;
@@ -132,13 +134,15 @@ export function FleetTab({
                       : `internal · ${tier!.label}`
                   }
                   title={
-                    <button
+                    <HudButton
                       type="button"
+                      variant="ghost"
                       onClick={() => onSelect(model.id)}
-                      className="truncate text-left"
+                      aria-label={`Select ${model.name}`}
+                      className="!min-h-11 !w-full !min-w-0 !justify-start !truncate !border-0 !bg-transparent !px-0 !py-0 !text-left !font-semibold !text-bone hover:!bg-transparent sm:!min-h-0"
                     >
                       {model.name}
-                    </button>
+                    </HudButton>
                   }
                   actions={
                     <StatusChip tone="neutral">
@@ -148,10 +152,12 @@ export function FleetTab({
                     </StatusChip>
                   }
                 >
-                  <button
+                  <HudButton
                     type="button"
+                    variant="ghost"
                     onClick={() => onSelect(model.id)}
-                    className="w-full text-left"
+                    aria-label={`Select ${model.name}`}
+                    className="!h-auto !min-h-11 !w-full !justify-start !rounded-none !border-0 !bg-transparent !p-0 !text-left !text-bone hover:!bg-transparent"
                   >
                     <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
                       <StatRow
@@ -231,7 +237,7 @@ export function FleetTab({
                         tone="positive"
                       />
                     </div>
-                  </button>
+                  </HudButton>
                   <div className="mt-3 border-t border-line/50 pt-3">
                     {evidence ? (
                       <div
@@ -266,8 +272,8 @@ export function FleetTab({
                     ) : (
                       <RadarChart
                         suiteId={suiteId!}
-                        scores={model.benchmarkSuites?.[suiteId!] ?? {}}
-                        profile={model.evaluationProfile}
+                        scores={publicBenchmark?.suites[suiteId!] ?? {}}
+                        profile={publicBenchmark?.profile ?? {}}
                       />
                     )}
                   </div>
@@ -336,6 +342,9 @@ export function FleetTab({
               const model = normalizeModelEvaluations(source);
               const selected = pricingId === model.id;
               const evidence = checkpointEvidence?.[model.id];
+              const publicBenchmark = evidence
+                ? null
+                : buildPublicBenchmarkData(model);
               const tier = evidence ? null : modelTier(model.capability);
               const unit = unitCostForModel?.(model);
               const measuredDelta = evidence?.benchmark
@@ -347,10 +356,16 @@ export function FleetTab({
               const speed =
                 model.serviceProfile?.interactiveTokPerSec ??
                 52 * model.tokPerSecMult;
-              const primarySuite = evidence
-                ? undefined
-                : model.benchmarkSuites?.omni_overview ??
-                  model.benchmarkSuites?.language;
+              const preferredSuiteIds = ["omni_overview", "language"] as const;
+              const suiteId = evidence
+                ? null
+                : preferredSuiteIds.find((candidate) =>
+                    Boolean(publicBenchmark?.suites[candidate]),
+                  ) ?? "language";
+              const primarySuite =
+                evidence || !publicBenchmark
+                  ? undefined
+                  : publicBenchmark.suites[suiteId!];
               const suiteScore = evidence ? null : suiteComposite(primarySuite);
               const measuredScore = evidence?.evaluationScore.estimate;
               return (
@@ -364,13 +379,15 @@ export function FleetTab({
                       : `released · ${tier!.label}`
                   }
                   title={
-                    <button
+                    <HudButton
                       type="button"
+                      variant="ghost"
                       onClick={() => onSelect(model.id)}
-                      className="truncate text-left"
+                      aria-label={`Select ${model.name}`}
+                      className="!min-h-11 !w-full !min-w-0 !justify-start !truncate !border-0 !bg-transparent !px-0 !py-0 !text-left !font-semibold !text-bone hover:!bg-transparent sm:!min-h-0"
                     >
                       {model.name}
-                    </button>
+                    </HudButton>
                   }
                   actions={
                     <StatusChip tone="positive">
@@ -380,10 +397,12 @@ export function FleetTab({
                     </StatusChip>
                   }
                 >
-                  <button
+                  <HudButton
                     type="button"
+                    variant="ghost"
                     onClick={() => onSelect(model.id)}
-                    className="w-full text-left"
+                    aria-label={`Select ${model.name}`}
+                    className="!h-auto !min-h-11 !w-full !justify-start !rounded-none !border-0 !bg-transparent !p-0 !text-left !text-bone hover:!bg-transparent"
                   >
                     <ModelProductSummary
                       model={model}
@@ -464,7 +483,7 @@ export function FleetTab({
                         </p>
                       ) : null}
                     </ModelProductSummary>
-                  </button>
+                  </HudButton>
                   <div className="mt-3 grid grid-cols-2 gap-1.5 border-t border-line/50 pt-3 sm:flex sm:flex-wrap">
                     <HudButton
                       type="button"

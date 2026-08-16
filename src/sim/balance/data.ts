@@ -1067,8 +1067,8 @@ export function totalSources(data: LabData): {
 export function formatTokens(mTok: number): string {
   if (mTok >= 1_000_000) return `${(mTok / 1_000_000).toFixed(2)}T tok`
   if (mTok >= 1000) return `${(mTok / 1000).toFixed(2)}B tok`
-  if (mTok >= 1) return `${mTok.toFixed(0)}M tok`
-  return `${(mTok * 1000).toFixed(0)}K tok`
+  if (mTok >= 1) return `${mTok.toFixed(2)}M tok`
+  return `${(mTok * 1000).toFixed(2)}K tok`
 }
 
 /** LQ synth share of a train recipe → capability multiplier (1 = fine, &lt;1 regresses). */

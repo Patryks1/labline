@@ -198,19 +198,20 @@ export function CheckpointEvaluationDialog({
                 </p>
               </div>
               {eligible.length > 1 ? (
-                <button
+                <HudButton
                   type="button"
+                  variant="ghost"
                   onClick={() =>
                     setSelected(
                       selected.length === eligible.length ? [] : eligible,
                     )
                   }
-                  className="font-mono text-[0.625rem] uppercase tracking-[0.12em] text-mint transition hover:text-bone focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/45"
+                  className="!min-h-11 !px-2 !py-1 font-mono text-[0.625rem] uppercase tracking-[0.12em] text-mint transition hover:text-bone focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/45 sm:!min-h-0"
                 >
                   {selected.length === eligible.length
                     ? "Clear all"
                     : "Select all"}
-                </button>
+                </HudButton>
               ) : null}
             </div>
             <div className="grid gap-2 sm:grid-cols-2">

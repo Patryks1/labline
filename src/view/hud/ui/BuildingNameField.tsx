@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent, type KeyboardEvent } from 'react'
 import { buildingDisplayName, sanitizeBuildingName } from '../../../sim/systems/map'
 import { useGameStore } from '../../../store/gameStore'
+import { HudButton, HudInput } from './HudPrimitives'
 
 type Props = {
   tile: {
@@ -64,8 +65,8 @@ export function BuildingNameField({ tile, compact, className = '' }: Props) {
 
   if (editing) {
     return (
-      <form onSubmit={onSubmit} className={`flex min-w-0 items-center gap-1 ${className}`}>
-        <input
+      <form onSubmit={onSubmit} className={`flex min-h-12 w-full min-w-0 items-center gap-1 lg:h-9 lg:min-h-0 ${className}`}>
+        <HudInput
           autoFocus
           value={draft}
           maxLength={40}
@@ -74,23 +75,25 @@ export function BuildingNameField({ tile, compact, className = '' }: Props) {
           onKeyDown={onKey}
           onClick={(e) => e.stopPropagation()}
           onPointerDown={(e) => e.stopPropagation()}
-          className="min-w-0 flex-1 rounded-lg border border-mint/40 bg-void px-2 py-1 text-sm font-medium text-bone outline-none ring-mint/30 focus:ring-1"
+          className="h-12 min-w-0 flex-1 border-mint/40 bg-void px-2 py-1 text-sm font-medium text-bone outline-none ring-mint/30 focus:ring-1 lg:h-9 lg:min-h-0"
           aria-label="Building name"
         />
-        <button
+        <HudButton
           type="submit"
-          className="min-h-12 shrink-0 rounded-md px-2 py-1 text-[0.75rem] text-mint hover:bg-mint/10 lg:min-h-0"
+          variant="ghost"
+          className="h-12 shrink-0 border-transparent px-2 py-1 text-[0.75rem] text-mint hover:bg-mint/10 lg:h-9 lg:min-h-0"
           onMouseDown={(e) => e.preventDefault()}
         >
           Save
-        </button>
+        </HudButton>
       </form>
     )
   }
 
   return (
-    <button
+    <HudButton
       type="button"
+      variant="ghost"
       title="Click to rename"
       onClick={(e) => {
         e.stopPropagation()
@@ -98,7 +101,7 @@ export function BuildingNameField({ tile, compact, className = '' }: Props) {
         setEditing(true)
       }}
       onPointerDown={(e) => e.stopPropagation()}
-      className={`group flex min-h-12 min-w-0 max-w-full items-center gap-1 rounded-md px-1 text-left hover:bg-line/30 lg:min-h-0 lg:px-0 ${className}`}
+      className={`group flex min-h-12 w-full min-w-0 items-center gap-1 overflow-hidden border-transparent px-2 text-left hover:bg-line/30 lg:h-9 lg:min-h-0 ${className}`}
     >
       <span className={`truncate font-medium text-bone ${compact ? 'text-sm' : 'text-sm'}`}>
         {display}
@@ -106,6 +109,6 @@ export function BuildingNameField({ tile, compact, className = '' }: Props) {
       <span className="shrink-0 font-mono text-[0.6875rem] uppercase tracking-wide text-muted opacity-0 transition group-hover:opacity-100">
         rename
       </span>
-    </button>
+    </HudButton>
   )
 }

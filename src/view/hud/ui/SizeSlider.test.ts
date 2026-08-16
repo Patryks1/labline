@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { describe, expect, it, vi } from 'vitest'
 import { parseParamsBox } from './modelSize'
 import { PARAM_PRESETS } from '../../../sim/balance/training'
+import { SizeSlider } from './SizeSlider'
 
 describe('model-size suffix parsing', () => {
   it('accepts explicit M, B, and T suffixes', () => {
@@ -22,5 +25,23 @@ describe('model-size suffix parsing', () => {
       '34B', '70B', '110B', '180B', '235B', '405B', '671B', '1T', '1.8T',
       '3T', '5T', '7T', '10T', '13T', '20T', '30T',
     ])
+  })
+
+  it('uses shared, touch-sized controls for exact and timeline editing', () => {
+    const markup = renderToStaticMarkup(createElement(SizeSlider, {
+      label: 'Model size',
+      value: 7,
+      onChange: vi.fn(),
+    }))
+
+    expect(markup).toContain('class="hud-input')
+    expect(markup).toContain('class="hud-select')
+    expect(markup).toContain('class="hud-range')
+    expect(markup).toContain('overflow-x-hidden')
+    expect(markup).toContain('bg-panel/95')
+    expect(markup).toContain('translate-x-0')
+    expect(markup).toContain('-translate-x-full')
+    expect(markup).toContain('aria-label="Model size exact"')
+    expect(markup).toContain('aria-label="Model size unit"')
   })
 })

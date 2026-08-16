@@ -32,6 +32,7 @@ import {
   planPremiumReadiness,
   planPriceTierMassPrior,
   planPriceTooHighScore,
+  planSegmentUsageAffinity,
   planServeModifiers,
   modelForServePrecision,
   planStabilityDissatisfaction,
@@ -1569,6 +1570,64 @@ describe('API vs sub balance iterations', () => {
 })
 
 describe('subscription plan demand rebalance', () => {
+  it('routes heavier segments toward Pro and Max allowances instead of defaulting to Plus', () => {
+    const [free, plus, pro, max] = defaultPlans()
+    expect(free).toBeDefined()
+    expect(plus).toBeDefined()
+    expect(pro).toBeDefined()
+    expect(max).toBeDefined()
+
+    expect(
+      planSegmentUsageAffinity(pro!.includedMTokPerMonth!, 'legal'),
+    ).toBeGreaterThan(
+      planSegmentUsageAffinity(plus!.includedMTokPerMonth!, 'legal'),
+    )
+    expect(
+      planSegmentUsageAffinity(max!.includedMTokPerMonth!, 'enterprise'),
+    ).toBeGreaterThan(
+      planSegmentUsageAffinity(plus!.includedMTokPerMonth!, 'enterprise'),
+    )
+    expect(
+      planSegmentUsageAffinity(plus!.includedMTokPerMonth!, 'consumer'),
+    ).toBeGreaterThan(
+      planSegmentUsageAffinity(max!.includedMTokPerMonth!, 'consumer'),
+    )
+  })
+
+  it('keeps meaningful paid demand on both Pro and Max in the default ladder', () => {
+    let s = shipModel(createGame(239), 76)
+    const modelId = s.player.models[0]!.id
+    s = withHall(s, 240)
+    s = {
+      ...s,
+      rivals: s.rivals.map((rival) => ({ ...rival, models: [] })),
+      player: {
+        ...s.player,
+        brandTrust: 82,
+        allocation: { training: 0.05, inference: 0.9, research: 0.05 },
+        pricing: {
+          ...s.player.pricing,
+          plans: defaultPlans().map((plan) => ({ ...plan, modelIds: [modelId] })),
+        },
+      },
+    }
+    for (let day = 0; day < 4; day += 1) {
+      s = tickMarket({ ...s, day: s.day + 1 })
+    }
+    const paid = s.lastMarket.planStats.filter((plan) => !plan.isFree)
+    const paidSeats = paid.reduce((sum, plan) => sum + plan.subscribers, 0)
+    const pro = paid.find((plan) => plan.planId === 'plan-pro')!
+    const max = paid.find((plan) => plan.planId === 'plan-max')!
+    const ratios = {
+      pro: pro.subscribers / paidSeats,
+      max: max.subscribers / paidSeats,
+      premium: (pro.subscribers + max.subscribers) / paidSeats,
+    }
+    expect(ratios.pro, JSON.stringify(ratios)).toBeGreaterThan(0.08)
+    expect(ratios.max, JSON.stringify(ratios)).toBeGreaterThan(0.05)
+    expect(ratios.premium, JSON.stringify(ratios)).toBeGreaterThan(0.2)
+  })
+
   it('applies rival seat conversion exactly once', () => {
     const model = {
       id: 'rival-seat',

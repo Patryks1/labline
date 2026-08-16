@@ -19,6 +19,7 @@ import { BuildingNameField } from '../ui/BuildingNameField'
 import {
   EmptyState,
   HudButton,
+  HudRange,
   MetricTile,
   StatusChip,
 } from '../ui/HudPrimitives'
@@ -115,7 +116,7 @@ export function InfrastructureOverview() {
           </StatusChip>
         }
       >
-        <div className="grid grid-cols-2 gap-x-4">
+        <div className="grid grid-cols-1 gap-x-4 min-[500px]:grid-cols-2">
           <StatRow label="VRAM" value={gb(fleet.vramGb)} />
           <StatRow label="Host need" value={pf(host.pfNeed)} tone={host.shortOn !== 'ok' ? 'warning' : 'neutral'} />
           <StatRow label="Fleet draw (electrical)" value={mw(fleet.mw)} />
@@ -144,11 +145,12 @@ export function InfrastructureOverview() {
               const progress = tile.buildingProgress / Math.max(1, tile.buildingTarget)
               const left = Math.max(0, tile.buildingTarget - tile.buildingProgress)
               return (
-                <button
+                <HudButton
                   key={`${tile.x}-${tile.y}`}
                   type="button"
+                  variant="ghost"
                   onClick={() => showOnMap(tile)}
-                  className="hover-lift w-full rounded-lg border border-amber/25 bg-amber/5 px-3 py-2 text-left transition hover:border-amber/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber/50"
+                  className="min-h-11 hover-lift w-full rounded-lg border border-amber/25 bg-amber/5 px-3 py-2 text-left transition hover:border-amber/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber/50"
                 >
                   <span className="flex items-center justify-between gap-2 text-[0.8125rem]">
                     <strong className="inline-flex min-w-0 items-center gap-1.5 truncate text-bone">
@@ -160,7 +162,7 @@ export function InfrastructureOverview() {
                   <div className="mt-2">
                     <MeterBar value={progress} tone="train" live detail={`${Math.round(progress * 100)}%`} />
                   </div>
-                </button>
+                </HudButton>
               )
             })}
           </div>
@@ -304,8 +306,9 @@ function RackDeploymentPlanner({
         ) : chooserOpen ? (
           <div className="mt-2 space-y-1 border-t border-line/60 pt-2">
             <div className="mb-1 flex justify-end gap-1">
-              <button
+              <HudButton
                 type="button"
+                variant="ghost"
                 onClick={() => {
                   setExcluded(new Set())
                   setRequested(null)
@@ -313,9 +316,10 @@ function RackDeploymentPlanner({
                 className="min-h-11 rounded-md px-2 py-1 text-[0.6875rem] text-mint hover:bg-mint/10 sm:min-h-0"
               >
                 Select all
-              </button>
-              <button
+              </HudButton>
+              <HudButton
                 type="button"
+                variant="ghost"
                 onClick={() => {
                   setExcluded(new Set(deployableHalls.map(({ hall }) => `${hall.x},${hall.y}`)))
                   setRequested(null)
@@ -323,15 +327,16 @@ function RackDeploymentPlanner({
                 className="min-h-11 rounded-md px-2 py-1 text-[0.6875rem] text-muted hover:bg-panel-2 hover:text-bone sm:min-h-0"
               >
                 Clear
-              </button>
+              </HudButton>
             </div>
             {deployableHalls.map(({ hall, spaces }) => {
               const key = `${hall.x},${hall.y}`
               const selected = !excluded.has(key)
               return (
-                <button
+                <HudButton
                   key={key}
                   type="button"
+                  variant="ghost"
                   aria-pressed={selected}
                   onClick={() => toggleHall(hall)}
                   className={`flex min-h-11 w-full items-center justify-between rounded-md border px-2 py-1.5 text-[0.6875rem] transition ${
@@ -342,7 +347,7 @@ function RackDeploymentPlanner({
                 >
                   <span className="truncate">{hall.name || 'Data center'}</span>
                   <span className="shrink-0 font-mono tabular-nums">{spaces} planned</span>
-                </button>
+                </HudButton>
               )
             })}
           </div>
@@ -360,8 +365,7 @@ function RackDeploymentPlanner({
           <label className="mt-2 block text-[0.8125rem] text-muted">
             Quantity <strong className="font-mono tabular-nums text-bone">{quantity}</strong> racks ·{' '}
             {quantity * quote.rackUnits} rack-width units
-            <input
-              type="range"
+            <HudRange
               min={1}
               max={quote.maxRacks}
               step={1}

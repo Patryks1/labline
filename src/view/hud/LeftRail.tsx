@@ -19,7 +19,6 @@ import {
   Package,
   Users,
   UsersThree,
-  X,
 } from '@phosphor-icons/react'
 import { useGameStore } from '../../store/gameStore'
 import { useUiStore } from '../../store/uiStore'
@@ -41,16 +40,23 @@ import { PowerPanel } from './panels/PowerPanel'
 import { ComputeMarketPanel } from './panels/ComputeMarketPanel'
 import { FleetBuildingsPanel } from './panels/FleetBuildingsPanel'
 import { BuildPanel } from './BuildTray'
-import { NAV_GROUPS, groupForPanel, type NavGroupId } from './navConfig'
+import {
+  SHELL_NAV_GROUPS,
+  shellPanelForPanel,
+  type ShellNavGroupId,
+} from './navConfig'
 import {
   MOBILE_MORE_SECTIONS,
   MOBILE_MORE_UTILITIES,
   MOBILE_PRIMARY_TABS,
 } from './mobileShellContracts'
+import { normalizeTrainingJobs } from './trainingJobViewModel'
+import { selectFinanceDashboardReadouts } from './data/financeDashboardModel'
 
 /**
  * Floating workspace drawer over the full-bleed map.
- * Rail: every panel is its own tab (Build pinned on top as the map action).
+ * Rail: every destination is a one-level action (Build pinned on top as the
+ * map action); group headings are visual landmarks, not nested tablists.
  * Content swaps animate via .panel-swap keyed on the active panel.
  */
 
@@ -58,15 +64,14 @@ interface RailTab {
   id: PanelId
   label: string
   hint: string
-  group: NavGroupId
+  group: ShellNavGroupId
 }
 
-/** Flattened nav: every panel is a first-class tab, groups become dividers. */
-const RAIL_SECTIONS: { group: NavGroupId; tabs: RailTab[] }[] = NAV_GROUPS.filter(
-  (g) => g.id !== 'build',
-).map((g) => ({
+/** Flattened visual nav: every panel is a first-class action under a heading. */
+const RAIL_SECTIONS: { group: ShellNavGroupId; label: string; tabs: RailTab[] }[] = SHELL_NAV_GROUPS.map((g) => ({
   group: g.id,
-  tabs: g.items.map((item) => ({
+  label: g.label,
+  tabs: g.items.filter((item) => !(g.id === 'build' && item.id === 'build')).map((item) => ({
     id: item.id,
     label: item.label,
     hint: item.hint,
@@ -108,7 +113,16 @@ function panelIcon(id: PanelId) {
   return Icon
 }
 
-export function LeftRail() {
+export interface LeftRailProps {
+  /** One-shot handoff from the global activity bar to a specific Models run. */
+  modelsFocusJobId?: string | null
+  onModelsFocusHandled?: () => void
+}
+
+export function LeftRail({
+  modelsFocusJobId = null,
+  onModelsFocusHandled,
+}: LeftRailProps = {}) {
   const active = useGameStore((s) => s.activePanel)
   const setPanel = useGameStore((s) => s.setPanel)
   const open = useGameStore((s) => s.leftRailOpen)
@@ -117,19 +131,18 @@ export function LeftRail() {
   const setMapTool = useGameStore((s) => s.setMapTool)
   const setBuildMode = useGameStore((s) => s.setBuildMode)
   const setCommandDockOpen = useGameStore((s) => s.setCommandDockOpen)
+  const commandDockOpen = useGameStore((s) => s.commandDockOpen)
   const state = useGameStore((s) => s.state)
+  const objectivesOpen = useUiStore((s) => s.objectivesOpen)
   const setObjectivesOpen = useUiStore((s) => s.setObjectivesOpen)
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false)
   const mobileMoreCloseRef = useRef<HTMLButtonElement>(null)
-
-  const group = useMemo(() => groupForPanel(active), [active])
-  const activeItem = useMemo(
-    () => group.items.find((item) => item.id === active) ?? null,
-    [group, active],
-  )
+  const mobileMoreDialogRef = useRef<HTMLElement>(null)
+  const shellActive = useMemo(() => shellPanelForPanel(active), [active])
 
   const badges = useMemo(() => {
-    const training = !!state.player.trainingJob
+    const training = normalizeTrainingJobs(state).length > 0
+    const finance = selectFinanceDashboardReadouts(state)
     const rawData =
       state.player.data &&
       Object.values(state.player.data.stocks).some((s) => s.raw > 0.5)
@@ -144,7 +157,7 @@ export function LeftRail() {
       (tile) => tile.buildingTarget > 0 && tile.buildingProgress < tile.buildingTarget,
     )
     return {
-      stats: state.player.finance.dayNet < 0 && state.day > 5,
+      stats: finance.current.net < 0 && state.day > 5,
       models: training,
       data: rawData,
       research,
@@ -158,6 +171,7 @@ export function LeftRail() {
   const handleTab = (id: PanelId) => {
     setMobileMoreOpen(false)
     setObjectivesOpen(false)
+    if (id === 'models') onModelsFocusHandled?.()
     if (active === id && open) {
       setOpen(false)
       return
@@ -181,7 +195,32 @@ export function LeftRail() {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const focusFrame = window.requestAnimationFrame(() => mobileMoreCloseRef.current?.focus())
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setMobileMoreOpen(false)
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setMobileMoreOpen(false)
+        return
+      }
+      if (event.key !== 'Tab') return
+      const root = mobileMoreDialogRef.current
+      if (!root) return
+      const focusable = Array.from(
+        root.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      )
+      if (focusable.length === 0) {
+        event.preventDefault()
+        return
+      }
+      const first = focusable[0]!
+      const last = focusable[focusable.length - 1]!
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => {
@@ -220,7 +259,7 @@ export function LeftRail() {
 
   return (
     <div className="workspace-shell pointer-events-none">
-      {/* Icon rail: Build action pinned on top, then every panel as its own tab */}
+      {/* Icon rail: Build action pinned on top, then grouped one-level destinations */}
       <nav
         className="desktop-workspace-rail hud-surface pointer-events-auto relative col-start-1 m-1.5 mr-1 flex min-h-0 flex-col items-stretch gap-0.5 overflow-y-auto rounded-lg p-1 panel-scroll"
         aria-label="Workspaces"
@@ -228,6 +267,7 @@ export function LeftRail() {
         <button
           type="button"
           aria-label="Build"
+          aria-current={active === 'build' && open ? 'page' : undefined}
           title="Build (R) - place facilities and expand campus capacity"
           onClick={() => handleTab('build')}
           className={`group relative flex min-h-12 w-full flex-col items-center justify-center gap-1 rounded-lg border px-1 py-1.5 transition ${
@@ -274,14 +314,16 @@ export function LeftRail() {
         {RAIL_SECTIONS.map((section) => (
           <div key={section.group} className="flex flex-col gap-0.5">
             <div aria-hidden className="mx-2 my-1 h-px bg-line/60" />
+            <p className="desktop-rail-group-label" role="heading" aria-level={2}>{section.label}</p>
             {section.tabs.map((tab) => {
               const Icon = panelIcon(tab.id)
-              const on = active === tab.id || (tab.id === 'racks' && active === 'chips')
+              const on = shellActive === tab.id
               return (
                 <button
                   key={tab.id}
                   type="button"
                   aria-label={tab.label}
+                  aria-current={on && open ? 'page' : undefined}
                   title={`${tab.label} - ${tab.hint}`}
                   onClick={() => handleTab(tab.id)}
                   className={`group relative flex min-h-11 w-full flex-col items-center justify-center gap-1 rounded-lg px-1 py-1.5 transition ${
@@ -313,39 +355,16 @@ export function LeftRail() {
         ))}
       </nav>
 
-      {/* Content drawer: stable header + animated panel swap */}
+      {/* Content drawer: panel-owned title plus a compact shell context header */}
       <div
-        className={`workspace-drawer hud-surface pointer-events-auto relative col-start-2 m-2 ml-1 flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg transition-opacity duration-200 ease-out ${
+        className={`workspace-drawer workspace-drawer--reserve-operations hud-surface pointer-events-auto relative col-start-2 m-2 ml-1 flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg transition-opacity duration-200 ease-out ${
           open ? 'opacity-100' : 'pointer-events-none opacity-0'
         }`}
       >
         {open && (
           <>
-            <header className="workspace-drawer__header relative z-10 flex h-14 shrink-0 items-center justify-between gap-2 border-b border-line/60 px-4">
-              <div className="flex min-w-0 items-baseline gap-2">
-                <p className="shrink-0 text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-mint/80">
-                  {group.label}
-                </p>
-                <h2 className="truncate text-sm font-semibold text-bone">
-                  {activeItem?.label ?? group.label}
-                </h2>
-                <p className="hidden truncate text-[0.75rem] text-muted/90 xl:block">
-                  {activeItem?.hint ?? group.description}
-                </p>
-              </div>
-              <button
-                type="button"
-                aria-label="Close workspace"
-                title="Collapse ([)"
-                onClick={() => setOpen(false)}
-                className="workspace-drawer__close flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-panel-2 hover:text-bone"
-              >
-                <X size="0.9rem" />
-              </button>
-            </header>
-
             <div
-              className={`workspace-drawer__body panel-scroll relative z-10 min-h-0 flex-1 p-4 ${
+              className={`workspace-drawer__body workspace-drawer__body--shell-reserved panel-scroll relative z-10 min-h-0 flex-1 p-4 ${
                 active === 'research'
                   ? 'flex flex-col overflow-y-auto xl:overflow-hidden'
                   : 'overflow-y-auto'
@@ -357,7 +376,11 @@ export function LeftRail() {
                   active === 'research' ? 'flex min-h-full flex-1 flex-col xl:min-h-0' : ''
                 }`}
               >
-                <PanelBody id={active} />
+                <PanelBody
+                  id={active}
+                  modelsFocusJobId={active === 'models' ? modelsFocusJobId : null}
+                  onModelsFocusHandled={onModelsFocusHandled}
+                />
               </div>
             </div>
           </>
@@ -407,6 +430,7 @@ export function LeftRail() {
             onClick={() => setMobileMoreOpen(false)}
           />
           <section
+            ref={mobileMoreDialogRef}
             className="mobile-more-sheet hud-surface"
             role="dialog"
             aria-modal="true"
@@ -420,10 +444,9 @@ export function LeftRail() {
               <button
                 ref={mobileMoreCloseRef}
                 type="button"
-                aria-label="Close workspace menu"
                 onClick={() => setMobileMoreOpen(false)}
               >
-                <X size="1rem" />
+                Done
               </button>
             </header>
 
@@ -439,7 +462,13 @@ export function LeftRail() {
                     <button
                       key={utility.id}
                       type="button"
-                      aria-pressed={utility.id === 'destroy' ? mapTool === 'destroy' : undefined}
+                      aria-pressed={
+                        utility.id === 'destroy'
+                          ? mapTool === 'destroy'
+                          : utility.id === 'intel'
+                            ? commandDockOpen
+                            : objectivesOpen
+                      }
                       onClick={() => {
                         if (utility.id === 'destroy') {
                           toggleDestroy()
@@ -464,7 +493,7 @@ export function LeftRail() {
                     <div>
                       {section.tabs.map((tab) => {
                         const Icon = panelIcon(tab.id)
-                        const selected = active === tab.id && open
+                        const selected = shellActive === tab.id && open
                         return (
                           <button
                             key={tab.id}
@@ -502,7 +531,15 @@ function LegacyEventsRedirect() {
   return null
 }
 
-function PanelBody({ id }: { id: PanelId }) {
+function PanelBody({
+  id,
+  modelsFocusJobId,
+  onModelsFocusHandled,
+}: {
+  id: PanelId
+  modelsFocusJobId?: string | null
+  onModelsFocusHandled?: () => void
+}) {
   switch (id) {
     case 'stats':
       return <StatsPanel />
@@ -511,7 +548,12 @@ function PanelBody({ id }: { id: PanelId }) {
     case 'data':
       return <DataPanel />
     case 'models':
-      return <ModelsPanel />
+      return (
+        <ModelsPanel
+          focusJobId={modelsFocusJobId}
+          onFocusHandled={onModelsFocusHandled}
+        />
+      )
     case 'plans':
       return <PlansPanel />
     case 'research':

@@ -4,6 +4,7 @@ import { createGame } from "../createGame";
 import { collectQuarterlyLabSnapshots } from "../systems/progression";
 import {
   createRivals,
+  RIVAL_STARTING_CASH_RESERVE,
   rivalAllocationPolicy,
   rivalDenseScaleTarget,
   rivalResearchTrainingModifiers,
@@ -20,6 +21,14 @@ const env =
   ).process?.env ?? {};
 
 describe("frontier strategy balance", () => {
+  it("gives every rival a $100M liquid reserve after buying its starting fleet", () => {
+    const rivals = createRivals(400, 5, ["west"], 300_000_000);
+    expect(rivals).toHaveLength(5);
+    for (const rival of rivals) {
+      expect(rival.cash).toBeGreaterThan(RIVAL_STARTING_CASH_RESERVE);
+    }
+  });
+
   it("gives every rival the same raw PF yield per accelerator", () => {
     const rivals = createRivals(401, 5, ["west"], 1_000_000_000);
     const yields = rivals.map((rival) => rival.flopsPf / rival.chips);

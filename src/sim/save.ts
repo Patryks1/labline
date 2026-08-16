@@ -44,6 +44,7 @@ import {
   presetFromFamily,
 } from "./balance/trainingV3";
 import { nativeWeightPrecisionForNumerics } from "./balance/trainingPrecision";
+import { minimumTrainingCalendarDays } from "./balance/training";
 import { scoreDesign } from "./balance/racks";
 import {
   createWorldMarkets,
@@ -66,6 +67,7 @@ import {
   migrateDataHallLayouts,
   refreshAllDataHallAnalyses,
 } from "./systems/dataHallLayouts";
+import { migrateHqOfficeLayouts } from "./systems/hqOffice";
 import {
   WORLD_FORMAT_VERSION,
   createDynamicWorld,
@@ -589,6 +591,19 @@ function normalizeTrainingJob(job: TrainingJob): TrainingJob {
     0,
     job.recommendedPfDays ?? job.targetPfDays,
   );
+  const minCalendarDays =
+    job.targetParamsB >= 1_000
+      ? Number.isFinite(job.minCalendarDays) && (job.minCalendarDays ?? 0) > 0
+        ? Math.max(1, job.minCalendarDays ?? 0)
+        : minimumTrainingCalendarDays({
+            paramsB: job.targetParamsB,
+            family: job.family,
+            backbone,
+            mode: job.mode,
+            trainingTokensMTok: job.trainMTok,
+            verificationTokensMTok: job.verifyMTok,
+          })
+      : 0;
   const setupCost = Math.max(
     0,
     job.economics?.setupCost ??
@@ -634,7 +649,7 @@ function normalizeTrainingJob(job: TrainingJob): TrainingJob {
     trainingFormulaVersion: job.trainingFormulaVersion ?? 1,
     trainingNumerics,
     numerics: trainingNumerics,
-    minCalendarDays: 0,
+    minCalendarDays,
     daysElapsed: Math.max(0, job.daysElapsed ?? 0),
     postTrainDaysElapsed: Math.max(0, job.postTrainDaysElapsed ?? 0),
     postTrainRiskPlan:
@@ -1701,7 +1716,9 @@ function restoreState(
   );
   return syncLabIndex(
     refreshAllDataHallAnalyses(
-      migrateDataHallLayouts(normalizeSiteEnergyState(restored)),
+      migrateHqOfficeLayouts(
+        migrateDataHallLayouts(normalizeSiteEnergyState(restored)),
+      ),
     ),
   );
 }

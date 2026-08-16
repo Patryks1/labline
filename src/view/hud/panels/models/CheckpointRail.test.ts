@@ -78,13 +78,14 @@ describe("CheckpointRail", () => {
         onReview: vi.fn(),
         onPromote: vi.fn(),
         onDiscard: vi.fn(),
+        onBranch: vi.fn(),
       }),
     );
 
     expect(markup).toContain("Checkpoint history");
     expect(markup).toContain('aria-pressed="true"');
     expect(markup).toContain(
-      "Milestone weights are released to stealth automatically.",
+      "A checkpoint is a saved copy of one run at a specific moment.",
     );
     expect(markup).toContain(
       "generates no demand, customers, market share, or revenue",
@@ -99,6 +100,14 @@ describe("CheckpointRail", () => {
     expect(markup).toContain('aria-label="Review Aster · 20%"');
     expect(markup).toContain('aria-label="Promote Aster · 20%"');
     expect(markup).toContain('aria-label="Discard Aster · 20%"');
+    expect(markup).toContain(
+      'aria-label="Branch a new model from Aster · 20%"',
+    );
+    expect(markup).toContain("Branch new model");
+    expect(markup).toContain("source run keeps");
+    expect(markup).toContain('data-hud-variant="danger"');
+    expect(markup).toContain('aria-label="Checkpoint history"');
+    expect(markup).not.toContain("Training run checkpoint graph");
   });
 
   it("selects the requested checkpoint and exposes disabled action reasons", () => {

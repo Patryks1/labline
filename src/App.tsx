@@ -1,8 +1,9 @@
-import { useEffect } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { installGameSaveLifecycle, useGameStore } from './store/gameStore'
 import { GameMap } from './view/three/GameMap'
 import { TopBar } from './view/hud/TopBar'
 import { BottomBar } from './view/hud/BottomBar'
+import { TrainingActivityBar } from './view/hud/TrainingActivityBar'
 import { LeftRail } from './view/hud/LeftRail'
 import { CommandDock } from './view/hud/CommandDock'
 import { HotkeyHelp } from './view/hud/HotkeyHelp'
@@ -19,6 +20,7 @@ import { FULL_BLEED_MAP_STYLE } from './view/hud/layout'
 import { MapNavigator } from './view/hud/MapNavigator'
 import { ReleaseCelebration } from './view/hud/ReleaseCelebration'
 import { DataHallEditorOverlay } from './view/hud/panels/hardware/DataHallEditorOverlay'
+import { HqOfficeEditorOverlay } from './view/hud/panels/HqOfficeEditorOverlay'
 
 function GameShell() {
   const paused = useGameStore((s) => s.state.paused)
@@ -28,7 +30,23 @@ function GameShell() {
   const activePanel = useGameStore((s) => s.activePanel)
   const leftOpen = useGameStore((s) => s.leftRailOpen)
   const dockOpen = useGameStore((s) => s.commandDockOpen)
+  const hqOfficeEditorFacilityId = useGameStore((s) => s.hqOfficeEditorFacilityId)
+  const setPanel = useGameStore((s) => s.setPanel)
+  const [modelsFocusJobId, setModelsFocusJobId] = useState<string | null>(null)
   useHotkeys()
+
+  const openModelsRun = useCallback(
+    (jobId: string) => {
+      setModelsFocusJobId(jobId)
+      setPanel('models')
+    },
+    [setPanel],
+  )
+  const openModels = useCallback(() => {
+    setModelsFocusJobId(null)
+    setPanel('models')
+  }, [setPanel])
+  const clearModelsFocus = useCallback(() => setModelsFocusJobId(null), [])
 
   const presentation = panelPresentation(activePanel)
   const workbenchOpen = leftOpen && presentation !== 'drawer'
@@ -49,10 +67,14 @@ function GameShell() {
       data-presentation={presentation}
       data-active-panel={activePanel}
       data-intel-open={dockOpen && !workbenchOpen ? 'true' : 'false'}
+      data-hq-office-open={hqOfficeEditorFacilityId ? 'true' : 'false'}
     >
       <a href="#game-map" className="skip-to-map">Skip controls and focus the map</a>
       <TopBar />
-      <LeftRail />
+      <LeftRail
+        modelsFocusJobId={modelsFocusJobId}
+        onModelsFocusHandled={clearModelsFocus}
+      />
       <main
         id="game-map"
         tabIndex={-1}
@@ -65,6 +87,10 @@ function GameShell() {
       <CommandDock forceCollapsed={workbenchOpen} />
       <MapNavigator />
       <BottomBar />
+      <TrainingActivityBar
+        onOpenModels={openModels}
+        onOpenModelsRun={openModelsRun}
+      />
       <ObjectivesDock />
       <VictoryOverlay />
       <PauseMenu />
@@ -72,6 +98,7 @@ function GameShell() {
       <HudFeedback />
       <ReleaseCelebration />
       <DataHallEditorOverlay />
+      <HqOfficeEditorOverlay key={hqOfficeEditorFacilityId ?? 'hq-office-closed'} />
     </div>
   )
 }

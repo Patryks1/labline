@@ -95,6 +95,7 @@ import {
   planAttractiveness,
   enforcePlanSubscriberPyramid,
   applyPlanUptierMigration,
+  applyHighUsagePlanCohorts,
   blendPlanSeatStickiness,
   freeTierDemandProfile,
   modelCapabilityRank,
@@ -111,6 +112,8 @@ import {
   planStabilityDissatisfaction,
   planServeModifiers,
   planSegmentPriceAffinity,
+  planSegmentUsageAffinity,
+  planSegmentUsageAffinityWeight,
   planSegmentAffinityWeight,
   planSubsidyRatio,
   planDemandShockMultiplier,
@@ -1725,10 +1728,13 @@ export function tickMarket(state: SimState): SimState {
   for (const [segId, segUsers] of playerSubUsersBySegment) {
     if (segUsers <= 0 || paidPlans.length === 0) continue;
     const utils = paidPlans.map((p) => {
+      const allowance = planEffectiveAllowanceMTokPerMonth(state, p);
       let u =
         planAttractiveness(state, p, segId, planPerceptionOpts) +
         Math.log(planSegmentPriceAffinity(p.pricePerMonth, segId)) *
-          planSegmentAffinityWeight(segId);
+          planSegmentAffinityWeight(segId) +
+        Math.log(planSegmentUsageAffinity(allowance, segId)) *
+          planSegmentUsageAffinityWeight(segId);
       if (!freePlanOn) u += 14; // paid more attractive when free closed
       return u;
     });
@@ -2017,6 +2023,10 @@ export function tickMarket(state: SimState): SimState {
 
   // Allowance-constrained seats climb when the next tier's value is decent.
   applyPlanUptierMigration(rawBuckets);
+
+  // Keep meaningful high-usage cohorts on valuable Pro/Max-style tiers. The
+  // cohort floor is earned by a real allowance step and acceptable value.
+  applyHighUsagePlanCohorts(rawBuckets);
 
   // Soft paid pyramid (cheap > mid > expensive), then free leads every paid SKU.
   enforcePlanSubscriberPyramid(rawBuckets);

@@ -8,6 +8,7 @@ import { money, pct } from './format'
 import { LablineMenuShell } from './menu/LablineMenuShell'
 import { SettingsPanel } from './menu/SettingsPanel'
 import { ConsoleDialog } from './ui/ConsoleDialog'
+import { HudButton, HudRange } from './ui/HudPrimitives'
 import {
   BALANCE_TUNING_GROUPS,
   resolveBalanceTuning,
@@ -188,16 +189,16 @@ export function PauseMenu() {
 
         {(tab === 'save' || tab === 'load') && (
           <div className="space-y-2">
-            <button
-              type="button"
-              className="min-h-11 text-[0.8125rem] text-mint hover:underline"
+            <HudButton
+              variant="ghost"
+              className="min-h-11 justify-start px-0 text-[0.8125rem] text-mint hover:underline"
               onClick={() => {
                 setTab('main')
                 setMsg(null)
               }}
             >
               ← Back
-            </button>
+            </HudButton>
             <SlotList
               mode={tab}
               bySlot={bySlot}
@@ -222,13 +223,13 @@ export function PauseMenu() {
 
         {tab === 'settings' && (
           <div>
-            <button
-              type="button"
-              className="min-h-11 text-[0.75rem] text-mint hover:underline"
+            <HudButton
+              variant="ghost"
+              className="min-h-11 justify-start px-0 text-[0.75rem] text-mint hover:underline"
               onClick={() => setTab('main')}
             >
               ← Back
-            </button>
+            </HudButton>
             <SettingsPanel gameplay={{
               autoPause,
               setAutoPause,
@@ -259,10 +260,9 @@ export function PauseMenu() {
           maxWidthClass="max-w-[30rem]"
           footer={confirm ? (
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-              <button type="button" className="hud-button hud-button--secondary" onClick={() => setConfirm(null)}>Cancel</button>
-              <button
-                type="button"
-                className="hud-button hud-button--danger"
+              <HudButton variant="secondary" onClick={() => setConfirm(null)}>Cancel</HudButton>
+              <HudButton
+                variant="danger"
                 onClick={() => {
                   const action = confirm.onConfirm
                   setConfirm(null)
@@ -270,7 +270,7 @@ export function PauseMenu() {
                 }}
               >
                 {confirm.action}
-              </button>
+              </HudButton>
             </div>
           ) : null}
         >
@@ -292,19 +292,13 @@ function MenuBtn({
   danger?: boolean
 }) {
   return (
-    <button
-      type="button"
+    <HudButton
+      variant={primary ? 'primary' : danger ? 'danger' : 'secondary'}
       onClick={onClick}
-      className={`min-h-11 w-full rounded-xl border px-3 py-2.5 text-left text-[0.8125rem] transition ${
-        primary
-          ? 'border-mint/40 bg-mint/15 text-mint hover:bg-mint/25'
-          : danger
-            ? 'border-danger/30 bg-danger/10 text-danger hover:bg-danger/15'
-            : 'border-line bg-panel-2 text-bone hover:border-mint/30'
-      }`}
+      className="min-h-11 w-full justify-start rounded-xl px-3 py-2.5 text-left text-[0.8125rem] transition"
     >
       {label}
-    </button>
+    </HudButton>
   )
 }
 
@@ -347,13 +341,13 @@ function BalanceTab({
 
   return (
     <div className="max-h-[calc(100dvh-16rem)] space-y-4 overflow-y-auto pr-1">
-      <button
-        type="button"
-        className="text-[0.75rem] text-mint hover:underline"
+      <HudButton
+        variant="ghost"
+        className="min-h-11 justify-start px-0 text-[0.75rem] text-mint hover:underline"
         onClick={onBack}
       >
         ← Back
-      </button>
+      </HudButton>
 
       {BALANCE_TUNING_GROUPS.map((group) => (
         <section key={group.id}>
@@ -374,8 +368,7 @@ function BalanceTab({
                       {slider.format(value)}
                     </span>
                   </div>
-                  <input
-                    type="range"
+                  <HudRange
                     min={slider.min}
                     max={slider.max}
                     step={slider.step}
@@ -386,7 +379,7 @@ function BalanceTab({
                         [slider.key]: Number(event.currentTarget.value),
                       } as Partial<BalanceTuning>)
                     }
-                    className="mt-1 w-full accent-mint"
+                    className="mt-1 w-full"
                   />
                   <p className="mt-0.5 text-[0.625rem] leading-snug text-muted">{slider.hint}</p>
                 </div>
@@ -396,13 +389,13 @@ function BalanceTab({
         </section>
       ))}
 
-      <button
-        type="button"
-        className="hud-button hud-button--secondary w-full"
+      <HudButton
+        variant="secondary"
+        className="min-h-11 w-full"
         onClick={() => resetBalanceTuning()}
       >
         Reset to defaults
-      </button>
+      </HudButton>
 
       <section className="border-t border-line pt-3">
         <h3 className="mb-1.5 font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">
@@ -413,28 +406,28 @@ function BalanceTab({
         </p>
         <div className="flex items-center gap-1.5">
           {[30, 90, 180].map((d) => (
-            <button
+            <HudButton
               key={d}
-              type="button"
+              variant="secondary"
               disabled={simRunning}
               onClick={() => setSimDays(d)}
-              className={`rounded-lg border px-2.5 py-1 text-[0.75rem] transition disabled:opacity-50 ${
+              className={`min-h-11 min-w-11 rounded-lg px-2.5 py-1 text-[0.75rem] transition disabled:opacity-50 ${
                 simDays === d
                   ? 'border-mint/40 bg-mint/15 text-mint'
                   : 'border-line bg-panel-2 text-bone hover:border-mint/30'
               }`}
             >
               {d}d
-            </button>
+            </HudButton>
           ))}
-          <button
-            type="button"
+          <HudButton
+            variant="primary"
             disabled={simRunning}
             onClick={runSimulation}
-            className="ml-auto rounded-lg border border-mint/40 bg-mint/15 px-3 py-1 text-[0.75rem] text-mint transition hover:bg-mint/25 disabled:opacity-50"
+            className="ml-auto min-h-11 px-3 py-1 text-[0.75rem] transition disabled:opacity-50"
           >
             {simRunning ? `Running… ${Math.round(simProgress * 100)}%` : 'Run'}
-          </button>
+          </HudButton>
         </div>
 
         {report && (
@@ -520,33 +513,33 @@ function SlotList({
             </div>
             <div className="flex shrink-0 gap-1">
               {mode === 'save' && (
-                <button
-                  type="button"
-                  className="rounded-lg bg-mint/20 px-2 py-1 text-[0.75rem] text-mint"
-                  onClick={() => void onSave(id)}
-                >
-                  Save
-                </button>
+                  <HudButton
+                    variant="primary"
+                    className="min-h-11 min-w-11 rounded-lg px-2 py-1 text-[0.75rem]"
+                    onClick={() => void onSave(id)}
+                  >
+                    Save
+                  </HudButton>
               )}
               {mode === 'load' && m && (
-                <button
-                  type="button"
-                  className={`rounded-lg px-2 py-1 text-[0.75rem] ${
-                    m.compatible ? 'bg-mint/20 text-mint' : 'bg-amber/15 text-amber'
-                  }`}
-                  onClick={() => onLoad(id)}
-                >
-                  {m.compatible ? 'Load' : `v${m.version}`}
-                </button>
+                  <HudButton
+                    variant="secondary"
+                    className={`min-h-11 min-w-11 rounded-lg px-2 py-1 text-[0.75rem] ${
+                      m.compatible ? 'bg-mint/20 text-mint' : 'bg-amber/15 text-amber'
+                    }`}
+                    onClick={() => onLoad(id)}
+                  >
+                    {m.compatible ? 'Load' : `v${m.version}`}
+                  </HudButton>
               )}
               {m && (
-                <button
-                  type="button"
-                  className="rounded-lg border border-line px-2 py-1 text-[0.75rem] text-danger"
+                <HudButton
+                  variant="danger"
+                  className="min-h-11 min-w-11 rounded-lg px-2 py-1 text-[0.75rem]"
                   onClick={() => onDelete(id)}
                 >
                   Del
-                </button>
+                </HudButton>
               )}
             </div>
           </div>

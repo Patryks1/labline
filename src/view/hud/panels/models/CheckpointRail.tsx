@@ -3,14 +3,18 @@ import {
   ArrowCircleUp,
   ArrowCounterClockwise,
   EyeSlash,
-  Flask,
   GitFork,
   ShieldCheck,
   Trash,
   Warning,
 } from "@phosphor-icons/react";
-import { EmptyState, HudButton, StatusChip } from "../../ui/HudPrimitives";
+import {
+  EmptyState,
+  HudButton,
+  StatusChip,
+} from "../../ui/HudPrimitives";
 import { money } from "../../format";
+import { BenchmarkEntryPoint } from "./BenchmarkEntryPoint";
 import {
   checkpointRivalDelta,
   checkpointReviewModeLabel,
@@ -23,19 +27,7 @@ import {
   type CheckpointBranchDirection,
   type CheckpointUiRecord,
 } from "./checkpointUi";
-
-const BRANCH_DIRECTIONS: ReadonlyArray<{
-  id: CheckpointBranchDirection;
-  label: string;
-}> = [
-  { id: "general", label: "General" },
-  { id: "chat", label: "Chat" },
-  { id: "code", label: "Code" },
-  { id: "agents", label: "Agents" },
-  { id: "reasoning", label: "Reasoning" },
-  { id: "safety", label: "Safety" },
-  { id: "custom", label: "Custom" },
-];
+import { checkpointBranchDirectionLabel } from "./checkpointBranching";
 
 function clampedPercent(value: number): number {
   return Math.round(Math.max(0, Math.min(1, value)) * 100);
@@ -53,8 +45,9 @@ export function CheckpointRail({
   onReview,
   onPromote,
   onDiscard,
-  onFork,
+  onBranch,
   onRollback,
+  jobs = [],
   title = "Stealth checkpoint lab",
   className = "",
 }: {
@@ -65,12 +58,18 @@ export function CheckpointRail({
   onReview?: (checkpointId: string) => void;
   onPromote?: (checkpointId: string) => void;
   onDiscard?: (checkpointId: string) => void;
-  onFork?: (request: {
-    checkpointId: string;
-    direction: CheckpointBranchDirection;
-    label?: string;
-  }) => void;
+  onBranch?: (checkpointId: string) => void;
   onRollback?: (request: { jobId: string; checkpointId: string }) => void;
+  jobs?: Array<{
+    id: string;
+    name: string;
+    progressPfDays: number;
+    targetPfDays: number;
+    parentCheckpointId?: string;
+    branchDirection?: CheckpointBranchDirection;
+    paused?: boolean;
+    failed?: boolean;
+  }>;
   title?: string;
   className?: string;
 }) {
@@ -79,10 +78,6 @@ export function CheckpointRail({
   );
   const [discardConfirmId, setDiscardConfirmId] = useState<string | null>(null);
   const [rollbackConfirmId, setRollbackConfirmId] = useState<string | null>(null);
-  const [forkCheckpointId, setForkCheckpointId] = useState<string | null>(null);
-  const [forkDirection, setForkDirection] =
-    useState<CheckpointBranchDirection>("general");
-  const [forkLabel, setForkLabel] = useState("");
   const activeId = selectedId ?? localSelectedId;
   const selected =
     checkpoints.find((checkpoint) => checkpoint.id === activeId) ??
@@ -111,9 +106,11 @@ export function CheckpointRail({
     setLocalSelectedId(checkpointId);
     setDiscardConfirmId(null);
     setRollbackConfirmId(null);
-    setForkCheckpointId(null);
     onSelect?.(checkpointId);
   };
+  const branchJobs = jobs.filter(
+    (job) => job.parentCheckpointId === selected.id,
+  );
 
   return (
     <section
@@ -122,7 +119,7 @@ export function CheckpointRail({
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="hud-eyebrow">Checkpoint operations</p>
+          <p className="hud-eyebrow">Training branches</p>
           <h3
             id={`checkpoint-rail-${selected.id}`}
             className="mt-1 text-sm font-semibold text-bone"
@@ -130,8 +127,9 @@ export function CheckpointRail({
             {title}
           </h3>
           <p className="mt-1 text-[0.6875rem] leading-5 text-muted">
-            Milestone weights are released to stealth automatically. They have
-            no customers or revenue until promoted.
+            A checkpoint is a saved copy of one run at a specific moment. Pick
+            one to compare, keep in Fleet, or use as the start of a separate
+            child model.
           </p>
         </div>
         <StatusChip
@@ -141,68 +139,38 @@ export function CheckpointRail({
         </StatusChip>
       </div>
 
-      <div
-        role="img"
-        aria-label="Training run checkpoint graph"
-        className="relative mt-3 h-16 rounded-md border border-line/55 bg-void/35 px-3"
-      >
-        <div className="absolute inset-x-3 top-7 h-px bg-line" />
-        {[0, 25, 50, 75, 100].map((tick) => (
-          <span
-            key={tick}
-            className="absolute top-6 h-2 w-px bg-line"
-            style={{ left: `calc(0.75rem + (100% - 1.5rem) * ${tick / 100})` }}
-          >
-            <span className="absolute left-1/2 top-3 -translate-x-1/2 font-mono text-[0.5625rem] tabular-nums text-muted">
-              {tick}%
-            </span>
-          </span>
-        ))}
-        {checkpoints.map((checkpoint, index) => {
-          const active = checkpoint.id === selected.id;
-          const left = Math.max(1.5, Math.min(98.5, checkpoint.progress * 100));
-          return (
-            <button
-              key={checkpoint.id}
-              type="button"
-              aria-label={`${checkpoint.label} graph marker at ${Math.round(checkpoint.progress * 100)}%`}
-              title={`${checkpoint.label} · ${checkpoint.kind}${checkpoint.branchDirection ? ` · ${checkpoint.branchDirection}` : ""}`}
-              onClick={() => choose(checkpoint.id)}
-              className={`absolute z-10 h-3 w-3 -translate-x-1/2 rounded-full border-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/55 ${
-                active
-                  ? "border-mint bg-mint shadow-[0_0_0_4px_rgba(86,225,180,0.13)]"
-                  : checkpoint.visibility === "public"
-                    ? "border-gold bg-gold"
-                    : checkpoint.visibility === "internal"
-                      ? "border-research bg-research"
-                      : "border-train bg-void hover:bg-train"
-              }`}
-              style={{ left: `${left}%`, top: index % 2 === 0 ? "1.35rem" : "2.05rem" }}
-            />
-          );
-        })}
-      </div>
-
       <ol
         aria-label="Checkpoint history"
-        className="panel-scroll mt-3 flex gap-2 overflow-x-auto pb-1"
+        className="panel-scroll relative mt-3 flex gap-2 overflow-x-auto pb-1 before:absolute before:left-4 before:right-4 before:top-4 before:h-px before:bg-line/70"
       >
         {checkpoints.map((checkpoint, index) => {
           const active = checkpoint.id === selected.id;
           const progress = clampedPercent(checkpoint.progress);
           return (
-            <li key={checkpoint.id} className="min-w-[10.5rem] flex-1">
-              <button
+            <li
+              key={checkpoint.id}
+              className="relative min-w-[10.5rem] flex-1 pt-3"
+            >
+              <HudButton
                 type="button"
+                variant="ghost"
                 aria-pressed={active}
                 aria-label={`Select ${checkpoint.label}, ${checkpointStatusLabel(checkpoint.status)}`}
                 onClick={() => choose(checkpoint.id)}
-                className={`h-full w-full rounded-md border p-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/45 ${
+                className={`!h-full !min-h-11 !w-full !justify-start !rounded-md !border !p-2.5 !text-left !font-normal !normal-case !tracking-normal !text-bone transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/45 ${
                   active
-                    ? "border-mint/55 bg-mint/10"
-                    : "border-line/60 bg-void/30 hover:border-line hover:bg-panel-2"
+                    ? "!border-mint/55 !bg-mint/10"
+                    : "!border-line/60 !bg-void/30 hover:!border-line hover:!bg-panel-2"
                 }`}
               >
+                <span
+                  aria-hidden="true"
+                  className={`absolute left-3 top-1.5 h-2.5 w-2.5 rounded-full border-2 ${
+                    active
+                      ? "border-mint bg-mint"
+                      : "border-line bg-panel-2"
+                  }`}
+                />
                 <span className="flex items-start justify-between gap-2">
                   <span className="font-mono text-[0.625rem] uppercase tracking-[0.11em] text-muted">
                     CP-{String(index + 1).padStart(2, "0")} · D{checkpoint.day}
@@ -239,11 +207,89 @@ export function CheckpointRail({
                     style={{ width: `${progress}%` }}
                   />
                 </span>
-              </button>
+              </HudButton>
             </li>
           );
         })}
       </ol>
+
+      <section
+        aria-label={`Branches from ${selected.label}`}
+        className="mt-3 rounded-md border border-research/30 bg-research/5 p-2.5"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="hud-eyebrow text-research">Model branches</p>
+            <p className="mt-0.5 text-[0.6875rem] leading-5 text-muted">
+              Each child starts from these weights while the source run keeps
+              training on its original path.
+            </p>
+          </div>
+          <HudButton
+            type="button"
+            variant="primary"
+            disabled={!selected.actions.fork.enabled}
+            title={actionTitle(selected.actions.fork)}
+            aria-label={`Branch a new model from ${selected.label}`}
+            onClick={() => onBranch?.(selected.id)}
+          >
+            <GitFork size="0.875rem" weight="bold" />
+            Branch new model
+          </HudButton>
+        </div>
+        {branchJobs.length > 0 ? (
+          <ul className="mt-2 grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3">
+            {branchJobs.map((job) => {
+              const progress = Math.round(
+                Math.max(
+                  0,
+                  Math.min(
+                    1,
+                    job.progressPfDays / Math.max(1e-9, job.targetPfDays),
+                  ),
+                ) * 100,
+              );
+              const status = job.failed
+                ? "Failed"
+                : job.paused
+                  ? "Paused"
+                  : "Training";
+              return (
+                <li
+                  key={job.id}
+                  className="rounded-md border border-line/55 bg-void/30 p-2"
+                >
+                  <span className="flex items-center justify-between gap-2">
+                    <strong className="min-w-0 truncate text-[0.75rem] text-bone">
+                      {job.name}
+                    </strong>
+                    <span className="font-mono text-[0.5625rem] uppercase text-research">
+                      {checkpointBranchDirectionLabel(
+                        job.branchDirection ?? "general",
+                      )}
+                    </span>
+                  </span>
+                  <span className="mt-1 flex items-center justify-between gap-2 font-mono text-[0.625rem] tabular-nums text-muted">
+                    <span>{status}</span>
+                    <span>{progress}%</span>
+                  </span>
+                  <span className="mt-1 block h-1 overflow-hidden rounded-full bg-line/45">
+                    <span
+                      className="block h-full rounded-full bg-research"
+                      style={{ width: `${progress}%` }}
+                    />
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <p className="mt-2 text-[0.625rem] leading-4 text-muted">
+            No child models yet. Branching keeps this checkpoint immutable and
+            adds a separate run to Training Activity.
+          </p>
+        )}
+      </section>
 
       <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,0.9fr)_minmax(19rem,1.1fr)]">
         <div className="space-y-3 rounded-md border border-line/60 bg-void/30 p-3">
@@ -617,16 +663,16 @@ export function CheckpointRail({
         aria-label={`Actions for ${selected.label}`}
         className="mt-3 grid grid-cols-2 gap-2 border-t border-line/50 pt-3 sm:flex sm:flex-wrap"
       >
-        <HudButton
+        <BenchmarkEntryPoint
+          context={{ kind: "checkpoint", id: selected.id }}
           type="button"
           disabled={!selected.actions.benchmark.enabled}
           title={actionTitle(selected.actions.benchmark)}
           aria-label={`Benchmark ${selected.label}`}
-          onClick={() => onBenchmark?.(selected.id)}
+          onOpen={() => onBenchmark?.(selected.id)}
         >
-          <Flask size="0.875rem" />
           {selected.actions.benchmark.label ?? "Run benchmark"}
-        </HudButton>
+        </BenchmarkEntryPoint>
         <HudButton
           type="button"
           variant="secondary"
@@ -640,38 +686,21 @@ export function CheckpointRail({
         </HudButton>
         <HudButton
           type="button"
-          variant="primary"
+          variant="secondary"
           disabled={!selected.actions.promote.enabled}
           title={actionTitle(selected.actions.promote)}
           aria-label={`Promote ${selected.label}`}
           onClick={() => onPromote?.(selected.id)}
         >
           <ArrowCircleUp size="0.875rem" />
-          {selected.actions.promote.label ?? "Promote checkpoint"}
-        </HudButton>
-        <HudButton
-          type="button"
-          variant="secondary"
-          disabled={!selected.actions.fork.enabled}
-          title={actionTitle(selected.actions.fork)}
-          aria-label={`Fork ${selected.label}`}
-          onClick={() => {
-            setForkCheckpointId(
-              forkCheckpointId === selected.id ? null : selected.id,
-            );
-            setForkDirection(selected.branchDirection ?? "general");
-            setForkLabel("");
-          }}
-        >
-          <GitFork size="0.875rem" />
-          {selected.actions.fork.label ?? "Fork direction"}
+          {selected.actions.promote.label ?? "Keep weights in Fleet"}
         </HudButton>
         <HudButton
           type="button"
           variant={rollbackConfirmId === selected.id ? "danger" : "ghost"}
           disabled={!selected.actions.rollback.enabled}
           title={actionTitle(selected.actions.rollback)}
-          aria-label={`${rollbackConfirmId === selected.id ? "Confirm restore as branch" : "Restore as branch"} ${selected.label}`}
+          aria-label={`${rollbackConfirmId === selected.id ? "Confirm restart source here" : "Restart source here"} ${selected.label}`}
           onClick={() => {
             if (rollbackConfirmId === selected.id) {
               onRollback?.({
@@ -686,12 +715,12 @@ export function CheckpointRail({
         >
           <ArrowCounterClockwise size="0.875rem" />
           {rollbackConfirmId === selected.id
-            ? "Confirm restore branch"
-            : selected.actions.rollback.label ?? "Restore as branch"}
+            ? "Confirm restart source"
+            : selected.actions.rollback.label ?? "Restart source here"}
         </HudButton>
         <HudButton
           type="button"
-          variant={discardConfirmId === selected.id ? "danger" : "ghost"}
+          variant="danger"
           disabled={!selected.actions.discard.enabled}
           title={actionTitle(selected.actions.discard)}
           aria-label={`${discardConfirmId === selected.id ? "Confirm discard" : "Discard"} ${selected.label}`}
@@ -710,86 +739,6 @@ export function CheckpointRail({
         </HudButton>
       </div>
 
-      {forkCheckpointId === selected.id ? (
-        <section
-          aria-label={`Fork ${selected.label} into a training direction`}
-          className="mt-3 rounded-md border border-research/35 bg-research/5 p-3"
-        >
-          <div className="flex flex-wrap items-start justify-between gap-2">
-            <div>
-              <p className="hud-eyebrow text-research">Branch training</p>
-              <strong className="mt-1 block text-[0.8125rem] text-bone">
-                Fork immutable weights into a new direction
-              </strong>
-              <p className="mt-1 max-w-2xl text-[0.6875rem] leading-5 text-muted">
-                The source checkpoint stays intact. Each branch can specialize
-                its own data and post-training recipe for code, chat, agents,
-                reasoning, or safety.
-              </p>
-            </div>
-            <HudButton
-              type="button"
-              variant="ghost"
-              onClick={() => setForkCheckpointId(null)}
-            >
-              Close
-            </HudButton>
-          </div>
-          <fieldset className="mt-3">
-            <legend className="sr-only">Training branch direction</legend>
-            <div className="flex flex-wrap gap-1.5">
-              {BRANCH_DIRECTIONS.map((direction) => (
-                <label
-                  key={direction.id}
-                  className={`cursor-pointer rounded-md border px-2.5 py-1.5 text-[0.6875rem] transition focus-within:ring-2 focus-within:ring-research/45 ${
-                    forkDirection === direction.id
-                      ? "border-research/55 bg-research/15 text-research"
-                      : "border-line/60 bg-void/35 text-muted hover:text-bone"
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name={`fork-direction-${selected.id}`}
-                    value={direction.id}
-                    checked={forkDirection === direction.id}
-                    onChange={() => setForkDirection(direction.id)}
-                    className="sr-only"
-                  />
-                  {direction.label}
-                </label>
-              ))}
-            </div>
-          </fieldset>
-          <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-            <label className="min-w-0 flex-1 text-[0.6875rem] text-muted">
-              Branch label (optional)
-              <input
-                type="text"
-                value={forkLabel}
-                maxLength={48}
-                onChange={(event) => setForkLabel(event.target.value)}
-                placeholder={`${selected.label} · ${forkDirection}`}
-                className="mt-1 w-full rounded-md border border-line bg-void px-2.5 py-1.5 text-[0.75rem] text-bone outline-none focus:border-research/55"
-              />
-            </label>
-            <HudButton
-              type="button"
-              variant="primary"
-              className="self-end"
-              onClick={() => {
-                onFork?.({
-                  checkpointId: selected.id,
-                  direction: forkDirection,
-                  label: forkLabel.trim() || undefined,
-                });
-                setForkCheckpointId(null);
-              }}
-            >
-              Create {forkDirection} branch
-            </HudButton>
-          </div>
-        </section>
-      ) : null}
     </section>
   );
 }

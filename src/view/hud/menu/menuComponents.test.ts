@@ -5,6 +5,7 @@ import { DEFAULT_CAMPAIGN_RULES } from '../../../sim/campaign'
 import { LablineMenuShell } from './LablineMenuShell'
 import { parseCheatMoneyAmount } from './cheatMoney'
 import { SettingsPanel } from './SettingsPanel'
+import { HOTKEY_ROWS } from '../HotkeyHelp'
 
 describe('LablineMenuShell', () => {
   it('renders the centered title identity and an external utility navigation', () => {
@@ -29,7 +30,8 @@ describe('LablineMenuShell', () => {
     expect(markup).toContain('role="dialog"')
     expect(markup).toContain('aria-modal="true"')
     expect(markup).toContain('aria-labelledby="pause-test"')
-    expect(markup).toContain('aria-label="Close pause menu"')
+    expect(markup).toContain('>Resume</button>')
+    expect(markup).not.toContain('aria-label="Close pause menu"')
   })
 })
 
@@ -39,6 +41,12 @@ describe('SettingsPanel', () => {
     expect(markup).toContain('>Interface</button>')
     expect(markup).toContain('>Video</button>')
     expect(markup).toContain('>Audio</button>')
+    expect(markup).toContain('settings-section-nav')
+    expect(markup).toContain('aria-current="page"')
+    expect(markup).toContain('role="region"')
+    expect(markup).toContain('aria-labelledby="settings-tab-interface"')
+    expect(markup).not.toContain('aria-controls=')
+    expect(markup).not.toContain('role="tablist"')
     expect(markup).not.toContain('>Gameplay</button>')
     expect(markup).not.toContain('>Cheats</button>')
   })
@@ -70,5 +78,19 @@ describe('SettingsPanel', () => {
     expect(parseCheatMoneyAmount('-10')).toBeNull()
     expect(parseCheatMoneyAmount('Infinity')).toBeNull()
     expect(parseCheatMoneyAmount('not money')).toBeNull()
+  })
+})
+
+describe('menu action contracts', () => {
+  it('keeps the save, transport, navigation, and help shortcuts visible', () => {
+    const actions = HOTKEY_ROWS.map((row) => row.action)
+    expect(actions).toEqual(expect.arrayContaining([
+      'Pause / resume',
+      'Quick save (autosave)',
+      'Same workspaces',
+      'Sub-tabs in current workspace',
+      'Toggle this help',
+    ]))
+    expect(HOTKEY_ROWS).toHaveLength(12)
   })
 })

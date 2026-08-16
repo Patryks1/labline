@@ -1,5 +1,6 @@
 import { ChatCircleDots } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
+import { HudRange } from './HudPrimitives'
 
 export type NegotiationStatus =
   "idle" | "countered" | "declined" | "agreed" | "signed";
@@ -150,8 +151,7 @@ export function NegotiationSlider({
           {suffix}
         </span>
       </span>
-      <input
-        type="range"
+      <HudRange
         min={min}
         max={max}
         step={step}

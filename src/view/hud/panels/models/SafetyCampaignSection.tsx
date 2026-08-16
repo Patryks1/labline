@@ -3,7 +3,7 @@ import { safetyCampaignEstimate } from '../../../../sim/systems/safetyCampaigns'
 import { formatTokens } from '../../../../sim/balance/data'
 import { money } from '../../format'
 import { GameCard, MeterBar, StatRow, BlockerList } from '../../ui/kit'
-import { HudButton } from '../../ui/HudPrimitives'
+import { HudButton, HudRange } from '../../ui/HudPrimitives'
 
 export function SafetyCampaignSection({
   model,
@@ -94,18 +94,19 @@ export function SafetyCampaignSection({
       </p>
       <div className="grid gap-1.5 min-[420px]:grid-cols-3">
         {(['targeted', 'standard', 'frontier'] as SafetyCampaignIntensity[]).map((option) => (
-          <button
+          <HudButton
             key={option}
             type="button"
+            variant="ghost"
             onClick={() => setIntensity(option)}
-            className={`rounded-md border px-2 py-1.5 text-[0.6875rem] capitalize transition ${
+            className={`!min-h-11 !rounded-md !px-2 !py-1.5 text-[0.6875rem] capitalize transition ${
               intensity === option
-                ? 'border-research/50 bg-research/15 text-research'
-                : 'border-line text-muted hover:text-bone'
+                ? '!border-research/50 !bg-research/15 !text-research'
+                : '!border-line !text-muted hover:!text-bone'
             }`}
           >
             {option}
-          </button>
+          </HudButton>
         ))}
       </div>
       {estimate ? (
@@ -117,13 +118,13 @@ export function SafetyCampaignSection({
       ) : null}
       <label className="mt-2 block text-[0.6875rem] text-muted">
         Researchers {researchers} / {researcherCount}
-        <input
+        <HudRange
           type="range"
           min={1}
           max={Math.max(1, researcherCount)}
           value={Math.min(Math.max(1, researcherCount), researchers)}
           onChange={(event) => setResearchers(Number(event.target.value))}
-          className="mt-1 w-full"
+          className="mt-1"
         />
       </label>
       <div className="mt-2 space-y-2">

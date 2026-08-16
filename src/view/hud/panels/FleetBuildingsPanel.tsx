@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { CaretRight } from '@phosphor-icons/react'
 import {
   getBuildDef,
   isBuildableKind,
@@ -18,6 +19,10 @@ import { facilityAnchorTiles } from '../../../sim/systems/worldAccess'
 import { money, num } from '../format'
 import { BuildingNameField } from '../ui/BuildingNameField'
 import { BuildingDisposeButtons } from './MapPanel'
+import {
+  activateBuildingRowFromClick,
+  activateBuildingRowFromKey,
+} from './FleetBuildingsPanelRowSemantics'
 import { ECONOMY } from '../../../sim/balance/economy'
 import {
   EmptyState,
@@ -79,6 +84,11 @@ function isPlayerFacility(t: MapTile): boolean {
   if (t.kind === 'empty' || isScenicKind(t.kind)) return false
   if (t.campusRole === 'pad') return false
   return isBuildableKind(t.kind)
+}
+
+function isBuildingRowControlTarget(target: EventTarget | null): boolean {
+  if (typeof Element === 'undefined' || !(target instanceof Element)) return false
+  return Boolean(target.closest('[data-building-row-control="true"]'))
 }
 
 /**
@@ -174,7 +184,11 @@ export function FleetBuildingsPanel() {
                         ? ` · ${getBuildDef(t.kind === 'office' ? 'hq' : (t.kind as never)).staffCap ?? '—'} desks`
                         : ''}
                     </div>
-                    <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
+                    <div
+                      className="mt-1.5"
+                      data-building-row-control="true"
+                      onClick={(e) => e.stopPropagation()}
+                    >
                       <BuildingDisposeButtons x={t.x} y={t.y} constructing compact />
                     </div>
                   </BuildingRow>
@@ -213,7 +227,11 @@ export function FleetBuildingsPanel() {
                       badge={kindLabel(t.kind)}
                     >
                       <BuildingDetail tile={t} staffResearchers={staff.researcher} />
-                      <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
+                      <div
+                        className="mt-1.5"
+                        data-building-row-control="true"
+                        onClick={(e) => e.stopPropagation()}
+                      >
                         <BuildingDisposeButtons x={t.x} y={t.y} constructing={false} compact />
                       </div>
                     </BuildingRow>
@@ -289,7 +307,7 @@ function BuildingDetail({
   )
 }
 
-function BuildingRow({
+export function BuildingRow({
   tile,
   active,
   badge,
@@ -305,32 +323,49 @@ function BuildingRow({
   const select = () => useGameStore.getState().selectTile(tile.x, tile.y)
 
   return (
-    <div
-      role="button"
+    <article
+      aria-keyshortcuts="Enter Space"
+      data-building-row="true"
       tabIndex={0}
-      onClick={select}
+      onClick={(event) => {
+        activateBuildingRowFromClick(isBuildingRowControlTarget(event.target), select)
+      }}
       onKeyDown={(event) => {
-        if (event.target !== event.currentTarget) return
-        if (event.key === 'Enter' || event.key === ' ') {
+        if (activateBuildingRowFromKey(event.key, event.target === event.currentTarget, select)) {
           event.preventDefault()
-          select()
         }
       }}
-      className={`hover-lift w-full rounded-lg border px-3 py-2 text-left transition ${
+      className={`hover-lift w-full cursor-pointer rounded-lg border px-3 py-2 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/50 ${
         active ? 'border-mint/50 bg-mint/10' : 'border-line/70 bg-panel-2/70 hover:border-mint/30'
       }`}
     >
       <div className="flex items-start justify-between gap-2 text-sm">
         <div
           className="min-w-0 flex-1"
+          data-building-row-control="true"
           onClick={(e) => e.stopPropagation()}
           onPointerDown={(e) => e.stopPropagation()}
         >
           <BuildingNameField tile={tile} compact />
         </div>
-        {badge ? <StatusChip tone={badgeTone}>{badge}</StatusChip> : null}
+        <div className="flex shrink-0 items-center gap-1.5">
+          {badge ? <StatusChip tone={badgeTone}>{badge}</StatusChip> : null}
+          <HudButton
+            type="button"
+            variant="ghost"
+            aria-label="Select building"
+            data-building-row-control="true"
+            className="min-h-11 min-w-11 border-transparent p-0 text-muted hover:text-mint sm:min-h-8 sm:min-w-8"
+            onClick={(event) => {
+              event.stopPropagation()
+              select()
+            }}
+          >
+            <CaretRight size="0.9rem" aria-hidden />
+          </HudButton>
+        </div>
       </div>
       {children}
-    </div>
+    </article>
   )
 }

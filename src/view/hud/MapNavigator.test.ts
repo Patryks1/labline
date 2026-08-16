@@ -20,6 +20,8 @@ describe('CloudVisibilityButton', () => {
     expect(markup).toContain('aria-label="Show clouds"')
     expect(markup).toContain('aria-pressed="true"')
     expect(markup).toContain('title="Hide clouds"')
+    expect(markup).toContain('min-h-11 min-w-11')
+    expect(markup).toContain('hud-button')
   })
 
   it('exposes its hidden state and show action accessibly', () => {

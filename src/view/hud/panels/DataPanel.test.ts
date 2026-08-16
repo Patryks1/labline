@@ -1,4 +1,4 @@
-import { createElement } from "react";
+import { createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { createGame } from "../../../sim/createGame";
@@ -10,7 +10,12 @@ import {
   estimateSynthBudget,
 } from "../../../sim/systems/data";
 import { useGameStore } from "../../../store/gameStore";
-import { DataPanel, SynthTeacherRoutingTable } from "./DataPanel";
+import {
+  DATA_MARKET_FILTER_GRID_CLASS,
+  DATA_MARKET_FILTER_SELECT_CLASS,
+  DataPanel,
+  SynthTeacherRoutingTable,
+} from "./DataPanel";
 
 describe("DataPanel market wiring", () => {
   it("renders the data panel with a market tab entry point", () => {
@@ -19,6 +24,54 @@ describe("DataPanel market wiring", () => {
     expect(markup).toContain("Data");
     expect(markup).toContain("Market");
     expect(markup).toContain("Corpus");
+    expect(markup).toContain("hud-input");
+    expect(markup).toContain("hud-button");
+  });
+
+  it("uses shared controls for source and market data selectors", () => {
+    useGameStore.setState({ state: createGame(6_407) });
+
+    const Panel = DataPanel as unknown as (props: {
+      initialTab?: "stocks" | "sources" | "market" | "synth";
+    }) => ReactElement;
+    const sourcesMarkup = renderToStaticMarkup(
+      createElement(Panel, { initialTab: "sources" }),
+    );
+    const marketMarkup = renderToStaticMarkup(
+      createElement(Panel, { initialTab: "market" }),
+    );
+
+    expect(sourcesMarkup).toContain("hud-button");
+    expect(marketMarkup).toContain("Data type filter");
+    expect(marketMarkup).toContain("hud-button");
+    expect(DATA_MARKET_FILTER_GRID_CLASS).toContain("xl:grid-cols-3");
+    expect(DATA_MARKET_FILTER_GRID_CLASS).not.toContain("lg:grid-cols-4");
+    expect(DATA_MARKET_FILTER_SELECT_CLASS).toContain("w-full");
+  });
+
+  it("surfaces hygiene consequences, domain buying, and compact market actions", () => {
+    useGameStore.setState({ state: createGame(6_409) });
+    const Panel = DataPanel as unknown as (props: {
+      initialTab?: "stocks" | "sources" | "market" | "synth";
+    }) => ReactElement;
+    const stocksMarkup = renderToStaticMarkup(
+      createElement(Panel, { initialTab: "stocks" }),
+    );
+    const sourcesMarkup = renderToStaticMarkup(
+      createElement(Panel, { initialTab: "sources" }),
+    );
+    const marketMarkup = renderToStaticMarkup(
+      createElement(Panel, { initialTab: "market" }),
+    );
+
+    expect(stocksMarkup).toContain("Hygiene load");
+    expect(stocksMarkup).toContain(">Buy<");
+    expect(stocksMarkup).toContain("hud-button--danger");
+    expect(stocksMarkup).toContain(">Prune all<");
+    expect(sourcesMarkup).not.toContain("Watch:");
+    expect(marketMarkup).toContain("Buy all");
+    expect(marketMarkup).not.toContain("Buy all matching");
+    expect(marketMarkup).not.toContain("Buy amount ·");
   });
 
   it("wires store lot buys to the instant settlement path", () => {

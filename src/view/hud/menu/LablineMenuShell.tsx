@@ -1,5 +1,5 @@
 import { useEffect, useRef, type KeyboardEvent, type ReactNode } from 'react'
-import { X } from '@phosphor-icons/react'
+import { HudButton } from '../ui/HudPrimitives'
 
 interface LablineMenuShellProps {
   variant: 'title' | 'pause'
@@ -122,14 +122,14 @@ export function LablineMenuShell({
       </header>
 
       {variant === 'pause' && onRequestClose ? (
-        <button
+        <HudButton
           type="button"
+          variant="ghost"
           onClick={onRequestClose}
-          aria-label="Close pause menu"
-          className="absolute right-4 top-4 z-20 flex min-h-11 min-w-11 items-center justify-center border border-line bg-void/70 text-muted backdrop-blur hover:border-mint/40 hover:text-bone"
+          className="absolute right-4 top-4 z-20 flex min-h-11 items-center justify-center border border-line bg-void/70 px-3 text-[0.6875rem] font-semibold text-muted backdrop-blur hover:border-mint/40 hover:text-bone"
         >
-          <X size="1.1rem" />
-        </button>
+          Resume
+        </HudButton>
       ) : null}
 
       <div className={`labline-menu-stage relative z-[1] h-full min-h-0 px-4 pb-5 sm:px-8 ${utilityNav ? 'labline-menu-stage--with-utility' : 'flex items-center justify-center'}`}>

@@ -3,7 +3,6 @@ import type { BenchmarkMetricId } from '../../../sim/types'
 import { formatParams } from '../../../sim/balance/training'
 import {
   EVALUATION_MARKETS,
-  SUITE_METRICS,
   evaluationMarketsForModel,
   suiteForEvaluationMarket,
   type EvaluationMarket,
@@ -15,8 +14,14 @@ import {
   buildAudienceReviewGroups,
   type PlanAudienceReview,
 } from './planReviews'
+import {
+  benchmarkMetricsForSuite,
+  publicBenchmarkScore,
+} from '../data/benchmarkViewModel'
 import { BenchmarkCompareTab } from './BenchmarkCompareTab'
+import { BenchmarkEntryPoint } from './models/BenchmarkEntryPoint'
 import { GameCard, MeterBar, SegmentedTabs, StatRow } from '../ui/kit'
+import { HudFilterBar } from '../ui/HudFilterBar'
 import {
   EmptyState,
   HudButton,
@@ -49,14 +54,14 @@ export function BenchmarksPanel() {
     return sortId === 'cap'
       ? marketModels
       : [...marketModels].sort((a, b) => {
-          const sa = a.model.benchmarkSuites?.[suite]?.[sortId] ?? 0
-          const sb = b.model.benchmarkSuites?.[suite]?.[sortId] ?? 0
+          const sa = publicBenchmarkScore(a.model, suite, sortId) ?? 0
+          const sb = publicBenchmarkScore(b.model, suite, sortId) ?? 0
           return sb - sa
         })
   }, [state, sortId, market])
 
   const suiteId = suiteForEvaluationMarket(market)
-  const metrics = SUITE_METRICS[suiteId]
+  const metrics = benchmarkMetricsForSuite(suiteId)
 
   const visible = showAll ? rows : rows.slice(0, PAGE)
   const hidden = Math.max(0, rows.length - PAGE)
@@ -70,7 +75,7 @@ export function BenchmarksPanel() {
     for (const d of metrics) {
       let best = -1
       for (const r of rows) {
-        const s = r.model.benchmarkSuites?.[suiteId]?.[d.id] ?? 0
+        const s = publicBenchmarkScore(r.model, suiteId, d.id) ?? 0
         if (s > best) best = s
       }
       map[d.id] = best
@@ -101,7 +106,7 @@ export function BenchmarksPanel() {
     for (const r of rows) {
       if (!r.isPlayer) continue
       const scores = metrics.map(
-        (d) => r.model.benchmarkSuites?.[suiteId]?.[d.id] ?? 0,
+        (d) => publicBenchmarkScore(r.model, suiteId, d.id) ?? 0,
       )
       const avg =
         scores.length === 0
@@ -153,11 +158,19 @@ export function BenchmarksPanel() {
     <PanelScaffold
       eyebrow="Evals"
       title="Benchmarks"
-      description="Seasons, audits & field reviews."
+      description="Board, compare, and reviews."
       actions={
-        activeSeason ? (
-          <StatusChip tone="research">{activeSeason.name}</StatusChip>
-        ) : undefined
+        <div className="flex items-center gap-1.5">
+          <BenchmarkEntryPoint
+            context={{ kind: 'public' }}
+            variant="ghost"
+            title="Browse public benchmark evidence. Private checkpoint evidence stays in Models."
+            onOpen={() => setTab('leaderboard')}
+          />
+          {activeSeason ? (
+            <StatusChip tone="research">{activeSeason.name}</StatusChip>
+          ) : null}
+        </div>
       }
     >
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -231,38 +244,52 @@ export function BenchmarksPanel() {
       <div key={tab} className="panel-swap mt-3 space-y-3">
         {tab === 'leaderboard' ? (
           <>
-            <div
-              className="flex flex-wrap gap-1"
-              aria-label="Evaluation market"
-            >
-              {EVALUATION_MARKETS.map((candidate) => (
-                <SortChip
-                  key={candidate.id}
-                  active={market === candidate.id}
-                  onClick={() => {
-                    setMarket(candidate.id)
-                    setSortId('cap')
-                    setShowAll(false)
-                  }}
-                  label={candidate.label}
-                />
-              ))}
-            </div>
-            <div className="flex flex-wrap gap-1">
-              <SortChip
-                active={sortId === 'cap'}
-                onClick={() => setSortId('cap')}
-                label="Capability"
-              />
-              {metrics.map((d) => (
-                <SortChip
-                  key={d.id}
-                  active={sortId === d.id}
-                  onClick={() => setSortId(d.id)}
-                  label={d.short}
-                />
-              ))}
-            </div>
+            <HudFilterBar
+              ariaLabel="Benchmark filters"
+              activeCount={(market === 'language' ? 0 : 1) + (sortId === 'cap' ? 0 : 1)}
+              onClear={() => {
+                setMarket('language')
+                setSortId('cap')
+                setShowAll(false)
+              }}
+              groups={[
+                {
+                  id: 'market',
+                  label: 'Market',
+                  description: 'Public evaluation suite',
+                  options: EVALUATION_MARKETS.map((candidate) => ({
+                    id: candidate.id,
+                    label: candidate.label,
+                    active: market === candidate.id,
+                    onSelect: () => {
+                      setMarket(candidate.id)
+                      setSortId('cap')
+                      setShowAll(false)
+                    },
+                  })),
+                },
+                {
+                  id: 'metric',
+                  label: 'Rank by',
+                  description: 'Capability or suite score',
+                  options: [
+                    {
+                      id: 'capability',
+                      label: 'Capability',
+                      active: sortId === 'cap',
+                      onSelect: () => setSortId('cap'),
+                    },
+                    ...metrics.map((metric) => ({
+                      id: metric.id,
+                      label: metric.short,
+                      active: sortId === metric.id,
+                      onSelect: () => setSortId(metric.id),
+                      title: metric.label,
+                    })),
+                  ],
+                },
+              ]}
+            />
 
             <div className="flex flex-wrap items-center gap-2 text-[0.6875rem] text-muted">
               <StatusChip tone="positive">PUBLIC</StatusChip>
@@ -393,7 +420,7 @@ export function BenchmarksPanel() {
                         </td>
                         {metrics.map((d) => {
                           const s =
-                            r.model.benchmarkSuites?.[suiteId]?.[d.id] ?? 0
+                            publicBenchmarkScore(r.model, suiteId, d.id) ?? 0
                           const isLead =
                             s >= (leaders[d.id] ?? 0) - 0.05 && s > 1
                           return (
@@ -537,28 +564,6 @@ function ReviewsTab({
         </div>
       ) : null}
     </GameCard>
-  )
-}
-
-function SortChip({
-  label,
-  active,
-  onClick,
-}: {
-  label: string
-  active: boolean
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`min-h-11 rounded-md px-2.5 py-1 text-[0.75rem] transition sm:min-h-0 ${
-        active ? 'bg-mint text-void' : 'bg-panel-2 text-muted hover:text-bone'
-      }`}
-    >
-      {label}
-    </button>
   )
 }
 

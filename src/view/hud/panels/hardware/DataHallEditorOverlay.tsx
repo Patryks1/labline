@@ -10,7 +10,9 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
   ArrowCounterClockwise,
+  ArrowLeft,
   ArrowsOutCardinal,
+  Backspace,
   Cube,
   Cpu,
   HardDrives,
@@ -18,7 +20,6 @@ import {
   Snowflake,
   SquaresFour,
   Trash,
-  X,
 } from "@phosphor-icons/react";
 import type {
   DataHallConstructionProject,
@@ -54,6 +55,18 @@ import { facilityAnchorTiles } from "../../../../sim/systems/worldAccess";
 import { resolveRackSku } from "../../../../sim/systems/racks";
 import { useGameStore } from "../../../../store/gameStore";
 import { money, mw, num } from "../../format";
+import {
+  BlockerList,
+  MeterBar,
+  SegmentedTabs,
+  StatRow,
+} from "../../ui/kit";
+import {
+  HudButton,
+  HudInput,
+  MetricTile,
+} from "../../ui/HudPrimitives";
+import { ResponsiveDonut } from "../../ui/dataViz/ResponsiveDonut";
 import {
   captureHallClock,
   projectHallPlanForAnalysis,
@@ -114,47 +127,40 @@ export function HallMobileWorkspaceTabs({
 }) {
   return (
     <nav
-      className="order-2 hidden grid-cols-3 border-y border-line/80 bg-panel/98 px-2 py-1 max-[900px]:grid"
-      aria-label="Hall editor workspace"
-      role="tablist"
+      className="order-2 hidden border-y border-line/80 bg-panel/98 px-2 py-1 max-[900px]:grid"
     >
-      {HALL_MOBILE_WORKSPACES.map((workspace) => {
-        const activeBadge =
-          workspace.id === "palette" && placementActive
-            ? "Placement selected"
-            : workspace.id === "inspect" && hasSelection
-              ? "Asset selected"
-              : null;
-        return (
-          <button
-            key={workspace.id}
-            id={`hall-mobile-tab-${workspace.id}`}
-            type="button"
-            role="tab"
-            aria-selected={active === workspace.id}
-            aria-controls={`hall-mobile-panel-${workspace.id}`}
-            aria-label={
-              activeBadge
-                ? `${workspace.label}, ${activeBadge.toLocaleLowerCase()}`
-                : workspace.label
-            }
-            onClick={() => onChange(workspace.id)}
-            className={`relative min-h-11 rounded-lg px-2 text-[0.75rem] font-medium transition ${
-              active === workspace.id
-                ? "bg-mint/15 text-mint"
-                : "text-muted hover:bg-panel-2 hover:text-bone"
-            }`}
-          >
-            {workspace.label}
-            {activeBadge ? (
-              <span
-                aria-hidden="true"
-                className="absolute right-2 top-2 size-1.5 rounded-full bg-amber"
-              />
-            ) : null}
-          </button>
-        );
-      })}
+      <SegmentedTabs
+        ariaLabel="Hall editor workspace"
+        active={active}
+        onChange={(id) => onChange(id as HallMobileWorkspace)}
+        idPrefix="hall-mobile-tab"
+        items={HALL_MOBILE_WORKSPACES.map((workspace) => {
+          const activeBadge =
+            workspace.id === "palette" && placementActive
+              ? "placement selected"
+              : workspace.id === "inspect" && hasSelection
+                ? "asset selected"
+                : null;
+          return {
+            id: workspace.id,
+            ariaLabel: activeBadge
+              ? `${workspace.label}, ${activeBadge}`
+              : workspace.label,
+            panelId: `hall-mobile-panel-${workspace.id}`,
+            label: (
+              <span className="relative inline-flex min-h-11 items-center px-2">
+                {workspace.label}
+                {activeBadge ? (
+                  <span
+                    aria-hidden="true"
+                    className="absolute right-0 top-2 size-1.5 rounded-full bg-amber"
+                  />
+                ) : null}
+              </span>
+            ),
+          };
+        })}
+      />
     </nav>
   );
 }
@@ -1338,7 +1344,7 @@ export function DataHallEditorOverlay() {
 
   return (
     <section
-      className="fixed inset-0 z-[100] flex flex-col overflow-y-auto bg-[#070b10] text-bone max-[900px]:grid max-[900px]:h-[100dvh] max-[900px]:grid-rows-[minmax(7rem,1fr)_auto_minmax(6rem,36dvh)_auto] max-[900px]:overflow-hidden xl:grid xl:grid-cols-[20rem_minmax(0,1fr)_20rem] xl:grid-rows-[minmax(0,1fr)_auto] xl:overflow-hidden"
+      className="fixed inset-0 z-[100] flex flex-col overflow-y-auto bg-void text-bone max-[900px]:grid max-[900px]:h-[100dvh] max-[900px]:grid-rows-[minmax(7rem,1fr)_auto_minmax(6rem,36dvh)_auto] max-[900px]:overflow-hidden xl:grid xl:grid-cols-[20rem_minmax(0,1fr)_20rem] xl:grid-rows-[minmax(0,1fr)_auto] xl:overflow-hidden"
       role="dialog"
       aria-modal="true"
       aria-label="Data Hall Editor"
@@ -1393,22 +1399,23 @@ export function DataHallEditorOverlay() {
             className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted"
             size={15}
           />
-          <input
+          <HudInput
             disabled={Boolean(constructionProject)}
             value={paletteSearch}
             onChange={(event) => setPaletteSearch(event.target.value)}
             placeholder="Search racks and equipment…"
-            className="h-9 w-full rounded-lg border border-line/80 bg-void/60 pl-8 pr-8 text-[0.75rem] text-bone outline-none placeholder:text-muted/70 focus:border-mint/60 focus:ring-2 focus:ring-mint/15 disabled:opacity-50 max-[900px]:h-11"
+            className="h-11 w-full pl-8 pr-8 text-[0.75rem] max-[900px]:h-11"
           />
           {paletteSearch ? (
-            <button
+            <HudButton
               type="button"
+              variant="ghost"
               onClick={() => setPaletteSearch("")}
               aria-label="Clear search"
-              className="absolute right-0 top-1/2 grid size-11 -translate-y-1/2 place-items-center rounded text-muted hover:bg-mint/10 hover:text-mint"
+              className="absolute right-0 top-1/2 grid size-11 -translate-y-1/2 place-items-center !border-0 !p-0 text-muted"
             >
-              <X size={12} />
-            </button>
+              <Backspace size={12} />
+            </HudButton>
           ) : null}
         </label>
 
@@ -1423,8 +1430,9 @@ export function DataHallEditorOverlay() {
           </span>
         </div>
 
-        <button
+        <HudButton
           type="button"
+          variant="secondary"
           disabled={Boolean(constructionProject)}
           onClick={() => {
             if (constructionProject) {
@@ -1441,7 +1449,7 @@ export function DataHallEditorOverlay() {
             }
             openRackDesigner(facilityId);
           }}
-          className="mt-3 flex w-full items-center gap-3 rounded-lg border border-mint/35 bg-mint/10 px-3 py-2.5 text-left transition hover:border-mint/65 hover:bg-mint/15"
+          className="mt-3 flex min-h-11 w-full items-center gap-3 rounded-lg border border-mint/35 bg-mint/10 px-3 py-2.5 text-left transition hover:border-mint/65 hover:bg-mint/15"
         >
           <span className="grid size-9 shrink-0 place-items-center rounded-md bg-mint text-void">
             <Cpu size={19} weight="duotone" />
@@ -1455,7 +1463,7 @@ export function DataHallEditorOverlay() {
               hall.
             </span>
           </span>
-        </button>
+        </HudButton>
 
         <PaletteGroup title="Racks · buy & place">
           {visibleRackCards.length ? (
@@ -1632,14 +1640,15 @@ export function DataHallEditorOverlay() {
             </>
           )}
         </div>
-        <button
+        <HudButton
           type="button"
+          variant="ghost"
           onClick={requestClose}
-          aria-label="Close Hall Operations editor"
+          aria-label="Back to map"
           className="absolute right-[max(0.75rem,env(safe-area-inset-right))] top-[max(0.75rem,env(safe-area-inset-top))] z-10 grid size-11 place-items-center rounded-lg border border-line/80 bg-void/90 text-muted shadow-xl transition hover:border-mint/50 hover:text-bone focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
         >
-          <X size={17} />
-        </button>
+          <ArrowLeft size={17} />
+        </HudButton>
         {previewStrategy ? (
           <div className="pointer-events-none absolute right-3 top-16 min-w-56 rounded-lg border border-mint/50 bg-void/90 px-3 py-2 shadow-xl max-[900px]:hidden">
             <p className="font-mono text-[0.625rem] uppercase tracking-[0.18em] text-mint">
@@ -1724,8 +1733,9 @@ export function DataHallEditorOverlay() {
             </p>
           </div>
           {mode ? (
-            <button
+            <HudButton
               type="button"
+              variant="ghost"
               className="min-h-11 shrink-0 rounded-lg border border-line px-3 text-[0.75rem] text-muted hover:border-mint/45 hover:text-bone"
               onClick={() => {
                 repeatPlacement.current = false;
@@ -1734,35 +1744,38 @@ export function DataHallEditorOverlay() {
               }}
             >
               Cancel
-            </button>
+            </HudButton>
           ) : null}
         </div>
 
         <div className="mt-3 grid grid-cols-3 gap-2" role="group" aria-label="Floor editing controls">
-          <button
+          <HudButton
             type="button"
-            className="hud-button hud-button--secondary !min-h-11"
+            variant="secondary"
+            className="!min-h-11"
             disabled={!past.length}
             onClick={undo}
           >
             Undo
-          </button>
-          <button
+          </HudButton>
+          <HudButton
             type="button"
-            className="hud-button hud-button--secondary !min-h-11"
+            variant="secondary"
+            className="!min-h-11"
             disabled={!future.length}
             onClick={redo}
           >
             Redo
-          </button>
-          <button
+          </HudButton>
+          <HudButton
             type="button"
+            variant={showGrid ? "primary" : "secondary"}
             aria-pressed={showGrid}
-            className={`hud-button !min-h-11 ${showGrid ? "hud-button--primary" : "hud-button--secondary"}`}
+            className="!min-h-11"
             onClick={() => setShowGrid((value) => !value)}
           >
             Grid
-          </button>
+          </HudButton>
         </div>
 
         <p className="mt-3 font-mono text-[0.5625rem] uppercase tracking-widest text-muted">
@@ -1774,15 +1787,16 @@ export function DataHallEditorOverlay() {
           aria-label="Hall diagnostic overlay"
         >
           {HALL_OVERLAYS.map((overlay) => (
-            <button
+            <HudButton
               key={overlay.id}
               type="button"
-              className={`hud-button !min-h-11 shrink-0 whitespace-nowrap ${overlayMode === overlay.id ? "hud-button--primary" : "hud-button--secondary"}`}
+              variant={overlayMode === overlay.id ? "primary" : "secondary"}
+              className="!min-h-11 shrink-0 whitespace-nowrap"
               aria-pressed={overlayMode === overlay.id}
               onClick={() => setOverlayMode(overlay.id)}
             >
               {overlay.label}
-            </button>
+            </HudButton>
           ))}
         </div>
 
@@ -1792,16 +1806,17 @@ export function DataHallEditorOverlay() {
         <div className="mt-1 grid grid-cols-3 gap-2" role="group" aria-label="Automatic hall layout preview">
           {(["density", "efficiency", "resilience"] as const).map(
             (strategy) => (
-              <button
+              <HudButton
                 key={strategy}
                 type="button"
+                variant={previewStrategy === strategy ? "primary" : "secondary"}
                 disabled={Boolean(constructionProject)}
-                className={`hud-button !min-h-11 capitalize ${previewStrategy === strategy ? "hud-button--primary" : "hud-button--secondary"}`}
+                className="!min-h-11 capitalize"
                 aria-pressed={previewStrategy === strategy}
                 onClick={() => applyStrategy(strategy)}
               >
                 {strategy}
-              </button>
+              </HudButton>
             ),
           )}
         </div>
@@ -1824,14 +1839,15 @@ export function DataHallEditorOverlay() {
                 "Nothing selected"}
             </h2>
           </div>
-          <button
+          <HudButton
             type="button"
+            variant="ghost"
             className="grid min-h-11 min-w-11 place-items-center rounded-lg text-muted hover:bg-panel-2 hover:text-bone"
             onClick={requestClose}
-            aria-label="Close editor"
+            aria-label="Back to map"
           >
-            <X />
-          </button>
+            <ArrowLeft />
+          </HudButton>
         </div>
         {selectedObject ? (
           <div className="mt-4 space-y-2 text-[0.75rem]">
@@ -1853,29 +1869,32 @@ export function DataHallEditorOverlay() {
               label="Rotation"
               value={`${selectedObject.rotation}°`}
             />
-            <button
+            <HudButton
               type="button"
+              variant="secondary"
               disabled={Boolean(constructionProject)}
-              className="hud-button hud-button--secondary flex !min-h-11 w-full items-center justify-center gap-2"
+              className="flex !min-h-11 w-full items-center justify-center gap-2"
               onClick={rotateSelected}
             >
               <ArrowCounterClockwise size={14} />
               Rotate · R
-            </button>
+            </HudButton>
             {!selectedObject.reserved ? (
-              <button
+              <HudButton
                 type="button"
+                variant="secondary"
                 disabled={Boolean(constructionProject)}
-                className="hud-button hud-button--secondary !min-h-11 w-full"
+                className="!min-h-11 w-full"
                 onClick={duplicateSelected}
               >
                 Duplicate
-              </button>
+              </HudButton>
             ) : null}
-            <button
+            <HudButton
               type="button"
+              variant="danger"
               disabled={Boolean(constructionProject)}
-              className="hud-button hud-button--danger flex !min-h-11 w-full items-center justify-center gap-2"
+              className="flex !min-h-11 w-full items-center justify-center gap-2"
               onClick={removeSelected}
             >
               <Trash size={14} />
@@ -1886,7 +1905,7 @@ export function DataHallEditorOverlay() {
                     ? "Return to staging"
                     : "Remove order draft"
                   : "Delete"}
-            </button>
+            </HudButton>
           </div>
         ) : selectedWall ? (
           <div className="mt-4 space-y-2">
@@ -1894,15 +1913,16 @@ export function DataHallEditorOverlay() {
               label="Wall"
               value={`${Math.abs(selectedWall.x2 - selectedWall.x1) + Math.abs(selectedWall.z2 - selectedWall.z1)} cells`}
             />
-            <button
+            <HudButton
               type="button"
+              variant="danger"
               disabled={Boolean(constructionProject)}
-              className="hud-button hud-button--danger flex !min-h-11 w-full items-center justify-center gap-2"
+              className="flex !min-h-11 w-full items-center justify-center gap-2"
               onClick={removeSelected}
             >
               <Trash size={14} />
               Delete wall
-            </button>
+            </HudButton>
           </div>
         ) : null}
         <div
@@ -2131,50 +2151,55 @@ export function DataHallEditorOverlay() {
 
       <footer className="order-4 flex min-h-[4.5rem] flex-wrap items-center gap-2 border-t border-line/80 bg-panel px-3 py-2 max-[900px]:sticky max-[900px]:bottom-0 max-[900px]:z-30 max-[900px]:min-h-0 max-[900px]:pl-[max(0.75rem,env(safe-area-inset-left))] max-[900px]:pr-[max(0.75rem,env(safe-area-inset-right))] max-[900px]:pb-[max(0.5rem,env(safe-area-inset-bottom))] xl:col-span-3 xl:order-none xl:flex-nowrap">
         <div className="hidden w-full grid-cols-[minmax(5.5rem,0.65fr)_minmax(0,1.35fr)] gap-2 max-[900px]:grid">
-          <button
+          <HudButton
             type="button"
-            className="hud-button hud-button--secondary !min-h-11"
+            variant="secondary"
+            className="!min-h-11"
             onClick={requestClose}
           >
             Done
-          </button>
-          <button
+          </HudButton>
+          <HudButton
             type="button"
-            className={`hud-button !min-h-11 min-w-0 ${canSchedulePlan && !constructionProject ? "hud-button--primary" : "hud-button--danger"}`}
+            variant={canSchedulePlan && !constructionProject ? "primary" : "danger"}
+            className="!min-h-11 min-w-0"
             disabled={planActionDisabled}
             title={planActionTitle}
             onClick={apply}
           >
             <span className="truncate">{mobilePlanActionLabel}</span>
-          </button>
+          </HudButton>
         </div>
 
         <div className="flex w-full flex-wrap items-center gap-2 max-[900px]:hidden xl:flex-nowrap">
-          <button
+          <HudButton
             type="button"
-            className="hud-button hud-button--secondary"
+            variant="secondary"
+            className=""
             disabled={!past.length}
             onClick={undo}
           >
             Undo
-          </button>
-          <button
+          </HudButton>
+          <HudButton
             type="button"
-            className="hud-button hud-button--secondary"
+            variant="secondary"
+            className=""
             disabled={!future.length}
             onClick={redo}
           >
             Redo
-          </button>
-          <button
+          </HudButton>
+          <HudButton
             type="button"
+            variant={showGrid ? "primary" : "secondary"}
             aria-pressed={showGrid}
-            className={`hud-button flex items-center gap-1.5 ${showGrid ? "hud-button--primary" : "hud-button--secondary"}`}
+            className="flex items-center gap-1.5"
             onClick={() => setShowGrid((value) => !value)}
           >
             <SquaresFour size={14} />
             Grid
-          </button>
+          </HudButton>
           <div className="mx-2 h-7 w-px bg-line" />
           <div
             className="flex max-w-full items-center gap-1 overflow-x-auto"
@@ -2182,16 +2207,17 @@ export function DataHallEditorOverlay() {
             aria-label="Hall diagnostic overlay"
           >
             {HALL_OVERLAYS.map((overlay) => (
-              <button
+              <HudButton
                 key={overlay.id}
                 type="button"
-                className={`hud-button whitespace-nowrap ${overlayMode === overlay.id ? "hud-button--primary" : "hud-button--secondary"}`}
+                variant={overlayMode === overlay.id ? "primary" : "secondary"}
+                className="whitespace-nowrap"
                 aria-pressed={overlayMode === overlay.id}
                 title={overlay.description}
                 onClick={() => setOverlayMode(overlay.id)}
               >
                 {overlay.label}
-              </button>
+              </HudButton>
             ))}
           </div>
           <div className="mx-2 hidden h-7 w-px bg-line 2xl:block" />
@@ -2200,16 +2226,17 @@ export function DataHallEditorOverlay() {
           </span>
           {(["density", "efficiency", "resilience"] as const).map(
             (strategy) => (
-              <button
+              <HudButton
                 key={strategy}
                 type="button"
+                variant={previewStrategy === strategy ? "primary" : "secondary"}
                 disabled={Boolean(constructionProject)}
-                className={`hud-button capitalize ${previewStrategy === strategy ? "hud-button--primary" : "hud-button--secondary"}`}
+                className="capitalize"
                 aria-pressed={previewStrategy === strategy}
                 onClick={() => applyStrategy(strategy)}
               >
                 {strategy}
-              </button>
+              </HudButton>
             ),
           )}
           <p
@@ -2218,22 +2245,24 @@ export function DataHallEditorOverlay() {
           >
             {message}
           </p>
-          <button
+          <HudButton
             type="button"
-            className="hud-button hud-button--secondary"
+            variant="secondary"
+            className=""
             onClick={requestClose}
           >
             Done
-          </button>
-          <button
+          </HudButton>
+          <HudButton
             type="button"
-            className={`hud-button min-w-40 ${canSchedulePlan && !constructionProject ? "hud-button--primary" : "hud-button--danger"}`}
+            variant={canSchedulePlan && !constructionProject ? "primary" : "danger"}
+            className="min-w-40"
             disabled={planActionDisabled}
             title={planActionTitle}
             onClick={apply}
           >
             {planActionLabel}
-          </button>
+          </HudButton>
         </div>
       </footer>
     </section>
@@ -2270,17 +2299,18 @@ function PaletteButton({
   onClick: () => void;
 }) {
   return (
-    <button
+    <HudButton
       type="button"
+      variant={active ? "primary" : "ghost"}
       disabled={disabled}
       onClick={onClick}
-      className={`flex min-h-10 w-full items-center justify-between border px-2 text-left text-[0.75rem] ${active ? "border-mint bg-mint/10 text-mint" : "border-line bg-void/40 text-bone hover:border-mint/40"} disabled:opacity-40`}
+      className={`flex min-h-11 w-full items-center justify-between border px-2 text-left text-[0.75rem] ${active ? "border-mint bg-mint/10 text-mint" : "border-line bg-void/40 text-bone hover:border-mint/40"} disabled:opacity-40`}
     >
       <span className="truncate">{label}</span>
       <span className="ml-2 shrink-0 font-mono text-[0.625rem] text-muted">
         {detail}
       </span>
-    </button>
+    </HudButton>
   );
 }
 function RackPaletteCard({
@@ -2313,8 +2343,9 @@ function RackPaletteCard({
   onDragEnd: () => void;
 }) {
   return (
-    <button
+    <HudButton
       type="button"
+      variant="ghost"
       disabled={disabled}
       draggable={!disabled}
       aria-pressed={active}
@@ -2356,7 +2387,7 @@ function RackPaletteCard({
           </span>
         </span>
       </span>
-    </button>
+    </HudButton>
   );
 }
 function RackCardVisual({
@@ -2376,16 +2407,16 @@ function RackCardVisual({
   return (
     <span
       aria-hidden="true"
-      className="relative m-2 mr-0 block h-[4.1rem] w-11 shrink-0 overflow-hidden rounded border border-white/15 bg-[#111a21] shadow-inner"
+      className="relative m-2 mr-0 block h-[4.1rem] w-11 shrink-0 overflow-hidden rounded border border-white/15 bg-void shadow-inner"
       style={{
-        boxShadow: `inset 0 0 0 1px hsl(${hue} 55% 45% / .18), 0 6px 16px #0008`,
+        boxShadow: `inset 0 0 0 1px hsl(${hue} 55% 45% / .18), 0 6px 16px color-mix(in srgb, var(--color-void) 55%, transparent)`,
       }}
     >
       <span className="absolute inset-x-1 top-1 h-1 rounded-sm bg-white/10" />
       {Array.from({ length: Math.min(7, 3 + generation) }, (_, index) => (
         <span
           key={index}
-          className="absolute left-1 right-1 h-[4px] rounded-[1px] bg-[#283743] ring-1 ring-black/70"
+          className="absolute left-1 right-1 h-[4px] rounded-[1px] bg-panel-2 ring-1 ring-black/70"
           style={{ top: `${12 + index * 7}px` }}
         >
           <span
@@ -2423,8 +2454,9 @@ function EquipmentPaletteCard({
   const Icon =
     kind === "cooling" ? Snowflake : kind === "power" ? Cube : HardDrives;
   return (
-    <button
+    <HudButton
       type="button"
+      variant="ghost"
       disabled={disabled}
       draggable={!disabled}
       aria-pressed={active}
@@ -2455,16 +2487,11 @@ function EquipmentPaletteCard({
       <span className="mt-1 block font-mono text-[0.5625rem] text-muted">
         {price}
       </span>
-    </button>
+    </HudButton>
   );
 }
 function InspectorRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between gap-3 border-b border-line/60 py-1.5">
-      <span className="text-muted">{label}</span>
-      <span className="font-mono text-bone">{value}</span>
-    </div>
-  );
+  return <StatRow label={label} value={value} />;
 }
 function Metric({
   label,
@@ -2477,18 +2504,7 @@ function Metric({
   good?: boolean;
   warning?: boolean;
 }) {
-  return (
-    <div className="border border-line bg-void/40 p-2">
-      <span className="block text-[0.625rem] uppercase text-muted">
-        {label}
-      </span>
-      <strong
-        className={`mt-1 block font-mono text-sm ${warning ? "text-amber" : good ? "text-mint" : "text-bone"}`}
-      >
-        {value}
-      </strong>
-    </div>
-  );
+  return <MetricTile label={label} value={value} tone={warning ? "warning" : good ? "positive" : "neutral"} />;
 }
 function PlanDeltaRow({
   label,
@@ -2565,12 +2581,13 @@ function ConstructionTimeline({
           {project.remainingDays}d left
         </strong>
       </div>
-      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-void">
-        <div
-          className="h-full rounded-full bg-violet-300 transition-[width]"
-          style={{ width: `${progress}%` }}
-        />
-      </div>
+      <MeterBar
+        label="Progress"
+        value={progress / 100}
+        detail={`${Math.round(progress)}%`}
+        tone="research"
+        live
+      />
       <div className="mt-3 grid grid-cols-3 gap-1">
         <ConstructionStage
           label="Build"
@@ -2665,36 +2682,19 @@ function HallFootprintMix({
   planned: number;
 }) {
   const footprint = installed + ordered + planned;
-  const total = Math.max(1, footprint);
-  const installedShare = Math.min(100, Math.max(0, (installed / total) * 100));
-  const orderedShare = Math.min(
-    100 - installedShare,
-    Math.max(0, (ordered / total) * 100),
-  );
-  const plannedShare = Math.min(
-    100 - installedShare - orderedShare,
-    Math.max(0, (planned / total) * 100),
-  );
   return (
-    <div
-      role="img"
-      aria-label={`${installed} assigned, ${ordered} order-draft, and ${planned} reserved rack-width units physically drawn in this plan`}
-      className="relative grid size-[4.75rem] shrink-0 place-items-center rounded-full"
-      style={{
-        background: `conic-gradient(#48d7d1 0 ${installedShare}%, #e3a94f ${installedShare}% ${installedShare + orderedShare}%, #8b8cf8 ${installedShare + orderedShare}% ${installedShare + orderedShare + plannedShare}%, #263540 ${installedShare + orderedShare + plannedShare}% 100%)`,
-      }}
-    >
-      <span className="grid size-[3.25rem] place-items-center rounded-full border border-line/70 bg-panel text-center shadow-inner">
-        <span>
-          <strong className="block font-mono text-sm leading-none text-bone">
-            {footprint}
-          </strong>
-          <small className="mt-0.5 block font-mono text-[0.5rem] uppercase text-muted">
-            placed
-          </small>
-        </span>
-      </span>
-    </div>
+    <ResponsiveDonut
+      slices={[
+        { id: "installed", label: "Assigned", value: installed, color: "var(--color-mint)" },
+        { id: "ordered", label: "Order draft", value: ordered, color: "var(--color-amber)" },
+        { id: "planned", label: "Reserved", value: planned, color: "var(--color-research)" },
+      ]}
+      centerLabel={String(footprint)}
+      caption="placed"
+      ariaLabel={`${installed} assigned, ${ordered} order-draft, and ${planned} reserved rack-width units physically drawn in this plan`}
+      valueFormatter={(value) => String(value)}
+      className="max-w-[6rem]"
+    />
   );
 }
 function Validation({
@@ -2707,19 +2707,14 @@ function Validation({
   danger?: boolean;
 }) {
   return (
-    <div
-      className={`mt-4 border p-2 ${danger ? "border-danger/40 bg-danger/5" : "border-amber/40 bg-amber/5"}`}
-    >
-      <strong
-        className={`text-[0.75rem] ${danger ? "text-danger" : "text-amber"}`}
-      >
-        {title}
-      </strong>
-      <ul className="mt-1 list-disc space-y-1 pl-4 text-[0.6875rem] text-muted">
-        {items.slice(0, 6).map((item) => (
-          <li key={item}>{item}</li>
-        ))}
-      </ul>
+    <div className="mt-4">
+      <p className="mb-1 font-mono text-[0.625rem] uppercase tracking-widest text-muted">{title}</p>
+      <BlockerList
+        items={items.slice(0, 6).map((item) => ({
+          text: item,
+          tone: danger ? "danger" : "warning",
+        }))}
+      />
     </div>
   );
 }

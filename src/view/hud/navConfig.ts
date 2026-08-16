@@ -33,7 +33,22 @@ export interface NavGroup {
   items: NavItem[]
 }
 
-/** Seven job-based workspaces; individual simulation panels remain independently routable. */
+/**
+ * The compatibility table above is also consumed by the legacy Shift+1–7 and
+ * Z/X/C/V shortcuts. Keep it stable while the visible shell converges on the
+ * four destination groups from the streamline reference.
+ */
+export type ShellNavGroupId = 'operate' | 'build' | 'products' | 'company'
+
+export interface ShellNavGroup {
+  id: ShellNavGroupId
+  label: string
+  short: string
+  description: string
+  items: NavItem[]
+}
+
+/** Compatibility keyboard groups; individual simulation panels remain independently routable. */
 export const NAV_GROUPS: NavGroup[] = [
   {
     id: 'strategy',
@@ -107,13 +122,81 @@ export const NAV_GROUPS: NavGroup[] = [
     id: 'company',
     label: 'Company',
     short: 'Company',
-    description: 'People, capital, ownership & recovery',
+    description: 'People, research, strategy & milestones',
     key: '7',
     items: [
-      { id: 'org', label: 'Company', hint: 'Leads, staff, equity & debt', key: '1' },
+      { id: 'org', label: 'Company', hint: 'Leads, staff & hiring', key: '1' },
     ],
   },
 ]
+
+/**
+ * Visual shell IA. This is deliberately separate from NAV_GROUPS: the latter
+ * is a compatibility surface for existing numeric and sub-navigation keys.
+ * Items remain one level deep; the group headings are visual landmarks, not
+ * nested tablists.
+ */
+export const SHELL_NAV_GROUPS: ShellNavGroup[] = [
+  {
+    id: 'operate',
+    label: 'Operate',
+    short: 'Operate',
+    description: 'Overview, workloads, processes & finances',
+    items: [
+      { id: 'map', label: 'Overview', hint: 'Fleet, facilities, construction & map' },
+      { id: 'computeMarket', label: 'Workloads', hint: 'Cloud, reserved, spot & rival PF' },
+      { id: 'rivals', label: 'Processes', hint: 'Intentions, capacity & launches' },
+      { id: 'stats', label: 'Finances', hint: 'P&L · compute · trends' },
+    ],
+  },
+  {
+    id: 'build',
+    label: 'Build',
+    short: 'Build',
+    description: 'Facilities, hardware & infrastructure',
+    items: [
+      { id: 'build', label: 'Facilities', hint: 'Place facilities and expand campus capacity' },
+      { id: 'racks', label: 'Hardware', hint: 'Racks, blueprints & custom silicon', presentation: 'workbench' },
+      { id: 'power', label: 'Infrastructure', hint: 'Grid MW, utility contracts & export' },
+    ],
+  },
+  {
+    id: 'products',
+    label: 'Products',
+    short: 'Products',
+    description: 'Models, datasets, benchmarks & plans',
+    items: [
+      { id: 'models', label: 'Models', hint: 'Train · intervene · release', presentation: 'workbench' },
+      { id: 'data', label: 'Datasets', hint: 'Assets, rights, manifests & synth', presentation: 'workbench' },
+      { id: 'benchmarks', label: 'Benchmarks', hint: 'Seasons, audits & field reviews', presentation: 'workbench' },
+      { id: 'plans', label: 'Plans', hint: 'Tiers & API list', presentation: 'workbench' },
+      { id: 'market', label: 'Market', hint: 'Share & segments' },
+    ],
+  },
+  {
+    id: 'company',
+    label: 'Company',
+    short: 'Company',
+    description: 'People, research, strategy & milestones',
+    items: [
+      { id: 'org', label: 'People', hint: 'Leads, staff & hiring' },
+      { id: 'research', label: 'Research', hint: 'Leads, pods, evidence & methods', presentation: 'immersive' },
+      { id: 'marketing', label: 'Strategy', hint: 'Budget, channels, reach & brand' },
+    ],
+  },
+]
+
+/** Map legacy panel ids to their single visible shell destination. */
+export function shellPanelForPanel(panel: PanelId): PanelId {
+  return panel === 'chips' ? 'racks' : panel
+}
+
+export function shellGroupForPanel(panel: PanelId): ShellNavGroup {
+  return (
+    SHELL_NAV_GROUPS.find((group) => group.items.some((item) => item.id === shellPanelForPanel(panel))) ??
+    SHELL_NAV_GROUPS[0]!
+  )
+}
 
 export type CommandViewId = 'pnl' | 'rivals' | 'feed'
 

@@ -3,6 +3,8 @@ import { createEmptyLabData } from '../balance/data'
 import type { DataDomain, LabData, StaffHeadcount } from '../types'
 import {
   collectTrafficData,
+  dataHygieneSnapshot,
+  dataModelDriftRate,
   dataProcessingThroughput,
   enqueueAutomaticProcessing,
   processDataJobs,
@@ -30,6 +32,32 @@ function rawCorpus(): LabData {
 }
 
 describe('controller-neutral data runtime', () => {
+  it('treats untreated and queued corpus as a measurable hygiene risk', () => {
+    const dirty = createEmptyLabData()
+    dirty.stocks.code.raw = 900
+    dirty.processQueue = [{
+      id: 'dirty-backlog',
+      domain: 'code',
+      remaining: 300,
+      total: 300,
+      qualityTarget: 70,
+    }]
+    const clean = createEmptyLabData()
+    clean.stocks.code.processed = 1_200
+    clean.stocks.code.quality = 82
+
+    const dirtyHygiene = dataHygieneSnapshot(dirty)
+    const cleanHygiene = dataHygieneSnapshot(clean)
+
+    expect(dirtyHygiene.pressure).toBeGreaterThan(cleanHygiene.pressure)
+    expect(dirtyHygiene.qualityTarget).toBeLessThan(cleanHygiene.qualityTarget)
+    expect(dataModelDriftRate(dirty)).toBeGreaterThan(0)
+    expect(dataModelDriftRate(clean)).toBe(0)
+    expect(updateDataQualityIndex(1.2, dirty)).toBeLessThan(
+      updateDataQualityIndex(1.2, clean),
+    )
+  })
+
   it('uses monotone, modality-aware acceptance yields', () => {
     expect(processingAcceptanceYield(30)).toBeGreaterThan(0.7)
     expect(processingAcceptanceYield(95)).toBeLessThan(0.5)

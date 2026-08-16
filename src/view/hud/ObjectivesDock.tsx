@@ -1,4 +1,4 @@
-import { CheckCircle, Crosshair, WarningCircle, X } from '@phosphor-icons/react'
+import { CheckCircle, Crosshair, WarningCircle } from '@phosphor-icons/react'
 import { useMemo } from 'react'
 import { useGameStore } from '../../store/gameStore'
 import { useUiStore } from '../../store/uiStore'
@@ -19,6 +19,7 @@ export function ObjectivesButton() {
     <button
       type="button"
       aria-expanded={open}
+      aria-pressed={open}
       title="Objectives and operational risks"
       onClick={() => setOpen(!open)}
       className={`hidden h-8 max-w-[15rem] items-center gap-1.5 rounded-lg border px-2 text-[0.75rem] lg:flex 2xl:gap-2 2xl:px-2.5 ${
@@ -55,7 +56,7 @@ export function ObjectivesDock() {
   }
 
   return (
-    <aside className="objectives-dock hud-surface pointer-events-auto absolute z-40 w-[21rem] rounded-xl p-3.5">
+    <aside className="objectives-dock hud-surface pointer-events-auto absolute z-40 w-[21rem] rounded-lg p-3">
       <div className="relative z-10 flex items-start justify-between gap-3">
         <div>
           <p className="hud-eyebrow">Mission control</p>
@@ -63,11 +64,10 @@ export function ObjectivesDock() {
         </div>
         <button
           type="button"
-          aria-label="Close objectives"
           onClick={() => setOpen(false)}
-          className="flex min-h-11 min-w-11 items-center justify-center rounded-lg text-muted hover:bg-panel-2 hover:text-bone"
+          className="flex min-h-11 items-center justify-center rounded-lg px-3 text-[0.6875rem] font-semibold text-muted hover:bg-panel-2 hover:text-bone"
         >
-          <X size="1rem" />
+          Done
         </button>
       </div>
 

@@ -46,10 +46,12 @@ import {
 import {
   EmptyState,
   HudButton,
+  HudSelect,
   PanelScaffold,
   StatusChip,
 } from "../ui/HudPrimitives";
 import { BlockerList, GameCard, SegmentedTabs, StatRow } from "../ui/kit";
+import { ResponsiveDonut } from "../ui/dataViz/ResponsiveDonut";
 
 type ProviderEvent = {
   title: string;
@@ -402,7 +404,7 @@ export function ComputeMarketPanel() {
                   <span className="shrink-0 font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
                     Chat with
                   </span>
-                  <select
+                  <HudSelect
                     value={cloudProviderId}
                     onChange={(event) => {
                       const nextId = event.target.value;
@@ -421,7 +423,7 @@ export function ComputeMarketPanel() {
                         ),
                       );
                     }}
-                    className="min-w-0 flex-1 bg-transparent text-right text-[0.8125rem] font-medium text-bone outline-none"
+                    className="min-h-11 min-w-0 flex-1 border-0 bg-transparent text-right text-[0.8125rem] font-medium text-bone outline-none"
                     aria-label="Compute provider"
                   >
                     {state.worldMarkets.cloudProviders.map((provider) => (
@@ -435,7 +437,7 @@ export function ComputeMarketPanel() {
                         {computeMw(pfToMw(provider.baselinePf))} total
                       </option>
                     ))}
-                  </select>
+                  </HudSelect>
                 </label>
 
                 <div className="space-y-2 rounded-lg border border-line/60 bg-void/35 p-2">
@@ -542,7 +544,7 @@ export function ComputeMarketPanel() {
                       </div>
                     </NegotiationComposer>
 
-                    <div className="grid grid-cols-2 gap-1 font-mono text-[0.6875rem] sm:grid-cols-5">
+                    <div className="grid grid-cols-2 gap-1 font-mono text-[0.6875rem]">
                       <NegotiationMetric
                         label="Capacity"
                         value={computeMw(pfToMw(negotiatedQuote.contract.pf))}
@@ -863,79 +865,19 @@ export function OwnedRentedDonut({
   owned: number;
   rented: number;
 }) {
-  const total = Math.max(0, owned) + Math.max(0, rented);
-  const ownedPct = total > 0 ? owned / total : 1;
-  const rentedPct = total > 0 ? rented / total : 0;
-  const r = 34;
-  const c = 2 * Math.PI * r;
-  const ownedLen = c * ownedPct;
-  const rentedLen = c * rentedPct;
   const ariaLabel = `Owned ${pf(owned)} versus rented ${pf(rented)} compute`;
+  const total = Math.max(0, owned) + Math.max(0, rented);
   const electrical = `≈ ${computeMw(pfToMw(total))} electrical`;
   return (
-    <div className="w-full min-w-0 min-[400px]:w-24 min-[400px]:shrink-0">
-      <div className="relative hidden h-24 w-24 max-w-full min-[400px]:block">
-        <svg
-          viewBox="0 0 88 88"
-          width="88"
-          height="88"
-          className="h-24 w-24 max-w-full"
-          role="img"
-          aria-label={ariaLabel}
-        >
-          <circle
-            cx="44"
-            cy="44"
-            r={r}
-            fill="none"
-            stroke="rgba(139,171,181,.22)"
-            strokeWidth="10"
-          />
-          <circle
-            cx="44"
-            cy="44"
-            r={r}
-            fill="none"
-            stroke="#56e1dc"
-            strokeWidth="10"
-            strokeDasharray={`${ownedLen} ${c - ownedLen}`}
-            strokeDashoffset={c * 0.25}
-            strokeLinecap="butt"
-          />
-          <circle
-            cx="44"
-            cy="44"
-            r={r}
-            fill="none"
-            stroke="#7aa2ff"
-            strokeWidth="10"
-            strokeDasharray={`${rentedLen} ${c - rentedLen}`}
-            strokeDashoffset={c * 0.25 - ownedLen}
-            strokeLinecap="butt"
-          />
-        </svg>
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <strong className="max-w-[4.5rem] truncate font-mono text-sm font-semibold tabular-nums text-bone">
-            {pf(total)}
-          </strong>
-        </div>
-      </div>
-      <div className="min-[400px]:hidden" role="img" aria-label={ariaLabel}>
-        <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-void/80">
-          <div className="h-full bg-[#56e1dc]" style={{ width: `${ownedPct * 100}%` }} />
-          <div className="h-full bg-[#7aa2ff]" style={{ width: `${rentedPct * 100}%` }} />
-        </div>
-        <div className="mt-1 flex items-baseline justify-between gap-2 font-mono text-[0.625rem] tabular-nums text-muted">
-          <span className="min-w-0 truncate">Owned {pf(owned)}</span>
-          <span className="min-w-0 truncate">Rented {pf(rented)}</span>
-        </div>
-      </div>
-      <p
-        className="mt-1 truncate text-center text-[0.625rem] uppercase tracking-[0.12em] text-muted"
-        title={electrical}
-      >
-        {electrical}
-      </p>
-    </div>
+    <ResponsiveDonut
+      slices={[
+        { id: "owned", label: "Owned", value: owned, color: "var(--color-mint)" },
+        { id: "rented", label: "Rented", value: rented, color: "var(--color-infer)" },
+      ]}
+      centerLabel={pf(total)}
+      caption={electrical}
+      ariaLabel={ariaLabel}
+      valueFormatter={pf}
+    />
   );
 }

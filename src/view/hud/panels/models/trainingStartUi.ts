@@ -13,12 +13,13 @@ export function trainingDataGuidanceText(opts: {
   diversityRetention: number
   holdoutRetention: number
 }): { headline: string; reductions: string } {
-  const headline = opts.rawStrongTargetMet
-    ? `Raw strong target met · ${formatGuidanceTokens(opts.selectedMTok)} / ${formatGuidanceTokens(opts.rawStrongTargetMTok)}`
-    : `Raw strong target · ${formatGuidanceTokens(opts.selectedMTok)} / ${formatGuidanceTokens(opts.rawStrongTargetMTok)}`
+  const headline = `${opts.rawStrongTargetMet ? 'Ready' : 'Needs more data'} · ${formatGuidanceTokens(opts.selectedMTok)} selected · ${opts.effectiveDataRatio.toFixed(1)}× effective`
   return {
-    headline: `${headline} · effective ${opts.effectiveDataRatio.toFixed(2)}:1`,
-    reductions: `Quality ×${opts.qualityRetention.toFixed(2)} · diversity ×${opts.diversityRetention.toFixed(2)} · verification holdout ${Math.round((1 - opts.holdoutRetention) * 100)}% (×${opts.holdoutRetention.toFixed(2)})`,
+    headline,
+    // Keep the detailed multipliers available to the owning component as a
+    // tooltip/accessible description, but out of the primary scan path. The
+    // old sentence was both noisy and difficult to read in the narrow panel.
+    reductions: '',
   }
 }
 

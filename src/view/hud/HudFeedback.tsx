@@ -1,7 +1,8 @@
-import { CheckCircle, WarningCircle, X } from '@phosphor-icons/react'
+import { CaretRight, CheckCircle, WarningCircle } from '@phosphor-icons/react'
 import { useEffect } from 'react'
 import { useUiStore } from '../../store/uiStore'
 import { ConsoleDialog } from './ui/ConsoleDialog'
+import { HudButton } from './ui/HudPrimitives'
 
 export function HudFeedback() {
   const confirm = useUiStore((s) => s.confirmRequest)
@@ -30,7 +31,7 @@ export function HudFeedback() {
         >
           {toast.tone === 'positive' ? <CheckCircle size="1rem" weight="fill" /> : <WarningCircle size="1rem" weight="fill" />}
           <span className="text-bone">{toast.message}</span>
-          <button type="button" aria-label="Dismiss notification" onClick={clearToast} className="ml-1 flex min-h-11 min-w-11 items-center justify-center text-muted hover:text-bone"><X size="0.9rem" /></button>
+          <HudButton type="button" variant="ghost" aria-label="Dismiss notification" onClick={clearToast} className="ml-1 min-h-11 min-w-11 border-transparent p-0 text-muted hover:text-bone"><CaretRight size="0.9rem" /></HudButton>
         </div>
       ) : null}
 
@@ -48,10 +49,11 @@ export function HudFeedback() {
         maxWidthClass="max-w-[30rem]"
         footer={confirm ? (
           <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-            <button type="button" className="hud-button hud-button--secondary" onClick={clearConfirm}>Cancel</button>
-            <button
+            <HudButton type="button" variant="secondary" onClick={clearConfirm}>Cancel</HudButton>
+            <HudButton
               type="button"
-              className={`hud-button ${confirm.tone === 'danger' ? 'hud-button--danger' : confirm.tone === 'warning' ? 'border-amber/40 bg-amber/10 text-amber' : 'hud-button--primary'}`}
+              variant={confirm.tone === 'danger' ? 'danger' : confirm.tone === 'warning' ? 'secondary' : 'primary'}
+              className={confirm.tone === 'warning' ? 'border-amber/40 bg-amber/10 text-amber' : ''}
               onClick={() => {
                 const action = confirm.onConfirm
                 clearConfirm()
@@ -59,7 +61,7 @@ export function HudFeedback() {
               }}
             >
               {confirm.actionLabel}
-            </button>
+            </HudButton>
           </div>
         ) : null}
       >

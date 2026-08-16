@@ -1,11 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ECONOMY } from "../../../sim/balance/economy";
-import {
-  STAFF_BLURBS,
-  STAFF_LABELS,
-  emptyStaff,
-  staffTotal,
-} from "../../../sim/balance/staff";
+import { staffTotal } from "../../../sim/balance/staff";
 import {
   bankCreditSnapshot,
   dailyLoanPayment,
@@ -14,21 +9,15 @@ import {
   loanOffers,
 } from "../../../sim/systems/loans";
 import {
-  cityForHq,
-  hireStaff,
-  hireStaffCost,
   playerHqStaffCap,
   playerStaff,
   playerStaffOpenSeats,
-  poachRivalStaff,
-  poachStaffCost,
-  staffWagePerDay,
 } from "../../../sim/systems/staff";
 import { isHqAnchor, isHqKind } from "../../../sim/systems/map";
 import type {
+  BuildableKind,
   FinanceDaySnapshot,
   SimState,
-  StaffRole,
 } from "../../../sim/types";
 import {
   acceptEquityOffer,
@@ -50,22 +39,57 @@ import {
 } from "../../../sim/systems/org";
 import { computeMarketingOutcome } from "../../../sim/systems/marketing";
 import { cashDistressStage } from "../../../sim/systems/victory";
-import { sparkPath } from "../../../sim/systems/stats";
-import { setAutomationPolicies } from "../../../sim/systems/automation";
 import { useGameStore } from "../../../store/gameStore";
 import { money, num, pct } from "../format";
 import { SliderField } from "../ui/SliderField";
-import { BlockerList, CardGrid, GameCard, SegmentedTabs } from "../ui/kit";
+import { CardGrid, GameCard } from "../ui/kit";
 import {
   HudButton,
+  HudRange,
   MetricTile,
   PanelScaffold,
   StatusChip,
 } from "../ui/HudPrimitives";
-import {
-  facilityAnchorTiles,
-  mapTileAtAny,
-} from "../../../sim/systems/worldAccess";
+import { facilityAnchorTiles } from "../../../sim/systems/worldAccess";
+import { buildFinanceDashboardModel } from "../data/financeDashboardModel";
+import { Sparkline } from "../ui/dataViz/Sparkline";
+import { hqOfficeEffects } from "../../../sim/systems/hqOffice";
+
+type CapitalView = "ownership" | "credit";
+
+export function CapitalActionSelector({
+  active,
+  onChange,
+}: {
+  active: CapitalView;
+  onChange: (view: CapitalView) => void;
+}) {
+  return (
+    <div
+      className="grid grid-cols-2 gap-1 rounded-lg bg-void/50 p-1"
+      role="group"
+      aria-label="Capital actions"
+    >
+      {(
+        [
+          ["ownership", "Ownership"],
+          ["credit", "Credit"],
+        ] as const
+      ).map(([id, label]) => (
+        <HudButton
+          key={id}
+          type="button"
+          variant="ghost"
+          aria-pressed={active === id}
+          onClick={() => onChange(id)}
+          className={`min-h-11 rounded-md px-2 py-1.5 text-[0.6875rem] transition sm:min-h-0 ${active === id ? "bg-panel-2 text-mint" : "text-muted hover:text-bone"}`}
+        >
+          {label}
+        </HudButton>
+      ))}
+    </div>
+  );
+}
 
 /**
  * Company operations plus the standalone Marketing workspace.
@@ -73,7 +97,7 @@ import {
 export function OrgPanel({
   workspace = "company",
 }: {
-  workspace?: "company" | "marketing";
+  workspace?: "company" | "marketing" | "capital";
 }) {
   const state = useGameStore((s) => s.state);
   const setState = (next: typeof state) =>
@@ -86,13 +110,12 @@ export function OrgPanel({
   const declineLoanOffer = useGameStore((s) => s.declineLoanOffer);
   const repayLoan = useGameStore((s) => s.repayLoan);
   const openSites = useGameStore((s) => s.openSites);
-  const selected = useGameStore((s) => s.selectedTile);
 
   const p = state.player;
+  const financeModel = useMemo(() => buildFinanceDashboardModel(state), [state]);
   const staff = playerStaff(state);
   const seats = playerHqStaffCap(state);
   const openSeats = playerStaffOpenSeats(state);
-  const wageDay = staffWagePerDay(state);
   const loans = p.loans ?? [];
   const dayDebt = dailyLoanPayment(loans);
   const credit = useMemo(() => bankCreditSnapshot(state), [state]);
@@ -117,15 +140,10 @@ export function OrgPanel({
     Math.min(maxDraw, Math.max(minDraw, Math.floor(maxDraw * 0.35))),
   );
   const [customTerm, setCustomTerm] = useState(45);
-  const [hireCount, setHireCount] = useState(1);
-  const [selectedHireRole, setSelectedHireRole] =
-    useState<StaffRole>("researcher");
-  const [companyTab, setCompanyTab] = useState<
-    "staff" | "funding" | "marketing" | "governance"
-  >(workspace === "marketing" ? "marketing" : "staff");
-  const [capitalView, setCapitalView] = useState<"ownership" | "credit">(
-    "ownership",
-  );
+  const [companyTab] = useState<
+    "staff" | "funding" | "marketing"
+  >(workspace === "marketing" ? "marketing" : workspace === "capital" ? "funding" : "staff");
+  const [capitalView, setCapitalView] = useState<CapitalView>("ownership");
   const [buybackPct, setBuybackPct] = useState(1);
   const capital = useMemo(() => capitalSnapshot(state), [state]);
   const equityOffers = useMemo(() => requestEquityOffers(state), [state]);
@@ -136,7 +154,7 @@ export function OrgPanel({
   const channelSpend = useMemo(() => marketingChannels(state), [state]);
   const reach = useMemo(() => marketingReach(state), [state]);
   const marketingOutcome = useMemo(() => computeMarketingOutcome(state), [state]);
-  const distress = cashDistressStage(p.cash);
+  const distress = cashDistressStage(financeModel.current.cash);
   const marketingBasis = marketingRevenueBasis(state);
   const marketingMultiple = marketingRevenueMultiple(state);
   const rivalMarketing = useMemo(
@@ -161,7 +179,9 @@ export function OrgPanel({
             100,
             Math.max(
               0,
-              50 + (p.finance.dayNet / Math.max(1, p.finance.dayRevenue)) * 50,
+              50 +
+                (financeModel.current.net / Math.max(1, financeModel.revenue.total)) *
+                  50,
             ),
           ) *
             0.3,
@@ -169,6 +189,7 @@ export function OrgPanel({
     ),
   );
   const marketingWorkspace = workspace === "marketing";
+  const capitalWorkspace = workspace === "capital";
 
   // Keep draw inside the bank’s current line as valuation / debt moves
   useEffect(() => {
@@ -206,36 +227,18 @@ export function OrgPanel({
       t.buildingProgress >= t.buildingTarget,
   );
 
-  const selectedHq =
-    selected &&
-    (() => {
-      const tile = mapTileAtAny(state, selected.x, selected.y);
-      return tile?.owner === "player" && isHqKind(tile.kind) ? tile : undefined;
-    })();
-  const hireCity =
-    (selectedHq && cityForHq(state, selectedHq.x, selectedHq.y)) ||
-    (hqs[0] && cityForHq(state, hqs[0].x, hqs[0].y)) ||
-    state.map.cities?.[0] ||
-    null;
-
-  const cityPool = hireCity?.talentAvailable ?? emptyStaff();
   const headcount = staffTotal(staff);
   const runwayLabel =
-    Number.isFinite(p.finance.runwayDays) && p.finance.runwayDays < 9000
-      ? `${Math.max(0, Math.floor(p.finance.runwayDays))}d`
+    Number.isFinite(financeModel.current.runwayDays) &&
+    financeModel.current.runwayDays < 9000
+      ? `${Math.max(0, Math.floor(financeModel.current.runwayDays))}d`
       : "∞";
-  const companyTabs = [
-    { id: "staff", label: "Team" },
-    { id: "funding", label: "Capital" },
-    { id: "governance", label: "Policy" },
-  ] as const;
-
   if (marketingWorkspace) {
     return (
       <PanelScaffold
         eyebrow="Growth"
         title="Marketing"
-        description="Budget, channels, reach, and brand."
+        description="Budget, channels, reach, brand."
       >
         <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 xl:grid-cols-[repeat(auto-fit,minmax(11rem,1fr))]">
           <MetricTile
@@ -323,7 +326,7 @@ export function OrgPanel({
           </CardGrid>
 
           <GameCard eyebrow="Impact" title="Measured acquisition" tone="mint">
-            <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+            <div className="grid grid-cols-2 gap-1.5">
               <Stat
                 label="Qualified leads"
                 value={`${num(marketingOutcome.qualifiedLeads, 0)}/d`}
@@ -392,42 +395,44 @@ export function OrgPanel({
 
   return (
     <PanelScaffold
-      eyebrow="Operations"
-      title="Company"
-      description="People, capital, ownership, and policy."
+      eyebrow={capitalWorkspace ? "Finances" : "People"}
+      title={capitalWorkspace ? "Capital" : "Company"}
+      description={
+        capitalWorkspace
+          ? "Ownership, credit, and recovery decisions."
+          : "HQ capacity, hiring, and the people who run the lab."
+      }
       actions={
-        <StatusChip
-          tone={
-            companyHealth >= 70
-              ? "positive"
-              : companyHealth >= 40
-                ? "warning"
-                : "danger"
-          }
-        >
-          Health {companyHealth}
-        </StatusChip>
+        !capitalWorkspace ? (
+          <StatusChip
+            tone={
+              companyHealth >= 70
+                ? "positive"
+                : companyHealth >= 40
+                  ? "warning"
+                  : "danger"
+            }
+          >
+            Health {companyHealth}
+          </StatusChip>
+        ) : undefined
       }
     >
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      {!capitalWorkspace ? <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <MetricTile
           label="Headcount"
           value={`${headcount}/${seats}`}
           detail={`${openSeats} open`}
         />
         <MetricTile
-          label="Ownership"
-          value={pct(capital.founderOwnership, 1)}
-          tone={capital.founderOwnership < 0.1 ? "danger" : "positive"}
-        />
-        <MetricTile
           label="Cash runway"
           value={runwayLabel}
           tone={
-            Number.isFinite(p.finance.runwayDays) && p.finance.runwayDays < 30
+            Number.isFinite(financeModel.current.runwayDays) &&
+              financeModel.current.runwayDays < 30
               ? "danger"
-              : Number.isFinite(p.finance.runwayDays) &&
-                  p.finance.runwayDays < 90
+              : Number.isFinite(financeModel.current.runwayDays) &&
+                  financeModel.current.runwayDays < 90
                 ? "warning"
                 : "neutral"
           }
@@ -435,12 +440,12 @@ export function OrgPanel({
         <MetricTile
           label="Brand trust"
           value={num(p.brandTrust, 0)}
-          detail={`Net ${money(p.finance.dayNet)}/d`}
-          tone={p.finance.dayNet < 0 ? "danger" : "gold"}
+          detail={`Net ${money(financeModel.current.net)}/d`}
+          tone={financeModel.current.net < 0 ? "danger" : "gold"}
         />
-      </div>
+      </div> : null}
 
-      {distress !== "stable" && (
+      {!capitalWorkspace && distress !== "stable" && (
         <div
           className={`mt-3 rounded-lg border px-3 py-2 text-[0.75rem] leading-snug ${
             distress === "distressed"
@@ -477,265 +482,30 @@ export function OrgPanel({
         </div>
       )}
 
-      <div className="mt-3">
-        <CompanyPulse
-          cash={p.cash}
-          net={p.finance.dayNet}
-          brand={p.brandTrust}
-          control={capital.founderOwnership}
-          team={headcount}
-          seats={seats}
-          history={state.financeHistory}
-        />
-      </div>
-
-      <div className="mt-3">
-        <SegmentedTabs
-          ariaLabel="Company sections"
-          active={companyTab === "marketing" ? "staff" : companyTab}
-          onChange={(id) =>
-            setCompanyTab(id as "staff" | "funding" | "governance")
-          }
-          items={[...companyTabs]}
-        />
-      </div>
-
       <div key={companyTab} className="panel-swap mt-3 space-y-3">
         {companyTab === "staff" ? (
           <>
-            <TeamBoard
-              staff={staff}
-              seats={seats}
-              wages={wageDay}
-              selectedRole={selectedHireRole}
-              onSelectRole={setSelectedHireRole}
-            />
-
-            {seats <= 0 ? (
-              <GameCard tone="train" eyebrow="Blocked" title="No HQ seats">
-                <p className="mb-2 text-[0.8125rem] text-muted">
-                  Build an HQ to unlock hiring.
-                </p>
-                <HudButton
-                  type="button"
-                  variant="secondary"
-                  onClick={() => openSites()}
-                >
+            <HqOfficeSummary state={state} hqs={hqs} />
+            <GameCard eyebrow="Office-owned" title="Team management lives on the floor" tone="mint">
+              <p className="text-[0.8125rem] leading-5 text-muted">
+                Open an HQ from the map or the floor list above to place desks,
+                inspect seat capacity, hire local staff, and poach specialists.
+              </p>
+              {hqs.length === 0 ? (
+                <HudButton type="button" variant="secondary" className="mt-3" onClick={() => openSites()}>
                   Open sites
                 </HudButton>
-              </GameCard>
-            ) : hireCity ? (
-              (() => {
-                const free = cityPool[selectedHireRole] ?? 0;
-                const cost = hireStaffCost(
-                  state,
-                  selectedHireRole,
-                  hireCount,
-                  hireCity.id,
-                );
-                const blocked =
-                  state.player.cash < cost ||
-                  free < hireCount ||
-                  openSeats < hireCount;
-                return (
-                  <section className="overflow-hidden rounded-lg border border-line bg-panel-2">
-                    <div className="flex items-center justify-between border-b border-line/70 px-3 py-2">
-                      <div>
-                        <h3 className="text-[0.75rem] font-medium text-bone">
-                          Hire {STAFF_LABELS[selectedHireRole].toLowerCase()}
-                        </h3>
-                        <p className="text-[0.625rem] text-muted">
-                          {hireCity.name} · {free} ready · {openSeats} seats
-                          open
-                        </p>
-                      </div>
-                      <span className="font-mono text-[0.625rem] text-muted">
-                        wage ×{(hireCity.talentWageMult ?? 1).toFixed(2)}
-                      </span>
-                    </div>
-                    <div className="grid gap-3 p-3 sm:grid-cols-[1fr_auto] sm:items-end">
-                      <div>
-                        <p className="mb-2 text-[0.6875rem] leading-snug text-muted">
-                          {STAFF_BLURBS[selectedHireRole]}
-                        </p>
-                        <label className="flex items-center gap-2 text-[0.625rem] text-muted">
-                          Quantity
-                          <input
-                            type="number"
-                            min={1}
-                            max={Math.max(1, openSeats)}
-                            value={hireCount}
-                            onChange={(event) =>
-                              setHireCount(
-                                Math.max(
-                                  1,
-                                  Math.min(20, Number(event.target.value) || 1),
-                                ),
-                              )
-                            }
-                            className="w-14 rounded border border-line bg-void px-1.5 py-1 font-mono text-[0.75rem] text-bone"
-                          />
-                        </label>
-                      </div>
-                      <div className="space-y-2">
-                        {blocked ? (
-                          <BlockerList
-                            items={[
-                              ...(state.player.cash < cost
-                                ? [
-                                    {
-                                      text: `Need ${money(cost)} cash`,
-                                      tone: "danger" as const,
-                                    },
-                                  ]
-                                : []),
-                              ...(free < hireCount
-                                ? [
-                                    {
-                                      text: `Only ${free} talent ready in ${hireCity.name}`,
-                                      tone: "warning" as const,
-                                    },
-                                  ]
-                                : []),
-                              ...(openSeats < hireCount
-                                ? [
-                                    {
-                                      text: `Only ${openSeats} seats open`,
-                                      tone: "warning" as const,
-                                    },
-                                  ]
-                                : []),
-                            ]}
-                          />
-                        ) : null}
-                        <HudButton
-                          type="button"
-                          variant="primary"
-                          className="w-full sm:w-auto"
-                          disabled={blocked}
-                          title={
-                            blocked
-                              ? "Resolve blockers to hire"
-                              : `Hire ${hireCount} ${STAFF_LABELS[selectedHireRole].toLowerCase()}`
-                          }
-                          onClick={() =>
-                            setState(
-                              hireStaff(
-                                state,
-                                hireCity.id,
-                                selectedHireRole,
-                                hireCount,
-                              ),
-                            )
-                          }
-                        >
-                          Hire · {money(cost)}
-                        </HudButton>
-                      </div>
-                    </div>
-                  </section>
-                );
-              })()
-            ) : null}
-
-            <GameCard
-              eyebrow="Talent market"
-              title="Poach rival talent"
-              tone="train"
-            >
-              <p className="mb-2 text-[0.8125rem] text-muted">
-                Premium market hires. Always open.
-              </p>
-              <div className="anim-stagger space-y-1">
-                {state.rivals.slice(0, 5).map((rival) => {
-                  const rivalStaff = rival.staff ?? emptyStaff();
-                  return (
-                    <div
-                      key={rival.id}
-                      className="flex flex-col items-stretch gap-2 rounded-lg border border-line/60 bg-panel-2 px-2 py-2 min-[500px]:flex-row min-[500px]:items-center min-[500px]:justify-between"
-                    >
-                      <div className="min-w-0">
-                        <div className="truncate text-[0.8125rem] text-bone">
-                          {rival.name}
-                        </div>
-                        <div className="font-mono text-[0.6875rem] tabular-nums text-muted">
-                          R{rivalStaff.researcher} · D
-                          {rivalStaff.data_processor} · E{rivalStaff.engineer}
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-1 [&>:last-child]:col-span-2 sm:grid-cols-3 sm:[&>:last-child]:col-span-1">
-                        {(
-                          [
-                            "researcher",
-                            "data_processor",
-                            "engineer",
-                          ] as StaffRole[]
-                        ).map((role) => {
-                          const cost = poachStaffCost(state, rival.id, role, 1);
-                          const canPoach =
-                            (rivalStaff[role] ?? 0) >= 1 &&
-                            openSeats >= 1 &&
-                            state.player.cash >= cost;
-                          return (
-                            <button
-                              key={role}
-                              type="button"
-                              title={
-                                canPoach
-                                  ? `${STAFF_LABELS[role]} · ${money(cost)}`
-                                  : "Need seats, cash, or rival talent"
-                              }
-                              disabled={!canPoach}
-                              className={`min-h-11 rounded-md px-1.5 py-1 font-mono text-[0.6875rem] tabular-nums min-[500px]:min-h-0 ${canPoach ? "bg-amber/15 text-amber hover:bg-amber/25" : "bg-line/30 text-muted"}`}
-                              onClick={() =>
-                                setState(
-                                  poachRivalStaff(state, rival.id, role, 1),
-                                )
-                              }
-                            >
-                              {role === "researcher"
-                                ? "R"
-                                : role === "data_processor"
-                                  ? "D"
-                                  : "E"}{" "}
-                              · {money(cost)}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+              ) : null}
             </GameCard>
           </>
         ) : null}
 
         {companyTab === "funding" ? (
           <div className="rounded-lg border border-line bg-panel-2 p-3 space-y-3">
-            <div
-              className="grid grid-cols-2 gap-1 rounded-lg bg-void/50 p-1"
-              role="tablist"
-              aria-label="Capital actions"
-            >
-              {(
-                [
-                  ["ownership", "Ownership"],
-                  ["credit", "Credit"],
-                ] as const
-              ).map(([id, label]) => (
-                <button
-                  key={id}
-                  type="button"
-                  role="tab"
-                  aria-selected={capitalView === id}
-                  onClick={() => setCapitalView(id)}
-                  className={`min-h-11 rounded-md px-2 py-1.5 text-[0.6875rem] transition sm:min-h-0 ${capitalView === id ? "bg-panel-2 text-mint" : "text-muted hover:text-bone"}`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
+            <CapitalActionSelector
+              active={capitalView}
+              onChange={setCapitalView}
+            />
             {capitalView === "ownership" ? (
               <section className="space-y-2 border-b border-line/70 pb-3">
                 <div className="flex items-baseline justify-between gap-2">
@@ -747,12 +517,12 @@ export function OrgPanel({
                   </span>
                 </div>
                 <div className="grid grid-cols-2 gap-1.5">
-                  <Stat label="Cash" value={money(state.player.cash)} />
+                  <Stat label="Cash" value={money(financeModel.current.cash)} />
                   <Stat
                     label="Runway"
                     value={
-                      Number.isFinite(state.player.finance.runwayDays)
-                        ? `${Math.max(0, Math.floor(state.player.finance.runwayDays))}d`
+                        Number.isFinite(financeModel.current.runwayDays)
+                        ? `${Math.max(0, Math.floor(financeModel.current.runwayDays))}d`
                         : "∞"
                     }
                   />
@@ -771,11 +541,11 @@ export function OrgPanel({
                 <CapitalRail
                   founder={capital.founderOwnership}
                   debt={capital.debtOutstanding}
-                  valuation={Math.max(1, p.finance.valuation)}
+                  valuation={Math.max(1, financeModel.current.valuation)}
                   board={capital.boardPressure}
                 />
                 {state.player.capital?.restructuring.active &&
-                  p.cash < 0 && (
+                  financeModel.current.cash < 0 && (
                   <div className="rounded-lg border border-danger/35 bg-danger/10 px-2 py-1.5 text-[0.6875rem] text-danger">
                     Recovery ladder:{" "}
                     {state.player.capital.restructuring.stage.replace("_", " ")}{" "}
@@ -831,9 +601,10 @@ export function OrgPanel({
                             </span>
                           </span>
                           {quote ? (
-                            <button
+                            <HudButton
                               type="button"
-                              disabled={state.player.cash < quote.cost}
+                              variant="ghost"
+                              disabled={financeModel.current.cash < quote.cost}
                               onClick={() =>
                                 setState(
                                   buyBackEquity(
@@ -846,7 +617,7 @@ export function OrgPanel({
                               className="min-h-11 shrink-0 rounded border border-amber/30 px-2 py-1 text-amber hover:bg-amber/10 disabled:opacity-35 sm:min-h-0"
                             >
                               Buy {money(quote.cost)}
-                            </button>
+                            </HudButton>
                           ) : (
                             <span className="text-muted/70">locked</span>
                           )}
@@ -887,8 +658,9 @@ export function OrgPanel({
                               : ""}
                           </div>
                         </div>
-                        <button
+                        <HudButton
                           type="button"
+                          variant="primary"
                           disabled={
                             (state.player.capital?.investorConfidence ?? 0) <
                             offer.confidenceRequired
@@ -899,7 +671,7 @@ export function OrgPanel({
                           className="min-h-11 w-full shrink-0 rounded bg-mint/20 px-2 py-1 font-mono text-[0.6875rem] text-mint disabled:opacity-35 min-[420px]:min-h-0 min-[420px]:w-auto"
                         >
                           Raise {money(offer.cashRaised)}
-                        </button>
+                        </HudButton>
                       </div>
                     </div>
                   ))}
@@ -942,13 +714,14 @@ export function OrgPanel({
                         {money(debt.remaining)} · {(debt.apr * 100).toFixed(1)}%
                         · {debt.daysLeft}d left
                       </div>
-                      <button
+                      <HudButton
                         type="button"
+                        variant="ghost"
                         className="min-h-11 shrink-0 px-2 text-[0.6875rem] text-mint hover:underline sm:min-h-0"
                         onClick={() => setState(repayTypedDebt(state, debt.id))}
                       >
                         Repay
-                      </button>
+                      </HudButton>
                     </div>
                   ))}
                 </div>
@@ -1007,15 +780,17 @@ export function OrgPanel({
                       </span>
                     </div>
                     <div className="grid grid-cols-2 gap-2">
-                      <button
+                      <HudButton
                         type="button"
+                        variant="ghost"
                         onClick={() => declineLoanOffer(firmOffer.id)}
                         className="min-h-11 rounded-lg border border-line px-2 py-1.5 text-[0.75rem] text-muted hover:border-danger/40 hover:text-danger"
                       >
                         Decline
-                      </button>
-                      <button
+                      </HudButton>
+                      <HudButton
                         type="button"
+                        variant="primary"
                         disabled={!canAcceptFirmOffer}
                         onClick={() => acceptLoanOffer(firmOffer.id)}
                         title={
@@ -1028,7 +803,7 @@ export function OrgPanel({
                         {canAcceptFirmOffer
                           ? "Accept offer"
                           : "Facility limit reached"}
-                      </button>
+                      </HudButton>
                     </div>
                   </div>
                 )}
@@ -1076,13 +851,14 @@ export function OrgPanel({
                             {((l.interestTotal ?? 0) * 100).toFixed(1)}% int
                           </div>
                         </div>
-                        <button
+                        <HudButton
                           type="button"
+                          variant="ghost"
                           onClick={() => repayLoan(l.id)}
                           className="min-h-11 shrink-0 rounded-lg border border-line px-2 py-1 text-[0.75rem] text-mint hover:bg-panel sm:min-h-0"
                         >
                           Pay off
-                        </button>
+                        </HudButton>
                       </div>
                     ))}
                   </div>
@@ -1097,13 +873,14 @@ export function OrgPanel({
                       Expensive short-term facility. Use only to avoid a crash;
                       repay as soon as you can.
                     </p>
-                    <button
+                    <HudButton
                       type="button"
+                      variant="danger"
                       className="min-h-11 w-full rounded-lg bg-danger/25 py-1.5 text-[0.8125rem] font-medium text-danger hover:bg-danger/35"
                       onClick={() => takeLoan("bailout")}
                     >
                       Take emergency bailout
-                    </button>
+                    </HudButton>
                   </div>
                 )}
 
@@ -1118,10 +895,11 @@ export function OrgPanel({
                           ? (o.principal * (1 + o.interestTotal)) / o.termDays
                           : 0;
                       const bail = o.id === "bailout";
-                      return (
-                        <button
+                        return (
+                        <HudButton
                           key={o.id}
                           type="button"
+                          variant={bail ? "danger" : "ghost"}
                           className={`flex min-h-11 w-full items-center justify-between gap-2 rounded-lg border px-2.5 py-2 text-left ${
                             bail
                               ? "border-danger/40 bg-danger/10 hover:border-danger/60"
@@ -1146,7 +924,7 @@ export function OrgPanel({
                           >
                             {money(o.principal)}
                           </span>
-                        </button>
+                        </HudButton>
                       );
                     })}
                   </div>
@@ -1197,7 +975,7 @@ export function OrgPanel({
                         />
 
                         <div className="grid grid-cols-2 gap-1.5 font-mono text-[0.75rem]">
-                          <QuoteStat
+                            <QuoteStat
                             label="Interest rate"
                             value={`${(quoteInterest * 100).toFixed(1)}%`}
                           />
@@ -1220,12 +998,13 @@ export function OrgPanel({
                           />
                           <QuoteStat
                             label="Cash after draw"
-                            value={money(state.player.cash + clampedDraw)}
+                            value={money(financeModel.current.cash + clampedDraw)}
                           />
                         </div>
 
-                        <button
+                        <HudButton
                           type="button"
+                          variant="primary"
                           disabled={!canDraw}
                           className={`min-h-11 w-full rounded-lg py-2 text-[0.8125rem] font-medium ${
                             canDraw
@@ -1242,7 +1021,7 @@ export function OrgPanel({
                           Draw {money(clampedDraw)} ·{" "}
                           {(quoteInterest * 100).toFixed(1)}% ·{" "}
                           {money(quoteDaily)}/d
-                        </button>
+                        </HudButton>
                       </>
                     )}
                   </div>
@@ -1252,9 +1031,6 @@ export function OrgPanel({
           </div>
         ) : null}
 
-        {companyTab === "governance" ? (
-          <GovernanceSummary state={state} />
-        ) : null}
       </div>
     </PanelScaffold>
   );
@@ -1286,6 +1062,58 @@ const BANKING_OFFER_PROFILE: Record<
     locked: "Raise company value to unlock",
   },
 };
+
+function HqOfficeSummary({
+  state,
+  hqs,
+}: {
+  state: SimState;
+  hqs: ReturnType<typeof facilityAnchorTiles>;
+}) {
+  const open = useGameStore((store) => store.openHqOfficeEditor);
+  const layouts = state.hqOfficeLayouts ?? {};
+  const totalSeats = hqs.reduce((sum, hq) => {
+    const facilityId = hq.campusId ?? `facility:${hq.x},${hq.y}`;
+    return sum + hqOfficeEffects(layouts[facilityId], hq.kind as BuildableKind).capacityBonus;
+  }, 0);
+  return (
+    <section className="rounded-lg border border-mint/25 bg-mint/5 p-3">
+      <div className="flex flex-col gap-2 min-[460px]:flex-row min-[460px]:items-start min-[460px]:justify-between">
+        <div className="min-w-0">
+          <p className="font-mono text-[0.625rem] uppercase tracking-[0.16em] text-mint">HQ floor plan</p>
+          <h3 className="mt-1 text-[0.9375rem] font-semibold text-bone">Build a productive office</h3>
+          <p className="mt-1 max-w-[42rem] text-[0.75rem] leading-relaxed text-muted">
+            Furniture is persistent: desks add seats, and plants, copy stations,
+            meeting rooms, and research walls improve the team&apos;s daily output.
+          </p>
+        </div>
+        <div className="shrink-0 text-left min-[460px]:text-right">
+          <div className="font-mono text-[0.8125rem] text-mint">+{totalSeats} fit-out seats</div>
+          <div className="text-[0.625rem] text-muted">{hqs.length} completed HQ{hqs.length === 1 ? "" : "s"}</div>
+        </div>
+      </div>
+      {hqs.length === 0 ? (
+        <p className="mt-2 rounded border border-amber/25 bg-amber/5 px-2 py-1.5 text-[0.75rem] text-amber">Build a completed HQ to unlock the office floor editor.</p>
+      ) : (
+        <div className="mt-3 grid gap-1.5 sm:grid-cols-2">
+          {hqs.map((hq) => {
+            const facilityId = hq.campusId ?? `facility:${hq.x},${hq.y}`;
+            const effects = hqOfficeEffects(layouts[facilityId], hq.kind as BuildableKind);
+            return (
+              <div key={facilityId} className="flex items-center justify-between gap-2 rounded-md border border-line/70 bg-void/35 px-2.5 py-2">
+                <div className="min-w-0">
+                  <div className="truncate text-[0.75rem] font-medium text-bone">{hq.name || "Headquarters"}</div>
+                  <div className="font-mono text-[0.625rem] text-muted">{effects.objectCount} objects · +{effects.capacityBonus} seats · +{(effects.productivityBonus * 100).toFixed(1)}% output</div>
+                </div>
+                <HudButton type="button" variant="secondary" className="min-h-11 shrink-0 px-2 py-1 text-[0.6875rem] sm:min-h-0" onClick={() => open(facilityId)}>Open floor</HudButton>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
 
 function bankingOfferAmount(product: BankingProduct): number {
   if (product.available < 100_000) return 0;
@@ -1353,14 +1181,15 @@ function BankingOfferCard({
             ? `${Math.round(product.termDays / 30)} months · ${money(financingCost)} interest`
             : profile.locked}
         </span>
-        <button
+        <HudButton
           type="button"
+          variant="secondary"
           disabled={!available}
           onClick={() => onAccept(principal)}
           className="min-h-11 shrink-0 rounded-md border border-amber/35 bg-amber/10 px-2.5 py-1 font-mono text-[0.6875rem] text-amber transition hover:border-amber/60 hover:bg-amber/15 active:translate-y-px disabled:cursor-not-allowed disabled:border-line disabled:bg-line/20 disabled:text-muted"
         >
           {available ? "Accept offer" : "Unavailable"}
-        </button>
+        </HudButton>
       </div>
     </article>
   );
@@ -1382,101 +1211,9 @@ function OfferTerm({ label, value }: { label: string; value: string }) {
   );
 }
 
-function TeamBoard({
-  staff,
-  seats,
-  wages,
-  selectedRole,
-  onSelectRole,
-}: {
-  staff: ReturnType<typeof playerStaff>;
-  seats: number;
-  wages: number;
-  selectedRole: StaffRole;
-  onSelectRole: (role: StaffRole) => void;
-}) {
-  const total = staffTotal(staff);
-  const openSeats = Math.max(0, seats - total);
-  const roles = [
-    ["researcher", "Research", "bg-mint", "text-mint"],
-    ["data_processor", "Data", "bg-sky-400", "text-sky-400"],
-    ["engineer", "Engineering", "bg-amber", "text-amber"],
-    ["ops", "Operations", "bg-violet-400", "text-violet-400"],
-  ] as const;
-  return (
-    <section className="rounded-lg border border-line bg-void/35 p-3">
-      <div className="flex items-end justify-between gap-3">
-        <div>
-          <div className="font-mono text-xl text-bone">
-            {total}
-            <span className="text-sm text-muted">/{seats}</span>
-          </div>
-          <div className="text-[0.625rem] text-muted">
-            team seats · {Math.max(0, seats - total)} open
-          </div>
-        </div>
-        <div className="text-right">
-          <div className="font-mono text-[0.75rem] text-danger">
-            {money(wages)}/d
-          </div>
-          <div className="text-[0.5625rem] uppercase tracking-wider text-muted">
-            payroll
-          </div>
-        </div>
-      </div>
-      <div className="my-2 flex h-3 overflow-hidden rounded-sm bg-line/50">
-        {roles.map(([role, label, color]) => (
-          <button
-            key={role}
-            type="button"
-            title={`${label}: ${staff[role]}`}
-            aria-label={`Select ${label}, ${staff[role]} staff`}
-            aria-pressed={selectedRole === role}
-            onClick={() => onSelectRole(role)}
-            className={`${color} min-w-1 transition hover:brightness-125 ${selectedRole === role ? "ring-1 ring-inset ring-bone" : "opacity-70"}`}
-            style={{ width: `${seats > 0 ? (staff[role] / seats) * 100 : 0}%` }}
-          />
-        ))}
-        {openSeats > 0 && (
-          <div
-            title={`Empty seats: ${openSeats}`}
-            aria-label={`${openSeats} empty team seats`}
-            className="min-w-1 border-l border-bone/20 bg-line/30"
-            style={{ width: `${seats > 0 ? (openSeats / seats) * 100 : 100}%` }}
-          />
-        )}
-      </div>
-      <div className="grid grid-cols-2 gap-1 sm:grid-cols-3 xl:grid-cols-5">
-        {roles.map(([role, label, , dot]) => (
-          <button
-            key={role}
-            type="button"
-            onClick={() => onSelectRole(role)}
-            className={`min-h-11 rounded px-1 py-1.5 text-left transition ${selectedRole === role ? "bg-panel-2 text-bone" : "text-muted hover:bg-panel-2/60"}`}
-          >
-            <span className={`mr-1 ${dot}`}>●</span>
-            <span className="text-[0.5625rem]">{label}</span>
-            <span className="block font-mono text-[0.75rem]">
-              {staff[role]}
-            </span>
-          </button>
-        ))}
-        <div
-          className="min-h-11 rounded border border-dashed border-line px-1 py-1.5 text-left text-muted"
-          aria-label={`${openSeats} empty seats`}
-        >
-          <span className="mr-1 text-line">○</span>
-          <span className="text-[0.5625rem]">Empty</span>
-          <span className="block font-mono text-[0.75rem] text-bone">
-            {openSeats}
-          </span>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function CompanyPulse({
+/** Legacy export retained for downstream integrations; People no longer renders
+ * this redundant history card because Finances owns KPI history. */
+export function CompanyPulse({
   cash,
   net,
   brand,
@@ -1544,7 +1281,12 @@ function CompanyPulse({
   } as const;
   const activeMetric = metric;
   const selectedMetric = metrics[activeMetric];
-  const path = sparkPath(selectedMetric.values, 180, 38, 2);
+  const selectedFormat = (value: number) =>
+    activeMetric === "share"
+      ? pct(value, 1)
+      : activeMetric === "brand"
+        ? value.toFixed(0)
+        : money(value);
   const firstValue = selectedMetric.values[0];
   const lastValue = selectedMetric.values.at(-1);
   const change =
@@ -1567,8 +1309,6 @@ function CompanyPulse({
         : activeMetric === "brand"
           ? scrubbedValue.toFixed(0)
           : money(scrubbedValue);
-  const markerX =
-    recent.length > 1 ? (scrubIndex / (recent.length - 1)) * 180 : 180;
   return (
     <section className="overflow-hidden rounded-lg border border-line bg-void/35">
       <div className="grid grid-cols-2 divide-x divide-y divide-line/70 sm:grid-cols-4 sm:divide-y-0">
@@ -1589,16 +1329,17 @@ function CompanyPulse({
         <div className="mb-1.5 flex flex-col gap-1.5 min-[420px]:flex-row min-[420px]:items-center min-[420px]:justify-between">
           <div className="grid w-full grid-cols-5 gap-0.5 min-[420px]:flex min-[420px]:w-auto">
             {(Object.keys(metrics) as (keyof typeof metrics)[]).map((key) => (
-              <button
+              <HudButton
                 key={key}
                 type="button"
+                variant="ghost"
                 aria-describedby="company-pulse-detail"
                 title={metrics[key].description}
                 onClick={() => setMetric(key)}
                 className={`min-h-11 rounded px-1.5 py-1 text-[0.5625rem] transition min-[420px]:min-h-0 ${activeMetric === key ? "bg-panel-2 text-bone" : "text-muted hover:text-bone"}`}
               >
                 {metrics[key].label}
-              </button>
+              </HudButton>
             ))}
           </div>
           <span
@@ -1608,37 +1349,30 @@ function CompanyPulse({
             {scrubbedLabel}
           </span>
         </div>
-        <svg
-          viewBox="0 0 180 38"
+        <Sparkline
+          values={selectedMetric.values}
+          days={recent.map((point) => point.day)}
+          format={selectedFormat}
+          label={`${selectedMetric.label} 30-day`}
+          height={38}
+          color="currentColor"
           className={`h-10 w-full ${selectedMetric.color}`}
-          preserveAspectRatio="none"
-          aria-label={`30 day ${selectedMetric.label} trend`}
-        >
-          <path d={path} fill="none" stroke="currentColor" strokeWidth="2" />
-          {scrubbedValue != null ? (
-            <line
-              x1={markerX}
-              x2={markerX}
-              y1="0"
-              y2="38"
-              stroke="currentColor"
-              strokeWidth="0.8"
-              strokeDasharray="2 2"
-              opacity="0.7"
-            />
-          ) : null}
-        </svg>
+          selectedIndex={scrubIndex}
+          ariaLabel={`30 day ${selectedMetric.label} trend`}
+          onActiveChange={(point) => {
+            if (point) setScrubIndex(point.index)
+          }}
+        />
         {recent.length > 1 ? (
           <label className="mt-1 block text-[0.5625rem] text-muted">
             <span className="sr-only">History day</span>
-            <input
-              type="range"
+            <HudRange
               min={0}
               max={recent.length - 1}
               step={1}
               value={scrubIndex}
               onChange={(event) => setScrubIndex(Number(event.target.value))}
-              className="h-3 w-full accent-mint"
+              className="h-11 w-full accent-mint"
               aria-label={`Scrub ${selectedMetric.label} history`}
             />
           </label>
@@ -1896,7 +1630,7 @@ function ChannelMixBar({
           />
         ))}
       </div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2">
         {order.map((key) => (
           <div
             key={key}
@@ -1954,175 +1688,6 @@ function SpendRace({
           </span>
         </div>
       ))}
-    </div>
-  );
-}
-
-function GovernanceSummary({ state }: { state: SimState }) {
-  const applyState = (next: SimState) => useGameStore.setState({ state: next });
-  const advanced = state.config.campaignRules.externalityMode === "advanced";
-  const account = state.externalities?.accounts[state.playerLabId];
-  const incidents = (state.externalities?.incidents ?? []).filter(
-    (incident) => incident.labId === state.playerLabId,
-  );
-
-  return (
-    <div className="space-y-3 rounded-lg border border-line bg-panel-2 p-3">
-      <div className="flex flex-col gap-2 min-[420px]:flex-row min-[420px]:items-start min-[420px]:justify-between">
-        <div className="min-w-0">
-          <h3 className="text-[0.9375rem] font-semibold text-bone">
-            Governance & externalities
-          </h3>
-          <p className="mt-1 text-[0.75rem] leading-relaxed text-muted">
-            {advanced
-              ? "Advanced rules meter every lab with identical carbon, cooling-water, provenance, and deployment-audit formulas."
-              : "Standard mode keeps trust, safety, and reliability in products while disabling carbon, water, rights-enforcement, and audit costs."}
-          </p>
-        </div>
-        <span
-          className={`rounded px-2 py-1 font-mono text-[0.625rem] uppercase ${advanced ? "bg-amber/15 text-amber" : "bg-mint/10 text-mint"}`}
-        >
-          {advanced ? "Advanced" : "Standard"}
-        </span>
-      </div>
-
-      {advanced && account ? (
-        <>
-          <div className="grid grid-cols-2 gap-2">
-            <Stat
-              label="Energy this month"
-              value={`${num(account.energyMWh, 0)} MWh`}
-            />
-            <Stat
-              label="Compliance spend"
-              value={money(account.complianceCost)}
-            />
-            <Stat
-              label="Carbon allocation"
-              value={`${num(account.carbonTons, 0)} / ${num(account.carbonBudgetTons, 0)} t`}
-              accent={
-                account.carbonTons > account.carbonBudgetTons
-                  ? "text-danger"
-                  : "text-bone"
-              }
-            />
-            <Stat
-              label="Water allocation"
-              value={`${num(account.waterM3, 0)} / ${num(account.waterBudgetM3, 0)} m³`}
-              accent={
-                account.waterM3 > account.waterBudgetM3
-                  ? "text-danger"
-                  : "text-bone"
-              }
-            />
-            <Stat label="Data-rights risk" value={pct(account.rightsRisk)} />
-            <Stat
-              label="Deployment-audit risk"
-              value={pct(account.auditRisk)}
-            />
-          </div>
-          <div className="rounded-lg border border-line/70 bg-void/35 p-2.5">
-            <div className="flex justify-between text-[0.75rem] text-muted">
-              <span>Enforcement record</span>
-              <span className="font-mono">
-                {account.violations} finding
-                {account.violations === 1 ? "" : "s"}
-              </span>
-            </div>
-            {incidents.length === 0 ? (
-              <p className="mt-1 text-[0.75rem] text-muted">
-                No published enforcement actions.
-              </p>
-            ) : (
-              incidents.slice(0, 4).map((incident) => (
-                <div
-                  key={incident.id}
-                  className="mt-1.5 border-t border-line/60 pt-1.5 text-[0.75rem] text-bone"
-                >
-                  {incident.description}
-                  <span className="ml-1 font-mono text-danger">
-                    −{money(incident.fine)}
-                  </span>
-                </div>
-              ))
-            )}
-          </div>
-        </>
-      ) : null}
-
-      <div className="border-t border-line/70 pt-3">
-        <div className="mb-2">
-          <h4 className="text-[0.8125rem] font-medium text-bone">
-            Operating policies
-          </h4>
-          <p className="mt-0.5 text-[0.75rem] text-muted">
-            Persistent guardrails prepare the next day through normal quotes,
-            budgets, and order queues.
-          </p>
-        </div>
-        <div className="space-y-1.5">
-          {(
-            [
-              [
-                "overflowCloud",
-                "Overflow cloud",
-                "Lease capped emergency PF when serving load exceeds the target.",
-              ],
-              [
-                "allocation",
-                "Compute allocation",
-                "Rebalance train, serve, and research pools with serving headroom.",
-              ],
-              [
-                "dataProcessing",
-                "Data processing",
-                "Keep raw domain stock flowing into the finite processing queue.",
-              ],
-              [
-                "fleetDeployment",
-                "Fleet deployment",
-                "Review capacity weekly and order suitable racks within budget.",
-              ],
-              [
-                "productCapacity",
-                "Product capacity",
-                "Balance API and subscription priority from observed pressure.",
-              ],
-            ] as const
-          ).map(([key, label, description]) => {
-            const enabled = state.automation[key].enabled;
-            return (
-              <button
-                key={key}
-                type="button"
-                aria-pressed={enabled}
-                onClick={() =>
-                  applyState(
-                    setAutomationPolicies(state, {
-                      [key]: { ...state.automation[key], enabled: !enabled },
-                    }),
-                  )
-                }
-                className="flex w-full items-center justify-between gap-3 rounded-lg border border-line/70 bg-void/35 px-2.5 py-2 text-left hover:border-mint/40"
-              >
-                <span>
-                  <span className="block text-[0.8125rem] text-bone">
-                    {label}
-                  </span>
-                  <span className="mt-0.5 block text-[0.6875rem] leading-relaxed text-muted">
-                    {description}
-                  </span>
-                </span>
-                <span
-                  className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[0.5625rem] uppercase ${enabled ? "bg-mint/15 text-mint" : "bg-line/50 text-muted"}`}
-                >
-                  {enabled ? "On" : "Off"}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
     </div>
   );
 }

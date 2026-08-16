@@ -11,9 +11,9 @@ import {
 
 describe('compute PF/EF display', () => {
   it('keeps PF below 1,000 and switches to EF at 1,000', () => {
-    expect(pf(536)).toBe('536.0 PF')
-    expect(pf(999.9)).toBe('999.9 PF')
-    expect(pf(3600)).toBe('3.6 EF')
+    expect(pf(536)).toBe('536.00 PF')
+    expect(pf(999.9)).toBe('999.90 PF')
+    expect(pf(3600)).toBe('3.60 EF')
   })
 
   it('pfLong spells the PF amount out with thousands separators', () => {
@@ -46,9 +46,9 @@ describe('compute capacity display units', () => {
 
   it('formats PF values at the EF boundary', () => {
     expect(pf(0)).toBe('0.00 PF')
-    expect(pf(10)).toBe('10.0 PF')
-    expect(pf(999)).toBe('999.0 PF')
-    expect(pf(1_000)).toBe('1.0 EF')
-    expect(pf(1_300)).toBe('1.3 EF')
+    expect(pf(10)).toBe('10.00 PF')
+    expect(pf(999)).toBe('999.00 PF')
+    expect(pf(1_000)).toBe('1.00 EF')
+    expect(pf(1_300)).toBe('1.30 EF')
   })
 })

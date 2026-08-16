@@ -12,12 +12,19 @@ export function HardwarePanel({ view }: { view: 'racks' | 'silicon' }) {
         ariaLabel="Hardware sections"
         active={view}
         onChange={(id) => setPanel(id === 'racks' ? 'racks' : 'chips')}
+        idPrefix="hardware-sections"
         items={[
-          { id: 'racks', label: 'Rack fleet' },
-          { id: 'silicon', label: 'Custom silicon' },
+          { id: 'racks', label: 'Rack fleet', panelId: 'hardware-panel-racks' },
+          { id: 'silicon', label: 'Custom silicon', panelId: 'hardware-panel-silicon' },
         ]}
       />
-      <div key={view} className="panel-swap">
+      <div
+        key={view}
+        id={`hardware-panel-${view}`}
+        role="tabpanel"
+        aria-labelledby={`hardware-sections-${view}`}
+        className="panel-swap"
+      >
         {view === 'racks' ? <RacksPanel /> : <ChipsPanel />}
       </div>
     </div>

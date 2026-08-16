@@ -35,6 +35,9 @@ import {
 /** Paid plans above this monthly price cannot retain product traffic as training data. */
 export const PAID_DATA_COLLECTION_PRICE_CAP = 50;
 
+/** Maximum number of subscription tiers a player can operate at once. */
+export const MAX_PLANS = 8;
+
 /**
  * Hard cap on the share of a plan's served traffic that may be collected.
  * Free: up to 100%. Paid ≤ $50: lerp(20% → 10%) by price/50. Above $50: 0%.
@@ -713,6 +716,20 @@ export function createPlan(
     monthlyApiValueSubsidyGbp?: number;
   },
 ): SimState {
+  if (state.player.pricing.plans.length >= MAX_PLANS) {
+    return {
+      ...state,
+      alerts: [
+        {
+          id: `plan-new-blocked-${state.day}-${state.player.pricing.plans.length}`,
+          day: state.day,
+          severity: "warn" as const,
+          message: `Plan limit reached (${MAX_PLANS}). Delete a plan before creating another.`,
+        },
+        ...state.alerts,
+      ].slice(0, 40),
+    };
+  }
   let modelIds = input.modelIds ? [...input.modelIds] : [];
   if (modelIds.length === 0 && state.player.pricing.activeModelId) {
     modelIds = [state.player.pricing.activeModelId];
@@ -1597,9 +1614,9 @@ export function freeTierDemandProfile(
 
 export function formatAllowance(plan: SubPlan): string {
   const m = planAllowanceMTokPerMonth(plan);
-  if (m >= 1000) return `${(m / 1000).toFixed(1)}B tok/mo`;
-  if (m >= 1) return `${m.toFixed(1)}M tok/mo`;
-  return `${(m * 1000).toFixed(0)}K tok/mo`;
+  if (m >= 1000) return `${(m / 1000).toFixed(2)}B tok/mo`;
+  if (m >= 1) return `${m.toFixed(2)}M tok/mo`;
+  return `${(m * 1000).toFixed(2)}K tok/mo`;
 }
 
 /** @deprecated use planAllowanceMTokPerDay × utilization */
@@ -2024,6 +2041,44 @@ export function planSegmentPriceAffinity(
 }
 
 /**
+ * Match plan allowance to the segment's real monthly workload, including a
+ * heavy-user tail. Price affinity answers what a buyer can pay; this answers
+ * whether the tier can actually carry their usage. The asymmetric curve is
+ * intentionally harsher on an undersized plan than on spare headroom.
+ */
+export function planSegmentUsageAffinity(
+  allowanceMTokPerMonth: number,
+  segmentId: SegmentId,
+): number {
+  const segment = SEGMENTS.find((candidate) => candidate.id === segmentId);
+  const coreTarget = Math.max(
+    0.5,
+    (segment?.baseUsage ?? ECONOMY.basePlanUsageMTokPerDay) *
+      ECONOMY.daysPerMonth,
+  );
+  const allowance = Math.max(0.01, allowanceMTokPerMonth);
+  const affinityFor = (target: number) => {
+    const logRatio = Math.log(allowance / Math.max(0.01, target));
+    const sigma = logRatio < 0 ? 0.72 : 1.15;
+    const z = logRatio / sigma;
+    return Math.exp(-0.5 * z * z);
+  };
+  const heavyShare = Math.max(
+    0.12,
+    Math.min(0.42, 0.12 + (segment?.baseUsage ?? 0) * 0.065),
+  );
+  const affinity =
+    affinityFor(coreTarget) * (1 - heavyShare) +
+    affinityFor(coreTarget * 3) * heavyShare;
+  return Math.max(0.02, Math.min(1, affinity));
+}
+
+export function planSegmentUsageAffinityWeight(segmentId: SegmentId): number {
+  const usage = SEGMENTS.find((segment) => segment.id === segmentId)?.baseUsage ?? 0.28;
+  return 6 + Math.min(6, Math.log1p(Math.max(0, usage)) * 3.2);
+}
+
+/**
  * Softmax weight of the ARPU affinity term in the per-segment plan split.
  * High-ARPU segments need the affinity to dominate the consumer-tuned
  * cheap-favoring base terms (an enterprise buyer must actually end up on the
@@ -2080,6 +2135,54 @@ export const PLAN_UPTIER_MIGRATE_FRAC = 0.15;
 
 /** Next-tier valueRatio must clear this floor to accept up-tier migrants. */
 export const PLAN_UPTIER_VALUE_FLOOR = 0.7;
+
+/**
+ * Preserve a visible heavy-usage cohort on progressively larger paid tiers.
+ * This is a floor, not a quota: organic demand can exceed it, while a tier
+ * earns no floor if its allowance barely improves on the tier below or its
+ * advertised value is unacceptable.
+ */
+export function applyHighUsagePlanCohorts<
+  T extends {
+    plan: Pick<SubPlan, "pricePerMonth">;
+    subscribers: number;
+    valueRatio: number;
+    effectiveAllowanceMTok: number;
+  },
+>(buckets: T[]): T[] {
+  const paid = buckets
+    .filter((bucket) => bucket.plan.pricePerMonth > 0)
+    .sort((a, b) => a.plan.pricePerMonth - b.plan.pricePerMonth);
+  if (paid.length < 2) return buckets;
+  const total = paid.reduce(
+    (sum, bucket) => sum + Math.max(0, bucket.subscribers),
+    0,
+  );
+  if (total <= 1e-9) return buckets;
+
+  for (let index = paid.length - 1; index >= 1; index -= 1) {
+    const tier = paid[index]!;
+    const below = paid[index - 1]!;
+    if (tier.valueRatio + 1e-9 < PLAN_UPTIER_VALUE_FLOOR) continue;
+    if (
+      tier.effectiveAllowanceMTok <
+      below.effectiveAllowanceMTok * 1.5
+    ) continue;
+    const cohortShare = Math.max(0.04, 0.16 / 2 ** (index - 1));
+    const deficit = total * cohortShare - tier.subscribers;
+    if (deficit <= 1e-9) continue;
+
+    let remaining = deficit;
+    for (let donorIndex = 0; donorIndex < index && remaining > 1e-9; donorIndex += 1) {
+      const donor = paid[donorIndex]!;
+      const moved = Math.min(remaining, Math.max(0, donor.subscribers));
+      donor.subscribers -= moved;
+      tier.subscribers += moved;
+      remaining -= moved;
+    }
+  }
+  return buckets;
+}
 
 /**
  * Enforce cheap ≥ mid ≥ expensive by shrinking dearer tiers until each

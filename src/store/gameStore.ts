@@ -79,6 +79,11 @@ import {
   applyHallPlan,
   migrateDataHallLayouts,
 } from "../sim/systems/dataHallLayouts";
+import {
+  applyHqOfficePlan,
+  migrateHqOfficeLayouts,
+  type HqOfficePlan,
+} from "../sim/systems/hqOffice";
 import { facilityAnchorTiles } from "../sim/systems/worldAccess";
 import type { DataHallEditPlan } from "../sim/types";
 import {
@@ -121,7 +126,12 @@ import {
   cancelDataSupplierContract,
   type DataPortfolioChannel,
 } from "../sim/systems/data";
-import { createPlan, updatePlan, deletePlan } from "../sim/systems/plans";
+import {
+  createPlan,
+  deletePlan,
+  MAX_PLANS,
+  updatePlan,
+} from "../sim/systems/plans";
 import {
   deleteSaveSlot,
   listSaveSlots,
@@ -204,6 +214,7 @@ interface GameStore {
   activePanel: PanelId;
   rackWorkspaceTab: "fleet" | "hall" | "blueprints";
   hallEditorFacilityId: string | null;
+  hqOfficeEditorFacilityId: string | null;
   selectedTile: { x: number; y: number } | null;
   selectedRivalId: string | null;
   mapTool: MapToolMode;
@@ -232,6 +243,13 @@ interface GameStore {
   openHallEditor: (facilityId: string) => void;
   closeHallEditor: () => void;
   applyHallEditorPlan: (plan: DataHallEditPlan) => {
+    ok: boolean;
+    error?: string;
+    netCost: number;
+  };
+  openHqOfficeEditor: (facilityId: string) => void;
+  closeHqOfficeEditor: () => void;
+  applyHqOfficeEditorPlan: (plan: HqOfficePlan) => {
     ok: boolean;
     error?: string;
     netCost: number;
@@ -595,6 +613,7 @@ function applyLoadedState(state: SimState) {
     activePanel: "stats" as PanelId,
     rackWorkspaceTab: "fleet" as const,
     hallEditorFacilityId: null,
+    hqOfficeEditorFacilityId: null,
     selectedTile: null,
     selectedRivalId: null,
     mapTool: "select" as MapToolMode,
@@ -623,6 +642,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
   activePanel: "stats",
   rackWorkspaceTab: "fleet",
   hallEditorFacilityId: null,
+  hqOfficeEditorFacilityId: null,
   selectedTile: null,
   selectedRivalId: null,
   mapTool: "select" as MapToolMode,
@@ -674,12 +694,27 @@ export const useGameStore = create<GameStore>((set, get) => ({
     set((store) => ({
       state: migrateDataHallLayouts(store.state),
       hallEditorFacilityId,
+      hqOfficeEditorFacilityId: null,
       leftRailOpen: false,
       commandDockOpen: false,
     })),
   closeHallEditor: () => set({ hallEditorFacilityId: null }),
   applyHallEditorPlan: (plan) => {
     const result = applyHallPlan(get().state, plan);
+    if (result.ok) set({ state: result.state });
+    return { ok: result.ok, error: result.error, netCost: result.netCost };
+  },
+  openHqOfficeEditor: (hqOfficeEditorFacilityId) =>
+    set((store) => ({
+      state: migrateHqOfficeLayouts(store.state),
+      hqOfficeEditorFacilityId,
+      hallEditorFacilityId: null,
+      leftRailOpen: false,
+      commandDockOpen: false,
+    })),
+  closeHqOfficeEditor: () => set({ hqOfficeEditorFacilityId: null }),
+  applyHqOfficeEditorPlan: (plan) => {
+    const result = applyHqOfficePlan(get().state, plan);
     if (result.ok) set({ state: result.state });
     return { ok: result.ok, error: result.error, netCost: result.netCost };
   },
@@ -1151,6 +1186,22 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
   setPricing: (p) =>
     set((st) => {
+      if (p.plans && p.plans.length > MAX_PLANS) {
+        return {
+          state: {
+            ...st.state,
+            alerts: [
+              {
+                id: `plan-pricing-blocked-${st.state.day}-${p.plans.length}`,
+                day: st.state.day,
+                severity: "warn" as const,
+                message: `Plan limit reached (${MAX_PLANS}). Delete a plan before creating another.`,
+              },
+              ...st.state.alerts,
+            ].slice(0, 40),
+          },
+        };
+      }
       const next = { ...st.state.player.pricing, ...p };
       if (
         p.apiPriceInPerMTok !== undefined ||

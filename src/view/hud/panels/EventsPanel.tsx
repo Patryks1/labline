@@ -46,7 +46,7 @@ export function EventsPanel() {
     <PanelScaffold
       eyebrow="Intelligence"
       title="World"
-      description="Alerts, live events, and the wire."
+      description="Alerts, events, and the wire."
       actions={
         <HudButton type="button" variant="ghost" onClick={() => setPanel('benchmarks')}>
           Open evals

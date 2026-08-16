@@ -22,7 +22,9 @@ describe('ConsoleDialog responsive frame', () => {
     expect(markup).toContain('h-[100dvh]')
     expect(markup).toContain('safe-area-inset-top')
     expect(markup).toContain('safe-area-inset-bottom')
-    expect(markup).toContain('h-11 w-11')
+    expect(markup).toContain('h-11 shrink-0')
+    expect(markup).toContain('>Done</button>')
+    expect(markup).toContain('hud-button')
   })
 
   it('supports terminal outcomes that require an explicit footer action', () => {

@@ -66,6 +66,7 @@ import { energyPriceForState } from "./map";
 import {
   cloneLabData,
   collectTrafficData,
+  dataModelDriftRate,
   dataProcessingThroughput,
   enqueueAutomaticProcessing,
   processDataJobs,
@@ -250,6 +251,8 @@ export interface DataPruneEstimate {
   cashCost: number;
   pfDays: number;
   researchersRequired: number;
+  engineersRequired: number;
+  estimatedDays: number;
   researchShare: number;
   availableResearchPf: number;
   ok: boolean;
@@ -293,16 +296,30 @@ export function estimateDataPrune(
   const lowQuality = lowQualityDataForDomain(data, domain);
   const totalMTok = lowQuality.rawMTok + lowQuality.processedMTok;
   const meta = DATA_DOMAIN_META[domain];
-  const cashPerMTok = meta.processCostPerMTok * 2.5;
-  const pfDaysPerMTok = meta.processHard * 0.65;
+  // An audit is a second, adversarial pass over the corpus. It costs more than
+  // ordinary cleaning because it inspects the rejected tail and rewrites
+  // provenance instead of merely accepting useful records.
+  const cashPerMTok = meta.processCostPerMTok * 3.25;
+  const pfDaysPerMTok = meta.processHard * 0.95;
   const researchersRequired = Math.max(
     1,
     Math.min(4, Math.ceil(totalMTok / 250)),
   );
+  const engineersRequired = Math.max(
+    1,
+    Math.min(6, Math.ceil(totalMTok / 300)),
+  );
   const existingShare = dataResearchReservationShare(data);
   const researchers = playerStaff(state).researcher ?? 0;
+  const engineers = playerStaff(state).engineer ?? 0;
   const availableResearchPf =
     grossResearchPoolPf(state) * DATA_PRUNE_RESEARCH_SHARE;
+  const cashCost = totalMTok * cashPerMTok;
+  const pfDays = totalMTok * pfDaysPerMTok;
+  const estimatedDays = Math.max(
+    1,
+    Math.ceil(pfDays / Math.max(DATA_PRUNE_MIN_ACTIVE_PF, availableResearchPf)),
+  );
   const alreadyQueued = data.pruneQueue.some((job) => job.domain === domain);
   let reason: string | undefined;
   if (totalMTok < 0.5) reason = "No low-quality stock detected";
@@ -313,8 +330,10 @@ export function estimateDataPrune(
     reason = "Pruning queue full";
   else if (researchers < researchersRequired) {
     reason = `Needs ${researchersRequired} researchers (have ${researchers})`;
-  } else if (state.player.cash + 1e-9 < totalMTok * cashPerMTok) {
-    reason = `Needs ${formatMoneyShort(totalMTok * cashPerMTok)} cash`;
+  } else if (engineers < engineersRequired) {
+    reason = `Needs ${engineersRequired} data engineers (have ${engineers})`;
+  } else if (state.player.cash + 1e-9 < cashCost) {
+    reason = `Needs ${formatMoneyShort(cashCost)} cash`;
   } else if (availableResearchPf < DATA_PRUNE_MIN_ACTIVE_PF)
     reason = "No research compute available";
   else if (
@@ -327,9 +346,11 @@ export function estimateDataPrune(
     domain,
     ...lowQuality,
     totalMTok,
-    cashCost: totalMTok * cashPerMTok,
-    pfDays: totalMTok * pfDaysPerMTok,
+    cashCost,
+    pfDays,
     researchersRequired,
+    engineersRequired,
+    estimatedDays,
     researchShare: DATA_PRUNE_RESEARCH_SHARE,
     availableResearchPf,
     ok: reason == null,
@@ -369,6 +390,7 @@ export function enqueueDataPrune(
     cashPerMTok: estimate.cashCost / Math.max(0.001, estimate.totalMTok),
     pfDaysPerMTok: estimate.pfDays / Math.max(0.001, estimate.totalMTok),
     researchersRequired: estimate.researchersRequired,
+    engineersRequired: estimate.engineersRequired,
     researchShare: estimate.researchShare,
     qualityBefore: data.stocks[domain].quality,
   };
@@ -395,8 +417,58 @@ export interface AllDataPruneEstimate {
   cashCost: number;
   pfDays: number;
   researchersRequired: number;
+  engineersRequired: number;
+  estimatedDays: number;
   ok: boolean;
   reason?: string;
+}
+
+/**
+ * Estimate queue time using the same finite headcount slots that settle jobs.
+ * Each active audit holds its researcher and data-engineer slots for the day;
+ * jobs that do not fit wait in queue. A blocked preview still gets a useful
+ * one-slot duration instead of rendering Infinity in the HUD.
+ */
+function estimateConcurrentPruneDays(
+  candidates: DataPruneEstimate[],
+  researchers: number,
+  engineers: number,
+): number {
+  if (candidates.length === 0) return 0;
+  const remaining = candidates.map((estimate) =>
+    Math.max(1, estimate.estimatedDays),
+  );
+  const researcherCapacity = Math.max(1, Math.floor(researchers));
+  const engineerCapacity = Math.max(1, Math.floor(engineers));
+  let days = 0;
+  const maxDays = remaining.reduce((sum, value) => sum + value, 0) * 2;
+
+  while (remaining.some((value) => value > 0) && days < maxDays) {
+    let researcherSlots = researcherCapacity;
+    let engineerSlots = engineerCapacity;
+    let active = 0;
+    for (let index = 0; index < candidates.length; index += 1) {
+      if (remaining[index] <= 0) continue;
+      const candidate = candidates[index];
+      if (
+        candidate.researchersRequired > researcherSlots ||
+        candidate.engineersRequired > engineerSlots
+      ) {
+        continue;
+      }
+      researcherSlots -= candidate.researchersRequired;
+      engineerSlots -= candidate.engineersRequired;
+      remaining[index] -= 1;
+      active += 1;
+    }
+    if (active === 0) {
+      // The preview is already blocked by staff. Keep the estimate finite and
+      // conservative for display; enqueue/tick remains the authority.
+      return Math.max(...remaining);
+    }
+    days += 1;
+  }
+  return Math.max(1, days);
 }
 
 export function estimateAllDataPrunes(state: SimState): AllDataPruneEstimate {
@@ -421,10 +493,19 @@ export function estimateAllDataPrunes(state: SimState): AllDataPruneEstimate {
   const researchersRequired = candidates.length
     ? Math.max(...candidates.map((estimate) => estimate.researchersRequired))
     : 0;
+  const engineersRequired = candidates.length
+    ? Math.max(...candidates.map((estimate) => estimate.engineersRequired))
+    : 0;
   const totalShare =
     dataResearchReservationShare(data) +
     candidates.length * DATA_PRUNE_RESEARCH_SHARE;
   const researchers = playerStaff(state).researcher ?? 0;
+  const engineers = playerStaff(state).engineer ?? 0;
+  const estimatedDays = estimateConcurrentPruneDays(
+    candidates,
+    researchers,
+    engineers,
+  );
   let reason: string | undefined;
   if (candidates.length === 0) reason = "No low-quality stock detected";
   else if (!audit.unlocked)
@@ -433,6 +514,8 @@ export function estimateAllDataPrunes(state: SimState): AllDataPruneEstimate {
     reason = "Pruning queue full";
   else if (researchers < researchersRequired) {
     reason = `Needs ${researchersRequired} researchers (have ${researchers})`;
+  } else if (engineers < engineersRequired) {
+    reason = `Needs ${engineersRequired} data engineers (have ${engineers})`;
   } else if (state.player.cash + 1e-9 < cashCost)
     reason = `Needs ${formatMoneyShort(cashCost)} cash`;
   else if (
@@ -450,6 +533,8 @@ export function estimateAllDataPrunes(state: SimState): AllDataPruneEstimate {
     cashCost,
     pfDays,
     researchersRequired,
+    engineersRequired,
+    estimatedDays,
     ok: reason == null,
     reason,
   };
@@ -1378,6 +1463,9 @@ function processDataPruneJobs(
   let cash = cashInput;
   let alerts = alertsInput ?? state.alerts;
   const researchers = playerStaff(state).researcher ?? 0;
+  const engineers = playerStaff(state).engineer ?? 0;
+  let researcherSlots = Math.max(0, researchers);
+  let engineerSlots = Math.max(0, engineers);
   const grossResearchPf = grossResearchPoolPf({
     ...state,
     player: { ...state.player, data },
@@ -1387,7 +1475,14 @@ function processDataPruneJobs(
   for (const job of data.pruneQueue) {
     const totalLeft = job.rawRemaining + job.processedRemaining;
     if (totalLeft <= 0.001) continue;
-    if (researchers < job.researchersRequired || grossResearchPf <= 0.001) {
+    const engineersRequired = Math.max(1, job.engineersRequired ?? 1);
+    if (
+      researchers < job.researchersRequired ||
+      engineers < engineersRequired ||
+      researcherSlots < job.researchersRequired ||
+      engineerSlots < engineersRequired ||
+      grossResearchPf <= 0.001
+    ) {
       queue.push(job);
       if (state.day % 4 === 0) {
         alerts = [
@@ -1395,13 +1490,19 @@ function processDataPruneJobs(
             id: `prune-stalled-${job.id}-${state.day}`,
             day: state.day,
             severity: "warn" as const,
-            message: `${DATA_DOMAIN_META[job.domain].label} pruning stalled — needs ${job.researchersRequired} researchers and research compute.`,
+            message: `${DATA_DOMAIN_META[job.domain].label} pruning stalled — needs ${job.researchersRequired} researchers, ${engineersRequired} data engineers, and research compute.`,
           },
           ...alerts,
         ].slice(0, 40);
       }
       continue;
     }
+
+    // A running audit holds its declared staff slots for this daily pass.
+    // This prevents a bulk queue from silently reusing one engineer on every
+    // domain while keeping the queue itself resumable as headcount expands.
+    researcherSlots -= job.researchersRequired;
+    engineerSlots -= engineersRequired;
 
     const byCompute =
       (grossResearchPf * job.researchShare) /
@@ -1468,6 +1569,83 @@ function processDataPruneJobs(
   // Never clamp the company ledger here. A prune queue may pause when it
   // cannot fund more work, but existing debt must survive into settlement.
   return { data, cash, alerts };
+}
+
+/**
+ * Apply one bounded hygiene penalty to already released checkpoints.
+ *
+ * Training evidence remains immutable, so this models an operationally stale
+ * served model rather than rewriting the run's historical data snapshot. The
+ * per-model day marker makes direct/retried tick calls idempotent.
+ */
+export const CORPUS_DRIFT_INTERVAL_DAYS = 20;
+
+function applyCorpusDrift(state: SimState, data: LabData): SimState {
+  const rate = dataModelDriftRate(data);
+  if (rate <= 0) return state;
+  if (state.day % CORPUS_DRIFT_INTERVAL_DAYS !== 0) return state;
+
+  let changed = false;
+  const models = state.player.models.map((model) => {
+    if (model.corpusDriftLastDay === state.day) return model;
+    const prior = Math.max(0, model.corpusDriftTotal ?? 0);
+    const applied = Math.min(rate, Math.max(0, 0.24 - prior));
+    if (applied <= 0) return { ...model, corpusDriftLastDay: state.day };
+    changed = true;
+    const retain = 1 - applied;
+    const qualityRetain = 1 - applied * 0.85;
+    const benchmarks = Object.fromEntries(
+      Object.entries(model.benchmarks).map(([key, value]) => [
+        key,
+        Math.max(0, value * qualityRetain),
+      ]),
+    ) as typeof model.benchmarks;
+    const quality = Object.fromEntries(
+      Object.entries(model.quality).map(([key, value]) => [
+        key,
+        Math.max(0, value * qualityRetain),
+      ]),
+    ) as unknown as typeof model.quality;
+    const capabilities = model.capabilities
+      ? {
+          ...model.capabilities,
+          domains: Object.fromEntries(
+            Object.entries(model.capabilities.domains).map(([key, value]) => [
+              key,
+              Math.max(0, value * qualityRetain),
+            ]),
+          ) as typeof model.capabilities.domains,
+          factuality: Math.max(0, model.capabilities.factuality * qualityRetain),
+          steerability: Math.max(0, model.capabilities.steerability * qualityRetain),
+          robustness: Math.max(0, model.capabilities.robustness * qualityRetain),
+          safety: Math.max(0, model.capabilities.safety * qualityRetain),
+          reliability: Math.max(0, model.capabilities.reliability * qualityRetain),
+        }
+      : undefined;
+    return {
+      ...model,
+      capability: Math.max(1, model.capability * retain),
+      benchmarks,
+      quality,
+      capabilities,
+      corpusDriftTotal: prior + applied,
+      corpusDriftLastDay: state.day,
+    };
+  });
+  if (!changed) return state;
+  return {
+    ...state,
+    player: { ...state.player, models },
+    alerts: [
+      {
+        id: `data-drift-${state.day}`,
+        day: state.day,
+        severity: "warn" as const,
+        message: `Corpus hygiene degraded every model by ${(rate * 100).toFixed(2)}% this 20-day cycle. Clean or prune exposed data before the next review.`,
+      },
+      ...state.alerts,
+    ].slice(0, 40),
+  };
 }
 
 export function tickData(state: SimState): SimState {
@@ -1810,7 +1988,8 @@ export function tickData(state: SimState): SimState {
     player: { ...state.player, cash, data, dataQuality },
     alerts,
   };
-  return spent > 0 ? recordCashSpend(next, spent, "data") : next;
+  const settled = spent > 0 ? recordCashSpend(next, spent, "data") : next;
+  return applyCorpusDrift(settled, data);
 }
 
 export interface ConsumeResult {

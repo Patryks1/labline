@@ -36,6 +36,7 @@ import { money, mw, num, pct, pf } from "../format";
 import {
   EmptyState,
   HudButton,
+  HudSelect,
   PanelScaffold,
   StatusChip,
 } from "../ui/HudPrimitives";
@@ -47,6 +48,8 @@ import {
   SegmentedTabs,
   StatRow,
 } from "../ui/kit";
+import { ResponsiveDonut } from "../ui/dataViz/ResponsiveDonut";
+import { Sparkline } from "../ui/dataViz/Sparkline";
 import {
   NegotiationHeader,
   NegotiationComposer,
@@ -135,10 +138,10 @@ export function PowerPanel() {
   const pushSlice = (id: string, label: string, sliceMw: number, color: string) => {
     if (sliceMw > 1e-4) mixSlices.push({ id, label, mw: sliceMw, color });
   };
-  pushSlice("solar", "Solar", balance.genBySourceMw.solarMw * genUsedShare, "#ffd166");
-  pushSlice("gas", "Gas", balance.genBySourceMw.gasMw * genUsedShare, "#e8ad56");
-  pushSlice("nuclear", "Nuclear", balance.genBySourceMw.nuclearMw * genUsedShare, "#a58be0");
-  pushSlice("other-gen", "Other on-site", balance.genBySourceMw.otherMw * genUsedShare, "#56e1dc");
+  pushSlice("solar", "Solar", balance.genBySourceMw.solarMw * genUsedShare, "var(--color-gold)");
+  pushSlice("gas", "Gas", balance.genBySourceMw.gasMw * genUsedShare, "var(--color-amber)");
+  pushSlice("nuclear", "Nuclear", balance.genBySourceMw.nuclearMw * genUsedShare, "var(--color-research)");
+  pushSlice("other-gen", "Other on-site", balance.genBySourceMw.otherMw * genUsedShare, "var(--color-mint)");
   importContracts.forEach((contract, index) => {
     const deliveredMw =
       contractCapMw > 1e-6
@@ -148,13 +151,13 @@ export function PowerPanel() {
       `city-${contract.id}`,
       `${contract.cityName} contract`,
       deliveredMw,
-      `rgba(95,167,232,${Math.max(0.45, 1 - index * 0.18)})`,
+      `color-mix(in srgb, var(--color-infer) ${Math.round(Math.max(0.45, 1 - index * 0.18) * 100)}%, transparent)`,
     );
   });
-  pushSlice("ppa", "PPA import", bill.energyContractMw, "#7aa2ff");
-  pushSlice("spot", "Spot import", bill.spotMw, "#8babb1");
-  pushSlice("export", "Export (sold)", balance.exportMw, "#48d7d1");
-  pushSlice("curtailed", "Curtailed", balance.curtailedMw, "rgba(139,171,181,.45)");
+  pushSlice("ppa", "PPA import", bill.energyContractMw, "var(--color-infer)");
+  pushSlice("spot", "Spot import", bill.spotMw, "var(--color-muted)");
+  pushSlice("export", "Export (sold)", balance.exportMw, "var(--color-mint)");
+  pushSlice("curtailed", "Curtailed", balance.curtailedMw, "color-mix(in srgb, var(--color-muted) 45%, transparent)");
 
   return (
     <PanelScaffold
@@ -770,12 +773,12 @@ function ContractDesk({
           <span className="shrink-0 font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
             Chat with
           </span>
-          <select
+          <HudSelect
             value={negotiation.cityId}
             onChange={(event) =>
               resetNegotiation({ cityId: event.target.value })
             }
-            className="min-w-0 flex-1 bg-transparent text-right text-[0.8125rem] font-medium text-bone outline-none"
+            className="min-h-11 min-w-0 flex-1 border-0 bg-transparent text-right text-[0.8125rem] font-medium text-bone outline-none"
             aria-label="City utility"
           >
             {deskCities.map(({ city }) => (
@@ -796,20 +799,29 @@ function ContractDesk({
                 in zone
               </option>
             ) : null}
-          </select>
+          </HudSelect>
         </label>
 
-        <SegmentedTabs
-          ariaLabel="Buy or sell power"
-          active={negotiation.mode}
-          onChange={(id) =>
-            resetNegotiation({ mode: id as "import" | "export" })
-          }
-          items={[
-            { id: "import", label: "Buy power" },
-            { id: "export", label: "Sell surplus" },
-          ]}
-        />
+        <div className="grid grid-cols-2 gap-1" role="group" aria-label="Buy or sell power">
+          <HudButton
+            type="button"
+            variant={negotiation.mode === "import" ? "primary" : "ghost"}
+            aria-pressed={negotiation.mode === "import"}
+            className="min-h-11"
+            onClick={() => resetNegotiation({ mode: "import" })}
+          >
+            Buy power
+          </HudButton>
+          <HudButton
+            type="button"
+            variant={negotiation.mode === "export" ? "primary" : "ghost"}
+            aria-pressed={negotiation.mode === "export"}
+            className="min-h-11"
+            onClick={() => resetNegotiation({ mode: "export" })}
+          >
+            Sell surplus
+          </HudButton>
+        </div>
 
         <div className="space-y-2 rounded-lg border border-line/60 bg-void/35 p-2">
           <NegotiationMessage
@@ -995,77 +1007,20 @@ export function PowerMixDonut({
   coveredPct: number;
   demandMw: number;
 }) {
-  const r = 34;
-  const c = 2 * Math.PI * r;
-  const total = slices.reduce((sum, slice) => sum + Math.max(0, slice.mw), 0);
-  let offset = 0;
-  const arcs = slices
-    .filter((slice) => slice.mw > 1e-4)
-    .map((slice) => {
-      const len = total > 0 ? (Math.max(0, slice.mw) / total) * c : 0;
-      const start = offset;
-      offset += len;
-      return { ...slice, len, start };
-    });
   const caption = `of ${mw(demandMw)} demand`;
   return (
-    <div className="w-full min-w-0 min-[400px]:w-24 min-[400px]:shrink-0">
-      <div className="relative hidden h-24 w-24 max-w-full min-[400px]:block">
-        <svg
-          viewBox="0 0 88 88"
-          width="88"
-          height="88"
-          className="h-24 w-24 max-w-full"
-          role="img"
-          aria-label="Power supply mix"
-        >
-          <circle
-            cx="44"
-            cy="44"
-            r={r}
-            fill="none"
-            stroke="rgba(139,171,181,.22)"
-            strokeWidth="10"
-          />
-          {arcs.map((arc) => (
-            <circle
-              key={arc.id}
-              cx="44"
-              cy="44"
-              r={r}
-              fill="none"
-              stroke={arc.color}
-              strokeWidth="10"
-              strokeDasharray={`${arc.len} ${c - arc.len}`}
-              strokeDashoffset={c * 0.25 - arc.start}
-              strokeLinecap="butt"
-            />
-          ))}
-        </svg>
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <strong className="max-w-[4.5rem] truncate font-mono text-sm font-semibold tabular-nums text-bone">
-            {pct(coveredPct)}
-          </strong>
-        </div>
-      </div>
-      <div className="min-[400px]:hidden" role="img" aria-label="Power supply mix">
-        <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-void/80">
-          {arcs.map((arc) => (
-            <div
-              key={arc.id}
-              className="h-full"
-              style={{ width: `${total > 0 ? (Math.max(0, arc.mw) / total) * 100 : 0}%`, background: arc.color }}
-            />
-          ))}
-        </div>
-      </div>
-      <p
-        className="mt-1 truncate text-center text-[0.625rem] uppercase tracking-[0.12em] text-muted"
-        title={caption}
-      >
-        {caption}
-      </p>
-    </div>
+    <ResponsiveDonut
+      slices={slices.map((slice) => ({
+        id: slice.id,
+        label: slice.label,
+        value: slice.mw,
+        color: slice.color,
+      }))}
+      centerLabel={pct(coveredPct)}
+      caption={caption}
+      ariaLabel="Power supply mix"
+      valueFormatter={mw}
+    />
   );
 }
 
@@ -1086,20 +1041,6 @@ export function PowerEfficiencyCard({ state }: { state: SimState }) {
     first && last && first.pfPerMw > 1e-9
       ? (last.pfPerMw - first.pfPerMw) / first.pfPerMw
       : 0;
-  const historyMax = history.length
-    ? Math.max(...history.map((sample) => sample.pfPerMw))
-    : 1;
-  const historyMin = history.length
-    ? Math.min(...history.map((sample) => sample.pfPerMw))
-    : 0;
-  const historyRange = Math.max(1e-9, historyMax - historyMin);
-  const sparkPoints = history
-    .map((sample, index) => {
-      const x = history.length > 1 ? (index / (history.length - 1)) * 96 : 48;
-      const y = 19 - ((sample.pfPerMw - historyMin) / historyRange) * 17;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
 
   return (
     <GameCard eyebrow="Power → compute" title="Compute efficiency" tone="mint">
@@ -1145,19 +1086,16 @@ export function PowerEfficiencyCard({ state }: { state: SimState }) {
       </div>
       {history.length >= 2 ? (
         <div className="mt-2 flex items-center gap-2">
-          <svg
-            viewBox="0 0 96 20"
+          <Sparkline
+            values={history.map((sample) => sample.pfPerMw)}
+            days={history.map((sample) => sample.day)}
+            format={(value) => num(value)}
+            label="PF per MW"
+            height={20}
+            color="var(--color-mint)"
             className="h-5 w-24 shrink-0"
-            role="img"
-            aria-label="PF per MW trend"
-          >
-            <polyline
-              points={sparkPoints}
-              fill="none"
-              stroke="#56e1dc"
-              strokeWidth="1.5"
-            />
-          </svg>
+            ariaLabel="PF per MW trend"
+          />
           <span className="text-[0.6875rem] text-muted">
             PF/MW {trendDelta >= 0 ? "up" : "down"} {pct(Math.abs(trendDelta), 1)}{" "}
             over {history.length}d
