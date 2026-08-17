@@ -16,6 +16,26 @@ import { FeedPost } from './ui/FeedPost'
 import { useUiStore } from '../../store/uiStore'
 import { selectFinanceDashboardReadouts } from './data/financeDashboardModel'
 
+/** Totals for a command-dock channel must come from the same rows the list shows. */
+export function sumChannelRows(
+  rows: ReadonlyArray<{
+    revenue: number
+    cogs: number
+    mtok?: number
+    users?: number
+  }>,
+) {
+  return rows.reduce(
+    (acc, row) => ({
+      revenue: acc.revenue + row.revenue,
+      cogs: acc.cogs + row.cogs,
+      mtok: acc.mtok + (row.mtok ?? 0),
+      users: acc.users + (row.users ?? 0),
+    }),
+    { revenue: 0, cogs: 0, mtok: 0, users: 0 },
+  )
+}
+
 /**
  * Floating right intelligence dock over the map.
  * Clickable, icon-led tabs switch P&L / Rivals / Feed without a second full panel.
@@ -120,14 +140,27 @@ function CommandIcon({ id }: { id: CommandViewId }) {
 
 function PnlView({ onOpenStats }: { onOpenStats: () => void }) {
   const state = useGameStore((s) => s.state)
-  const { finance: f, current, revenue, costs } = selectFinanceDashboardReadouts(state)
+  const { current, revenue, costs } = selectFinanceDashboardReadouts(state)
   const market = state.lastMarket
   const planStats = market.planStats
   const apiModels = market.modelFinance.filter(
     (model) => model.dayApiRevenue > 0 || model.dayApiCogs > 0 || model.dayApiMTok > 0,
   )
-  const subMTok = planStats.reduce((sum, plan) => sum + plan.dayMTok, 0)
-  const subUsers = planStats.reduce((sum, plan) => sum + plan.subscribers, 0)
+  const apiLedger = sumChannelRows(
+    apiModels.map((model) => ({
+      revenue: model.dayApiRevenue,
+      cogs: model.dayApiCogs,
+      mtok: model.dayApiMTok,
+    })),
+  )
+  const subLedger = sumChannelRows(
+    planStats.map((plan) => ({
+      revenue: plan.dayRevenue,
+      cogs: plan.dayCogs,
+      mtok: plan.dayMTok,
+      users: plan.subscribers,
+    })),
+  )
   const enterpriseApiRevenue = revenue.enterprise * 0.5
   const enterpriseSubRevenue = revenue.enterprise - enterpriseApiRevenue
   const dayNet = current.net
@@ -161,12 +194,12 @@ function PnlView({ onOpenStats }: { onOpenStats: () => void }) {
       <div className="anim-stagger space-y-2">
         <ChannelBreakdown
           label="API"
-          revenue={revenue.api + enterpriseApiRevenue}
-          cogs={f.apiCogs ?? 0}
-          usage={`${num(market.apiDayMTok, 2)} MTok`}
+          revenue={apiLedger.revenue + enterpriseApiRevenue}
+          cogs={apiLedger.cogs}
+          usage={`${num(apiLedger.mtok, 2)} MTok`}
         >
           {apiModels.length > 0 ? (
-            apiModels.slice(0, 4).map((model) => (
+            apiModels.map((model) => (
               <BreakdownItem
                 key={model.modelId}
                 label={model.name}
@@ -185,12 +218,12 @@ function PnlView({ onOpenStats }: { onOpenStats: () => void }) {
 
         <ChannelBreakdown
           label="Subs"
-          revenue={revenue.subscription + enterpriseSubRevenue}
-          cogs={f.subCogs ?? 0}
-          usage={`${num(subMTok, 2)} MTok · ${compactPeople(subUsers)} users`}
+          revenue={subLedger.revenue + enterpriseSubRevenue}
+          cogs={subLedger.cogs}
+          usage={`${num(subLedger.mtok, 2)} MTok · ${compactPeople(subLedger.users)} users`}
         >
           {planStats.length > 0 ? (
-            planStats.slice(0, 4).map((plan) => (
+            planStats.map((plan) => (
               <BreakdownItem
                 key={plan.planId}
                 label={plan.name}
