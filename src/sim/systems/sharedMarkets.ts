@@ -4,6 +4,7 @@ import { RACK_SKU_CATALOG } from '../balance/rackSkus'
 import { createRng, hashSeed, seededId } from '../rng'
 import type {
   ActiveLoan,
+  CatchUpCampaign,
   DataDomain,
   FirmLoanOffer,
   LabId,
@@ -13,6 +14,13 @@ import type {
   SimState,
   StaffRole,
 } from '../types'
+import { isLivePublicModel } from '../modelRelease'
+import {
+  catchUpEligible,
+  catchUpHazard,
+  catchUpPressure,
+  FRONTIER_STALE_INFLECTION_DAYS,
+} from '../balance/rivalCatchUp'
 import { creditLimitForValuation, totalDebt } from './loans'
 import {
   acceptEquityOffer,
@@ -20,6 +28,7 @@ import {
   requestEquityOffers,
 } from './capital'
 import { facilityAnchorTiles } from './worldAccess'
+import { getBuildDef } from './map'
 import { getLab, syncLabIndex, updateLab } from './labEngine'
 import { STAFF_HIRE_COST } from '../balance/staff'
 import { labStaffOpenSeats } from './staff'
@@ -744,6 +753,9 @@ export function domainProcessingCost(domain: DataDomain, quantity: number): numb
 
 export interface CompetitiveCatchUpSnapshot {
   active: boolean
+  eligible: boolean
+  pressure: number
+  hazard: number
   rivalId: LabId | null
   playerShare: number
   rivalShare: number
@@ -754,32 +766,17 @@ export interface CompetitiveCatchUpSnapshot {
   frontierStaleAfterDays: number
 }
 
-/** Select exactly one credible challenger when the player becomes dominant. */
-export function competitiveCatchUpSnapshot(state: SimState): CompetitiveCatchUpSnapshot {
-  const playerShare =
-    state.lastMarket.sharesByLab[state.playerLabId] ?? state.player.finance.totalShare ?? 0
-  const playerFrontier = state.player.models
-    .filter((model) => model.release === 'released' || model.shipped)
-    .toSorted(
-      (a, b) =>
-        b.capability - a.capability || b.releaseDay - a.releaseDay || a.id.localeCompare(b.id),
-    )[0]
-  const playerCapability = playerFrontier?.capability ?? 0
-  const frontierStaleAfterDays = playerFrontier
-    ? 100 + (hashSeed(state.seed, playerFrontier.id, 'frontier-stale-window') % 51)
-    : 150
-  const frontierAgeDays = playerFrontier
-    ? Math.max(0, state.day - playerFrontier.releaseDay)
-    : 0
-  const frontierStale =
-    Boolean(playerFrontier) && frontierAgeDays >= frontierStaleAfterDays
+function catchUpTarget(state: SimState): {
+  target: SimState['rivals'][number] | undefined
+  targetCapability: number
+} {
   let target = state.rivals[0]
   let targetScore = Number.NEGATIVE_INFINITY
   let targetCapability = 0
   for (const rival of state.rivals) {
     const capability = rival.models.reduce(
       (best, model) =>
-        Math.max(best, model.release === 'released' || model.shipped ? model.capability : 0),
+        Math.max(best, isLivePublicModel(model) ? model.capability : 0),
       0,
     )
     const share = state.lastMarket.sharesByLab[rival.id] ?? rival.marketShare ?? 0
@@ -790,31 +787,124 @@ export function competitiveCatchUpSnapshot(state: SimState): CompetitiveCatchUpS
       targetCapability = capability
     }
   }
+  return { target, targetCapability }
+}
+
+function catchUpMetrics(state: SimState) {
+  const playerShare =
+    state.lastMarket.sharesByLab[state.playerLabId] ?? state.player.finance.totalShare ?? 0
+  const playerFrontier = state.player.models
+    .filter(isLivePublicModel)
+    .toSorted(
+      (a, b) =>
+        b.capability - a.capability || b.releaseDay - a.releaseDay || a.id.localeCompare(b.id),
+    )[0]
+  const playerCapability = playerFrontier?.capability ?? 0
+  const frontierStaleAfterDays = playerFrontier
+    ? FRONTIER_STALE_INFLECTION_DAYS +
+      ((hashSeed(state.seed, playerFrontier.id, 'frontier-stale-window') % 21) - 10)
+    : FRONTIER_STALE_INFLECTION_DAYS
+  const frontierAgeDays = playerFrontier
+    ? Math.max(0, state.day - playerFrontier.releaseDay)
+    : 0
+  const { target, targetCapability } = catchUpTarget(state)
   const rivalShare = target
     ? state.lastMarket.sharesByLab[target.id] ?? target.marketShare ?? 0
     : 0
   const shareGap = Math.max(0, playerShare - rivalShare)
   const capabilityGap = Math.max(0, playerCapability - targetCapability)
+  const pressure = catchUpPressure({
+    playerShare,
+    shareGap,
+    capabilityGap,
+    frontierAgeDays,
+    frontierStaleAfterDays,
+  })
   return {
-    active:
-      Boolean(target) &&
-      ((playerShare >= 0.5 && (shareGap >= 0.25 || capabilityGap >= 8)) ||
-        (frontierStale && targetCapability <= playerCapability)),
-    rivalId: target?.id ?? null,
     playerShare,
     rivalShare,
     shareGap,
     capabilityGap,
-    frontierStale,
     frontierAgeDays,
     frontierStaleAfterDays,
+    target,
+    targetCapability,
+    pressure,
+    hazard: catchUpHazard(pressure),
+    eligible: catchUpEligible(pressure),
+  }
+}
+
+function campaignStillLive(
+  state: SimState,
+  campaign: CatchUpCampaign,
+  eligible: boolean,
+): boolean {
+  const rival = state.rivals.find((candidate) => candidate.id === campaign.rivalId)
+  if (!rival) return false
+  // Persist through the in-flight job, then end once that campaign ships.
+  // Stale-player pressure must not lock one rival into catch-up forever.
+  if (rival.trainingJob) return true
+  const shippedSinceArm = rival.models.some(
+    (model) =>
+      isLivePublicModel(model) && (model.releaseDay ?? 0) >= campaign.armedDay,
+  )
+  if (shippedSinceArm) return false
+  return eligible
+}
+
+/**
+ * Seeded daily arm/disarm. Call once per tick before controllers read the
+ * snapshot so market orders and training share one campaign.
+ */
+export function advanceCatchUpCampaign(state: SimState): SimState {
+  const metrics = catchUpMetrics(state)
+  const existing = state.catchUpCampaign
+  if (existing && campaignStillLive(state, existing, metrics.eligible)) {
+    return state
+  }
+  if (!metrics.eligible || !metrics.target) {
+    return existing ? { ...state, catchUpCampaign: undefined } : state
+  }
+  const rng = createRng(
+    hashSeed(state.seed, state.day, metrics.target.id, 'catch-up-arm'),
+  )
+  if (rng.next() < metrics.hazard) {
+    return {
+      ...state,
+      catchUpCampaign: { rivalId: metrics.target.id, armedDay: state.day },
+    }
+  }
+  return existing ? { ...state, catchUpCampaign: undefined } : state
+}
+
+/** Select exactly one credible challenger; activation is a persisted hazard. */
+export function competitiveCatchUpSnapshot(state: SimState): CompetitiveCatchUpSnapshot {
+  const metrics = catchUpMetrics(state)
+  const campaign = state.catchUpCampaign
+      const armed =
+        campaign != null && campaignStillLive(state, campaign, metrics.eligible)
+      const rivalId = armed ? campaign.rivalId : (metrics.target?.id ?? null)
+  return {
+    active: armed,
+    eligible: metrics.eligible,
+    pressure: metrics.pressure,
+    hazard: metrics.hazard,
+    rivalId,
+    playerShare: metrics.playerShare,
+    rivalShare: metrics.rivalShare,
+    shareGap: metrics.shareGap,
+    capabilityGap: metrics.capabilityGap,
+    frontierStale: metrics.frontierAgeDays >= metrics.frontierStaleAfterDays,
+    frontierAgeDays: metrics.frontierAgeDays,
+    frontierStaleAfterDays: metrics.frontierStaleAfterDays,
   }
 }
 
 /** Rival controllers express strategy only through the same public market actions. */
 export function queueRivalMarketOrders(state: SimState): SimState {
-  let next = state
-  const competitiveResponse = competitiveCatchUpSnapshot(state)
+  let next = advanceCatchUpCampaign(state)
+  const competitiveResponse = competitiveCatchUpSnapshot(next)
   for (let index = 0; index < state.rivals.length; index++) {
     const rivalId = state.rivals[index]!.id
     let lab = getLab(next, rivalId)
@@ -828,14 +918,19 @@ export function queueRivalMarketOrders(state: SimState): SimState {
       -Infinity,
       ...(lab.capital?.fundingRounds ?? []).map((round) => round.day),
     )
+    const smallHallCash = Math.floor(
+      getBuildDef('dc').cash * (next.config.economyMult ?? 1),
+    )
+    const needsCampusRaise =
+      lab.cash < smallHallCash * 0.9 ||
+      (isCatchUpChallenger &&
+        lab.cash < Math.max(smallHallCash, lab.finance.valuation * 0.12))
     if (
       weekly &&
-      next.day >= 30 &&
-      (lab.cash < 15_000_000 ||
-        (isCatchUpChallenger &&
-          lab.cash < Math.max(60_000_000, lab.finance.valuation * 0.12))) &&
-      next.day - lastRoundDay >= (isCatchUpChallenger ? 75 : 120) &&
-      (lab.capital?.investorConfidence ?? 0) >= 0.35
+      next.day >= 21 &&
+      needsCampusRaise &&
+      next.day - lastRoundDay >= (isCatchUpChallenger ? 60 : 75) &&
+      (lab.capital?.investorConfidence ?? 0) >= 0.32
     ) {
       const offer = requestEquityOffers(next, rivalId)
         .filter(
@@ -855,21 +950,21 @@ export function queueRivalMarketOrders(state: SimState): SimState {
     if (
       weekly &&
       !hasTypedDebt &&
-      lab.finance.valuation > 60_000_000 &&
-      (lab.cash < 25_000_000 || isCatchUpChallenger)
+      lab.finance.valuation > 40_000_000 &&
+      (lab.cash < smallHallCash * 0.85 || isCatchUpChallenger)
     ) {
       const debtBefore = (lab.capital?.debt ?? []).length
       next = applyForLabDebt(
         next,
         rivalId,
         isCatchUpChallenger
-          ? 'venture_debt'
+          ? 'project_finance'
           : lab.finance.dayRevenue > 0
-            ? 'revolver'
+            ? 'project_finance'
             : 'venture_debt',
         Math.min(
-          lab.finance.valuation * (isCatchUpChallenger ? 0.12 : 0.1),
-          isCatchUpChallenger ? 120_000_000 : 40_000_000,
+          lab.finance.valuation * (isCatchUpChallenger ? 0.28 : 0.22),
+          isCatchUpChallenger ? 280_000_000 : smallHallCash * 1.2,
         ),
       )
       lab = getLab(next, rivalId)

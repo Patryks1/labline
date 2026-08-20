@@ -1,11 +1,13 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { Trash } from "@phosphor-icons/react";
+import { Trash, Graph } from "@phosphor-icons/react";
 import { ECONOMY } from "../../../sim/balance/economy";
 import {
   analyzeApiPricing,
   analyzePlanPricing,
+  apiHostingCostFloor,
   apiUnitCostPerMTok,
   blendApiPrice,
+  clampApiListToHostingFloor,
   commercialApiListPricePerEquivalentMTok,
   commercialModelKind,
   planMarginPerSubMonth,
@@ -44,6 +46,7 @@ import {
   maxPlanDataCollectionShare,
   PAID_DATA_COLLECTION_PRICE_CAP,
   PLAN_PRO_WORKLOAD_MESSAGES_PER_DAY,
+  MIN_PLAN_ALLOWANCE_MTOK_PER_MONTH,
   MAX_PLANS,
 } from "../../../sim/systems/plans";
 import type { PlanOfferingBreadth } from "../../../sim/systems/plans";
@@ -51,6 +54,7 @@ import { useGameStore } from "../../../store/gameStore";
 import { money, num, pct, people } from "../format";
 import type {
   Model,
+  ModelRouter,
   ComputeLedger,
   FinanceDaySnapshot,
   NativeWorkUnits,
@@ -60,6 +64,22 @@ import type {
   ServeThrottlePolicy,
   SubPlan,
 } from "../../../sim/types";
+import { isLivePublicModel } from "../../../sim/modelRelease";
+import {
+  composeRouterModel,
+  planAssignedRouters,
+  planExposedModelIds,
+  planRouterParts,
+  releasedRouterMemberIds,
+  soldApiRouterMemberIds,
+  soldApiRouters,
+  apiRouterParts,
+} from "../../../sim/balance/modelRouter";
+import {
+  ROUTER_LANE_META,
+  ROUTER_LANES,
+  normalizeModelRouters,
+} from "../../../sim/balance/modelStudio";
 import { computeSnapshot } from "../../../sim/tick";
 import { ResearchUnlockLink } from "../ui/ResearchUnlockLink";
 import {
@@ -215,9 +235,8 @@ export function PlansPanel() {
   const setPricing = useGameStore((s) => s.setPricing);
   const financeModel = useMemo(() => buildFinanceDashboardModel(state), [state]);
   const stats = financeModel.stats.plans;
-  const models = state.player.models.filter(
-    (m) => m.release === "released" || m.shipped,
-  );
+  const models = state.player.models.filter(isLivePublicModel);
+  const routers = normalizeModelRouters(state.player.modelRouters);
   const pricing = state.player.pricing;
   const snap = computeSnapshot(state);
   const energyPrice = energyPriceForState(state);
@@ -234,7 +253,7 @@ export function PlansPanel() {
   );
   const rivalApiPeers = state.rivals.flatMap((rival) =>
     rival.models
-      .filter((model) => model.release === "released" || model.shipped)
+      .filter(isLivePublicModel)
       .map((model) => {
         const effective = effectiveApiPeerPricing(rival.pricing, model);
         return {
@@ -250,7 +269,7 @@ export function PlansPanel() {
   );
   const rivalApiInOutPeers = state.rivals.flatMap((rival) => {
     return rival.models
-      .filter((model) => model.release === "released" || model.shipped)
+      .filter(isLivePublicModel)
       .map((model) => {
         const effective = effectiveApiPeerPricing(rival.pricing, model);
         return {
@@ -267,7 +286,7 @@ export function PlansPanel() {
   });
   const rivalPlanPeers = state.rivals.flatMap((rival) => {
     const best = [...rival.models]
-      .filter((model) => model.release === "released" || model.shipped)
+      .filter(isLivePublicModel)
       .sort((a, b) => b.capability - a.capability)[0];
     if (!best) return [];
     return (rival.pricing.plans ?? [])
@@ -283,6 +302,23 @@ export function PlansPanel() {
   const active =
     models.find((m) => m.id === pricing.activeModelId) ?? models[0];
   const apiModelIds = pricing.apiModelIds ?? (active ? [active.id] : []);
+  const sellableRouters = routers.filter(
+    (router) => releasedRouterMemberIds(router, models).length > 0,
+  );
+  const listedRouters = soldApiRouters({
+    apiRouterIds: pricing.apiRouterIds,
+    apiModelIds,
+    activeModelRouterId: state.player.activeModelRouterId,
+    routers,
+    models,
+  });
+  const listedRouterIds = new Set(listedRouters.map((router) => router.id));
+  const routedApiMemberIds = new Set(
+    soldApiRouterMemberIds(listedRouters, models),
+  );
+  const liveApiEndpoints =
+    listedRouters.length +
+    apiModelIds.filter((id) => !routedApiMemberIds.has(id)).length;
 
   const [name, setName] = useState("Team");
   const [price, setPrice] = useState(100);
@@ -440,7 +476,7 @@ export function PlansPanel() {
               id: PLANS_TAB_IDS[1],
               label: `Tiers (${state.player.pricing.plans.length})`,
             },
-            { id: PLANS_TAB_IDS[2], label: `API (${models.length})` },
+            { id: PLANS_TAB_IDS[2], label: `API (${models.length + sellableRouters.length})` },
           ]}
         />
       </div>
@@ -527,14 +563,28 @@ export function PlansPanel() {
                 .filter((plan) => plan.id === selectedPlanId && !creatingPlan)
                 .map((plan) => {
                   const st = stats.find((s) => s.planId === plan.id);
+                  const servingIds = new Set(
+                    planExposedModelIds(plan, models, routers),
+                  );
+                  const assignedRouters = planAssignedRouters(plan, routers);
+                  const routed =
+                    assignedRouters[0] != null
+                      ? composeRouterModel(
+                          assignedRouters[0],
+                          planRouterParts(assignedRouters[0], models, plan),
+                        )
+                      : null;
                   const planModel =
-                    models.find((m) => plan.modelIds.includes(m.id)) ?? active;
+                    routed ??
+                    models.find((m) => servingIds.has(m.id)) ??
+                    active;
                   return (
                     <PlanCard
                       key={plan.id}
                       plan={plan}
                       stats={st}
                       models={models}
+                      routers={routers}
                       allPlans={state.player.pricing.plans}
                       unitCogs={
                         state.lastMarket.marginalPerMTok || infra.costPerMTok
@@ -593,8 +643,8 @@ export function PlansPanel() {
                   Included usage (MTok/month)
                   <DraftNumberInput
                     ariaLabel="New plan included MTok per month"
-                    min={0.01}
-                    step={1}
+                    min={MIN_PLAN_ALLOWANCE_MTOK_PER_MONTH}
+                    step={0.5}
                     value={includedMTok}
                     decimals={2}
                     onCommit={setIncludedMTok}
@@ -641,22 +691,213 @@ export function PlansPanel() {
           <section className="space-y-2">
             <ApiCostSummary
               estimatedCostPerMTok={estimatedApiCostPerMTok}
-              modelCount={models.length}
-              liveModelCount={apiModelIds.length}
+              modelCount={models.length + sellableRouters.length}
+              liveModelCount={liveApiEndpoints}
               servedMTok={apiServed}
               requestedMTok={apiRequested}
             />
 
-            {models.length === 0 ? (
+            {models.length === 0 && sellableRouters.length === 0 ? (
               <EmptyState
                 title="No released models"
-                description="Release a model first — API list prices attach to each public model."
+                description="Release a model first — API list prices attach to each public model or serving router."
               />
             ) : (
               <div className="anim-stagger space-y-2">
+                {sellableRouters.map((router) => {
+                  const isApiLive = listedRouterIds.has(router.id);
+                  const members = releasedRouterMemberIds(router, models)
+                    .map((id) => models.find((model) => model.id === id))
+                    .filter((model): model is Model => Boolean(model));
+                  const seedPrice =
+                    members.reduce((sum, model) => {
+                      return (
+                        sum +
+                        blendApiPrice(
+                          model.apiPriceInPerMTok ??
+                            model.suggestedApiPriceIn ??
+                            pricing.apiPriceInPerMTok,
+                          model.apiPriceOutPerMTok ??
+                            model.suggestedApiPriceOut ??
+                            pricing.apiPriceOutPerMTok,
+                        )
+                      );
+                    }, 0) / Math.max(1, members.length);
+                  const parts = apiRouterParts(router, models, seedPrice);
+                  const composed = composeRouterModel(router, parts);
+                  const memberFins = members.map((model) =>
+                    modelFinance.find((row) => row.modelId === model.id),
+                  );
+                  const dayMTok = memberFins.reduce(
+                    (sum, row) => sum + (row?.dayApiMTok ?? 0),
+                    0,
+                  );
+                  const dayRev = memberFins.reduce(
+                    (sum, row) => sum + (row?.dayApiRevenue ?? 0),
+                    0,
+                  );
+                  const dayCogs = memberFins.reduce(
+                    (sum, row) => sum + (row?.dayApiCogs ?? 0),
+                    0,
+                  );
+                  const blend = composed
+                    ? blendApiPrice(
+                        composed.apiPriceInPerMTok ??
+                          composed.suggestedApiPriceIn ??
+                          seedPrice,
+                        composed.apiPriceOutPerMTok ??
+                          composed.suggestedApiPriceOut ??
+                          seedPrice,
+                      )
+                    : seedPrice;
+                  const hostingFloorBlended = parts.reduce((sum, part) => {
+                    const precision =
+                      pricing.apiServePrecisionByModel?.[part.model.id] ??
+                      "fp16";
+                    const served = modelForServePrecision(
+                      part.model,
+                      precision,
+                      state.player.researchUnlocked,
+                    );
+                    return (
+                      sum +
+                      part.share *
+                        apiHostingCostFloor(state, snap, served, {
+                          energyPricePerMWh: energyPrice,
+                        }).blended
+                    );
+                  }, 0);
+                  const belowFloor = blend < hostingFloorBlended;
+                  const { inMTok, outMTok } = splitInOutMTok(dayMTok);
+                  const dayNet = dayRev - dayCogs;
+                  const toggleRouterApi = () => {
+                    const current =
+                      pricing.apiRouterIds ??
+                      listedRouters.map((entry) => entry.id);
+                    const next = isApiLive
+                      ? current.filter((id) => id !== router.id)
+                      : [...current, router.id];
+                    setPricing({ apiRouterIds: [...new Set(next)] });
+                  };
+                  return (
+                    <div
+                      key={router.id}
+                      data-testid={`api-router-card-${router.id}`}
+                    >
+                      <GameCard
+                        eyebrow={isApiLive ? "API mix live" : "API mix paused"}
+                        title={router.name}
+                        tone={
+                          isApiLive ? "mint" : belowFloor ? "danger" : "infer"
+                        }
+                        actions={
+                          <HudButton
+                            type="button"
+                            variant={isApiLive ? "danger" : "primary"}
+                            className="!px-2.5 !py-1 text-[0.75rem]"
+                            onClick={toggleRouterApi}
+                          >
+                            {isApiLive ? "Stop API" : "Sell API"}
+                          </HudButton>
+                        }
+                      >
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                          <div>
+                            <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+                              Price
+                            </div>
+                            <div className="font-mono text-[0.8125rem] tabular-nums text-bone">
+                              ${formatApiListPrice(blend)}/M
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+                              Floor
+                            </div>
+                            <div
+                              className={`font-mono text-[0.8125rem] tabular-nums ${
+                                belowFloor ? "text-danger" : "text-bone"
+                              }`}
+                            >
+                              ${hostingFloorBlended.toFixed(2)}/M
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+                              Speed
+                            </div>
+                            <div className="font-mono text-[0.8125rem] tabular-nums text-bone">
+                              {num(
+                                composed?.serviceProfile?.interactiveTokPerSec ??
+                                  parts.reduce(
+                                    (sum, part) =>
+                                      sum +
+                                      part.share *
+                                        52 *
+                                        part.model.tokPerSecMult,
+                                    0,
+                                  ),
+                                0,
+                              )}{" "}
+                              t/s
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+                              Traffic
+                            </div>
+                            <div className="font-mono text-[0.8125rem] tabular-nums text-bone">
+                              {num(dayMTok)} MTok
+                            </div>
+                          </div>
+                        </div>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <StatusChip tone="research">router</StatusChip>
+                          {composed ? (
+                            <StatusChip tone="serve">
+                              cap {composed.capability.toFixed(2)}
+                            </StatusChip>
+                          ) : null}
+                          {belowFloor ? (
+                            <StatusChip tone="danger">
+                              Losing money / MTok
+                            </StatusChip>
+                          ) : null}
+                        </div>
+                        <p className="mt-2 text-[0.75rem] leading-5 text-muted">
+                          {ROUTER_LANES.filter((lane) => router.lanes[lane])
+                            .map((lane) => ROUTER_LANE_META[lane].label)
+                            .join(" · ") || "No lanes assigned"}
+                          . Harder work hits Frontier. Lane prices sit on the
+                          model cards.
+                        </p>
+                        <div className="mt-2 grid gap-1.5 sm:grid-cols-3">
+                          <UsageCell
+                            label="Traffic / day"
+                            value={num(dayMTok, 2)}
+                            sub={`${num(inMTok, 2)} in · ${num(outMTok, 2)} out MTok`}
+                          />
+                          <UsageCell
+                            label="Settled rev / cost"
+                            value={money(dayRev)}
+                            sub={`${money(dayCogs)} serving · prior day`}
+                            accent="text-mint"
+                          />
+                          <UsageCell
+                            label="Settled net / day"
+                            value={money(dayNet)}
+                            sub={isApiLive ? "live mix" : "not listed"}
+                            accent={dayNet < 0 ? "text-danger" : "text-mint"}
+                          />
+                        </div>
+                      </GameCard>
+                    </div>
+                  );
+                })}
                 {models.map((m) => {
                   const fin = modelFinance.find((f) => f.modelId === m.id);
                   const isApiLive = apiModelIds.includes(m.id);
+                  const viaRouter = routedApiMemberIds.has(m.id);
                   const apiPrecision =
                     pricing.apiServePrecisionByModel?.[m.id] ?? "fp16";
                   const apiPrecisionOptions = unlockedPlanPrecisions(
@@ -704,9 +945,15 @@ export function PlansPanel() {
                       dayMTok: fin?.dayApiMTok,
                     },
                   );
+                  const hosting = apiHostingCostFloor(
+                    state,
+                    snap,
+                    apiServedModel,
+                    { energyPricePerMWh: energyPrice },
+                  );
                   const pricingStatus = analyzeApiPricing({
                     price: blend,
-                    marginalCost: liveCost.blended,
+                    marginalCost: hosting.blended,
                     capability: apiServedModel.capability,
                     featureScore: m.modalities.length * 18,
                     tokPerSec:
@@ -717,8 +964,8 @@ export function PlansPanel() {
                     ),
                   });
                   const suggestedApi = suggestCompetitiveApiInOut({
-                    costIn: liveCost.costIn,
-                    costOut: liveCost.costOut,
+                    costIn: hosting.costIn,
+                    costOut: hosting.costOut,
                     capability: apiServedModel.capability,
                     featureScore: m.modalities.length * 18,
                     tokPerSec:
@@ -744,30 +991,44 @@ export function PlansPanel() {
                         Math.abs(fin?.dayApiRevenue ?? 0) * 0.005,
                         Math.abs(currentListRevenueAtPriorTraffic) * 0.005,
                       );
-                  const belowFloor = blend < liveCost.blended;
+                  const belowFloor = blend < hosting.blended;
 
                   return (
                     <div key={m.id} data-testid={`api-model-card-${m.id}`}>
                       <GameCard
-                        eyebrow={isApiLive ? "API live" : "API paused"}
+                        eyebrow={
+                          viaRouter
+                            ? "Via router"
+                            : isApiLive
+                              ? "API live"
+                              : "API paused"
+                        }
                         title={m.name}
                         tone={
-                          isApiLive ? "mint" : belowFloor ? "danger" : "infer"
+                          viaRouter || isApiLive
+                            ? "mint"
+                            : belowFloor
+                              ? "danger"
+                              : "infer"
                         }
                         actions={
-                          <HudButton
-                            type="button"
-                            variant={isApiLive ? "danger" : "primary"}
-                            className="!px-2.5 !py-1 text-[0.75rem]"
-                            onClick={() => {
-                              const next = isApiLive
-                                ? apiModelIds.filter((id) => id !== m.id)
-                                : [...apiModelIds, m.id];
-                              setPricing({ apiModelIds: next });
-                            }}
-                          >
-                            {isApiLive ? "Stop API" : "Sell API"}
-                          </HudButton>
+                          viaRouter ? (
+                            <StatusChip tone="research">via router</StatusChip>
+                          ) : (
+                            <HudButton
+                              type="button"
+                              variant={isApiLive ? "danger" : "primary"}
+                              className="!px-2.5 !py-1 text-[0.75rem]"
+                              onClick={() => {
+                                const next = isApiLive
+                                  ? apiModelIds.filter((id) => id !== m.id)
+                                  : [...apiModelIds, m.id];
+                                setPricing({ apiModelIds: next });
+                              }}
+                            >
+                              {isApiLive ? "Stop API" : "Sell API"}
+                            </HudButton>
+                          )
                         }
                       >
                         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -788,7 +1049,7 @@ export function PlansPanel() {
                                 belowFloor ? "text-danger" : "text-bone"
                               }`}
                             >
-                              ${liveCost.blended.toFixed(2)}/M
+                              ${hosting.blended.toFixed(2)}/M
                             </div>
                           </div>
                           <div>
@@ -845,9 +1106,11 @@ export function PlansPanel() {
                             label="Settled net / day"
                             value={money(dayNet)}
                             sub={
-                              isApiLive
-                                ? "live endpoint"
-                                : (fin?.note ?? "not listed")
+                              viaRouter
+                                ? "via router mix"
+                                : isApiLive
+                                  ? "live endpoint"
+                                  : (fin?.note ?? "not listed")
                             }
                             accent={dayNet < 0 ? "text-danger" : "text-mint"}
                           />
@@ -974,13 +1237,22 @@ export function PlansPanel() {
                             </span>
                             <DraftNumberInput
                               ariaLabel={`${m.name} input price per million tokens`}
-                              min={0}
+                              min={hosting.costIn}
                               step={0.0000001}
                               value={pin}
                               decimals={7}
                               trimTrailingZeros
                               onCommit={(nextIn) => {
-                                setModelApiInOut(m.id, nextIn, pout);
+                                const listed = clampApiListToHostingFloor(
+                                  nextIn,
+                                  pout,
+                                  hosting,
+                                );
+                                setModelApiInOut(
+                                  m.id,
+                                  listed.priceIn,
+                                  listed.priceOut,
+                                );
                               }}
                               className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 font-mono text-[0.8125rem] text-bone outline-none"
                             />
@@ -995,22 +1267,35 @@ export function PlansPanel() {
                             </span>
                             <DraftNumberInput
                               ariaLabel={`${m.name} output price per million tokens`}
-                              min={0}
+                              min={hosting.costOut}
                               step={0.0000001}
                               value={pout}
                               decimals={7}
                               trimTrailingZeros
                               onCommit={(committedOut) => {
-                                setModelApiInOut(m.id, pin, committedOut);
+                                const listed = clampApiListToHostingFloor(
+                                  pin,
+                                  committedOut,
+                                  hosting,
+                                );
+                                setModelApiInOut(
+                                  m.id,
+                                  listed.priceIn,
+                                  listed.priceOut,
+                                );
                               }}
                               className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 font-mono text-[0.8125rem] text-bone outline-none"
                             />
                           </label>
                         </div>
                         <p className="mt-2 text-[0.75rem] leading-5 text-muted">
-                          Estimated cost {money(liveCost.blended)} per 1M tokens
-                          ({liveCost.source === "live" ? "settled" : "forecast"}
-                          )
+                          Hosting floor {money(hosting.blended)} per 1M tokens
+                          {hosting.source === "cloud_reference"
+                            ? " (cloud rental quote — no campus replica)"
+                            : " (energy, racks, halls, and leases at this size)"}
+                          {liveCost.source === "live"
+                            ? ` · settled ${money(liveCost.blended)}`
+                            : ""}
                           {belowFloor
                             ? " · current list price is below cost"
                             : ""}
@@ -1519,6 +1804,11 @@ const THROTTLE_POLICY_OPTIONS: {
     id: "throttle",
     label: "Slow streams",
     hint: "Serve everyone; streams slow down and demand cools tomorrow.",
+  },
+  {
+    id: "surge",
+    label: "Peak pricing",
+    hint: "Raise API prices under load to shed demand profitably.",
   },
 ];
 
@@ -2225,24 +2515,100 @@ const PLAN_PRECISION_LABELS: Record<PlanServePrecision, string> = {
   ternary_1_58: "1.58-bit",
 };
 
+function PlanPrecisionPills({
+  model,
+  plan,
+  unlocked,
+  onSelect,
+}: {
+  model: Model;
+  plan: SubPlan;
+  unlocked: string[];
+  onSelect: (precision: PlanServePrecision) => void;
+}) {
+  const precision = planModelServePrecision(plan, model, unlocked);
+  const precisionOptions = availablePlanPrecisionsForModel(model, unlocked);
+  const modifiers = planServeModifiers(precision, unlocked);
+  return (
+    <div className="border-t border-line/50 px-2 py-2">
+      <div className="flex flex-wrap gap-1">
+        {precisionOptions.map((option) => {
+          const active = option === precision;
+          const preview = planServeModifiers(option, unlocked);
+          return (
+            <HudButton
+              key={option}
+              type="button"
+              variant="ghost"
+              title={`${preview.label} · ${(preview.computeMult * 100).toFixed(2)}% serving compute`}
+              onClick={() => onSelect(option)}
+              className={`rounded-full px-2 py-1 font-mono text-[0.6875rem] ${
+                active
+                  ? "bg-infer/25 text-infer ring-1 ring-infer/40"
+                  : "bg-void text-muted hover:text-bone"
+              }`}
+            >
+              {PLAN_PRECISION_LABELS[option]}
+            </HudButton>
+          );
+        })}
+      </div>
+      <p className="mt-1.5 text-[0.625rem] leading-snug text-muted">
+        {modifiers.label} uses {(modifiers.computeMult * 100).toFixed(2)}% of
+        full-precision serve compute
+        {modifiers.capabilityDelta
+          ? ` · capability ${modifiers.capabilityDelta}`
+          : " · no fixed capability penalty"}
+        .
+      </p>
+      {precisionOptions.length <= 2 ? (
+        <ResearchUnlockLink
+          className="mt-1.5"
+          nodeId="sys_quant"
+          label="Research serving quantization for more formats"
+        />
+      ) : null}
+    </div>
+  );
+}
+
 function PlanModelRoster({
   plan,
   models,
+  routers,
   unlocked,
   onChange,
 }: {
   plan: SubPlan;
   models: Model[];
+  routers: ModelRouter[];
   unlocked: string[];
   onChange: (patch: Partial<SubPlan>) => void;
 }) {
   const [addOpen, setAddOpen] = useState(false);
-  const [expandedModelId, setExpandedModelId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const assignedRouters = planAssignedRouters(plan, routers);
+  const assignedRouterIds = new Set(assignedRouters.map((router) => router.id));
+  const routerMemberIds = new Set(
+    assignedRouters.flatMap((router) =>
+      releasedRouterMemberIds(router, models),
+    ),
+  );
   const selectedModels = plan.modelIds
     .map((modelId) => models.find((model) => model.id === modelId))
-    .filter((model): model is Model => Boolean(model));
-  const selectedIds = new Set(selectedModels.map((model) => model.id));
-  const availableModels = models.filter((model) => !selectedIds.has(model.id));
+    .filter(
+      (model): model is Model =>
+        model != null && !routerMemberIds.has(model.id),
+    );
+  const selectedIds = new Set(plan.modelIds);
+  const availableRouters = routers.filter((router) => {
+    if (assignedRouterIds.has(router.id)) return false;
+    return releasedRouterMemberIds(router, models).length > 0;
+  });
+  const availableModels = models.filter(
+    (model) => !selectedIds.has(model.id) && !routerMemberIds.has(model.id),
+  );
+  const canAdd = availableRouters.length + availableModels.length > 0;
 
   const addModel = (model: Model) => {
     const precision = planModelServePrecision(plan, model, unlocked);
@@ -2253,7 +2619,15 @@ function PlanModelRoster({
         [model.id]: precision,
       },
     });
-    setExpandedModelId(model.id);
+    setExpandedId(model.id);
+    setAddOpen(false);
+  };
+
+  const addRouter = (router: ModelRouter) => {
+    onChange({
+      routerIds: [...(plan.routerIds ?? []), router.id],
+    });
+    setExpandedId(`router:${router.id}`);
     setAddOpen(false);
   };
 
@@ -2264,7 +2638,14 @@ function PlanModelRoster({
       modelIds: plan.modelIds.filter((id) => id !== modelId),
       servePrecisionByModel: precisionByModel,
     });
-    if (expandedModelId === modelId) setExpandedModelId(null);
+    if (expandedId === modelId) setExpandedId(null);
+  };
+
+  const removeRouter = (routerId: string) => {
+    onChange({
+      routerIds: (plan.routerIds ?? []).filter((id) => id !== routerId),
+    });
+    if (expandedId === `router:${routerId}`) setExpandedId(null);
   };
 
   const setPrecision = (modelId: string, precision: PlanServePrecision) => {
@@ -2284,22 +2665,51 @@ function PlanModelRoster({
             Models on this plan
           </div>
           <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">
-            Add released models, then open one to choose its serving precision.
+            Add released models or a serving router. Open a row for precision.
           </p>
         </div>
         <HudButton
           type="button"
           variant="secondary"
           onClick={() => setAddOpen((open) => !open)}
-          disabled={availableModels.length === 0}
+          disabled={!canAdd}
           className="shrink-0 rounded-full border border-mint/35 bg-mint/10 px-2.5 py-1 text-[0.75rem] font-medium text-mint disabled:cursor-not-allowed disabled:opacity-40"
         >
-          + Add model
+          + Add
         </HudButton>
       </div>
 
       {addOpen ? (
         <div className="mt-2 grid grid-cols-1 gap-1 rounded-lg border border-mint/25 bg-panel-2/70 p-1.5 sm:grid-cols-2">
+          {availableRouters.length > 0 ? (
+            <div className="col-span-full px-1 pt-0.5 text-[0.625rem] uppercase tracking-[0.08em] text-muted">
+              Routers
+            </div>
+          ) : null}
+          {availableRouters.map((router) => {
+            const members = releasedRouterMemberIds(router, models);
+            return (
+              <HudButton
+                key={router.id}
+                type="button"
+                variant="ghost"
+                onClick={() => addRouter(router)}
+                className="flex min-w-0 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left hover:bg-mint/10"
+              >
+                <span className="truncate text-[0.75rem] font-medium text-bone">
+                  {router.name}
+                </span>
+                <span className="shrink-0 font-mono text-[0.625rem] text-muted">
+                  router · {members.length} models
+                </span>
+              </HudButton>
+            );
+          })}
+          {availableModels.length > 0 && availableRouters.length > 0 ? (
+            <div className="col-span-full px-1 pt-0.5 text-[0.625rem] uppercase tracking-[0.08em] text-muted">
+              Models
+            </div>
+          ) : null}
           {availableModels.map((model) => (
             <HudButton
               key={model.id}
@@ -2323,111 +2733,204 @@ function PlanModelRoster({
       ) : null}
 
       <div className="mt-2 space-y-1.5">
-        {selectedModels.length === 0 ? (
+        {assignedRouters.length === 0 && selectedModels.length === 0 ? (
           <div className="rounded-lg border border-dashed border-line px-2.5 py-3 text-center text-[0.75rem] text-muted">
-            No model is available on this plan yet.
+            No model or router on this plan yet.
           </div>
         ) : (
-          selectedModels.map((model) => {
-            const expanded = expandedModelId === model.id;
-            const precision = planModelServePrecision(plan, model, unlocked);
-            const precisionOptions = availablePlanPrecisionsForModel(
-              model,
-              unlocked,
-            );
-            const modifiers = planServeModifiers(precision, unlocked);
-            const modalityLabel =
-              model.productPreset?.replaceAll("_", " ") ??
-              model.modalities.join(" · ");
-            return (
-              <article
-                key={model.id}
-                className="overflow-hidden rounded-lg border border-line/50 bg-panel-2/55"
-              >
-                <div className="flex items-center gap-1.5 p-1.5">
-                  <HudButton
-                    type="button"
-                    variant="ghost"
-                    aria-expanded={expanded}
-                    onClick={() =>
-                      setExpandedModelId(expanded ? null : model.id)
-                    }
-                    className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-1.5 py-1 text-left hover:bg-void/50"
-                  >
-                    <span className="min-w-0">
-                      <span className="block truncate text-[0.75rem] font-semibold text-bone">
-                        {model.name}
+          <>
+            {assignedRouters.map((router) => {
+              const expanded = expandedId === `router:${router.id}`;
+              const parts = planRouterParts(router, models, plan);
+              const composed = composeRouterModel(router, parts);
+              const members = releasedRouterMemberIds(router, models)
+                .map((id) => models.find((model) => model.id === id))
+                .filter((model): model is Model => Boolean(model));
+              const computeMult =
+                parts.length === 0
+                  ? 1
+                  : parts.reduce((sum, part) => {
+                      return (
+                        sum +
+                        part.share *
+                          planServeModifiers(
+                            planModelServePrecision(
+                              plan,
+                              part.model,
+                              unlocked,
+                            ),
+                            unlocked,
+                          ).computeMult
+                      );
+                    }, 0);
+              return (
+                <article
+                  key={router.id}
+                  className="overflow-hidden rounded-lg border border-line/50 bg-panel-2/55"
+                >
+                  <div className="flex items-center gap-1.5 p-1.5">
+                    <HudButton
+                      type="button"
+                      variant="ghost"
+                      aria-expanded={expanded}
+                      onClick={() =>
+                        setExpandedId(expanded ? null : `router:${router.id}`)
+                      }
+                      className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-1.5 py-1 text-left hover:bg-void/50"
+                    >
+                      <span className="min-w-0">
+                        <span className="flex items-center gap-1.5">
+                          <Graph
+                            size="0.8rem"
+                            className="shrink-0 text-mint"
+                            weight="duotone"
+                          />
+                          <span className="block truncate text-[0.75rem] font-semibold text-bone">
+                            {router.name}
+                          </span>
+                        </span>
+                        <span className="block min-w-0 whitespace-normal break-words text-[0.625rem] leading-snug text-muted">
+                          Router ·{" "}
+                          {ROUTER_LANES.filter((lane) => router.lanes[lane])
+                            .map((lane) => ROUTER_LANE_META[lane].label)
+                            .join(" · ") || "no lanes"}
+                        </span>
                       </span>
-                      <span className="block min-w-0 whitespace-normal break-words text-[0.625rem] capitalize leading-snug text-muted">
-                        {modalityLabel}
+                      <span className="shrink-0 text-right font-mono">
+                        <span className="block text-[0.6875rem] font-semibold text-infer">
+                          mix
+                          {composed
+                            ? ` · cap ${num(composed.capability)}`
+                            : ""}
+                        </span>
+                        <span className="block text-[0.5625rem] text-muted">
+                          compute ×{computeMult.toFixed(2)}
+                        </span>
                       </span>
-                    </span>
-                    <span className="shrink-0 text-right font-mono">
-                      <span className="block text-[0.6875rem] font-semibold text-infer">
-                        {PLAN_PRECISION_LABELS[precision]}
-                      </span>
-                      <span className="block text-[0.5625rem] text-muted">
-                        compute ×{modifiers.computeMult.toFixed(2)}
-                      </span>
-                    </span>
-                  </HudButton>
-                  <HudButton
-                    type="button"
-                    variant="ghost"
-                    aria-label={`Remove ${model.name} from ${plan.name}`}
-                    title="Remove model from plan"
-                    onClick={() => removeModel(model.id)}
-                    className="rounded-md px-1.5 py-1 text-[0.75rem] text-muted hover:bg-panel-2 hover:text-bone"
-                  >
-                    <Trash aria-hidden="true" size="0.8rem" weight="bold" />
-                  </HudButton>
-                </div>
-
-                {expanded ? (
-                  <div className="border-t border-line/50 px-2 py-2">
-                    <div className="flex flex-wrap gap-1">
-                      {precisionOptions.map((option) => {
-                        const active = option === precision;
-                        const preview = planServeModifiers(option, unlocked);
-                        return (
-                          <HudButton
-                            key={option}
-                            type="button"
-                            variant="ghost"
-                            title={`${preview.label} · ${(preview.computeMult * 100).toFixed(2)}% serving compute`}
-                            onClick={() => setPrecision(model.id, option)}
-                            className={`rounded-full px-2 py-1 font-mono text-[0.6875rem] ${
-                              active
-                                ? "bg-infer/25 text-infer ring-1 ring-infer/40"
-                                : "bg-void text-muted hover:text-bone"
-                            }`}
-                          >
-                            {PLAN_PRECISION_LABELS[option]}
-                          </HudButton>
-                        );
-                      })}
-                    </div>
-                    <p className="mt-1.5 text-[0.625rem] leading-snug text-muted">
-                      {modifiers.label} uses{" "}
-                      {(modifiers.computeMult * 100).toFixed(2)}% of
-                      full-precision serve compute
-                      {modifiers.capabilityDelta
-                        ? ` · capability ${modifiers.capabilityDelta}`
-                        : " · no fixed capability penalty"}
-                      .
-                    </p>
-                    {precisionOptions.length <= 2 ? (
-                      <ResearchUnlockLink
-                        className="mt-1.5"
-                        nodeId="sys_quant"
-                        label="Research serving quantization for more formats"
-                      />
-                    ) : null}
+                    </HudButton>
+                    <HudButton
+                      type="button"
+                      variant="ghost"
+                      aria-label={`Remove ${router.name} from ${plan.name}`}
+                      title="Remove router from plan"
+                      onClick={() => removeRouter(router.id)}
+                      className="rounded-md px-1.5 py-1 text-[0.75rem] text-muted hover:bg-panel-2 hover:text-bone"
+                    >
+                      <Trash aria-hidden="true" size="0.8rem" weight="bold" />
+                    </HudButton>
                   </div>
-                ) : null}
-              </article>
-            );
-          })
+                  {expanded ? (
+                    <div className="space-y-1.5 border-t border-line/50 px-2 py-2">
+                      {members.length === 0 ? (
+                        <p className="text-[0.6875rem] text-amber">
+                          Assign released models to this router&apos;s lanes.
+                        </p>
+                      ) : (
+                        members.map((model) => {
+                          const precision = planModelServePrecision(
+                            plan,
+                            model,
+                            unlocked,
+                          );
+                          return (
+                            <div
+                              key={model.id}
+                              className="overflow-hidden rounded-md border border-line/40 bg-void/40"
+                            >
+                              <div className="flex items-center justify-between gap-2 px-2 py-1.5">
+                                <span className="min-w-0">
+                                  <span className="block truncate text-[0.6875rem] font-medium text-bone">
+                                    {model.name}
+                                  </span>
+                                  <span className="block text-[0.5625rem] text-muted">
+                                    {ROUTER_LANES.filter(
+                                      (lane) => router.lanes[lane] === model.id,
+                                    )
+                                      .map((lane) => ROUTER_LANE_META[lane].label)
+                                      .join(" · ")}
+                                  </span>
+                                </span>
+                                <span className="shrink-0 font-mono text-[0.6875rem] font-semibold text-infer">
+                                  {PLAN_PRECISION_LABELS[precision]}
+                                </span>
+                              </div>
+                              <PlanPrecisionPills
+                                model={model}
+                                plan={plan}
+                                unlocked={unlocked}
+                                onSelect={(next) => setPrecision(model.id, next)}
+                              />
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  ) : null}
+                </article>
+              );
+            })}
+            {selectedModels.map((model) => {
+              const expanded = expandedId === model.id;
+              const precision = planModelServePrecision(plan, model, unlocked);
+              const modifiers = planServeModifiers(precision, unlocked);
+              const modalityLabel =
+                model.productPreset?.replaceAll("_", " ") ??
+                model.modalities.join(" · ");
+              return (
+                <article
+                  key={model.id}
+                  className="overflow-hidden rounded-lg border border-line/50 bg-panel-2/55"
+                >
+                  <div className="flex items-center gap-1.5 p-1.5">
+                    <HudButton
+                      type="button"
+                      variant="ghost"
+                      aria-expanded={expanded}
+                      onClick={() =>
+                        setExpandedId(expanded ? null : model.id)
+                      }
+                      className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-1.5 py-1 text-left hover:bg-void/50"
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate text-[0.75rem] font-semibold text-bone">
+                          {model.name}
+                        </span>
+                        <span className="block min-w-0 whitespace-normal break-words text-[0.625rem] capitalize leading-snug text-muted">
+                          {modalityLabel}
+                        </span>
+                      </span>
+                      <span className="shrink-0 text-right font-mono">
+                        <span className="block text-[0.6875rem] font-semibold text-infer">
+                          {PLAN_PRECISION_LABELS[precision]}
+                        </span>
+                        <span className="block text-[0.5625rem] text-muted">
+                          compute ×{modifiers.computeMult.toFixed(2)}
+                        </span>
+                      </span>
+                    </HudButton>
+                    <HudButton
+                      type="button"
+                      variant="ghost"
+                      aria-label={`Remove ${model.name} from ${plan.name}`}
+                      title="Remove model from plan"
+                      onClick={() => removeModel(model.id)}
+                      className="rounded-md px-1.5 py-1 text-[0.75rem] text-muted hover:bg-panel-2 hover:text-bone"
+                    >
+                      <Trash aria-hidden="true" size="0.8rem" weight="bold" />
+                    </HudButton>
+                  </div>
+                  {expanded ? (
+                    <PlanPrecisionPills
+                      model={model}
+                      plan={plan}
+                      unlocked={unlocked}
+                      onSelect={(next) => setPrecision(model.id, next)}
+                    />
+                  ) : null}
+                </article>
+              );
+            })}
+          </>
         )}
       </div>
     </section>
@@ -2533,6 +3036,7 @@ function PlanCard({
   plan,
   stats,
   models,
+  routers,
   allPlans,
   unitCogs,
   apiList,
@@ -2546,6 +3050,7 @@ function PlanCard({
   plan: SubPlan;
   stats?: PlanDayStats;
   models: Model[];
+  routers: ModelRouter[];
   allPlans: SubPlan[];
   unitCogs: number;
   apiList: number;
@@ -2826,8 +3331,8 @@ function PlanCard({
               Included usage (MTok/month)
               <DraftNumberInput
                 ariaLabel={`${plan.name} included MTok per month`}
-                min={0.01}
-                step={1}
+                min={MIN_PLAN_ALLOWANCE_MTOK_PER_MONTH}
+                step={0.5}
                 value={allowanceMo}
                 decimals={2}
                 onCommit={(next) => onChange({ includedMTokPerMonth: next })}
@@ -2960,6 +3465,7 @@ function PlanCard({
         <PlanModelRoster
           plan={plan}
           models={models}
+          routers={routers}
           unlocked={unlocked}
           onChange={onChange}
         />
@@ -3117,35 +3623,6 @@ function PlanCard({
               </p>
             )}
           </div>
-
-          <div className="text-[0.75rem] text-muted">Models on this plan</div>
-          {models.length === 0 ? (
-            <p className="mt-1 text-[0.75rem] text-amber">Ship a model first</p>
-          ) : (
-            <div className="mt-1 flex flex-wrap gap-1">
-              {models.map((m) => {
-                const on = plan.modelIds.includes(m.id);
-                return (
-                  <HudButton
-                    key={m.id}
-                    type="button"
-                    variant="ghost"
-                    onClick={() => {
-                      const modelIds = on
-                        ? plan.modelIds.filter((id) => id !== m.id)
-                        : [...plan.modelIds, m.id];
-                      onChange({ modelIds });
-                    }}
-                    className={`rounded-full px-2 py-0.5 text-[0.75rem] ${
-                      on ? "bg-mint/20 text-mint" : "bg-void text-muted"
-                    }`}
-                  >
-                    {m.name}
-                  </HudButton>
-                );
-              })}
-            </div>
-          )}
         </div>
 
         <HudButton

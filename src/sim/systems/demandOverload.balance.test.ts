@@ -8,9 +8,11 @@ import { collectOffers, tickMarket } from '../systems/market'
 import { buildScaledModel } from '../balance/modelBuild'
 import {
   nextSpeedStrain,
+  nextSurgeLevel,
   planSlownessDissatisfaction,
   strainLatencyFactor,
   strainSpeedFactor,
+  surgePriceMultiplier,
   throttleAbsorbShare,
   throttleChurnScale,
   throttlePainScale,
@@ -233,7 +235,19 @@ describe('throttle policy math', () => {
     expect(throttleAbsorbShare('throttle', 0.4)).toBe(1)
     expect(throttleAbsorbShare('balanced', 0.1)).toBe(1)
     expect(throttleAbsorbShare('balanced', 0.5)).toBeCloseTo(0.5)
+    expect(throttleAbsorbShare('surge', 0.5)).toBeCloseTo(0.5)
     expect(throttleAbsorbShare('balanced', 0)).toBe(0)
+  })
+
+  it('surge EMA ramps under load and heals with headroom', () => {
+    let level = 0
+    for (let i = 0; i < 8; i++) level = nextSurgeLevel(level, 0.4, 'surge')
+    expect(level).toBeGreaterThan(0.15)
+    expect(surgePriceMultiplier(level)).toBeGreaterThan(1.1)
+    expect(surgePriceMultiplier(level)).toBeLessThanOrEqual(1.8)
+    const cooling = nextSurgeLevel(level, 0, 'surge')
+    expect(cooling).toBeLessThan(level)
+    expect(nextSurgeLevel(level, 0.4, 'balanced')).toBeLessThan(level)
   })
 
   it('strain rises when throttling and heals with headroom', () => {
@@ -295,6 +309,33 @@ describe('overload policies in the market', () => {
     const shed = run(overloadedBase('shed'), 2, { pinBrandTrust: 58 })
     expect(balanced.player.speedStrain ?? 0).toBeGreaterThan(0.02)
     expect(balanced.player.servicePain).toBeLessThan(shed.player.servicePain)
+  })
+
+  it('surge prices API up under load: fewer MTok, higher $/MTok, less churn than shed', () => {
+    const base = (policy: ServeThrottlePolicy) =>
+      withPolicy(
+        withRivalModels(withReleasedModel(withRacks(createGame(21), 96))),
+        policy,
+      )
+    const surge = run(base('surge'), 14, { pinBrandTrust: 58 })
+    const shed = run(base('shed'), 14, { pinBrandTrust: 58 })
+    expect(surge.lastMarket.apiSurgeMultiplier ?? 1).toBeGreaterThan(1.05)
+    expect(surge.lastMarket.apiDemandMTok ?? 0).toBeLessThan(
+      shed.lastMarket.apiDemandMTok ?? 0,
+    )
+    expect(surge.lastMarket.apiDayMTok).toBeLessThanOrEqual(
+      shed.lastMarket.apiDayMTok,
+    )
+    const surgeYield =
+      surge.lastMarket.apiDayRevenue /
+      Math.max(0.01, surge.lastMarket.apiDayMTok)
+    const shedYield =
+      shed.lastMarket.apiDayRevenue / Math.max(0.01, shed.lastMarket.apiDayMTok)
+    expect(surgeYield).toBeGreaterThan(shedYield)
+    expect(surge.player.servicePain).toBeLessThan(shed.player.servicePain)
+    const subsOf = (s: SimState) =>
+      s.lastMarket.planStats.reduce((sum, p) => sum + p.subscribers, 0)
+    expect(subsOf(surge)).toBeGreaterThan(subsOf(shed))
   })
 })
 

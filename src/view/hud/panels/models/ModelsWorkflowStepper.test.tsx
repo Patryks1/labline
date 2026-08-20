@@ -20,7 +20,7 @@ describe("ModelsWorkflowStepper", () => {
     expect(markup).toContain('data-step="compute"');
     expect(markup).toContain('data-step="review"');
     expect(markup).toContain('aria-label="Compute"');
-    expect(markup).toContain("CPU");
+    expect(markup).toContain("Recipe");
     expect(markup).toContain('aria-current="step"');
     expect(markup).toContain('aria-pressed="true"');
     expect(markup).toContain("← Back");

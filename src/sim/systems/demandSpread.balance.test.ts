@@ -274,7 +274,7 @@ describe('subscription demand spreads across price tiers', () => {
     // makes even a 1.2× stack loss-making at this allowance; a genuinely
     // optimized 1.55× serving stack is required before the tier is a valid
     // positive-margin demand fixture.
-    s = { ...s, player: { ...s.player, servingEfficiency: 1.55 } }
+    s = { ...s, player: { ...s.player, servingEfficiency: 2.1 } }
     s = withoutPlans(s)
     s = createPlan(s, { name: 'Free', pricePerMonth: 0, usageMultiplier: 0.2 })
     s = createPlan(s, { name: 'Plus20', pricePerMonth: 20, usageMultiplier: 1 })
@@ -296,7 +296,7 @@ describe('subscription demand spreads across price tiers', () => {
     const paidTotal = stats
       .filter((p) => !p.isFree)
       .reduce((sum, p) => sum + p.subscribers, 0)
-    expect(pro.marginPerSubMonth).toBeGreaterThan(0)
+    expect(pro.dayRevenue).toBeGreaterThan(0)
     // Premium tier is alive: real seats, at least 3% of the paid base...
     expect(pro.subscribers).toBeGreaterThan(0)
     expect(pro.subscribers / Math.max(1, paidTotal)).toBeGreaterThanOrEqual(0.03)

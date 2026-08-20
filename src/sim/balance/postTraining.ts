@@ -1,4 +1,10 @@
-import type { DataDomain, Model, PostTrainStage, TrainingJob } from '../types'
+import type { DataDomain, Model, PostTrainGym, PostTrainStage, ToolSkill, TrainingJob } from '../types'
+import {
+  gymQualityForStage,
+  meanToolProficiency,
+  postTrainGymWorkMult,
+  postTrainStageCashCost,
+} from './modelStudio'
 import { trainingNumericsEconomicsProfile } from './trainingPrecision'
 import { activeBalanceTuning } from './tuning'
 
@@ -50,7 +56,11 @@ export function postTrainRelevantDataMTok(
   job: Pick<TrainingJob, 'trainMTok' | 'dataPlan'>,
   stage: TrainablePostStage,
 ): number {
-  const weights = job.dataPlan?.weights ?? {}
+  const alignVolume = Math.max(0, job.dataPlan?.postTrainMTok ?? 0)
+  const weights =
+    alignVolume > 1e-9 && job.dataPlan?.postTrainWeights
+      ? job.dataPlan.postTrainWeights
+      : (job.dataPlan?.weights ?? {})
   const affinity = RELEVANT_DATA[stage]
   let relevantShare = 0
   let specifiedShare = 0
@@ -61,7 +71,8 @@ export function postTrainRelevantDataMTok(
   }
   // Legacy/default recipes still contain general instruction material.
   const share = specifiedShare > 1e-9 ? relevantShare / specifiedShare : 0.22
-  return Math.max(0, job.trainMTok ?? 0) * Math.max(0.04, share)
+  const volume = alignVolume > 1e-9 ? alignVolume : Math.max(0, job.trainMTok ?? 0)
+  return volume * Math.max(0.04, share)
 }
 
 /**
@@ -78,6 +89,10 @@ export function postTrainTargetPfDays(
 ): number {
   const relevantMTok = postTrainRelevantDataMTok(job, stage)
   const volumeScale = 1 + 0.7 * Math.log10(1 + relevantMTok / 100)
+  const earlyT = Math.max(0, Math.min(1, relevantMTok / 800))
+  const earlyScale = 0.45 + 0.55 * (earlyT * earlyT * (3 - 2 * earlyT))
+  const reasoningTax =
+    stage === "process" || stage === "tools" ? 1.35 : 1
   // Sparse checkpoints train the active path plus a bounded share of the
   // inactive expert bank; treating the full bank as dense is too punitive.
   const activeParamsB = Math.max(0, Math.min(paramsB, job.activeParamsB ?? paramsB))
@@ -91,10 +106,39 @@ export function postTrainTargetPfDays(
         Math.min(5, volumeScale) *
         Math.min(4.2, sizeScale) *
         repeatScale *
+        earlyScale *
+        reasoningTax *
         activeBalanceTuning().postTrainWorkMult *
         10,
     ) / 10
   )
+}
+
+/** Gym quality stretches PF-days; unfunded gyms waste cluster time. */
+export function studioPostTrainTargetPfDays(
+  job: Pick<TrainingJob, 'trainMTok' | 'dataPlan'> &
+    Partial<Pick<TrainingJob, 'postTrainStageRuns' | 'activeParamsB' | 'targetParamsB'>>,
+  stage: TrainablePostStage,
+  paramsB = 1,
+  gyms?: readonly PostTrainGym[],
+): number {
+  const quality = gymQualityForStage(stage, gyms)
+  return Math.round(postTrainTargetPfDays(job, stage, paramsB) * postTrainGymWorkMult(quality) * 10) / 10
+}
+
+export function postTrainStageQuote(
+  job: Pick<TrainingJob, 'trainMTok' | 'dataPlan' | 'targetParamsB'> &
+    Partial<Pick<TrainingJob, 'postTrainStageRuns' | 'activeParamsB'>>,
+  stage: TrainablePostStage,
+  gyms?: readonly PostTrainGym[],
+): { pfDays: number; cash: number; gymQuality: number } {
+  const paramsB = job.targetParamsB ?? 1
+  const gymQuality = gymQualityForStage(stage, gyms)
+  return {
+    pfDays: studioPostTrainTargetPfDays(job, stage, paramsB, gyms),
+    cash: postTrainStageCashCost(paramsB, stage, gymQuality),
+    gymQuality,
+  }
 }
 
 /** @deprecated Forecast-only duration hint; PF targets are the completion gate. */
@@ -316,6 +360,8 @@ export interface PostTrainEffectivenessInput {
   models: readonly Model[]
   progress?: number
   daysElapsed?: number
+  gyms?: readonly PostTrainGym[]
+  tools?: readonly ToolSkill[]
 }
 
 /**
@@ -345,9 +391,17 @@ export function postTrainStageEffectiveness(input: PostTrainEffectivenessInput):
     0.2 * research +
     0.14 * foundation +
     0.24 * compute
+  const gymMult =
+    input.gyms == null
+      ? 1
+      : 0.7 + 0.3 * gymQualityForStage(input.stage, input.gyms)
+  const toolMult =
+    input.tools == null || input.stage !== 'tools'
+      ? 1
+      : 0.6 + 0.4 * meanToolProficiency(input.tools)
   // A selected stage with no allocated work is neutral; partial PF exposes at
   // most that fraction of the stage evidence.
-  return clamp01(evidence * compute)
+  return clamp01(evidence * compute * gymMult * toolMult)
 }
 
 /** Resolve and freeze every completed stage, including legacy/cheat completions. */
@@ -355,6 +409,8 @@ export function resolvedPostTrainStageEffectiveness(
   job: TrainingJob,
   researchUnlocked: readonly string[],
   models: readonly Model[],
+  gyms?: readonly PostTrainGym[],
+  tools?: readonly ToolSkill[],
 ): Partial<Record<TrainablePostStage, number>> {
   const resolved = { ...(job.postTrainStageEffectiveness ?? {}) }
   for (const stage of completedPostTrainStages(job)) {
@@ -363,6 +419,8 @@ export function resolvedPostTrainStageEffectiveness(
       stage,
       researchUnlocked,
       models,
+      gyms,
+      tools,
     })
   }
   return resolved
@@ -372,6 +430,8 @@ export function postTrainEffectProfile(
   job: TrainingJob,
   researchUnlocked: readonly string[],
   models: readonly Model[],
+  gyms?: readonly PostTrainGym[],
+  toolSkills?: readonly ToolSkill[],
 ): {
   scaleStrength: number
   alignmentEquivalent: number
@@ -397,6 +457,8 @@ export function postTrainEffectProfile(
         stage,
         researchUnlocked,
         models,
+        gyms,
+        tools: toolSkills,
       })
       const priorRuns =
         job.postTrainStageRuns?.[stage] ?? (frozen != null ? 1 : 0)
@@ -404,7 +466,14 @@ export function postTrainEffectProfile(
     }
     if (frozen != null) return clamp01(frozen)
     if (stage === job.postTrain || completed.has(stage)) {
-      return postTrainStageEffectiveness({ job, stage, researchUnlocked, models })
+      return postTrainStageEffectiveness({
+        job,
+        stage,
+        researchUnlocked,
+        models,
+        gyms,
+        tools: toolSkills,
+      })
     }
     return 0
   }

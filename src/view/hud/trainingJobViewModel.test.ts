@@ -165,7 +165,7 @@ describe("training job view model", () => {
     expect(decisionModel).toMatchObject({
       issueLabel: "Decision: Data discovery",
       issueTone: "warning",
-      primaryAction: { kind: "open-run", label: "Resolve decision" },
+      primaryAction: { kind: "decide", label: "Decide" },
       etaLabel: "Decision due",
     });
     expect(paused.primaryAction).toEqual({

@@ -1,6 +1,7 @@
 import { ArrowCounterClockwise, Brain, CheckCircle, Play, WarningCircle } from '@phosphor-icons/react'
 import { useMemo } from 'react'
 import { useGameStore } from '../../store/gameStore'
+import { useUiStore } from '../../store/uiStore'
 import {
   buildTrainingActivity,
   type TrainingActivityAction,
@@ -116,32 +117,52 @@ function ActivityItem({
   job: TrainingJobViewModel
   onAction: (action: TrainingActivityAction) => void
 }) {
+  const pct = Math.round(job.stageProgress * 100)
   return (
     <article
-      className="training-activity-bar__item flex min-w-[18rem] shrink-0 items-center gap-2 rounded-md border border-line/70 bg-panel-2/75 px-2 py-1.5"
+      className="training-activity-bar__item flex min-w-[11rem] max-w-[16rem] flex-[1_1_11rem] cursor-pointer items-center gap-1.5 rounded-md border border-line/70 bg-panel-2/75 px-2 py-1.5"
       data-job-id={job.id}
       data-urgency={job.urgency}
       data-stage={job.stage}
       data-status={job.statusLabel.toLowerCase().replaceAll(' ', '-')}
       data-issue={job.issueTone ?? 'none'}
-      title={job.issueLabel ? `${job.issueLabel} · ${job.allocatedPf.toFixed(2)} PF/d` : `${job.stageLabel} · ${job.allocatedPf.toFixed(2)} PF/d`}
+      title={
+        job.issueLabel
+          ? `${job.name} · ${job.issueLabel} · ${job.allocatedPf.toFixed(2)} PF/d`
+          : `${job.name} · ${job.stageLabel} ${pct}% · ${job.etaLabel} · ${job.allocatedPf.toFixed(2)} PF/d`
+      }
+      onClick={(event) => {
+        event.stopPropagation()
+        onAction({ kind: 'open-run', label: 'View run', jobId: job.id })
+      }}
     >
       <span className={`shrink-0 ${iconToneClass(job)}`}>
         <ActivityIcon job={job} />
       </span>
-      <span className="min-w-0 max-w-[8rem] truncate text-[0.75rem] font-semibold text-bone" title={job.name}>
-        {job.name}
-      </span>
-      <StatusChip tone={chipTone(job.statusTone)}>{job.statusLabel}</StatusChip>
-      <div className="training-activity-bar__meter min-w-[5rem] flex-1">
-        <MeterBar
-          label={`${job.stageLabel} · ${(job.stageProgress * 100).toFixed(2)}%`}
-          value={job.stageProgress}
-          detail={job.etaLabel}
-          tone={meterTone(job.statusTone)}
-          live={!job.job.failed && job.statusLabel !== 'Paused'}
-        />
-      </div>
+      <button
+        type="button"
+        className="min-w-0 flex-1 text-left"
+        onClick={(event) => {
+          event.stopPropagation()
+          onAction({ kind: 'open-run', label: 'View run', jobId: job.id })
+        }}
+      >
+        <span className="flex min-w-0 items-center justify-between gap-1">
+          <span className="min-w-0 truncate text-[0.75rem] font-semibold text-bone">
+            {job.name}
+          </span>
+          <StatusChip tone={chipTone(job.statusTone)}>{job.statusLabel}</StatusChip>
+        </span>
+        <div className="training-activity-bar__meter mt-1">
+          <MeterBar
+            label={`${job.stageLabel} ${pct}%`}
+            value={job.stageProgress}
+            detail={job.etaLabel}
+            tone={meterTone(job.statusTone)}
+            live={!job.job.failed && job.statusLabel !== 'Paused'}
+          />
+        </div>
+      </button>
       <span className="sr-only">
         {job.issueLabel ? `${job.issueLabel}. ` : ''}
         {job.allocatedPf > 0 ? `${job.allocatedPf.toFixed(2)} PF/d.` : 'No PF/d.'}
@@ -152,7 +173,10 @@ function ActivityItem({
         className="min-h-7 shrink-0 px-2 text-[0.6875rem]"
         data-action-kind={job.primaryAction.kind}
         aria-label={`${job.primaryAction.label} ${job.name}`}
-        onClick={() => onAction(job.primaryAction)}
+        onClick={(event) => {
+          event.stopPropagation()
+          onAction(job.primaryAction)
+        }}
       >
         {job.primaryAction.label}
       </HudButton>
@@ -184,6 +208,8 @@ export function TrainingActivityBar({
   )
   const activity = useMemo(() => buildTrainingActivity(state), [state])
   const suppressSummary = shouldSuppressTrainingSummary(workspaceOpen, activePanel)
+  const openCampaignDecision = useUiStore((s) => s.openCampaignDecision)
+  const pendingDecision = activity.jobs.find((job) => job.job.pendingCampaignEvent)
 
   const openModels = () => {
     if (onOpenModels) {
@@ -194,6 +220,10 @@ export function TrainingActivityBar({
   }
 
   const handleAction = (action: TrainingActivityAction) => {
+    if (action.kind === 'decide') {
+      openCampaignDecision(action.jobId)
+      return
+    }
     if (action.kind === 'resume') {
       pauseTraining(action.jobId, false)
       return
@@ -223,7 +253,35 @@ export function TrainingActivityBar({
       data-summary-suppressed={suppressSummary ? 'true' : 'false'}
       aria-label="Training activity"
     >
-      <div className="training-activity-bar__surface hud-surface flex min-h-12 min-w-0 items-center gap-2 rounded-lg px-2.5 py-1.5">
+      <div
+        className="training-activity-bar__surface hud-surface flex min-h-12 min-w-0 cursor-pointer flex-col gap-1.5 rounded-lg px-2.5 py-1.5"
+        data-open-models="true"
+        onClick={openModels}
+      >
+        {pendingDecision?.job.pendingCampaignEvent ? (
+          <button
+            type="button"
+            data-campaign-decision-prompt="true"
+            onClick={(event) => {
+              event.stopPropagation()
+              openCampaignDecision(pendingDecision.id)
+            }}
+            className="pointer-events-auto flex min-h-11 w-full items-center justify-between gap-2 rounded-md border border-amber/50 bg-amber/15 px-2.5 text-left"
+          >
+            <span className="min-w-0">
+              <span className="block font-mono text-[0.5625rem] uppercase tracking-[0.12em] text-amber">
+                Decision due
+              </span>
+              <span className="block truncate text-[0.8125rem] font-semibold text-bone">
+                {pendingDecision.name}: {pendingDecision.job.pendingCampaignEvent.title}
+              </span>
+            </span>
+            <span className="shrink-0 rounded-md bg-amber px-2 py-1 text-[0.6875rem] font-semibold text-void">
+              Decide
+            </span>
+          </button>
+        ) : null}
+        <div className="flex min-w-0 items-center gap-2">
         <div className="flex shrink-0 items-center gap-2 border-r border-line/60 pr-2.5">
           <Brain size="1rem" weight="duotone" className="text-train" aria-hidden />
           {activity.jobs.length > 0 ? (
@@ -240,8 +298,9 @@ export function TrainingActivityBar({
         </div>
 
         <div
-          className="training-activity-bar__list flex min-w-0 flex-1 items-stretch gap-2 overflow-x-auto panel-scroll"
+          className="training-activity-bar__list flex min-w-0 flex-1 flex-wrap content-start items-stretch gap-1.5 overflow-y-auto panel-scroll"
           data-empty={activity.jobs.length === 0 ? 'true' : 'false'}
+          data-job-count={activity.jobs.length}
           aria-label="Training runs"
         >
           {activity.jobs.length > 0 ? (
@@ -262,10 +321,14 @@ export function TrainingActivityBar({
           type="button"
           variant="ghost"
           className="shrink-0 min-h-8 px-2 text-[0.6875rem] text-mint"
-          onClick={openModels}
+          onClick={(event) => {
+            event.stopPropagation()
+            openModels()
+          }}
         >
           Models
         </HudButton>
+        </div>
       </div>
     </aside>
   )

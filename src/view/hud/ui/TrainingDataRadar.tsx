@@ -4,110 +4,191 @@ import {
   DATA_DOMAINS,
   DATA_DOMAIN_META,
   formatTokens,
-  normalizeWeights,
 } from "../../../sim/balance/data";
 import {
   domainAvailabilityTooltip,
-  domainCapReason,
   domainStockAvailability,
-  rebalanceTrainingDataDomain,
   trainingDataDomainFill,
   type TrainingDataDomainAvailability,
 } from "./trainingDataRadarMath";
-import { HudButton, HudInput, HudSelect } from "./HudPrimitives";
+import {
+  MAX_POST_TRAIN_SHARE,
+  MIN_POST_TRAIN_SHARE,
+} from "../../../sim/balance/modelProduct";
+import { HudButton, HudInput, HudRange, HudSelect } from "./HudPrimitives";
+import {
+  RECIPE_VERIFY_META,
+  RECIPE_ZONE_META,
+  allocationsFromMix,
+  clampEnvelopeSplit,
+  clampRecipeToUsable,
+  clampRecipeZoom,
+  focusZoomForVolume,
+  formatRecipeTokDraft,
+  invertTokenRadius,
+  parseRecipeTokInput,
+  recipeScaleCeiling,
+  recipeZoneCapMTok,
+  scaleEnvelope,
+  splitOwnedAndSynth,
+  stackRadiiFromTokens,
+  splitEnvelope,
+  splitStackedDrag,
+  stackedSpoke,
+  tokenRadius,
+  verifyTokens,
+  type RecipeZone,
+} from "../panels/models/recipePlan";
 
-const SIZE = 380;
+const SIZE = 440;
 const CENTER = SIZE / 2;
-const RADIUS = 128;
+const RADIUS = 168;
 
-function formatNumberDraft(value: number, decimals?: number): string {
-  return decimals == null ? String(value) : value.toFixed(decimals);
+function compactTok(mTok: number): string {
+  if (!Number.isFinite(mTok) || mTok <= 0) return "0";
+  if (mTok >= 1000) return `${(mTok / 1000).toFixed(mTok >= 10_000 ? 0 : 1)}B`;
+  if (mTok >= 10) return `${Math.round(mTok)}M`;
+  if (mTok >= 1) return `${mTok.toFixed(1)}M`;
+  return `${Math.round(mTok * 1000)}K`;
 }
 
-function DraftNumberInput({
-  value,
-  onCommit,
-  min,
-  max,
-  step,
-  decimals,
-  className,
-  ariaLabel,
-  title,
-}: {
-  value: number;
-  onCommit: (value: number) => void;
-  min?: number;
-  max?: number;
-  step?: number;
-  decimals?: number;
-  className: string;
-  ariaLabel?: string;
-  title?: string;
-}) {
-  const [draft, setDraft] = useState(() => formatNumberDraft(value, decimals));
-  const editingRef = useRef(false);
-
-  useEffect(() => {
-    if (!editingRef.current) {
-      setDraft(formatNumberDraft(value, decimals));
-    }
-  }, [value, decimals]);
-
-  const commit = () => {
-    const parsed = Number(draft);
-    if (draft.trim() === "" || !Number.isFinite(parsed)) {
-      setDraft(formatNumberDraft(value, decimals));
-      return;
-    }
-    const clamped = Math.max(
-      min ?? -Infinity,
-      Math.min(max ?? Infinity, parsed),
-    );
-    const next =
-      decimals == null
-        ? clamped
-        : Math.round(clamped * 10 ** decimals) / 10 ** decimals;
-    onCommit(next);
-    setDraft(formatNumberDraft(next, decimals));
-  };
-
-  return (
-    <HudInput
-      type="text"
-      inputMode="decimal"
-      data-min={min}
-      data-max={max}
-      data-step={step}
-      value={draft}
-      aria-label={ariaLabel}
-      title={title}
-      onFocus={() => {
-        editingRef.current = true;
-      }}
-      onChange={(event) => setDraft(event.target.value)}
-      onBlur={() => {
-        editingRef.current = false;
-        commit();
-      }}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") event.currentTarget.blur();
-        if (event.key === "Escape") {
-          setDraft(formatNumberDraft(value, decimals));
-          event.currentTarget.blur();
-        }
-      }}
-      className={className}
-    />
-  );
+function spokeAngle(index: number) {
+  return -Math.PI / 2 + (index / DATA_DOMAINS.length) * Math.PI * 2;
 }
 
 function point(index: number, value: number) {
-  const angle = -Math.PI / 2 + (index / DATA_DOMAINS.length) * Math.PI * 2;
+  const angle = spokeAngle(index);
   return {
     x: CENTER + Math.cos(angle) * RADIUS * value,
     y: CENTER + Math.sin(angle) * RADIUS * value,
   };
+}
+
+function labelAnchor(index: number) {
+  const angle = spokeAngle(index);
+  const ux = Math.cos(angle);
+  const uy = Math.sin(angle);
+  let tx = "-50%";
+  let ty = "-50%";
+  if (ux > 0.42) tx = "-6%";
+  else if (ux < -0.42) tx = "-94%";
+  if (uy > 0.5) ty = "-12%";
+  else if (uy < -0.5) ty = "-88%";
+  return {
+    left: `${50 + ux * 47}%`,
+    top: `${50 + uy * 47}%`,
+    transform: `translate(${tx}, ${ty})`,
+  };
+}
+
+type VolumeKey = "all" | "base" | "post" | "synth";
+
+function VolumeRow({
+  label,
+  color,
+  valueLabel,
+  editable,
+  editing,
+  draft,
+  ariaEdit,
+  ariaInput,
+  onStart,
+  onDraft,
+  onCommit,
+  onCancel,
+  onNudge,
+}: {
+  label: string;
+  color: string;
+  valueLabel: string;
+  editable: boolean;
+  editing: boolean;
+  draft: string;
+  ariaEdit: string;
+  ariaInput: string;
+  onStart: () => void;
+  onDraft: (value: string) => void;
+  onCommit: () => void;
+  onCancel: () => void;
+  onNudge?: (direction: -1 | 1) => void;
+}) {
+  const swatch = (
+    <i
+      className="training-data-radar-pop__swatch"
+      style={{ background: color }}
+    />
+  );
+  if (editing) {
+    return (
+      <label className="training-data-radar-pop__row">
+        <span className="training-data-radar-pop__edit">
+          {swatch}
+          <span>{label}</span>
+          <HudInput
+            autoFocus
+            value={draft}
+            onChange={(event) => onDraft(event.target.value)}
+            onBlur={onCommit}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key === "Enter") {
+                event.preventDefault();
+                onCommit();
+              }
+              if (event.key === "Escape") {
+                event.preventDefault();
+                onCancel();
+              }
+            }}
+            aria-label={ariaInput}
+          />
+        </span>
+      </label>
+    );
+  }
+  if (!editable) {
+    return (
+      <div className="training-data-radar-pop__row" data-readonly="true">
+        <span className="training-data-radar-pop__edit">
+          {swatch}
+          <span>{label}</span>
+          <span className="font-mono text-[0.75rem] tabular-nums">{valueLabel}</span>
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="training-data-radar-pop__row training-data-radar-pop__row--edit">
+      <button
+        type="button"
+        className="training-data-radar-pop__edit"
+        aria-label={ariaEdit}
+        onClick={onStart}
+      >
+        {swatch}
+        <span>{label}</span>
+        <span className="font-mono text-[0.75rem] tabular-nums">{valueLabel}</span>
+      </button>
+      {onNudge ? (
+        <span className="training-data-radar-pop__nudge">
+          <button
+            type="button"
+            aria-label={`${ariaEdit} down`}
+            onClick={() => onNudge(-1)}
+          >
+            −
+          </button>
+          <button
+            type="button"
+            aria-label={`${ariaEdit} up`}
+            onClick={() => onNudge(1)}
+          >
+            +
+          </button>
+        </span>
+      ) : null}
+    </div>
+  );
 }
 
 function polygon(values: number[]) {
@@ -120,10 +201,13 @@ function polygon(values: number[]) {
 }
 
 export function TrainingDataRadar({
-  weights,
-  totalMTok,
+  baseWeights,
+  postWeights,
+  baseMTok,
+  postMTok,
+  baseVolumes,
+  alignVolumes,
   data,
-  autoBalanceDisabled,
   syntheticUnlocked = false,
   syntheticMultiplier = 0,
   syntheticExpansionAvailable,
@@ -134,68 +218,94 @@ export function TrainingDataRadar({
   syntheticTeacherIds,
   includeSynthHQ,
   includeSynthLQ,
-  previousWeights,
-  showPreviousOverlay = false,
-  onTogglePreviousOverlay,
-  optimalByDomainMTok,
-  onChange,
-  onAutoBalance,
+  onOwnedChange,
   onTeacherChange,
-  onIncludeSynthHQChange,
-  onIncludeSynthLQChange,
+  onOpenPlanLibrary,
+  trainShare,
+  onTrainShareChange,
 }: {
-  weights: Record<DataDomain, number>;
-  totalMTok: number;
+  baseWeights: Record<DataDomain, number>;
+  postWeights: Record<DataDomain, number>;
+  baseMTok: number;
+  postMTok: number;
+  baseVolumes?: Record<DataDomain, number>;
+  alignVolumes?: Record<DataDomain, number>;
   data: LabData;
-  autoBalanceDisabled?: boolean;
   syntheticUnlocked?: boolean;
-  /** Effective generated-token expansion (0 = drag blocked at owned corpus). */
   syntheticMultiplier?: number;
-  /**
-   * True when generated-token expansion may be used at all (research unlock or
-   * a distill teacher). Enables dragging past usable stock; the resulting
-   * real:synthetic ratio is reported through onChange meta.
-   */
   syntheticExpansionAvailable?: boolean;
-  /** Per-domain generated headroom (distill teacher corpus); 0 elsewhere. */
   syntheticHeadroomMTok?: Partial<Record<DataDomain, number>>;
-  /** Labels the excess segment: teacher-generated in distill, lab-made otherwise. */
   syntheticSource?: "teacher" | "lab";
-  /** Corpus claimed by active jobs, subtracted from usable stock. */
   reservedMTokByDomain?: Partial<Record<DataDomain, number>>;
   teachers: Model[];
   syntheticTeacherIds: Partial<Record<DataDomain, string>>;
   includeSynthHQ: boolean;
   includeSynthLQ: boolean;
-  previousWeights?: Record<DataDomain, number> | null;
-  showPreviousOverlay?: boolean;
-  onTogglePreviousOverlay?: () => void;
-  /** Recommended recipe per domain (MTok) drawn as a dotted guideline. */
-  optimalByDomainMTok?: Partial<Record<DataDomain, number>>;
-  onChange: (
-    weights: Record<DataDomain, number>,
-    totalMTok: number,
-    meta?: { realMTok: number; synthMTok: number },
-  ) => void;
-  onAutoBalance: () => void;
+  onOwnedChange: (recipe: {
+    base: Record<DataDomain, number>;
+    align: Record<DataDomain, number>;
+    realMTok: number;
+    synthMTok: number;
+  }) => void;
   onTeacherChange: (domain: DataDomain, teacherId: string | undefined) => void;
-  onIncludeSynthHQChange: (value: boolean) => void;
-  onIncludeSynthLQChange: (value: boolean) => void;
+  onOpenPlanLibrary?: () => void;
+  trainShare?: number;
+  onTrainShareChange?: (share: number) => void;
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
-  const draggingRef = useRef<DataDomain | null>(null);
-  /** Axis scale captured when a drag starts; freezing it kills drag feedback runaway. */
-  const dragAxisMaxRef = useRef<number | null>(null);
+  const draggingRef = useRef<{
+    domain: DataDomain;
+    zone: RecipeZone;
+  } | null>(null);
+  const dragCeilingRef = useRef<number | null>(null);
+  const dragZoomRef = useRef<number | null>(null);
   const [selected, setSelected] = useState<DataDomain>("code");
-  const [dragging, setDragging] = useState<DataDomain | null>(null);
-  const normalized = useMemo(() => normalizeWeights(weights), [weights]);
-  const allocations = useMemo(
-    () =>
-      Object.fromEntries(
-        DATA_DOMAINS.map((domain) => [domain, totalMTok * normalized[domain]]),
-      ) as Record<DataDomain, number>,
-    [normalized, totalMTok],
+  const [zoom, setZoom] = useState(1);
+  const [dragging, setDragging] = useState<{
+    domain: DataDomain;
+    zone: RecipeZone;
+  } | null>(null);
+  const [editing, setEditing] = useState<VolumeKey | null>(null);
+  const [draft, setDraft] = useState("");
+
+  const propsBase = useMemo(
+    () => baseVolumes ?? allocationsFromMix(baseWeights, baseMTok),
+    [baseVolumes, baseWeights, baseMTok],
   );
+  const propsAlign = useMemo(
+    () => alignVolumes ?? allocationsFromMix(postWeights, postMTok),
+    [alignVolumes, postWeights, postMTok],
+  );
+  const baseKey = DATA_DOMAINS.map((domain) =>
+    (propsBase[domain] ?? 0).toFixed(3),
+  ).join("|");
+  const alignKey = DATA_DOMAINS.map((domain) =>
+    (propsAlign[domain] ?? 0).toFixed(3),
+  ).join("|");
+  const [baseAlloc, setBaseAlloc] = useState(propsBase);
+  const [postAlloc, setPostAlloc] = useState(propsAlign);
+  const stockKey = DATA_DOMAINS.map(
+    (domain) => `${domain}:${(data.stocks[domain]?.processed ?? 0).toFixed(3)}`,
+  ).join("|");
+
+  useEffect(() => {
+    setEditing(null);
+    setDraft("");
+  }, [selected]);
+
+  useEffect(() => {
+    if (draggingRef.current) return;
+    const usable = Object.fromEntries(
+      stockKey.split("|").map((part) => {
+        const sep = part.lastIndexOf(":");
+        return [part.slice(0, sep), Number(part.slice(sep + 1))];
+      }),
+    ) as Record<DataDomain, number>;
+    const clamped = clampRecipeToUsable(propsBase, propsAlign, usable);
+    setBaseAlloc(clamped.base);
+    setPostAlloc(clamped.align);
+  }, [alignKey, baseKey, propsAlign, propsBase, stockKey]);
+
   const expansionEnabled =
     syntheticExpansionAvailable ?? syntheticMultiplier > 0;
 
@@ -208,12 +318,12 @@ export function TrainingDataRadar({
         includeSynthLQ,
         syntheticHeadroomMTok: syntheticHeadroomMTok?.[domain] ?? 0,
         syntheticMultiplier,
-        selectedMTok: allocations[domain],
+        selectedMTok: baseAlloc[domain] + postAlloc[domain],
       });
     }
     return map;
   }, [
-    allocations,
+    baseAlloc,
     data.stocks,
     includeSynthHQ,
     includeSynthLQ,
@@ -222,42 +332,15 @@ export function TrainingDataRadar({
     syntheticMultiplier,
   ]);
 
-  /**
-   * Axis scale is anchored to stock and current selections — never to a
-   * multiple of the selection being dragged — so the scale cannot chase the
-   * handle. During an active drag the scale is frozen entirely.
-   */
-  const axisMaxMTok = Math.max(
-    1,
-    totalMTok / DATA_DOMAINS.length,
-    ...DATA_DOMAINS.map((domain) => availabilityByDomain[domain].usableMTok),
-    ...DATA_DOMAINS.map((domain) => allocations[domain] * 1.08),
-  );
-  const target = DATA_DOMAINS.map((domain) => allocations[domain] / axisMaxMTok);
-
-  /**
-   * True drag ceiling per domain: usable stock, or — when generated-token
-   * expansion is available — the 8× hard expansion bound over the
-   * real + headroom base, regardless of the current multiplier.
-   */
-  const dragCapMTok = (domain: DataDomain): number => {
-    const availability = availabilityByDomain[domain];
-    if (!expansionEnabled) return availability.usableMTok;
-    const base = availability.usableMTok + availability.syntheticHeadroomMTok;
-    return Math.max(availability.capMTok, base * 8);
-  };
-
-  const layers = useMemo(() => {
-    const real: number[] = [];
-    const hq: number[] = [];
-    const lq: number[] = [];
-    const synth: number[] = [];
+  const fills = useMemo(() => {
+    const map = {} as Record<
+      DataDomain,
+      ReturnType<typeof trainingDataDomainFill>
+    >;
     for (const domain of DATA_DOMAINS) {
       const availability = availabilityByDomain[domain];
-      const need = Math.max(0.01, allocations[domain]);
-      const targetRadius = allocations[domain] / axisMaxMTok;
-      const fill = trainingDataDomainFill({
-        needMTok: need,
+      map[domain] = trainingDataDomainFill({
+        needMTok: baseAlloc[domain] + postAlloc[domain],
         realAvailableMTok: availability.processedRealMTok,
         synthHQStockMTok: availability.processedSynthHQMTok,
         synthLQStockMTok: availability.processedSynthLQMTok,
@@ -267,22 +350,12 @@ export function TrainingDataRadar({
         syntheticMultiplier,
         syntheticHeadroomMTok: syntheticHeadroomMTok?.[domain],
       });
-      real.push((targetRadius * fill.realTake) / need);
-      hq.push((targetRadius * (fill.realTake + fill.hqTake)) / need);
-      lq.push(
-        (targetRadius * (fill.realTake + fill.hqTake + fill.lqTake)) / need,
-      );
-      synth.push(
-        (targetRadius *
-          (fill.realTake + fill.hqTake + fill.lqTake + fill.synthTake)) /
-          need,
-      );
     }
-    return { real, hq, lq, synth };
+    return map;
   }, [
-    allocations,
     availabilityByDomain,
-    axisMaxMTok,
+    baseAlloc,
+    postAlloc,
     includeSynthHQ,
     includeSynthLQ,
     reservedMTokByDomain,
@@ -290,46 +363,207 @@ export function TrainingDataRadar({
     syntheticMultiplier,
   ]);
 
-  /** Real coverage = per-domain selection clamped to usable owned stock. */
-  const realCoveredMTok = (alloc: Record<DataDomain, number>): number =>
-    DATA_DOMAINS.reduce(
-      (sum, domain) =>
-        sum + Math.min(alloc[domain], availabilityByDomain[domain].usableMTok),
-      0,
-    );
+  const spokes = useMemo(
+    () =>
+      Object.fromEntries(
+        DATA_DOMAINS.map((domain) => {
+          const fill = fills[domain];
+          const synth = syntheticUnlocked ? fill.synthTake : 0;
+          return [
+            domain,
+            stackedSpoke(baseAlloc[domain], postAlloc[domain], synth),
+          ];
+        }),
+      ) as Record<DataDomain, ReturnType<typeof stackedSpoke>>,
+    [baseAlloc, fills, postAlloc, syntheticUnlocked],
+  );
 
-  const commitAllocations = (next: Record<DataDomain, number>) => {
-    const nextTotal = DATA_DOMAINS.reduce(
-      (sum, candidate) => sum + next[candidate],
+  const stockCeiling = useMemo(
+    () =>
+      recipeScaleCeiling(
+        Object.fromEntries(
+          DATA_DOMAINS.map((domain) => [
+            domain,
+            availabilityByDomain[domain].usableMTok,
+          ]),
+        ),
+      ),
+    [availabilityByDomain],
+  );
+  const [axisCeiling, setAxisCeiling] = useState(0);
+  const ceiling = Math.max(1, axisCeiling || stockCeiling);
+
+  useEffect(() => {
+    if (axisCeiling <= 0) {
+      setAxisCeiling(stockCeiling);
+      return;
+    }
+    if (stockCeiling > axisCeiling * 2.6) setAxisCeiling(stockCeiling);
+  }, [axisCeiling, stockCeiling]);
+
+  const stackedRadii = useMemo(
+    () =>
+      Object.fromEntries(
+        DATA_DOMAINS.map((domain) => {
+          const spoke = spokes[domain];
+          return [
+            domain,
+            stackRadiiFromTokens(
+              spoke.inner,
+              spoke.mid,
+              spoke.outer,
+              ceiling,
+              zoom,
+              trainShare ?? 0.82,
+            ),
+          ];
+        }),
+      ) as Record<DataDomain, ReturnType<typeof stackRadiiFromTokens>>,
+    [ceiling, spokes, trainShare, zoom],
+  );
+
+  const dragCapMTok = (domain: DataDomain, target: RecipeZone): number => {
+    const ownedCap = recipeZoneCapMTok(target, availabilityByDomain[domain], {
+      syntheticUnlocked,
+      expansionEnabled,
+    });
+    if (target === "base") {
+      return Math.min(
+        ownedCap,
+        spokes[domain].mid * (1 - MIN_POST_TRAIN_SHARE),
+      );
+    }
+    return ownedCap;
+  };
+
+  const commitOwned = (
+    nextBase: Record<DataDomain, number>,
+    nextAlign: Record<DataDomain, number>,
+    extraByDomain?: Partial<Record<DataDomain, number>>,
+  ) => {
+    const clampedBase = { ...nextBase };
+    const clampedAlign = { ...nextAlign };
+    for (const domain of DATA_DOMAINS) {
+      const split = clampEnvelopeSplit(
+        clampedBase[domain] ?? 0,
+        clampedAlign[domain] ?? 0,
+      );
+      clampedBase[domain] = split.base;
+      clampedAlign[domain] = split.align;
+      const envelope = split.base + split.align;
+      const ownedCap = availabilityByDomain[domain].usableMTok;
+      if (envelope > ownedCap) {
+        const scaled = scaleEnvelope(split.base, split.align, ownedCap);
+        clampedBase[domain] = scaled.base;
+        clampedAlign[domain] = scaled.align;
+      }
+    }
+    setBaseAlloc(clampedBase);
+    setPostAlloc(clampedAlign);
+    const owned = DATA_DOMAINS.reduce(
+      (sum, domain) =>
+        sum +
+        Math.max(0, clampedBase[domain] ?? 0) +
+        Math.max(0, clampedAlign[domain] ?? 0),
       0,
     );
-    if (nextTotal <= 0) return;
-    const realMTok = realCoveredMTok(next);
-    onChange(normalizeWeights(next), nextTotal, {
+    if (owned <= 0) return;
+    const realMTok = DATA_DOMAINS.reduce((sum, domain) => {
+      const envelope =
+        Math.max(0, clampedBase[domain] ?? 0) +
+        Math.max(0, clampedAlign[domain] ?? 0);
+      return sum + Math.min(envelope, availabilityByDomain[domain].usableMTok);
+    }, 0);
+    const extras = DATA_DOMAINS.reduce((sum, domain) => {
+      if (extraByDomain && domain in extraByDomain) {
+        return sum + Math.max(0, extraByDomain[domain] ?? 0);
+      }
+      return sum + (syntheticUnlocked ? spokes[domain].synth : 0);
+    }, 0);
+    onOwnedChange({
+      base: clampedBase,
+      align: clampedAlign,
       realMTok,
-      synthMTok: Math.max(0, nextTotal - realMTok),
+      synthMTok: extras,
     });
   };
 
-  const commitDomainMTok = (domain: DataDomain, valueMTok: number) => {
-    const next = rebalanceTrainingDataDomain(
-      allocations,
-      domain,
-      valueMTok,
-      dragCapMTok(domain),
+  const commitDomain = (
+    target: RecipeZone,
+    domain: DataDomain,
+    valueMTok: number,
+  ) => {
+    const value = Math.max(0, Math.min(dragCapMTok(domain, target), valueMTok));
+    if (target === "synth") {
+      commitOwned(baseAlloc, postAlloc, { [domain]: value });
+      return;
+    }
+    if (target === "base") {
+      const split = splitEnvelope(spokes[domain].mid, value);
+      commitOwned(
+        { ...baseAlloc, [domain]: split.base },
+        { ...postAlloc, [domain]: split.align },
+      );
+      return;
+    }
+    const usable = availabilityByDomain[domain].usableMTok;
+    const split = splitOwnedAndSynth(value, usable);
+    const scaled = scaleEnvelope(
+      spokes[domain].base,
+      spokes[domain].post,
+      split.owned,
     );
-    commitAllocations(next);
+    commitOwned(
+      { ...baseAlloc, [domain]: scaled.base },
+      { ...postAlloc, [domain]: scaled.align },
+      expansionEnabled && split.synth > 0
+        ? { [domain]: split.synth }
+        : undefined,
+    );
   };
 
-  /** MAX: fill every domain to its full usable stock (no expansion). */
-  const useAllData = () => {
-    const next = Object.fromEntries(
-      DATA_DOMAINS.map((domain) => [
-        domain,
-        availabilityByDomain[domain].usableMTok,
-      ]),
-    ) as Record<DataDomain, number>;
-    commitAllocations(next);
+  const commitTypedVolume = (
+    key: VolumeKey,
+    domain: DataDomain,
+    raw: string,
+  ) => {
+    const parsed = parseRecipeTokInput(raw);
+    setEditing(null);
+    setDraft("");
+    if (parsed == null) return;
+    const cap = dragCapMTok(domain, key === "all" ? "post" : key);
+    const value = Math.max(0, Math.min(cap, parsed));
+    if (key === "all" || key === "synth") {
+      commitDomain(key === "all" ? "post" : "synth", domain, value);
+      return;
+    }
+    if (key === "base") {
+      const envelope = spokes[domain].mid;
+      if (value <= envelope) {
+        commitDomain("base", domain, value);
+        return;
+      }
+      const align = spokes[domain].post;
+      const owned = Math.min(cap, value + align);
+      const nextBase = Math.min(value, owned);
+      commitOwned(
+        { ...baseAlloc, [domain]: nextBase },
+        { ...postAlloc, [domain]: owned - nextBase },
+      );
+      return;
+    }
+    const base = spokes[domain].base;
+    const owned = Math.min(cap, base + value);
+    const nextBase = Math.min(base, owned);
+    commitOwned(
+      { ...baseAlloc, [domain]: nextBase },
+      { ...postAlloc, [domain]: owned - nextBase },
+    );
+  };
+
+  const startEdit = (key: VolumeKey, valueMTok: number) => {
+    setEditing(key);
+    setDraft(formatRecipeTokDraft(valueMTok));
   };
 
   const updateFromPointer = (
@@ -344,106 +578,216 @@ export function TrainingDataRadar({
     const index = DATA_DOMAINS.indexOf(domain);
     const angle = -Math.PI / 2 + (index / DATA_DOMAINS.length) * Math.PI * 2;
     const projected = (x * Math.cos(angle) + y * Math.sin(angle)) / RADIUS;
-    const axisMax = dragAxisMaxRef.current ?? axisMaxMTok;
-    commitDomainMTok(domain, Math.max(0, projected * axisMax));
+    const liveCeiling = dragCeilingRef.current ?? ceiling;
+    const liveZoom = dragZoomRef.current ?? zoom;
+    const target = draggingRef.current?.zone ?? "base";
+    let value: number;
+    if (target === "base") {
+      const ownedR = tokenRadius(spokes[domain].mid, liveCeiling, liveZoom);
+      const frac =
+        ownedR > 1e-9 ? Math.max(0, Math.min(1, projected / ownedR)) : 0;
+      value = spokes[domain].mid * frac;
+    } else {
+      value = splitStackedDrag(
+        target,
+        invertTokenRadius(Math.max(0, projected), liveCeiling, liveZoom),
+        spokes[domain],
+      );
+    }
+    commitDomain(target, domain, value);
   };
 
-  const selectedAvailability = availabilityByDomain[selected];
-  const selectedNeed = allocations[selected];
-  const selectedFill = trainingDataDomainFill({
-    needMTok: selectedNeed,
-    realAvailableMTok: selectedAvailability.processedRealMTok,
-    synthHQStockMTok: selectedAvailability.processedSynthHQMTok,
-    synthLQStockMTok: selectedAvailability.processedSynthLQMTok,
-    includeSynthHQ,
-    includeSynthLQ,
-    reservedMTok: reservedMTokByDomain?.[selected] ?? 0,
-    syntheticMultiplier,
-    syntheticHeadroomMTok: syntheticHeadroomMTok?.[selected],
-  });
-  const selectedShortfall = selectedFill.shortfall;
-  const selectedDiminishing =
-    expansionEnabled &&
-    selectedFill.synthTake > 2 * Math.max(1, selectedFill.realTake);
-  const selectedCapReason = domainCapReason(
-    selectedAvailability,
-    syntheticMultiplier,
-  );
-  const selectedTeacher = teachers.find(
-    (teacher) => teacher.id === syntheticTeacherIds[selected],
-  );
-  const estimatedQuality = selectedTeacher
-    ? Math.min(92, 48 + selectedTeacher.capability * 0.55)
-    : null;
-  void onIncludeSynthHQChange;
-  void onIncludeSynthLQChange;
+  const useAllData = () => {
+    const nextBase = { ...baseAlloc };
+    const nextAlign = { ...postAlloc };
+    for (const domain of DATA_DOMAINS) {
+      const scaled = scaleEnvelope(
+        spokes[domain].base,
+        spokes[domain].post,
+        availabilityByDomain[domain].usableMTok,
+      );
+      nextBase[domain] = scaled.base;
+      nextAlign[domain] = scaled.align;
+    }
+    commitOwned(nextBase, nextAlign);
+  };
+
+  const verifyShare = 1 - (trainShare ?? 0.82);
+  const selectedSpoke = spokes[selected];
+  const selectedLabel = DATA_DOMAIN_META[selected].label;
+  const selectedVerify = verifyTokens(selectedSpoke.mid, trainShare ?? 0.82);
+  const selectedRows: {
+    key: VolumeKey | "verify";
+    label: string;
+    color: string;
+    value: number;
+    editable: boolean;
+  }[] = [
+    {
+      key: "all",
+      label: "All",
+      color: "#e8f2f2",
+      value: selectedSpoke.mid,
+      editable: true,
+    },
+    {
+      key: "base",
+      label: RECIPE_ZONE_META.base.label,
+      color: RECIPE_ZONE_META.base.stroke,
+      value: selectedSpoke.base,
+      editable: true,
+    },
+    {
+      key: "post",
+      label: RECIPE_ZONE_META.post.label,
+      color: RECIPE_ZONE_META.post.stroke,
+      value: selectedSpoke.post,
+      editable: true,
+    },
+    {
+      key: "verify",
+      label: RECIPE_VERIFY_META.label,
+      color: RECIPE_VERIFY_META.stroke,
+      value: selectedVerify,
+      editable: false,
+    },
+    ...(syntheticUnlocked
+      ? [
+          {
+            key: "synth" as const,
+            label: "Synth",
+            color: RECIPE_ZONE_META.synth.stroke,
+            value: selectedSpoke.synth,
+            editable: true,
+          },
+        ]
+      : []),
+  ];
 
   return (
     <section
-      className="mt-2 overflow-hidden rounded-xl border border-line/80 bg-void/35"
+      className="rounded-xl border border-line/80 bg-void/35"
       aria-label="Training data radar"
     >
-      <div className="flex flex-wrap items-center justify-end gap-2 border-b border-line/70 px-3 py-2">
-        {previousWeights && onTogglePreviousOverlay ? (
+      <div className="flex flex-wrap items-end justify-between gap-2 border-b border-line/70 px-3 py-2">
+        {onTrainShareChange && trainShare != null ? (
+          <label className="min-w-[12rem] flex-1 text-[0.6875rem] text-muted">
+            <span className="flex justify-between gap-2 font-mono tabular-nums">
+              <span>Verify {(verifyShare * 100).toFixed(0)}%</span>
+              <span className="text-bone">
+                Train {(trainShare * 100).toFixed(0)}%
+              </span>
+            </span>
+            <HudRange
+              type="range"
+              min={5}
+              max={60}
+              step={1}
+              value={Math.round(verifyShare * 100)}
+              onChange={(event) =>
+                onTrainShareChange(1 - Number(event.target.value) / 100)
+              }
+              className="mt-1"
+              aria-label="Verification holdout"
+              title="Share of the recipe held out to verify the run"
+            />
+          </label>
+        ) : (
+          <span />
+        )}
+        <div className="flex flex-wrap gap-1">
           <HudButton
             type="button"
             variant="ghost"
-            onClick={onTogglePreviousOverlay}
-            aria-pressed={showPreviousOverlay}
-            className={`!min-h-11 !rounded-full !px-3 !py-1 text-[0.6875rem] ${
-              showPreviousOverlay
-                ? "!border-amber/50 !bg-amber/15 !text-amber"
-                : "!border-line !text-muted hover:!text-bone"
-            }`}
+            className="!min-h-9 !px-2.5 !text-[0.6875rem]"
+            aria-label="Zoom out"
+            onClick={() =>
+              setZoom((current) => clampRecipeZoom(current / 1.35))
+            }
           >
-            Previous corpus
+            -
           </HudButton>
-        ) : null}
-        <HudButton
-          type="button"
-          onClick={useAllData}
-          variant="ghost"
-          className="!min-h-11 !rounded-full !border-sky/40 !bg-sky/10 !px-3 !py-1 text-[0.6875rem] !text-sky"
-          title="MAX — set every domain to its full usable stock (all processed real + enabled synthetic, minus active-job reservations). Does not use synthetic expansion."
-        >
-          Use all data
-        </HudButton>
-        <HudButton
-          type="button"
-          onClick={onAutoBalance}
-          disabled={autoBalanceDisabled}
-          variant="ghost"
-          className="!min-h-11 !rounded-full !border-mint/40 !bg-mint/10 !px-3 !py-1 text-[0.6875rem] !text-mint disabled:!opacity-40"
-          title={
-            autoBalanceDisabled
-              ? "Research Mixture Engineering to automate this recipe."
-              : "Sets the recommended domain mix, then shifts volume away from shortages while preserving modality minimums."
-          }
-        >
-          Auto-balance · best recipe
-        </HudButton>
+          <HudButton
+            type="button"
+            variant="ghost"
+            className="!min-h-9 !px-2.5 !text-[0.6875rem]"
+            aria-label="Fit recipe"
+            onClick={() => {
+              setAxisCeiling(stockCeiling);
+              setZoom(1);
+            }}
+          >
+            Fit
+          </HudButton>
+          <HudButton
+            type="button"
+            variant="ghost"
+            className="!min-h-9 !px-2.5 !text-[0.6875rem]"
+            aria-label="Zoom in"
+            onClick={() =>
+              setZoom((current) => clampRecipeZoom(current * 1.35))
+            }
+          >
+            +
+          </HudButton>
+          <HudButton
+            type="button"
+            variant="ghost"
+            className="!min-h-9 !px-2.5 !text-[0.6875rem]"
+            aria-label="Focus selected domain"
+            title="Zoom this domain's tokens. Other domains keep their amounts."
+            onClick={() =>
+              setZoom(focusZoomForVolume(spokes[selected].mid, ceiling))
+            }
+          >
+            Focus
+          </HudButton>
+          <HudButton
+            type="button"
+            variant="ghost"
+            className="!min-h-9 !px-2.5 !text-[0.6875rem]"
+            onClick={useAllData}
+            title="Fill every domain to owned usable stock. Does not add synthetic expansion."
+          >
+            Use all data
+          </HudButton>
+          {onOpenPlanLibrary ? (
+            <HudButton
+              type="button"
+              variant="ghost"
+              className="!min-h-9 !px-2.5 !text-[0.6875rem]"
+              onClick={onOpenPlanLibrary}
+            >
+              Load plan
+            </HudButton>
+          ) : null}
+        </div>
       </div>
+
       <div className="training-data-radar-layout grid min-w-0 gap-3 p-3">
         <div className="min-w-0">
+          <div className="training-data-radar-chart">
           <svg
             ref={svgRef}
             viewBox={`0 0 ${SIZE} ${SIZE}`}
-            className="mx-auto block h-auto w-full max-w-[380px] touch-none overflow-visible"
+            className="block h-auto w-full touch-none overflow-visible"
             role="group"
             aria-label="Draggable radar chart for training data domains"
             onPointerMove={(event) => {
-              const domain = draggingRef.current;
-              if (domain)
-                updateFromPointer(domain, event.clientX, event.clientY);
+              const drag = draggingRef.current;
+              if (drag)
+                updateFromPointer(drag.domain, event.clientX, event.clientY);
             }}
             onPointerUp={() => {
               draggingRef.current = null;
-              dragAxisMaxRef.current = null;
+              dragCeilingRef.current = null;
+              dragZoomRef.current = null;
               setDragging(null);
             }}
             onPointerCancel={() => {
               draggingRef.current = null;
-              dragAxisMaxRef.current = null;
+              dragCeilingRef.current = null;
+              dragZoomRef.current = null;
               setDragging(null);
             }}
           >
@@ -458,10 +802,10 @@ export function TrainingDataRadar({
             ))}
             {DATA_DOMAINS.map((domain, index) => {
               const end = point(index, 1);
-              const label = point(index, 1.25);
-              const tip = domainAvailabilityTooltip(
-                availabilityByDomain[domain],
-                syntheticMultiplier,
+              const usableMark = tokenRadius(
+                availabilityByDomain[domain].usableMTok,
+                ceiling,
+                zoom,
               );
               return (
                 <g key={domain}>
@@ -472,446 +816,364 @@ export function TrainingDataRadar({
                     y2={end.y}
                     stroke="rgba(139,171,181,.16)"
                   />
-                  <text
-                    x={label.x}
-                    y={label.y}
-                    textAnchor="middle"
-                    dominantBaseline="middle"
-                    fill={selected === domain ? "#56e1dc" : "#9bb1ba"}
-                    fontSize="11"
-                  >
-                    <title>{tip}</title>
-                    {DATA_DOMAIN_META[domain].label}{" "}
-                    {formatTokens(allocations[domain])}
-                  </text>
+                  {usableMark > 0.04 ? (
+                    <circle
+                      cx={point(index, usableMark).x}
+                      cy={point(index, usableMark).y}
+                      r="2.4"
+                      fill="none"
+                      stroke="rgba(139,171,181,.45)"
+                      strokeWidth="1.25"
+                      pointerEvents="none"
+                    />
+                  ) : null}
                 </g>
               );
             })}
-            {previousWeights && showPreviousOverlay ? (
-              <polygon
-                points={polygon(
-                  DATA_DOMAINS.map((domain) => {
-                    const prev = normalizeWeights(previousWeights);
-                    const maxPrev = Math.max(
-                      0.2,
-                      ...DATA_DOMAINS.map((d) => prev[d]),
-                    );
-                    return prev[domain] / maxPrev;
-                  }),
-                )}
-                fill="rgba(243,183,91,.08)"
-                stroke="#f3b75b"
-                strokeWidth="1.5"
-                opacity="0.85"
-              />
-            ) : null}
-            {optimalByDomainMTok ? (
-              <>
-                <polygon
-                  points={polygon(
-                    DATA_DOMAINS.map((domain) =>
-                      Math.min(
-                        1.15,
-                        (optimalByDomainMTok[domain] ?? 0) / axisMaxMTok,
-                      ),
-                    ),
-                  )}
-                  fill="none"
-                  stroke="#9bb1ba"
-                  strokeDasharray="2 4"
-                  strokeWidth="1.25"
-                  opacity="0.9"
-                  pointerEvents="none"
-                />
-                {DATA_DOMAINS.map((domain, index) => {
-                  const optimalRadius = Math.min(
-                    1.15,
-                    (optimalByDomainMTok[domain] ?? 0) / axisMaxMTok,
-                  );
-                  if (optimalRadius <= 0.005) return null;
-                  const marker = point(index, optimalRadius);
-                  return (
-                    <rect
-                      key={`optimal-${domain}`}
-                      x={marker.x - 3.2}
-                      y={marker.y - 3.2}
-                      width={6.4}
-                      height={6.4}
-                      transform={`rotate(45 ${marker.x} ${marker.y})`}
-                      fill="#9bb1ba"
-                      stroke="#07171d"
-                      strokeWidth="1"
-                      pointerEvents="none"
-                    >
-                      <title>{`Optimal ${DATA_DOMAIN_META[domain].label}: ${formatTokens(optimalByDomainMTok[domain] ?? 0)}`}</title>
-                    </rect>
-                  );
-                })}
-              </>
-            ) : null}
+            {syntheticUnlocked ? (
             <polygon
-              points={polygon(target)}
-              fill="rgba(93,225,217,.035)"
-              stroke="#f3b75b"
-              strokeDasharray="4 4"
-              strokeWidth="1.5"
+              points={polygon(
+                DATA_DOMAINS.map((domain) => stackedRadii[domain].outer),
+              )}
+              fill={RECIPE_ZONE_META.synth.fill}
+              stroke={RECIPE_ZONE_META.synth.stroke}
+              strokeWidth="2"
+              pointerEvents="none"
             />
-            {expansionEnabled ? (
-              <polygon
-                points={polygon(layers.synth)}
-                fill="rgba(255,209,102,.14)"
-                stroke="#ffd166"
-                strokeWidth="1"
-              />
-            ) : null}
-            {syntheticUnlocked ? (
-              <polygon
-                points={polygon(layers.lq)}
-                fill="rgba(174,126,232,.16)"
-                stroke="#ae7ee8"
-                strokeWidth="1"
-              />
-            ) : null}
-            {syntheticUnlocked ? (
-              <polygon
-                points={polygon(layers.hq)}
-                fill="rgba(60,173,223,.2)"
-                stroke="#3cade0"
-                strokeWidth="1"
-              />
             ) : null}
             <polygon
-              points={polygon(layers.real)}
-              fill="rgba(86,225,220,.25)"
-              stroke="#56e1dc"
+              points={polygon(
+                DATA_DOMAINS.map((domain) => stackedRadii[domain].owned),
+              )}
+              fill={RECIPE_ZONE_META.post.fill}
+              stroke={RECIPE_ZONE_META.post.stroke}
               strokeWidth="1.5"
+              pointerEvents="none"
+            />
+            <polygon
+              points={polygon(
+                DATA_DOMAINS.map((domain) => stackedRadii[domain].inner),
+              )}
+              fill={RECIPE_ZONE_META.base.fill}
+              stroke={RECIPE_ZONE_META.base.stroke}
+              strokeWidth="1.5"
+              pointerEvents="none"
+            />
+            <polygon
+              points={polygon(
+                DATA_DOMAINS.map((domain) => stackedRadii[domain].verify),
+              )}
+              fill={RECIPE_VERIFY_META.fill}
+              stroke={RECIPE_VERIFY_META.stroke}
+              strokeWidth="1.5"
+              pointerEvents="none"
             />
             {DATA_DOMAINS.map((domain, index) => {
-              const handle = point(index, target[index] ?? 0);
-              const active = selected === domain;
-              const isDragging = dragging === domain;
               const tip = domainAvailabilityTooltip(
                 availabilityByDomain[domain],
                 syntheticMultiplier,
               );
-              return (
-                <g key={domain}>
-                  {active ? (
+              const domainSelected = selected === domain;
+              const radii = stackedRadii[domain];
+              const spoke = spokes[domain];
+              const handles: {
+                zone: RecipeZone;
+                value: number;
+                radius: number;
+                hit: number;
+                size: number;
+                label: string;
+                tangent: number;
+              }[] = [
+                {
+                  zone: "post",
+                  value: spoke.post,
+                  radius: radii.owned,
+                  hit: domainSelected ? 13 : 10,
+                  size: domainSelected ? 5 : 3.5,
+                  label: "data volume",
+                  tangent: 0,
+                },
+                ...(syntheticUnlocked
+                  ? [
+                      {
+                        zone: "synth" as const,
+                        value: spoke.synth,
+                        radius: radii.outer,
+                        hit: domainSelected ? 16 : 12,
+                        size: domainSelected ? 7 : 5,
+                        label: "synthetic volume",
+                        tangent: 0,
+                      },
+                    ]
+                  : []),
+                {
+                  zone: "base",
+                  value: spoke.base,
+                  radius: radii.inner,
+                  hit: domainSelected ? 16 : 12,
+                  size: domainSelected ? 6.5 : 4.5,
+                  label: "base volume",
+                  tangent: 0,
+                },
+              ];
+              return handles.map((handle) => {
+                const meta = RECIPE_ZONE_META[handle.zone];
+                const along = point(index, handle.radius);
+                const angle = spokeAngle(index);
+                const pos = {
+                  x: along.x - Math.sin(angle) * handle.tangent,
+                  y: along.y + Math.cos(angle) * handle.tangent,
+                };
+                const isDragging =
+                  dragging?.domain === domain && dragging.zone === handle.zone;
+                return (
+                  <g key={`handle-${domain}-${handle.zone}`}>
+                    {handle.tangent !== 0 ? (
+                      <line
+                        x1={along.x}
+                        y1={along.y}
+                        x2={pos.x}
+                        y2={pos.y}
+                        stroke={meta.stroke}
+                        strokeWidth="1.25"
+                        pointerEvents="none"
+                      />
+                    ) : null}
+                    {handle.zone === "base" ? (
+                      <circle
+                        cx={pos.x}
+                        cy={pos.y}
+                        r={handle.size + 3.5}
+                        fill="rgba(0,229,192,.18)"
+                        stroke={meta.stroke}
+                        strokeWidth="1.25"
+                        pointerEvents="none"
+                      />
+                    ) : null}
+                    {handle.zone === "synth" ? (
+                      <circle
+                        cx={pos.x}
+                        cy={pos.y}
+                        r={domainSelected ? 11 : 9}
+                        fill={RECIPE_ZONE_META.synth.fill}
+                        stroke={meta.stroke}
+                        strokeWidth="1"
+                        pointerEvents="none"
+                      />
+                    ) : null}
                     <circle
-                      cx={handle.x}
-                      cy={handle.y}
-                      r={isDragging ? 11 : 9}
-                      fill="rgba(86,225,220,.12)"
-                      stroke="#56e1dc"
-                      strokeWidth="1"
+                      cx={pos.x}
+                      cy={pos.y}
+                      r={handle.hit}
+                      fill="transparent"
+                      className="cursor-grab outline-none active:cursor-grabbing"
+                      tabIndex={0}
+                      role="slider"
+                      aria-label={`${DATA_DOMAIN_META[domain].label} ${handle.label}`}
+                      aria-valuemin={
+                        handle.zone === "base"
+                          ? Math.round(
+                              spokes[domain].mid * (1 - MAX_POST_TRAIN_SHARE),
+                            )
+                          : 0
+                      }
+                      aria-valuemax={Math.round(
+                        dragCapMTok(domain, handle.zone),
+                      )}
+                      aria-valuenow={Math.round(handle.value)}
+                      onFocus={() => setSelected(domain)}
+                      onPointerDown={(event) => {
+                        event.preventDefault();
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        draggingRef.current = {
+                          domain,
+                          zone: handle.zone,
+                        };
+                        dragCeilingRef.current = ceiling;
+                        dragZoomRef.current = zoom;
+                        setSelected(domain);
+                        setEditing(null);
+                        setDragging({ domain, zone: handle.zone });
+                        updateFromPointer(
+                          domain,
+                          event.clientX,
+                          event.clientY,
+                        );
+                      }}
+                      onKeyDown={(event) => {
+                        if (
+                          ![
+                            "ArrowUp",
+                            "ArrowRight",
+                            "ArrowDown",
+                            "ArrowLeft",
+                          ].includes(event.key)
+                        )
+                          return;
+                        event.preventDefault();
+                        const delta =
+                          event.key === "ArrowUp" ||
+                          event.key === "ArrowRight"
+                            ? Math.max(1, ceiling * 0.03)
+                            : -Math.max(1, ceiling * 0.03);
+                        commitDomain(
+                          handle.zone,
+                          domain,
+                          handle.value + delta,
+                        );
+                      }}
+                    >
+                      <title>
+                        {`${meta.label} · ${formatTokens(handle.value)}\n${tip}`}
+                      </title>
+                    </circle>
+                    <circle
+                      cx={pos.x}
+                      cy={pos.y}
+                      r={isDragging ? handle.size + 1.5 : handle.size}
+                      fill={isDragging ? "#f2f6f5" : meta.stroke}
+                      stroke="#07171d"
+                      strokeWidth="2"
                       pointerEvents="none"
                     />
-                  ) : null}
-                  <circle
-                    cx={handle.x}
-                    cy={handle.y}
-                    r={14}
-                    fill="transparent"
-                    className="cursor-grab outline-none active:cursor-grabbing"
-                    tabIndex={0}
-                    role="slider"
-                    aria-label={`${DATA_DOMAIN_META[domain].label} token volume`}
-                    aria-valuemin={0}
-                    aria-valuemax={Math.round(dragCapMTok(domain))}
-                    aria-valuenow={Math.round(allocations[domain])}
-                    onFocus={() => setSelected(domain)}
-                    onPointerDown={(event) => {
-                      event.preventDefault();
-                      event.currentTarget.setPointerCapture(event.pointerId);
-                      draggingRef.current = domain;
-                      dragAxisMaxRef.current = axisMaxMTok;
-                      setSelected(domain);
-                      setDragging(domain);
-                      updateFromPointer(domain, event.clientX, event.clientY);
-                    }}
-                    onKeyDown={(event) => {
-                      if (
-                        ![
-                          "ArrowUp",
-                          "ArrowRight",
-                          "ArrowDown",
-                          "ArrowLeft",
-                        ].includes(event.key)
-                      )
-                        return;
-                      event.preventDefault();
-                      const delta =
-                        event.key === "ArrowUp" || event.key === "ArrowRight"
-                          ? Math.max(1, axisMaxMTok * 0.01)
-                          : -Math.max(1, axisMaxMTok * 0.01);
-                      commitDomainMTok(domain, allocations[domain] + delta);
-                    }}
-                  >
-                    <title>{tip}</title>
-                  </circle>
-                  <circle
-                    cx={handle.x}
-                    cy={handle.y}
-                    r={active ? 6.5 : 5}
-                    fill={active ? "#f2f6f5" : "#56e1dc"}
-                    stroke="#07171d"
-                    strokeWidth="2"
-                    pointerEvents="none"
-                  />
-                </g>
-              );
+                  </g>
+                );
+              });
             })}
           </svg>
-          <div className="flex flex-wrap justify-center gap-x-3 gap-y-1 text-[0.625rem] text-muted">
-            <span>
-              <i className="mr-1 inline-block h-2 w-2 rounded-sm bg-mint" />
-              Real
-            </span>
-            {syntheticUnlocked ? (
-              <span>
-                <i className="mr-1 inline-block h-2 w-2 rounded-sm bg-sky" />
-                HQ synthetic
-              </span>
-            ) : null}
-            {syntheticUnlocked ? (
-              <span>
-                <i className="mr-1 inline-block h-2 w-2 rounded-sm bg-research" />
-                LQ synthetic
-              </span>
-            ) : null}
-            {expansionEnabled ? (
-              <span>
-                <i className="mr-1 inline-block h-2 w-2 rounded-sm bg-gold" />
-                {syntheticSource === "teacher"
-                  ? "Teacher synthetic"
-                  : "Synthetic"}
-              </span>
-            ) : null}
-            <span>
-              <i className="mr-1 inline-block h-2 w-2 rounded-sm border border-dashed border-amber" />
-              Shortfall
-            </span>
-            {optimalByDomainMTok ? (
-              <span>
-                <i className="mr-1 inline-block h-2 w-2 rotate-45 rounded-[1px] bg-[#9bb1ba]" />
-                Optimal
-              </span>
-            ) : null}
-          </div>
-        </div>
-        <aside className="min-w-0 space-y-3">
-          <div className="rounded-lg border border-line/70 bg-panel-2/65 p-3">
-            <span className="font-mono text-[0.625rem] uppercase tracking-widest text-muted">
-              Domain volume
-            </span>
-            <ul className="mt-2 space-y-1.5">
-              {DATA_DOMAINS.map((domain) => {
-                const availability = availabilityByDomain[domain];
-                const tip = domainAvailabilityTooltip(
-                  availability,
+          {DATA_DOMAINS.map((domain, index) => {
+            const active = selected === domain;
+            const spoke = spokes[domain];
+            return (
+              <button
+                key={`label-${domain}`}
+                type="button"
+                className={`training-data-radar-label${active ? " is-active" : ""}`}
+                data-radar-label={domain}
+                style={labelAnchor(index)}
+                title={domainAvailabilityTooltip(
+                  availabilityByDomain[domain],
                   syntheticMultiplier,
-                );
-                const active = selected === domain;
-                return (
-                  <li key={domain}>
-                    <div
-                      className={`flex items-center gap-2 rounded-md px-1.5 py-1 text-[0.6875rem] ${
-                        active ? "bg-mint/10" : "hover:bg-void/40"
-                      }`}
-                      title={tip}
-                      onFocusCapture={() => setSelected(domain)}
-                    >
-                      <HudButton
-                        type="button"
-                        onClick={() => setSelected(domain)}
-                        variant="ghost"
-                        className={`!min-h-11 !min-w-0 !flex-1 !justify-start !border-0 !bg-transparent !px-1.5 !py-1 text-left ${
-                          active ? "text-mint" : "text-muted"
-                        }`}
-                      >
-                        {DATA_DOMAIN_META[domain].label}
-                      </HudButton>
-                      <DraftNumberInput
-                        value={Math.round(allocations[domain])}
-                        min={0}
-                        max={Math.round(dragCapMTok(domain))}
-                        step={1}
-                        decimals={0}
-                        ariaLabel={`${DATA_DOMAIN_META[domain].label} MTok`}
-                        title={tip}
-                        onCommit={(value) => {
-                          setSelected(domain);
-                          commitDomainMTok(domain, value);
-                        }}
-                        className="w-20 rounded border border-line bg-void px-1.5 py-0.5 text-right font-mono text-[0.6875rem] text-bone outline-none focus:border-mint/50"
-                      />
-                      <span className="w-8 shrink-0 font-mono text-[0.625rem] text-muted">
-                        MTok
-                      </span>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
-          <div className="rounded-lg border border-line/70 bg-panel-2/65 p-3">
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <span className="font-mono text-[0.625rem] uppercase tracking-widest text-muted">
-                  Selected domain
-                </span>
-                <h4 className="text-base font-medium text-bone">
-                  {DATA_DOMAIN_META[selected].label}{" "}
-                  <span className="font-mono text-sm text-mint">
-                    {formatTokens(selectedNeed)}
-                  </span>
-                </h4>
-              </div>
-              <span
-                className={
-                  selectedShortfall > 0.05
-                    ? "font-mono text-xs text-amber"
-                    : "font-mono text-xs text-mint"
-                }
+                )}
+                onClick={() => setSelected(domain)}
               >
-                {selectedShortfall > 0.05
-                  ? `${formatTokens(selectedShortfall)} short`
-                  : "covered"}
+                <span>{DATA_DOMAIN_META[domain].label}</span>
+                <strong>{compactTok(spoke.mid)}</strong>
+              </button>
+            );
+          })}
+          </div>
+          <div
+            className="training-data-radar-pop"
+            data-radar-pop="true"
+            role="dialog"
+            aria-label={`${selectedLabel} recipe volumes`}
+          >
+            <div className="training-data-radar-pop__head">
+              <strong className="text-[0.75rem] text-bone">{selectedLabel}</strong>
+              <span className="font-mono text-[0.625rem] tabular-nums text-muted">
+                {compactTok(selectedSpoke.mid)}
               </span>
             </div>
-            <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5 text-[0.6875rem]">
-              <SourceRow label="Needed" value={formatTokens(selectedNeed)} />
-              <SourceRow
-                label="Available real"
-                value={formatTokens(selectedAvailability.usableRealMTok)}
-                tone="text-mint"
+            <div className="training-data-radar-pop__rows">
+            {selectedRows.map((row) => (
+              <VolumeRow
+                key={row.key}
+                label={row.label}
+                color={row.color}
+                valueLabel={compactTok(row.value)}
+                editable={row.editable}
+                editing={row.editable && editing === row.key}
+                draft={draft}
+                ariaEdit={`Edit ${selectedLabel} ${row.label.toLowerCase()}`}
+                ariaInput={`${selectedLabel} ${row.label.toLowerCase()} MTok`}
+                onStart={() => {
+                  if (row.key === "verify") return;
+                  startEdit(row.key, row.value);
+                }}
+                onDraft={setDraft}
+                onCommit={() => {
+                  if (row.key === "verify") return;
+                  commitTypedVolume(row.key, selected, draft);
+                }}
+                onCancel={() => {
+                  setEditing(null);
+                  setDraft("");
+                }}
+                onNudge={
+                  row.editable
+                    ? (direction) => {
+                        const step = Math.max(
+                          1,
+                          row.key === "base"
+                            ? selectedSpoke.mid * 0.04
+                            : row.value * 0.05 || 1,
+                        );
+                        commitTypedVolume(
+                          row.key === "verify" ? "all" : row.key,
+                          selected,
+                          formatRecipeTokDraft(
+                            Math.max(0, row.value + direction * step),
+                          ),
+                        );
+                      }
+                    : undefined
+                }
               />
-              <SourceRow
-                label="Available synthetic"
-                value={formatTokens(
-                  selectedAvailability.usableSynthHQMTok +
-                    selectedAvailability.usableSynthLQMTok +
-                    Math.max(
-                      0,
-                      selectedAvailability.capMTok -
-                        selectedAvailability.usableMTok,
-                    ),
-                )}
-                tone="text-gold"
-              />
-              <SourceRow
-                label="Selected"
-                value={formatTokens(selectedAvailability.selectedMTok)}
-              />
-              <SourceRow
-                label="Max"
-                value={formatTokens(dragCapMTok(selected))}
-                tone={selectedCapReason ? "text-amber" : "text-bone"}
-              />
-              {optimalByDomainMTok ? (
-                <SourceRow
-                  label="Optimal"
-                  value={formatTokens(optimalByDomainMTok[selected] ?? 0)}
-                  tone="text-muted"
-                />
-              ) : null}
-              <SourceRow
-                label="Real used"
-                value={formatTokens(selectedFill.realTake)}
-                tone="text-mint"
-              />
-              {selectedFill.hqTake > 0.05 ? (
-                <SourceRow
-                  label="HQ synthetic"
-                  value={formatTokens(selectedFill.hqTake)}
-                  tone="text-sky"
-                />
-              ) : null}
-              {selectedFill.lqTake > 0.05 ? (
-                <SourceRow
-                  label="LQ synthetic"
-                  value={formatTokens(selectedFill.lqTake)}
-                  tone="text-research"
-                />
-              ) : null}
-              {expansionEnabled && selectedFill.synthTake > 0.05 ? (
-                <SourceRow
-                  label={
-                    syntheticSource === "teacher"
-                      ? "Teacher synthetic"
-                      : "Synthetic"
-                  }
-                  value={formatTokens(selectedFill.synthTake)}
-                  tone="text-gold"
-                />
-              ) : null}
-              <SourceRow
-                label="Shortfall"
-                value={formatTokens(selectedShortfall)}
-                tone={selectedShortfall > 0.05 ? "text-amber" : "text-muted"}
-              />
-              <SourceRow
-                label="Mix share"
-                value={`${Math.round(normalized[selected] * 100)}%`}
-              />
+            ))}
             </div>
-            {selectedCapReason ? (
-              <p className="mt-2 text-[0.625rem] leading-snug text-amber">
-                {selectedCapReason}
-              </p>
-            ) : null}
-            {selectedDiminishing ? (
-              <p className="mt-2 text-[0.625rem] leading-snug text-amber">
-                Past ~2× real data, extra synthetic tokens hit diminishing
-                returns and inflate benchmark-overfit risk.
-              </p>
-            ) : null}
-            {syntheticUnlocked ? (
-              <label className="mt-3 block text-[0.6875rem] text-muted">
-                Synthetic teacher
-                <HudSelect
-                  value={syntheticTeacherIds[selected] ?? ""}
-                  onChange={(event) =>
-                    onTeacherChange(selected, event.target.value || undefined)
-                  }
-                  className="mt-1 w-full min-w-0 text-xs"
-                >
-                  <option value="">Auto · best teacher</option>
-                  {teachers.map((teacher) => (
-                    <option key={teacher.id} value={teacher.id}>
-                      {teacher.name} · cap {teacher.capability.toFixed(0)}
-                    </option>
-                  ))}
-                </HudSelect>
-              </label>
-            ) : null}
-            {syntheticUnlocked ? (
-              <p className="mt-1 min-h-8 text-[0.625rem] leading-snug text-muted">
-                {selectedTeacher
-                  ? `Predicted ${estimatedQuality && estimatedQuality >= 58 ? "high" : "low"} quality · Q${estimatedQuality?.toFixed(0)} from ${selectedTeacher.name}.`
-                  : "Auto chooses the strongest eligible teacher for this domain."}
-              </p>
-            ) : null}
           </div>
-        </aside>
+          <div
+            className="training-data-radar-legend mt-3 text-[0.6875rem]"
+            data-radar-legend="true"
+          >
+            {(
+              [
+                RECIPE_VERIFY_META,
+                RECIPE_ZONE_META.base,
+                RECIPE_ZONE_META.post,
+                ...(syntheticUnlocked ? [RECIPE_ZONE_META.synth] : []),
+              ] as const
+            ).map((meta) => (
+              <div key={meta.label} className="flex min-w-0 items-start gap-2">
+                <i
+                  className="mt-1 inline-block h-2.5 w-2.5 shrink-0 rounded-sm"
+                  style={{
+                    background: meta.fill,
+                    boxShadow: `inset 0 0 0 1.5px ${meta.stroke}`,
+                  }}
+                />
+                <span>
+                  <strong className="block text-bone">{meta.label}</strong>
+                  <span className="text-[0.625rem] leading-snug text-muted">
+                    {meta.blurb}
+                  </span>
+                </span>
+              </div>
+            ))}
+          </div>
+          {syntheticUnlocked ? (
+            <label className="mt-3 block text-[0.6875rem] text-muted">
+              Synthetic teacher
+              <HudSelect
+                value={syntheticTeacherIds[selected] ?? ""}
+                onChange={(event) =>
+                  onTeacherChange(selected, event.target.value || undefined)
+                }
+                className="mt-1 w-full min-w-0 text-xs"
+              >
+                <option value="">Default teacher</option>
+                {teachers.map((teacher) => (
+                  <option key={teacher.id} value={teacher.id}>
+                    {teacher.name} · cap {teacher.capability.toFixed(0)}
+                  </option>
+                ))}
+              </HudSelect>
+            </label>
+          ) : null}
+        </div>
       </div>
     </section>
-  );
-}
-
-function SourceRow({
-  label,
-  value,
-  tone = "text-bone",
-}: {
-  label: string;
-  value: string;
-  tone?: string;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-2">
-      <span className="text-muted">{label}</span>
-      <span className={`font-mono ${tone}`}>{value}</span>
-    </div>
   );
 }

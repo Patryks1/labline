@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import {
   BellRinging,
+  Buildings,
   CaretLeft,
   CaretRight,
   ChartLine,
@@ -15,6 +16,7 @@ import { EmptyState, HudButton, StatusChip } from './ui/HudPrimitives'
 import { FeedPost } from './ui/FeedPost'
 import { useUiStore } from '../../store/uiStore'
 import { selectFinanceDashboardReadouts } from './data/financeDashboardModel'
+import { FacilitiesIntelView } from './panels/command/FacilitiesIntelView'
 
 /** Totals for a command-dock channel must come from the same rows the list shows. */
 export function sumChannelRows(
@@ -38,7 +40,7 @@ export function sumChannelRows(
 
 /**
  * Floating right intelligence dock over the map.
- * Clickable, icon-led tabs switch P&L / Rivals / Feed without a second full panel.
+ * Clickable, icon-led tabs switch P&L / Sites / Rivals / World without a second full panel.
  */
 export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boolean }) {
   const open = useGameStore((s) => s.commandDockOpen)
@@ -95,6 +97,8 @@ export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boole
                 items={COMMAND_VIEWS.map((v) => ({
                   id: v.id,
                   label: v.label,
+                  ariaLabel: v.label,
+                  title: v.label,
                   icon: <CommandIcon id={v.id} />,
                 }))}
               />
@@ -115,6 +119,7 @@ export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boole
           <div className="panel-scroll relative z-10 min-h-0 flex-1 overflow-y-auto p-3">
             <div key={view} className="panel-swap">
               {view === 'pnl' && <PnlView onOpenStats={() => setPanel('stats')} />}
+              {view === 'sites' && <FacilitiesIntelView />}
               {view === 'rivals' && (
                 <RivalsView
                   onOpenMarket={() => setPanel('market')}
@@ -134,7 +139,8 @@ export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boole
 }
 
 function CommandIcon({ id }: { id: CommandViewId }) {
-  const Icon = id === 'pnl' ? ChartLine : id === 'rivals' ? UsersThree : BellRinging
+  const Icon =
+    id === 'pnl' ? ChartLine : id === 'sites' ? Buildings : id === 'rivals' ? UsersThree : BellRinging
   return <Icon size="1.05rem" weight="duotone" aria-hidden />
 }
 

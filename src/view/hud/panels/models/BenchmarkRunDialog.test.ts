@@ -23,6 +23,7 @@ describe('BenchmarkRunDialog', () => {
 
     expect(markup).toContain('role="dialog"')
     expect(markup).toContain('aria-modal="true"')
+    expect(markup).toContain('Measure, do not train')
     expect(markup).toContain('Image generation')
     expect(markup).not.toContain('Language &amp; reasoning')
     expect(markup).toContain('Benchmark spend per suite')

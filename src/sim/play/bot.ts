@@ -18,6 +18,7 @@ import { setModelApiInOut } from '../systems/training'
 import { computeSnapshot } from '../systems/compute'
 import { hireStaff, playerStaff } from '../systems/staff'
 import type { BuildableKind, MapTile, SimState } from '../types'
+import { isLivePublicModel } from '../modelRelease'
 import type { DifficultyId } from '../balance/gameConfig'
 import { tickSharedMarkets } from '../systems/sharedMarkets'
 import {
@@ -208,7 +209,7 @@ export function botAct(state: SimState): SimState {
     countKind(s, 'substation') + countKind(s, 'solar') + countKind(s, 'gas') + countKind(s, 'battery')
   const racks = liveRackCount(s)
   const arriving = orderedRackCount(s)
-  const hasPublic = s.player.models.some((m) => m.release === 'released' || m.shipped)
+  const hasPublic = s.player.models.some(isLivePublicModel)
   const snap = computeSnapshot(s)
   const processedData = totalProcessed(s.player.data)
 
@@ -288,7 +289,7 @@ export function botAct(state: SimState): SimState {
   // Compete for real processed corpus before training. One finite lot per day
   // keeps the bot competent without grants or privileged data generation.
   const latestPublic = s.player.models
-    .filter((model) => model.release === 'released' || model.shipped)
+    .filter(isLivePublicModel)
     .toSorted((a, b) => b.releaseDay - a.releaseDay)[0]
   const corpusTarget = hasPublic
     ? Math.max(6_500, (latestPublic?.paramsB ?? 1) * 1_800)
@@ -461,7 +462,7 @@ export function botAct(state: SimState): SimState {
   // 120-day clock. Besides wasting data, taking the better of two hidden
   // outcome rolls gave the calibration bot an unfair early capability edge.
   const currentLatestPublic = s.player.models
-    .filter((model) => model.release === 'released' || model.shipped)
+    .filter(isLivePublicModel)
     .toSorted((a, b) => b.releaseDay - a.releaseDay)[0]
   const daysSinceRelease = currentLatestPublic
     ? s.day - currentLatestPublic.releaseDay
@@ -554,7 +555,7 @@ export function runPlayBot(opts: {
       boughtChips = true
       note('racks', `${liveRackCount(s)} racks live`)
     }
-    if (s.player.models.some((m) => m.release === 'released' || m.shipped)) {
+    if (s.player.models.some(isLivePublicModel)) {
       releasedModel = true
       note('release', 'First model released')
     }

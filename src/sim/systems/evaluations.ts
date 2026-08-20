@@ -11,6 +11,7 @@ import type {
   ReviewAudience,
   SimState,
 } from '../types'
+import { isLivePublicModel } from '../modelRelease'
 import { buildBenchmarkEvent } from './benchmarkEvent'
 import { HISTORY_LIMITS } from './history'
 import { modelOfferApiPrice } from './market'
@@ -305,13 +306,13 @@ export function tickEvaluations(state: SimState): SimState {
     }
   }
   if (next.calendar.isReviewDay) {
-    for (const model of next.player.models.filter((item) => item.release === 'released' || item.shipped)) {
+    for (const model of next.player.models.filter(isLivePublicModel)) {
       for (const audience of REVIEW_AUDIENCES) {
         next = publishReview(next, model.id, audience, 'quarterly', next.playerLabId)
       }
     }
     for (const rival of next.rivals) {
-      for (const model of rival.models.filter((item) => item.release === 'released' || item.shipped)) {
+      for (const model of rival.models.filter(isLivePublicModel)) {
         for (const audience of REVIEW_AUDIENCES) {
           next = publishReview(next, model.id, audience, 'quarterly', rival.id)
         }

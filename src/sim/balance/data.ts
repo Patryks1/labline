@@ -45,7 +45,7 @@ export const DATA_DOMAIN_META: Record<
     /** Cash per MTok processed */
     processCostPerMTok: number
     processHard: number
-    /** Synth gen: MTok per research-PF·day at cap 50 model */
+    /** Relative synth throughput vs chat=18. Absolute PF cost is in syntheticGeneration.ts */
     synthMTokPerPfDay: number
   }
 > = {
@@ -1076,4 +1076,50 @@ export function lqSynthCapabilityMult(synthLqShare: number): number {
   const s = Math.max(0, Math.min(1, synthLqShare))
   // Up to ~22% capability hit when train mix is all LQ synth
   return 1 - s * (DATA_ECONOMY.lqRegressionMax ?? 0.22)
+}
+
+/**
+ * Extra quality haircut for synthetic mass in a train recipe.
+ * Unpurged pile synth and generated expansion both count — you cannot
+ * uncheck your way out of a dirty corpus.
+ */
+export function applySynthQualityTax(
+  qualityUsed: number,
+  synthShare: number,
+  synthLqShare = 0,
+): number {
+  let quality = Number.isFinite(qualityUsed) ? qualityUsed : 40
+  const share = Math.max(0, Math.min(1, synthShare))
+  const lqShare = Math.max(0, Math.min(1, synthLqShare))
+  if (share > 0.04) {
+    quality = Math.max(12, quality * (1 - share * 0.22))
+  }
+  if (lqShare > 0.08) {
+    quality = Math.max(12, quality * (1 - lqShare * 0.35))
+  }
+  return quality
+}
+
+/** Unpurged synthetic tokens sitting in processed corpus, 0–1. */
+export function corpusSynthShare(data: LabData | undefined): {
+  synth: number
+  lq: number
+} {
+  if (!data?.stocks) return { synth: 0, lq: 0 }
+  let processed = 0
+  let synth = 0
+  let lq = 0
+  for (const domain of DATA_DOMAINS) {
+    const stock = data.stocks[domain]
+    if (!stock) continue
+    const pile = Math.max(0, stock.processed ?? 0)
+    processed += pile
+    synth += Math.max(0, stock.fromSynthHQ ?? 0) + Math.max(0, stock.fromSynthLQ ?? 0)
+    lq += Math.max(0, stock.fromSynthLQ ?? 0)
+  }
+  if (processed <= 1e-9) return { synth: 0, lq: 0 }
+  return {
+    synth: Math.min(1, synth / processed),
+    lq: Math.min(1, lq / processed),
+  }
 }

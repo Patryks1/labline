@@ -23,7 +23,7 @@ const TEST_UNIT_COSTS: RivalInfraUnitCosts = {
   rackPrice: 313_500,
   interconnectCostPerMw: 52_000_000 / 14,
   generationCostPerMw: 48_000_000 / 18,
-  hallCash: { small: 118_000_000, medium: 340_000_000, large: 980_000_000 },
+  hallCash: { small: 128_000_000, medium: 520_000_000, large: 2_450_000_000 },
   hallRacks: { small: 96, medium: 288, large: 960 },
 }
 
@@ -194,8 +194,20 @@ describe('layered rival strategy', () => {
 })
 
 describe('rival scale ladder and infrastructure (workstream 6)', () => {
-  it('exposes the full parameter ladder starting at 22B', () => {
-    expect(RIVAL_SCALE_LADDER_PARAMS_B).toEqual([22, 34, 70, 110, 180, 235, 405])
+  it('exposes the full parameter ladder from 22B into the multi-T band', () => {
+    expect(RIVAL_SCALE_LADDER_PARAMS_B[0]).toBe(22)
+    expect(RIVAL_SCALE_LADDER_PARAMS_B).toContain(405)
+    expect(RIVAL_SCALE_LADDER_PARAMS_B[RIVAL_SCALE_LADDER_PARAMS_B.length - 1]).toBe(
+      5_000,
+    )
+  })
+
+  it('respects an era ceiling when listing candidates', () => {
+    const decision = chooseRivalScaleCandidate(
+      richScaleContext({ currentParamsB: 34, maxParamsB: 120 }),
+      { family: 'dense', backbone: 'dense' },
+    )
+    expect(decision.candidates.every((c) => c.paramsB <= 120 * 1.001)).toBe(true)
   })
 
   it('evaluates ladder sizes beyond 22B when resources justify a climb', () => {
@@ -253,11 +265,15 @@ describe('rival scale ladder and infrastructure (workstream 6)', () => {
 
   it('selects dc / dc_m / dc_l from projected bay demand', () => {
     expect(chooseRivalDcSize(50, 'efficiency')).toBe('dc')
-    expect(chooseRivalDcSize(100, 'efficiency')).toBe('dc_m')
-    expect(chooseRivalDcSize(300, 'efficiency')).toBe('dc_l')
-    // Hyperscalers build one tier ahead once demand clears 55% of the tier.
-    expect(chooseRivalDcSize(60, 'hyperscale')).toBe('dc_m')
-    expect(chooseRivalDcSize(180, 'hyperscale')).toBe('dc_l')
+    expect(chooseRivalDcSize(100, 'efficiency')).toBe('dc')
+    expect(chooseRivalDcSize(300, 'efficiency')).toBe('dc')
+    expect(chooseRivalDcSize(100, 'efficiency', 1)).toBe('dc_m')
+    expect(chooseRivalDcSize(300, 'efficiency', 1)).toBe('dc_m')
+    expect(chooseRivalDcSize(300, 'efficiency', 2)).toBe('dc_l')
+    // Hyperscalers build one tier ahead once they already have a live hall.
+    expect(chooseRivalDcSize(60, 'hyperscale')).toBe('dc')
+    expect(chooseRivalDcSize(60, 'hyperscale', 1)).toBe('dc_m')
+    expect(chooseRivalDcSize(180, 'hyperscale', 2)).toBe('dc_l')
   })
 
   it('never selects a candidate that fails the HBM memory gate', () => {

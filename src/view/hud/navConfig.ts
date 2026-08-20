@@ -57,7 +57,7 @@ export const NAV_GROUPS: NavGroup[] = [
     description: 'P&L, rivals, forecasts & world signals',
     key: '1',
     items: [
-      { id: 'stats', label: 'Command', hint: 'P&L · compute · trends', key: '1', presentation: 'workbench' },
+      { id: 'stats', label: 'Command', hint: 'P&L · capital · compute', key: '1', presentation: 'workbench' },
       { id: 'rivals', label: 'Rivals', hint: 'Intentions, capacity & launches', key: '2' },
     ],
   },
@@ -81,7 +81,7 @@ export const NAV_GROUPS: NavGroup[] = [
     description: 'Cloud, sites, fleet, grid & silicon',
     key: '3',
     items: [
-      { id: 'map', label: 'Overview', hint: 'Fleet, facilities, construction & map', key: '1' },
+      { id: 'map', label: 'Overview', hint: 'Fleet capacity, construction & map', key: '1' },
       { id: 'computeMarket', label: 'Compute', hint: 'Cloud, reserved, spot & rival PF', key: '2' },
       { id: 'racks', label: 'Hardware', hint: 'Racks, blueprints & custom silicon', key: '3', presentation: 'workbench' },
       { id: 'power', label: 'Power', hint: 'Grid MW, utility contracts & export', key: '4' },
@@ -146,7 +146,7 @@ export const SHELL_NAV_GROUPS: ShellNavGroup[] = [
       { id: 'map', label: 'Overview', hint: 'Fleet, facilities, construction & map' },
       { id: 'computeMarket', label: 'Workloads', hint: 'Cloud, reserved, spot & rival PF' },
       { id: 'rivals', label: 'Processes', hint: 'Intentions, capacity & launches' },
-      { id: 'stats', label: 'Finances', hint: 'P&L · compute · trends' },
+      { id: 'stats', label: 'Finances', hint: 'P&L · capital · compute' },
     ],
   },
   {
@@ -198,12 +198,13 @@ export function shellGroupForPanel(panel: PanelId): ShellNavGroup {
   )
 }
 
-export type CommandViewId = 'pnl' | 'rivals' | 'feed'
+export type CommandViewId = 'pnl' | 'sites' | 'rivals' | 'feed'
 
 export const COMMAND_VIEWS: { id: CommandViewId; label: string; key: string }[] = [
   { id: 'pnl', label: 'P&L', key: 'F1' },
-  { id: 'rivals', label: 'Rivals', key: 'F2' },
-  { id: 'feed', label: 'World', key: 'F3' },
+  { id: 'sites', label: 'Sites', key: 'F2' },
+  { id: 'rivals', label: 'Rivals', key: 'F3' },
+  { id: 'feed', label: 'World', key: 'F4' },
 ]
 
 /** Function-row shortcuts follow the visible panel order beneath map tools. */

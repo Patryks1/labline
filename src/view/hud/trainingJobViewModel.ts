@@ -25,6 +25,11 @@ export type TrainingActivityAction =
       jobId: string;
     }
   | {
+      kind: "decide";
+      label: "Decide";
+      jobId: string;
+    }
+  | {
       kind: "resume";
       label: "Resume";
       jobId: string;
@@ -61,6 +66,8 @@ export interface TrainingActivityViewModel {
   activeCount: number;
   issueCount: number;
   readyCount: number;
+  decideCount: number;
+  blockedCount: number;
   summary: string;
   liveAnnouncement: string;
 }
@@ -208,7 +215,7 @@ function actionForJob(
     };
   }
   if (job.pendingCampaignEvent) {
-    return { kind: "open-run", label: "Resolve decision", jobId: job.id };
+    return { kind: "decide", label: "Decide", jobId: job.id };
   }
   if (completeReady) {
     return {
@@ -362,6 +369,8 @@ export function buildTrainingActivity(
       activeCount: 0,
       issueCount: 0,
       readyCount: 0,
+      decideCount: 0,
+      blockedCount: 0,
       summary: "No model training runs",
       liveAnnouncement: "No model training runs are active.",
     };
@@ -380,11 +389,28 @@ export function buildTrainingActivity(
   const readyCount = viewModels.filter(
     (job) => job.statusLabel === "Ready",
   ).length;
+  const decideCount = viewModels.filter(
+    (job) => job.job.pendingCampaignEvent,
+  ).length;
+  const blockedCount = viewModels.filter(
+    (job) =>
+      job.statusTone === "danger" &&
+      !job.job.failed &&
+      !job.job.pendingCampaignEvent,
+  ).length;
   const activeCount = viewModels.filter(
     (job) => !job.job.failed && job.statusLabel !== "Ready",
   ).length;
   const lead = viewModels[0]!;
-  const summary = `${viewModels.length} training run${viewModels.length === 1 ? "" : "s"}`;
+  const parts = [
+    `${viewModels.length} run${viewModels.length === 1 ? "" : "s"}`,
+  ];
+  if (decideCount > 0) parts.push(`${decideCount} decide`);
+  if (blockedCount > 0) parts.push(`${blockedCount} blocked`);
+  if (readyCount > 0) parts.push(`${readyCount} ready`);
+  if (activeCount > 0 && decideCount + blockedCount + readyCount === 0) {
+    parts.push(`${lead.stageLabel} ${Math.round(lead.stageProgress * 100)}%`);
+  }
   const liveAnnouncement = viewModels
     .map(
       (job) =>
@@ -397,7 +423,9 @@ export function buildTrainingActivity(
     activeCount,
     issueCount,
     readyCount,
-    summary: `${summary} · ${lead.stageLabel} ${Math.round(lead.stageProgress * 100)}%`,
+    decideCount,
+    blockedCount,
+    summary: parts.join(" · "),
     liveAnnouncement,
   };
 }

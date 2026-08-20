@@ -8,10 +8,12 @@ import {
 import type {
   DataDomain,
   LabData,
+  ModelFamily,
   ProcessJob,
   SegmentId,
   StaffHeadcount,
 } from "../types";
+import { synthAttemptedMTokPerDay } from "../balance/syntheticGeneration";
 import {
   appendDatasetAsset,
   marketDatasetAsset,
@@ -767,13 +769,17 @@ export function syntheticGenerationMTokPerDay(input: {
   teacherReliability: number;
   researchPf: number;
   tier: "hq" | "lq";
+  activeParamsB?: number;
+  family?: ModelFamily;
 }): number {
-  const speedMultiplier = input.tier === "lq" ? 1.65 : 0.85;
-  return (
-    DATA_DOMAIN_META[input.domain].synthMTokPerPfDay *
-    (0.5 + clamp(input.teacherDomainCapability, 0, 100) / 100) *
-    Math.max(0.4, clamp(input.teacherReliability, 0, 100) / 80) *
-    speedMultiplier *
-    Math.max(0, input.researchPf)
-  );
+  return synthAttemptedMTokPerDay({
+    domain: input.domain,
+    domainSynthMTokPerPfDay: DATA_DOMAIN_META[input.domain].synthMTokPerPfDay,
+    teacherDomainCapability: input.teacherDomainCapability,
+    teacherReliability: input.teacherReliability,
+    researchPf: input.researchPf,
+    tier: input.tier,
+    activeParamsB: input.activeParamsB,
+    family: input.family,
+  });
 }

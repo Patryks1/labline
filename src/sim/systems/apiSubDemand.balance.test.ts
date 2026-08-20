@@ -147,8 +147,10 @@ function parityState(seed = 9_401): SimState {
 
 describe("API vs subscription demand balance", () => {
   it("raises API base intensity so peer-priced API can compete with seats", () => {
-    expect(ECONOMY.apiBaseMTokPerUserDay).toBeGreaterThanOrEqual(0.04);
-    expect(ECONOMY.marketDailyActiveUsageShare).toBeGreaterThanOrEqual(0.25);
+    expect(ECONOMY.apiBaseMTokPerUserDay).toBeGreaterThanOrEqual(0.028);
+    expect(ECONOMY.apiBaseMTokPerUserDay).toBeLessThanOrEqual(0.04);
+    expect(ECONOMY.marketDailyActiveUsageShare).toBeGreaterThanOrEqual(0.18);
+    expect(ECONOMY.marketDailyActiveUsageShare).toBeLessThanOrEqual(0.24);
     expect(
       apiDemandPricePenalty({ ratioToPeer: 1.12, kind: "language" }),
     ).toBeLessThan(0.35);

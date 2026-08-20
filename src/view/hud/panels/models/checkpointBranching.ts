@@ -54,8 +54,8 @@ export const CHECKPOINT_BRANCH_DIRECTIONS: readonly CheckpointBranchDirectionOpt
   {
     id: "custom",
     label: "Custom",
-    description: "Start neutral and tune the child after it enters the queue.",
-    dataHint: "Source mix",
+    description: "Start from the source mix and edit domain shares before launch.",
+    dataHint: "Editable mix",
   },
 ] as const;
 

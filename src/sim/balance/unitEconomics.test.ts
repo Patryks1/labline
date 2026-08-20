@@ -9,7 +9,11 @@ import { energyPriceForState, playerBuildingOpex } from "../systems/map";
 import { attributedServingFixedCost } from "../systems/market";
 import { tickDay } from "../tick";
 import type { Model, SimState } from "../types";
-import { applyModelApiMarkup, setModelApiInOut } from "../systems/training";
+import {
+  applyModelApiMarkup,
+  listReleasedModel,
+  setModelApiInOut,
+} from "../systems/training";
 import { ECONOMY } from "./economy";
 import { buildScaledModel } from "./modelBuild";
 import {
@@ -27,9 +31,11 @@ import {
   API_COST_IN_MULT,
   API_COST_OUT_MULT,
   FALLBACK_COST_PER_MTOK,
+  apiHostingCostFloor,
   apiUnitCostPerMTok,
   boundedApiListCostPerMTok,
   birthApiUnitCostPerMTok,
+  clampApiListToHostingFloor,
   launchReferenceApiCostPerMTok,
   marginPct,
   markupRatio,
@@ -180,9 +186,23 @@ describe("unitEconomics canonical helpers", () => {
 
     const repriced = applyModelApiMarkup(withHuge, huge.id, 120);
     const model = repriced.player.models[0]!;
-    expect(model.apiPriceInPerMTok).toBeLessThan(1_000);
-    expect(model.apiPriceOutPerMTok).toBeLessThan(1_000);
-    expect(model.costApiPriceOut).toBeCloseTo(actual.costOut, 8);
+    const hosting = apiHostingCostFloor(
+      withHuge,
+      computeSnapshot(withHuge),
+      huge,
+    );
+    expect(model.costApiPriceOut).toBeCloseTo(hosting.costOut, 8);
+    expect(model.apiPriceInPerMTok ?? 0).toBeGreaterThanOrEqual(
+      hosting.costIn - 1e-9,
+    );
+    expect(model.apiPriceOutPerMTok ?? 0).toBeGreaterThanOrEqual(
+      hosting.costOut - 1e-9,
+    );
+    if (hosting.source === "cloud_reference") {
+      expect(model.apiPriceInPerMTok).toBeLessThan(1_000);
+      expect(model.apiPriceOutPerMTok).toBeLessThan(1_000);
+    }
+    expect(actual.costOut).toBeGreaterThan(0);
   });
 
   it("preserves a blended list price under the canonical 70/30 text mix", () => {
@@ -193,7 +213,7 @@ describe("unitEconomics canonical helpers", () => {
     expect(blendApiPrice(split.priceIn, split.priceOut)).toBeCloseTo(12, 10);
   });
 
-  it("preserves sub-micro input/output list prices without rounding", () => {
+  it("clamps listed API prices up to the hosting floor", () => {
     const state = createGame(7_707);
     const model = buildScaledModel({
       id: "micro-list",
@@ -205,18 +225,25 @@ describe("unitEconomics canonical helpers", () => {
       dataQuality: 60,
       postTrain: "none",
     });
+    const withModel = {
+      ...state,
+      player: { ...state.player, models: [model] },
+    };
+    const hosting = apiHostingCostFloor(
+      withModel,
+      computeSnapshot(withModel),
+      model,
+    );
     const priced = setModelApiInOut(
-      {
-        ...state,
-        player: { ...state.player, models: [model] },
-      },
+      withModel,
       model.id,
       0.0000001,
       0.0000007,
     ).player.models[0]!;
-    expect(priced.apiPriceInPerMTok).toBe(0.0000001);
-    expect(priced.apiPriceOutPerMTok).toBe(0.0000007);
-    expect(priced.apiPricePerMTok).toBeCloseTo(0.00000028, 12);
+    expect(priced.apiPriceInPerMTok).toBeCloseTo(hosting.costIn, 8);
+    expect(priced.apiPriceOutPerMTok).toBeCloseTo(hosting.costOut, 8);
+    expect(priced.costApiPriceIn).toBeCloseTo(hosting.costIn, 8);
+    expect(priced.costApiPriceOut).toBeCloseTo(hosting.costOut, 8);
   });
 
   it("bills media in native images, minutes, and seconds", () => {
@@ -446,5 +473,100 @@ describe("unitEconomics canonical helpers", () => {
       expect(unit.source).toBe("estimate");
       expect(unit.components.buildingOpexDay).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("API hosting cost floor", () => {
+  it("charges more per token for a larger model on the same campus", () => {
+    const state = withServeCampus(createGame({ seed: 4415 }), 32);
+    const snap = computeSnapshot(state);
+    const small = buildScaledModel({
+      id: "floor-7b",
+      name: "Floor 7B",
+      paramsB: 7,
+      family: "dense",
+      day: state.day,
+      dataCoverage: 12,
+      dataQuality: 70,
+    });
+    const large = buildScaledModel({
+      id: "floor-70b",
+      name: "Floor 70B",
+      paramsB: 70,
+      family: "dense",
+      day: state.day,
+      dataCoverage: 12,
+      dataQuality: 70,
+    });
+    const smallFloor = apiHostingCostFloor(state, snap, small);
+    const largeFloor = apiHostingCostFloor(state, snap, large);
+    expect(smallFloor.source).toBe("campus");
+    expect(largeFloor.source).toBe("campus");
+    expect(largeFloor.blended).toBeGreaterThan(smallFloor.blended);
+    expect(largeFloor.costOut).toBeGreaterThan(largeFloor.costIn);
+    expect(smallFloor.costOut / smallFloor.costIn).toBeCloseTo(
+      API_COST_OUT_MULT / API_COST_IN_MULT,
+      5,
+    );
+    expect(smallFloor.campusPerMTok + smallFloor.bandwidthPerMTok).toBeCloseTo(
+      smallFloor.blended,
+      6,
+    );
+  });
+
+  it("uses a cloud rental quote when the campus has no serving replica", () => {
+    const state = createGame({ seed: 4416 });
+    const model = buildScaledModel({
+      id: "cloud-floor",
+      name: "Cloud floor",
+      paramsB: 8,
+      family: "dense",
+      day: state.day,
+      dataCoverage: 8,
+      dataQuality: 60,
+    });
+    const floor = apiHostingCostFloor(state, computeSnapshot(state), model);
+    expect(floor.source).toBe("cloud_reference");
+    expect(floor.capacityMTok).toBe(0);
+    expect(floor.blended).toBeCloseTo(launchReferenceApiCostPerMTok(model), 8);
+    expect(floor.costIn).toBeLessThan(floor.costOut);
+  });
+
+  it("lifts a below-cost go-to-market list to the hosting floor", () => {
+    const base = createGame({ seed: 4417 });
+    const model = buildScaledModel({
+      id: "list-floor",
+      name: "List floor",
+      paramsB: 3,
+      family: "dense",
+      day: base.day,
+      dataCoverage: 8,
+      dataQuality: 65,
+      shipped: true,
+      release: "released",
+    });
+    const state: SimState = {
+      ...base,
+      player: { ...base.player, models: [model] },
+    };
+    const hosting = apiHostingCostFloor(state, computeSnapshot(state), model);
+    const listed = listReleasedModel(state, {
+      modelId: model.id,
+      sell: true,
+      apiIn: hosting.costIn * 0.1,
+      apiOut: hosting.costOut * 0.1,
+    }).player.models[0]!;
+    expect(listed.apiPriceInPerMTok).toBeCloseTo(hosting.costIn, 8);
+    expect(listed.apiPriceOutPerMTok).toBeCloseTo(hosting.costOut, 8);
+    expect(listed.commerciallyOffered).toBe(true);
+  });
+
+  it("does not lower an above-floor list", () => {
+    const listed = clampApiListToHostingFloor(4, 12, {
+      costIn: 0.4,
+      costOut: 1.6,
+    });
+    expect(listed.priceIn).toBe(4);
+    expect(listed.priceOut).toBe(12);
   });
 });

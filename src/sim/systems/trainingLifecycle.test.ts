@@ -12,7 +12,7 @@ import {
   tickTraining,
   trainingStageFailurePlan,
 } from "./training";
-import { postTrainTargetPfDays } from "../balance/postTraining";
+import { studioPostTrainTargetPfDays } from "../balance/postTraining";
 import { ensureLabData } from "./data";
 import { tickCheckpointEvaluations } from "./checkpointEvaluations";
 
@@ -135,8 +135,8 @@ describe("training lifecycle controls", () => {
 
     const prepared = state.player.trainingJobs!.map((job) => ({
       ...job,
-      progressPfDays: job.targetPfDays * 0.12,
-      campaignMilestonesReached: [0.12],
+      progressPfDays: job.targetPfDays * 0.5,
+      campaignMilestonesReached: [0.5],
     }));
     state = {
       ...state,
@@ -227,7 +227,7 @@ describe("training lifecycle controls", () => {
     expect(next.player.trainingJob).toMatchObject({
       postTrain: "rlhf",
       postTrainProgress: 0,
-      postTrainTarget: postTrainTargetPfDays(job, "rlhf"),
+      postTrainTarget: studioPostTrainTargetPfDays(job, "rlhf"),
     });
   });
 

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Trash } from "@phosphor-icons/react";
+import { Check, Trash } from "@phosphor-icons/react";
 import { useGameStore } from "../../../store/gameStore";
 import { ResearchUnlockLink } from "../ui/ResearchUnlockLink";
 import {
@@ -193,8 +193,8 @@ export function SynthTeacherRoutingTable({
             Corpus routing
           </div>
           <p className="mt-0.5 text-[0.6875rem] text-dim">
-            Auto picks the best retained teacher for each corpus. Internal
-            checkpoints stay private.
+            Yield costs research PF by teacher size. Weak teachers mint mostly
+            low-quality data; capability raises useful yield and high-Q share.
           </p>
         </div>
         <div className="flex gap-3 font-mono text-[0.625rem] tabular-nums text-muted sm:block sm:shrink-0 sm:text-right">
@@ -1840,11 +1840,20 @@ export function DataPanel({
                                       }
                                       className={`min-h-11 rounded-md px-2 py-1 font-mono text-[0.6875rem] transition ${
                                         active
-                                          ? "border-mint/50 bg-mint/10 text-bone"
-                                          : "border-line/70 bg-void/35 text-muted hover:border-line hover:bg-void/55"
-                                      } ${inDeskMix ? "" : "border-dashed"} disabled:opacity-50`}
+                                          ? "!border-mint !bg-mint/20 !text-mint hover:!border-mint hover:!bg-mint/28 hover:!text-mint"
+                                          : "!border-line/70 !bg-void/40 !text-muted hover:!border-line hover:!bg-void/60 hover:!text-bone"
+                                      } ${active || inDeskMix ? "" : "!border-dashed"} disabled:opacity-50`}
                                     >
-                                      {DATA_DOMAIN_META[domain].label}
+                                      <span className="inline-flex items-center gap-1">
+                                        {active ? (
+                                          <Check
+                                            size="0.7rem"
+                                            weight="bold"
+                                            aria-hidden
+                                          />
+                                        ) : null}
+                                        {DATA_DOMAIN_META[domain].label}
+                                      </span>
                                     </HudButton>
                                   );
                                 })}

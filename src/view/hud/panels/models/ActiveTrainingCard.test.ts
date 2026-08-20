@@ -62,11 +62,39 @@ function markup(job: TrainingJob): string {
   );
 }
 
+describe("ActiveTrainingCard campaign mixer", () => {
+  it("hands incidents to the global decision modal instead of an inline mixer", () => {
+    const rendered = markup(
+      trainingJob({
+        pendingCampaignEvent: {
+          id: "evt-1",
+          kind: "loss_spike",
+          title: "Loss spike at scale",
+          description: "The observed loss moved outside the band.",
+          signal: "loss 3.4",
+          day: 18,
+          milestone: 0.12,
+          decisionDeadlineDay: 23,
+          severity: "warning",
+          evidenceAccuracy: 0.4,
+          choices: [],
+        },
+      }),
+    );
+    expect(rendered).toContain("Incident paused this run");
+    expect(rendered).toContain("Loss spike at scale");
+    expect(rendered).toContain(">Open decision</button>");
+    expect(rendered).not.toContain('data-campaign-mixer="true"');
+    expect(rendered).not.toContain("Keep the campaign moving");
+  });
+});
+
 describe("ActiveTrainingCard direct checkpoint actions", () => {
   it("shows Benchmark, checkpoint save, and branch actions on progressed active weights", () => {
     const rendered = markup(trainingJob());
+    expect(rendered).toContain('data-campaign-spine="true"');
     expect(rendered).toContain(">Benchmark</button>");
-    expect(rendered).toContain(">Save checkpoint</button>");
+    expect(rendered).toContain(">Save snapshot</button>");
     expect(rendered).toContain(">Branch model</button>");
     expect(rendered).toContain("Capture these exact weights");
     expect(rendered).not.toContain('class="live-glow');
@@ -76,7 +104,7 @@ describe("ActiveTrainingCard direct checkpoint actions", () => {
   it("disables checkpoint actions until the run has produced weights", () => {
     const rendered = markup(trainingJob({ progressPfDays: 0 }));
     expect(rendered).toMatch(/<button[^>]*disabled=""[^>]*>Benchmark<\/button>/);
-    expect(rendered).toMatch(/<button[^>]*disabled=""[^>]*>Save checkpoint<\/button>/);
+    expect(rendered).toMatch(/<button[^>]*disabled=""[^>]*>Save snapshot<\/button>/);
     expect(rendered).toMatch(/<button[^>]*disabled=""[^>]*>Branch model<\/button>/);
     expect(rendered).toContain("Allocate compute before saving a checkpoint.");
   });
@@ -134,7 +162,7 @@ describe("ActiveTrainingCard direct checkpoint actions", () => {
     );
     expect(rendered).toContain("Delete failed run");
     expect(rendered).not.toContain(">Benchmark</button>");
-    expect(rendered).not.toContain(">Save checkpoint</button>");
+    expect(rendered).not.toContain(">Save snapshot</button>");
   });
 
   it("marks run cancellation as destructive before the confirmation click", () => {

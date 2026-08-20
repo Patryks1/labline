@@ -48,7 +48,7 @@ export function CheckpointRail({
   onBranch,
   onRollback,
   jobs = [],
-  title = "Stealth checkpoint lab",
+  title = "Weight files",
   className = "",
 }: {
   checkpoints: CheckpointUiRecord[];

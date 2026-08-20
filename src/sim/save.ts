@@ -34,6 +34,7 @@ import {
   WORLD_POPULATION,
 } from "./balance/economy";
 import { DATA_DOMAINS } from "./balance/data";
+import { normalizeDomainHeat } from "./balance/domainHeat";
 import { normalizeModelEvaluations } from "./balance/evaluationSuites";
 import type { CheckpointEvaluationReport } from "./balance/checkpointEvaluation";
 import { API_PRICE_EPSILON, blendApiPrice } from "./balance/pricing";
@@ -68,6 +69,11 @@ import {
   refreshAllDataHallAnalyses,
 } from "./systems/dataHallLayouts";
 import { migrateHqOfficeLayouts } from "./systems/hqOffice";
+import { ensureModelStudio } from "./balance/modelStudio";
+import {
+  defaultEffortIdOf,
+  migrateEffortRecipes,
+} from "./balance/modelProduct";
 import {
   WORLD_FORMAT_VERSION,
   createDynamicWorld,
@@ -865,6 +871,7 @@ function normalizeModelComputeV2(model: Model): Model {
         : model.nativeWeightPrecision),
     deploymentArtifacts: ensureArray(model.deploymentArtifacts),
     syntheticProvenance: ensureArray(model.syntheticProvenance),
+    archived: model.archived === true ? true : undefined,
   };
 }
 
@@ -1267,7 +1274,10 @@ function restoreState(
     ).map((entry): PrivateEvaluationJob => {
       const scheduledDay = Math.max(0, entry.scheduledDay ?? 0);
       const readyDay = Math.max(scheduledDay, entry.readyDay ?? 0);
-      if (entry.kind === "checkpoint_evaluation") {
+      if (
+        entry.kind === "checkpoint_evaluation" ||
+        entry.kind === "released_model_evaluation"
+      ) {
         return {
           ...entry,
           scheduledDay,
@@ -1386,6 +1396,7 @@ function restoreState(
     restored.player.dataSupplierOffers,
   ).map(normalizeDataSupplierContract);
   restored.player.safetyCampaign = restored.player.safetyCampaign ?? null;
+  restored.player = ensureModelStudio(restored.player);
   restored.player.researchUnlocked = ensureArray(
     restored.player.researchUnlocked,
   );
@@ -1488,6 +1499,22 @@ function restoreState(
     restored.regionInterconnections,
   );
   restored.segments = ensureArray(restored.segments);
+  restored.domainHeat = normalizeDomainHeat(restored.domainHeat);
+  if (
+    restored.catchUpCampaign &&
+    typeof restored.catchUpCampaign.rivalId === "string" &&
+    restored.catchUpCampaign.rivalId.length > 0
+  ) {
+    restored.catchUpCampaign = {
+      rivalId: restored.catchUpCampaign.rivalId,
+      armedDay: Math.max(
+        1,
+        Math.floor(restored.catchUpCampaign.armedDay ?? restored.day ?? 1),
+      ),
+    };
+  } else {
+    restored.catchUpCampaign = undefined;
+  }
   if (restored.lastMarket) {
     const legacyDirect = Math.max(0, restored.lastMarket.apiDayCogs ?? 0);
     restored.lastMarket = {
@@ -1625,6 +1652,59 @@ function restoreState(
       unservedRatio,
     );
   }
+  // Live models missing a ship day start aging from now so old saves don't
+  // take a retroactive staleness cliff.
+  const releaseDayFallback = Math.max(1, restored.day);
+  const withReleaseDay = (model: Model): Model => {
+    if (Number.isFinite(model.releaseDay) && model.releaseDay > 0) return model;
+    if (model.release === "released" || model.shipped) {
+      return { ...model, releaseDay: releaseDayFallback };
+    }
+    return { ...model, releaseDay: model.releaseDay ?? 0 };
+  };
+  const migrateListing = (model: Model, planIds: ReadonlySet<string>): Model => {
+    const recipes = migrateEffortRecipes(model.productProfile);
+    const productProfile = model.productProfile
+      ? {
+          ...model.productProfile,
+          effortRecipes: recipes,
+          defaultEffortId: defaultEffortIdOf({
+            ...model.productProfile,
+            effortRecipes: recipes,
+          }),
+        }
+      : model.productProfile;
+    const listed =
+      model.commerciallyOffered === true ||
+      model.commerciallyOffered === false
+        ? model.commerciallyOffered
+        : (model.release === "released" || model.shipped === true) &&
+          (model.apiPriceInPerMTok != null ||
+            model.apiPricePerMTok != null ||
+            planIds.has(model.id));
+    return {
+      ...model,
+      productProfile,
+      commerciallyOffered: listed,
+    };
+  };
+  const playerPlanModelIds = new Set(
+    (restored.player.pricing.plans ?? []).flatMap((plan) => plan.modelIds),
+  );
+  restored.player.models = restored.player.models.map((model) =>
+    migrateListing(withReleaseDay(model), playerPlanModelIds),
+  );
+  restored.rivals = restored.rivals.map((rival) => {
+    const rivalPlanIds = new Set(
+      (rival.pricing?.plans ?? []).flatMap((plan) => plan.modelIds ?? []),
+    );
+    return {
+      ...rival,
+      models: rival.models.map((model) =>
+        migrateListing(withReleaseDay(model), rivalPlanIds),
+      ),
+    };
+  });
   // Throttle-policy era defaults for older saves.
   restored.player.speedStrain = Math.max(
     0,
@@ -1637,6 +1717,10 @@ function restoreState(
   restored.player.subSpeedStrain = Math.max(
     0,
     Math.min(1, restored.player.subSpeedStrain ?? restored.player.speedStrain),
+  );
+  restored.player.apiSurgeLevel = Math.max(
+    0,
+    Math.min(1, restored.player.apiSurgeLevel ?? 0),
   );
   restored.player.pricing = {
     ...restored.player.pricing,

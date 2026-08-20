@@ -12,6 +12,7 @@ import type {
   ProductPricing,
   SimState,
 } from '../types'
+import { isLivePublicModel } from '../modelRelease'
 import { modelOfferApiPrice } from './market'
 
 export interface QuarterlyLabSnapshot {
@@ -40,7 +41,7 @@ const clamp = (value: number, low = 0, high = 100) =>
 const roundScore = (value: number) => Math.round(clamp(value) * 100) / 100
 
 function releasedModels(models: readonly Model[]): Model[] {
-  return models.filter((model) => model.release === 'released' || model.shipped)
+  return models.filter(isLivePublicModel)
 }
 
 function modelSnapshot(

@@ -14,8 +14,19 @@ describe("ModelsPanel workbench IA", () => {
     expect(markup).toContain('data-models-view-nav="true"');
     expect(markup).toContain('data-view="runs"');
     expect(markup).toContain('data-view="checkpoints"');
+    expect(markup).toContain('data-view="labs"');
+    expect(markup).toContain('data-view="routers"');
     expect(markup).toContain('data-view="fleet"');
     expect(markup).toContain("Train model");
+    expect(markup.match(/Train model/g)).toHaveLength(1);
+    expect(markup).not.toContain("+ Train model");
+    expect(markup).not.toContain('data-action="empty-train-model"');
+    expect(markup).not.toContain('data-action="new-model"');
+    expect(markup).not.toContain("Pretraining is the cheap part");
+    expect(markup).toContain("data-models-empty-workbench");
+    expect(markup).toContain("data-empty-campaign-pipeline");
+    expect(markup).toContain("Start campaign");
+    expect(markup).toContain("No campaign yet");
     expect(markup).not.toContain("Train another");
     expect(markup).not.toContain('data-model-workflow="true"');
     expect(markup).not.toContain('data-model-new-workflow="true"');
@@ -30,7 +41,7 @@ describe("ModelsPanel workbench IA", () => {
     const markup = renderToStaticMarkup(createElement(ModelsPanel));
 
     expect(modelsWorkbenchLayoutForViewport(1024)).toBe("stacked");
-    expect(modelsWorkbenchLayoutForViewport(1280)).toBe("compact-columns");
+    expect(modelsWorkbenchLayoutForViewport(1280)).toBe("stacked");
     expect(modelsWorkbenchLayoutForViewport(1440)).toBe("columns");
     expect(markup).toContain('data-models-workbench-layout="responsive"');
     expect(markup).toContain("models-workbench-layout");

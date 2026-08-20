@@ -145,10 +145,6 @@ export function liquidityRunwayDays(state: SimState): number {
   return Math.max(0, state.player.cash) / burn
 }
 
-/** Cash level below which an emergency facility is always offered. */
-export const BAILOUT_CASH_TRIGGER = 12_000_000
-/** Runway (days) below which an emergency facility is offered. */
-export const BAILOUT_RUNWAY_TRIGGER = 20
 /** Hard ceiling on the emergency facility principal. */
 export const BAILOUT_MAX_PRINCIPAL = 120_000_000
 /** Smallest facility worth paperwork. */
@@ -164,22 +160,15 @@ function isRecoverableBusiness(state: SimState): boolean {
 }
 
 /**
- * Emergency facility eligibility from liquidity, not one day's P&L:
- * current cash, trailing cash burn, runway, debt vs valuation, and whether an
- * emergency facility is already open.
+ * Emergency facility only after cash has actually gone negative.
+ * Negative P&L, short runway, or thin-but-positive cash never qualifies —
+ * those are still solvent. An open bailout or an unrecoverable balance
+ * sheet also blocks a new facility.
  */
 export function isBailoutEligible(state: SimState): boolean {
-  const cash = state.player.cash
+  if (state.player.cash >= 0) return false
   const hasBailout = (state.player.loans ?? []).some((l) => l.offerId === 'bailout')
   if (hasBailout) return false
-  if (cash >= 0) {
-    // Pre-negative triggers: thin absolute cash or a short liquidity runway.
-    return (
-      cash < BAILOUT_CASH_TRIGGER ||
-      liquidityRunwayDays(state) < BAILOUT_RUNWAY_TRIGGER
-    )
-  }
-  // Negative cash: rescue only a potentially recoverable business.
   return isRecoverableBusiness(state)
 }
 
@@ -193,18 +182,15 @@ export function bailoutOffer(state: SimState): LoanOffer | null {
   if (!isBailoutEligible(state)) return null
   const cash = state.player.cash
   const burn = Math.max(1, trailingDailyCashBurn(state))
-  // Deeper holes get the longer stabilization window (~30–45 days runway).
-  const targetDays = cash < 0 ? 45 : 30
+  const targetDays = 45
   const targetRunwayCost = burn * targetDays
   const overdueObligations =
-    cash < 0
-      ? 7 *
-        (dailyLoanPayment(state.player.loans ?? []) +
-          (state.player.capital?.debt ?? []).reduce(
-            (sum, debt) => sum + debt.dailyPayment,
-            0,
-          ))
-      : 0
+    7 *
+    (dailyLoanPayment(state.player.loans ?? []) +
+      (state.player.capital?.debt ?? []).reduce(
+        (sum, debt) => sum + debt.dailyPayment,
+        0,
+      ))
   const required = targetRunwayCost + overdueObligations - cash
   const principal = Math.floor(
     Math.min(BAILOUT_MAX_PRINCIPAL, Math.max(BAILOUT_MIN_PRINCIPAL, required)),

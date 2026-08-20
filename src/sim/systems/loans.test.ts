@@ -2,8 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
 import type { ActiveLoan, FinanceDaySnapshot, SimState } from '../types'
 import {
-  BAILOUT_MAX_PRINCIPAL,
-  BAILOUT_MIN_PRINCIPAL,
   bailoutOffer,
   interestForDraw,
   isBailoutEligible,
@@ -73,9 +71,8 @@ function withPlayer(
 }
 
 describe('emergency bailout (liquidity-based)', () => {
-  it('eligibility ignores one-day P&L and uses cash + trailing burn runway', () => {
+  it('eligibility requires negative cash, not P&L or short runway', () => {
     const base = createGame(710)
-    // Terrible single-day P&L but no cash burn → long runway → not eligible
     const badPnl = withPlayer(
       base,
       { cash: 30_000_000 },
@@ -84,7 +81,6 @@ describe('emergency bailout (liquidity-based)', () => {
     )
     expect(isBailoutEligible(badPnl)).toBe(false)
 
-    // Great single-day P&L but cash is burning fast → short runway → eligible
     const burning = withPlayer(
       base,
       { cash: 30_000_000 },
@@ -92,16 +88,23 @@ describe('emergency bailout (liquidity-based)', () => {
       burnHistory(30_000_000, 2_000_000, base.day),
     )
     expect(liquidityRunwayDays(burning)).toBeLessThan(20)
-    expect(isBailoutEligible(burning)).toBe(true)
+    expect(isBailoutEligible(burning)).toBe(false)
 
-    // Thin absolute cash triggers regardless of history
     const thin = withPlayer(
       base,
       { cash: 5_000_000 },
       {},
       flatHistory(5_000_000, base.day),
     )
-    expect(isBailoutEligible(thin)).toBe(true)
+    expect(isBailoutEligible(thin)).toBe(false)
+
+    const broke = withPlayer(
+      base,
+      { cash: -1 },
+      { dayNet: 5_000_000, dayRevenue: 1_000_000, valuation: 80_000_000 },
+      [],
+    )
+    expect(isBailoutEligible(broke)).toBe(true)
   })
 
   it('negative cash is eligible only when the business is recoverable', () => {
@@ -132,17 +135,17 @@ describe('emergency bailout (liquidity-based)', () => {
     const state = withPlayer(
       base,
       {
-        cash: 2_000_000,
+        cash: -2_000_000,
         loans: [activeLoan({ offerId: 'bailout' })],
       },
-      { dayNet: -1_000_000 },
-      burnHistory(2_000_000, 1_000_000, base.day),
+      { dayNet: -1_000_000, dayRevenue: 1_000_000, valuation: 80_000_000 },
+      burnHistory(-2_000_000, 1_000_000, base.day),
     )
     expect(isBailoutEligible(state)).toBe(false)
     expect(bailoutOffer(state)).toBeNull()
   })
 
-  it('sizes principal to restore ~30–45 days runway and adds it as financing cash', () => {
+  it('does not offer a bailout while cash is still non-negative', () => {
     const base = createGame(713)
     const state = withPlayer(
       base,
@@ -150,30 +153,7 @@ describe('emergency bailout (liquidity-based)', () => {
       { dayNet: -1_000_000 },
       burnHistory(2_000_000, 1_000_000, base.day),
     )
-    const offer = bailoutOffer(state)
-    expect(offer).not.toBeNull()
-    expect(offer!.principal).toBeGreaterThanOrEqual(BAILOUT_MIN_PRINCIPAL)
-    expect(offer!.principal).toBeLessThanOrEqual(BAILOUT_MAX_PRINCIPAL)
-    expect(offer!.interestTotal).toBeGreaterThanOrEqual(0.25)
-
-    const next = takeLoan(state, 'bailout')
-    // Financing inflow: cash rises by exactly the principal, never resets
-    expect(next.player.cash).toBeCloseTo(
-      state.player.cash + offer!.principal,
-      5,
-    )
-    expect(next.player.finance.cash).toBeCloseTo(next.player.cash, 5)
-    // Financing is not P&L: day net and revenue are untouched
-    expect(next.player.finance.dayNet).toBeCloseTo(
-      state.player.finance.dayNet,
-      5,
-    )
-    expect(next.player.finance.dayRevenue).toBe(state.player.finance.dayRevenue)
-
-    const burn = Math.max(1, trailingDailyCashBurn(next))
-    const runwayAfter = next.player.cash / burn
-    expect(runwayAfter).toBeGreaterThanOrEqual(28)
-    expect(runwayAfter).toBeLessThanOrEqual(45)
+    expect(bailoutOffer(state)).toBeNull()
   })
 
   it('restores ~45 days runway when cash is already negative', () => {

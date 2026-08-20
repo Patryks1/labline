@@ -1,5 +1,6 @@
 import type { BuildableKind, PanelId, SimState } from '../../sim/types'
 import { computeSnapshot } from '../../sim/systems/compute'
+import { planExposedModelIds } from '../../sim/balance/modelRouter'
 import { isDcAnchor, isDcKind, isHqAnchor, isHqKind } from '../../sim/systems/map'
 import { playerHqStaffCap, playerStaff, staffTotal } from '../../sim/systems/staff'
 import { facilityAnchorTiles } from '../../sim/systems/worldAccess'
@@ -50,7 +51,13 @@ export function buildObjectives(state: SimState, includeGuidance = true): Object
       model.apiPriceInPerMTok != null ||
       model.apiPriceOutPerMTok != null ||
       state.player.pricing.plans.some(
-        (plan) => plan.enabled && plan.modelIds.includes(model.id),
+        (plan) =>
+          plan.enabled &&
+          planExposedModelIds(
+            plan,
+            state.player.models,
+            state.player.modelRouters,
+          ).includes(model.id),
       ),
   )
   const hasResearch =
@@ -77,7 +84,7 @@ export function buildObjectives(state: SimState, includeGuidance = true): Object
       description: 'Current spending leaves fewer than 30 days of runway.',
       progress: `${Math.max(0, Math.floor(finance.runwayDays))} days left`,
       severity: 'danger',
-      panel: 'org',
+      panel: 'stats',
       actionLabel: 'Review funding',
     })
   }

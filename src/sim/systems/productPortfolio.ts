@@ -12,7 +12,8 @@ import type {
   SimState,
   SubPlan,
 } from '../types'
-import { planAllowanceMTokPerMonth } from './plans'
+import { isLivePublicModel } from '../modelRelease'
+import { planAllowanceMTokPerMonth, planServingModelIds } from './plans'
 import { blendApiPrice, splitBlendedApiPrice } from '../balance/pricing'
 
 export const MAX_PROMOTED_PRODUCT_OFFERS = 6
@@ -150,7 +151,7 @@ const DEMAND_PROFILES: Record<SegmentId, DemandProfile> = {
 const MODALITY_ORDER: readonly Modality[] = ['text', 'image', 'video', 'audio', 'tools']
 
 function isReleased(model: Model): boolean {
-  return model.release === 'released' || model.shipped
+  return isLivePublicModel(model)
 }
 
 function compareModelScore(
@@ -166,7 +167,7 @@ function primaryApiModel(state: SimState, released: Model[]): Model | null {
 
 function planModels(state: SimState, plan: SubPlan, fallback: Model | null): Model[] {
   const byId = new Map(state.player.models.filter(isReleased).map((model) => [model.id, model]))
-  const selected = [...new Set(plan.modelIds)]
+  const selected = planServingModelIds(state, plan)
     .map((id) => byId.get(id))
     .filter((model): model is Model => model != null)
   if (selected.length > 0) return selected

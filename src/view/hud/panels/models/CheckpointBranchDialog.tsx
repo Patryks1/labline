@@ -1,25 +1,36 @@
 import { useEffect, useState } from "react";
 import { GitFork } from "@phosphor-icons/react";
 import type {
+  DataDomain,
+  SpecializationFocus,
   TrainingCheckpointBranchDirection,
   TrainingCheckpointCandidate,
 } from "../../../../sim/types";
+import { branchFocusPreset } from "../../../../sim/balance/modelProduct";
 import { formatParams } from "../../../../sim/balance/training";
+import {
+  DATA_DOMAIN_META,
+  DATA_DOMAINS,
+} from "../../../../sim/balance/data";
 import { ConsoleDialog } from "../../ui/ConsoleDialog";
 import {
   HudButton,
   HudInput,
+  HudRange,
   StatusChip,
 } from "../../ui/HudPrimitives";
 import {
   CHECKPOINT_BRANCH_DIRECTIONS,
   suggestedCheckpointBranchName,
 } from "./checkpointBranching";
+import { FocusStudio } from "./FocusStudio";
 
 export interface CheckpointBranchRequest {
   checkpointId: string;
   direction: TrainingCheckpointBranchDirection;
   label: string;
+  weights?: Partial<Record<DataDomain, number>>;
+  specializationFocus?: SpecializationFocus;
 }
 
 export function CheckpointBranchDialog({
@@ -43,12 +54,21 @@ export function CheckpointBranchDialog({
   const [name, setName] = useState(() =>
     suggestedCheckpointBranchName(sourceRunName, initialDirection),
   );
+  const sourceWeights = checkpoint?.model.dataPlan?.weights ?? {};
+  const [customWeights, setCustomWeights] = useState<
+    Partial<Record<DataDomain, number>>
+  >(() => ({ ...sourceWeights }));
+  const [focus, setFocus] = useState<SpecializationFocus>(() =>
+    branchFocusPreset(initialDirection),
+  );
 
   useEffect(() => {
     if (!open || !checkpoint) return;
     const nextDirection = checkpoint.branchDirection ?? "general";
     setDirection(nextDirection);
     setName(suggestedCheckpointBranchName(sourceRunName, nextDirection));
+    setCustomWeights({ ...(checkpoint.model.dataPlan?.weights ?? {}) });
+    setFocus(branchFocusPreset(nextDirection));
   }, [checkpoint, open, sourceRunName]);
 
   if (!checkpoint) return null;
@@ -86,6 +106,9 @@ export function CheckpointBranchDialog({
                   checkpointId: checkpoint.id,
                   direction,
                   label: trimmedName,
+                  weights:
+                    direction === "custom" ? customWeights : undefined,
+                  specializationFocus: focus,
                 })
               }
             >
@@ -183,6 +206,7 @@ export function CheckpointBranchDialog({
                           : current,
                       );
                       setDirection(option.id);
+                      setFocus(branchFocusPreset(option.id));
                     }}
                     className="sr-only"
                   />
@@ -202,6 +226,49 @@ export function CheckpointBranchDialog({
             })}
           </div>
         </fieldset>
+
+        <FocusStudio focus={focus} onChange={setFocus} />
+
+        {direction === "custom" ? (
+          <fieldset data-custom-mix-editor="true">
+            <legend className="text-[0.75rem] font-semibold text-bone">
+              Custom mix
+            </legend>
+            <p className="mt-0.5 text-[0.6875rem] leading-5 text-muted">
+              Tune the child corpus before it enters the queue. Sliders are
+              relative shares and re-normalize on start.
+            </p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              {DATA_DOMAINS.map((domain) => (
+                <label
+                  key={domain}
+                  className="block rounded-md border border-line/50 bg-void/30 px-2 py-1.5 text-[0.6875rem] text-muted"
+                >
+                  <span className="flex items-baseline justify-between gap-2">
+                    <span>{DATA_DOMAIN_META[domain].label}</span>
+                    <span className="font-mono text-bone">
+                      {Math.round((customWeights[domain] ?? 0) * 100)}%
+                    </span>
+                  </span>
+                  <HudRange
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={Math.round((customWeights[domain] ?? 0) * 100)}
+                    onChange={(event) =>
+                      setCustomWeights((current) => ({
+                        ...current,
+                        [domain]: Number(event.target.value) / 100,
+                      }))
+                    }
+                    className="mt-1"
+                  />
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        ) : null}
 
         <label className="block text-[0.75rem] font-semibold text-bone">
           New model name

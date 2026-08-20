@@ -3,6 +3,7 @@ import { blendApiPrice } from "../../../sim/balance/pricing";
 import { planAllowanceMTokPerMonth } from "../../../sim/systems/plans";
 import { competitiveCatchUpSnapshot } from "../../../sim/systems/sharedMarkets";
 import { useGameStore } from "../../../store/gameStore";
+import { isLivePublicModel } from "../../../sim/modelRelease";
 import { useUiStore } from "../../../store/uiStore";
 import { money, num, pct } from "../format";
 import { FeedPost } from "../ui/FeedPost";
@@ -107,10 +108,7 @@ export function RivalIntelPanel() {
   }
 
   const estimate = rival?.publicEstimate;
-  const publicModels =
-    rival?.models.filter(
-      (model) => model.release === "released" || model.shipped,
-    ) ?? [];
+  const publicModels = rival?.models.filter(isLivePublicModel) ?? [];
   const competitiveResponse = competitiveCatchUpSnapshot(state);
   const marketRows = [
     { id: "player", name: "You", share: financeModel.current.share },
@@ -275,7 +273,7 @@ export function RivalIntelPanel() {
                   [
                     "Released",
                     state.player.models.filter(
-                      (model) => model.release === "released" || model.shipped,
+                      isLivePublicModel,
                     ).length,
                   ],
                   [
@@ -335,9 +333,7 @@ export function RivalIntelPanel() {
             </GameCard>
 
             <GameCard eyebrow="Fleet" title="Your released models" tone="mint">
-              {state.player.models.filter(
-                (model) => model.release === "released" || model.shipped,
-              ).length === 0 ? (
+              {state.player.models.filter(isLivePublicModel).length === 0 ? (
                 <EmptyState
                   title="No public release"
                   description="Release a trained model to begin competing for demand."
@@ -346,7 +342,7 @@ export function RivalIntelPanel() {
                 <div className="anim-stagger space-y-2">
                   {state.player.models
                     .filter(
-                      (model) => model.release === "released" || model.shipped,
+                      isLivePublicModel,
                     )
                     .toSorted(
                       (left, right) => right.capability - left.capability,

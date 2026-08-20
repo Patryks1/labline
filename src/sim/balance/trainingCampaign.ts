@@ -8,8 +8,15 @@ import type {
   TrainingJob,
 } from "../types";
 import { architectureBlueprintProfile } from "./architectureFrontiers";
+import {
+  clampTrainingCampaignIntervention,
+  describeCampaignIntervention,
+  meetsIndependentVerificationGate,
+  withCampaignEvidencePrecision,
+} from "./trainingCampaignIntervention";
 
-export const TRAINING_CAMPAIGN_MILESTONES = [0.12, 0.32, 0.58, 0.82] as const;
+/** One mid-base incident. Post-train is a separate phase popup, not a gate. */
+export const TRAINING_CAMPAIGN_MILESTONES = [0.5] as const;
 /** Omni needs roughly 1.8× the ordinary strong 7.5N breadth target. */
 export const CLOSED_LOOP_MIN_EFFECTIVE_DATA_RATIO = 13.5;
 
@@ -53,7 +60,7 @@ export function canSurfaceRecursiveResearchEvent(
   );
 }
 
-function roundedInterventionCost(job: TrainingJob, multiplier: number): number {
+export function roundedInterventionCost(job: TrainingJob, multiplier: number): number {
   const raw =
     (75_000 +
       Math.sqrt(Math.max(0.01, job.targetParamsB)) * 125_000 +
@@ -282,6 +289,51 @@ function eventContent(
               stumbleRisk: 0.045,
             },
           ),
+          choice(
+            "extra-clean-pass",
+            "Run a clean-pass replay",
+            `Add ${pct(0.03)} compute to re-encode the shard with stricter filters.`,
+            {
+              extraComputeFraction: 0.03,
+              dataQualityDelta: 2.5,
+              reliabilityDelta: 1.5,
+              stumbleRisk: -0.03,
+            },
+          ),
+          choice(
+            "expand-holdout",
+            "Expand the holdout",
+            `${money(standardCost)} to grow a clean evaluation slice before trusting the shard.`,
+            {
+              cashCost: standardCost,
+              dataQualityDelta: 1.5,
+              reliabilityDelta: 2,
+              safetyDelta: 0.5,
+            },
+          ),
+          choice(
+            "restaff-cleaners",
+            "Restaff data cleaning",
+            "Raise the researcher floor and slow the recipe until provenance is signed off.",
+            {
+              minResearchers: 12,
+              reliabilityDelta: 1.5,
+              dataQualityDelta: 1,
+              stumbleRisk: -0.02,
+            },
+          ),
+          choice(
+            "replace-and-rollback",
+            "Replace workers and roll back",
+            `Spend ${money(highCost)} and replay ${pct(0.02)} from a clean optimizer state.`,
+            {
+              cashCost: highCost,
+              progressRollbackFraction: 0.02,
+              dataQualityDelta: 2,
+              reliabilityDelta: 3,
+              stumbleRisk: -0.05,
+            },
+          ),
         ],
       };
     case "mixture_discovery":
@@ -322,6 +374,48 @@ function eventContent(
             "Preserve the original forecast and give up the possible transfer gain.",
             { reliabilityDelta: 0.5 },
           ),
+          choice(
+            "isolated-probe",
+            "Isolate a proxy probe",
+            `${money(standardCost)} for a small off-mainline mix test without changing the parent recipe.`,
+            {
+              cashCost: standardCost,
+              extraComputeFraction: 0.01,
+              reliabilityDelta: 1,
+              breakthroughBias: 0.01,
+            },
+          ),
+          choice(
+            "double-down-mix",
+            "Retune the curriculum",
+            `Add ${pct(0.03)} compute and shift quality toward the promising domain.`,
+            {
+              extraComputeFraction: 0.03,
+              dataQualityDelta: 1.5,
+              capabilityDelta: 0.45,
+              stumbleRisk: 0.015,
+            },
+          ),
+          choice(
+            "rollback-curriculum",
+            "Roll back the mix change",
+            `Replay ${pct(0.02)} from the last stable mix snapshot.`,
+            {
+              progressRollbackFraction: 0.02,
+              reliabilityDelta: 1.5,
+              stumbleRisk: -0.025,
+            },
+          ),
+          choice(
+            "staff-curriculum",
+            "Staff a curriculum desk",
+            "Raise the researcher floor so mix edits are reviewed before the next milestone.",
+            {
+              minResearchers: 10,
+              reliabilityDelta: 1,
+              dataQualityDelta: 0.5,
+            },
+          ),
         ],
       };
     case "hardware_fault":
@@ -358,6 +452,48 @@ function eventContent(
             "Resume from partial state",
             "No immediate cost. Silent optimizer corruption remains possible.",
             { reliabilityDelta: -2.5, stumbleRisk: 0.055 },
+          ),
+          choice(
+            "diagnostic-hardware",
+            "Run a hardware diagnostic",
+            `${money(standardCost)} and ${pct(0.012)} compute to verify optimizer state without a full rollback.`,
+            {
+              cashCost: standardCost,
+              extraComputeFraction: 0.012,
+              reliabilityDelta: 1.5,
+              stumbleRisk: -0.02,
+            },
+          ),
+          choice(
+            "buy-spare-cluster",
+            "Buy spare cluster time",
+            `${money(highCost)} for hot spare workers so the save can finish cleanly.`,
+            {
+              cashCost: highCost,
+              reliabilityDelta: 3,
+              stumbleRisk: -0.04,
+            },
+          ),
+          choice(
+            "pause-and-staff",
+            "Pause and staff ops",
+            "Raise the researcher floor and delay until the fault report is signed.",
+            {
+              minResearchers: 8,
+              reliabilityDelta: 1,
+              stumbleRisk: -0.015,
+            },
+          ),
+          choice(
+            "dual-path-verify",
+            "Dual-path verify",
+            `${money(standardCost)} plus a ${pct(0.01)} rollback so both the live state and last snapshot are checked.`,
+            {
+              cashCost: standardCost,
+              progressRollbackFraction: 0.01,
+              reliabilityDelta: 2.5,
+              stumbleRisk: -0.03,
+            },
           ),
         ],
       };
@@ -405,6 +541,48 @@ function eventContent(
               stumbleRisk: 0.07,
             },
           ),
+          choice(
+            "rollback-router",
+            "Roll back the router",
+            `Replay ${pct(0.025)} from the last balanced routing snapshot.`,
+            {
+              progressRollbackFraction: 0.025,
+              reliabilityDelta: 2,
+              stumbleRisk: -0.04,
+            },
+          ),
+          choice(
+            "diagnostic-routing",
+            "Diagnose expert load",
+            `${money(standardCost)} for routing traces and overflow histograms.`,
+            {
+              cashCost: standardCost,
+              extraComputeFraction: 0.015,
+              reliabilityDelta: 1.5,
+              breakthroughBias: 0.01,
+            },
+          ),
+          choice(
+            "staff-routing",
+            "Staff a routing desk",
+            "Raise the researcher floor so load-balance edits are reviewed live.",
+            {
+              minResearchers: 14,
+              reliabilityDelta: 1.5,
+              stumbleRisk: -0.02,
+            },
+          ),
+          choice(
+            "cool-and-replay",
+            "Cool the router and replay",
+            `Add ${pct(0.025)} compute and roll back ${pct(0.015)} to re-warm experts evenly.`,
+            {
+              extraComputeFraction: 0.025,
+              progressRollbackFraction: 0.015,
+              reliabilityDelta: 2,
+              stumbleRisk: -0.045,
+            },
+          ),
         ],
       };
     case "modality_interference":
@@ -449,6 +627,48 @@ function eventContent(
               dataQualityDelta: 4,
               reliabilityDelta: 2,
               breakthroughBias: 0.025,
+            },
+          ),
+          choice(
+            "rollback-bridge",
+            "Roll back the last bridge",
+            `Replay ${pct(0.02)} from the last stable cross-modal snapshot.`,
+            {
+              progressRollbackFraction: 0.02,
+              reliabilityDelta: 1.5,
+              stumbleRisk: -0.025,
+            },
+          ),
+          choice(
+            "staff-modal",
+            "Staff a modality desk",
+            "Raise the researcher floor so media regressions are reviewed before the next gate.",
+            {
+              minResearchers: 16,
+              reliabilityDelta: 1,
+              dataQualityDelta: 0.5,
+            },
+          ),
+          choice(
+            "protect-text",
+            "Protect the text backbone",
+            "Prioritize language reliability while media domains wait for a later pass.",
+            {
+              reliabilityDelta: 2,
+              capabilityDelta: -0.15,
+              dataQualityDelta: 0.5,
+              stumbleRisk: -0.01,
+            },
+          ),
+          choice(
+            "extra-pair-compute",
+            "Spend extra pairing compute",
+            `Add ${pct(0.04)} compute for paired batches without commissioning new data.`,
+            {
+              extraComputeFraction: 0.04,
+              capabilityDelta: 0.4,
+              dataQualityDelta: 1.5,
+              stumbleRisk: -0.02,
             },
           ),
         ],
@@ -505,6 +725,40 @@ function eventContent(
             "Bank no gain. Preserve the real-data anchor and wait for stronger verifiers or a fresher experiment set.",
             { reliabilityDelta: 1, stumbleRisk: -0.015 },
           ),
+          choice(
+            "staged-replication",
+            "Stage a cheaper replication",
+            `${money(highCost)} and ${pct(0.06)} extra compute. Useful as a screen; it does not meet the independent verification gate.`,
+            {
+              cashCost: highCost,
+              extraComputeFraction: 0.06,
+              minResearchers: 20,
+              reliabilityDelta: 1.5,
+              safetyDelta: 0.5,
+              stumbleRisk: -0.02,
+            },
+          ),
+          choice(
+            "staff-verifiers",
+            "Staff extra verifiers",
+            "Raise the researcher floor and wait. No recursive gain is banked until a full independent protocol runs.",
+            {
+              minResearchers: 40,
+              reliabilityDelta: 2,
+              safetyDelta: 1,
+              stumbleRisk: -0.02,
+            },
+          ),
+          choice(
+            "archive-proposals",
+            "Archive for a later campaign",
+            "Keep the proposals on file. Safety-first; the run continues on the real-data recipe.",
+            {
+              safetyDelta: 1.5,
+              reliabilityDelta: 0.5,
+              stumbleRisk: -0.01,
+            },
+          ),
         ],
       };
     }
@@ -550,6 +804,47 @@ function eventContent(
               reliabilityDelta: pushDelta >= 0 ? 0.5 : -3,
               breakthroughBias: 0.05,
               stumbleRisk: 0.075,
+            },
+          ),
+          choice(
+            "rollback-optimizer",
+            "Roll back the optimizer",
+            `Replay ${pct(0.03)} from the last stable optimizer snapshot.`,
+            {
+              progressRollbackFraction: 0.03,
+              reliabilityDelta: 2,
+              stumbleRisk: -0.04,
+            },
+          ),
+          choice(
+            "buy-spare-cluster",
+            "Buy spare cluster time",
+            `${money(highCost)} for headroom so the spike can be retried without starving the main save.`,
+            {
+              cashCost: highCost,
+              reliabilityDelta: 2,
+              stumbleRisk: -0.035,
+            },
+          ),
+          choice(
+            "pause-and-staff",
+            "Pause and staff up",
+            "Raise the researcher floor before touching the schedule.",
+            {
+              minResearchers: 10,
+              reliabilityDelta: 1.5,
+              stumbleRisk: -0.02,
+            },
+          ),
+          choice(
+            "cool-and-replay",
+            "Cool the schedule and replay",
+            `Add ${pct(0.025)} compute and roll back ${pct(0.015)} to re-enter the recovery band.`,
+            {
+              extraComputeFraction: 0.025,
+              progressRollbackFraction: 0.015,
+              reliabilityDelta: 2.5,
+              stumbleRisk: -0.05,
             },
           ),
         ],
@@ -607,24 +902,9 @@ export function createTrainingCampaignEvent(
       latestEvidence?.accuracy ?? latestEvidence?.confidence ?? 0.35,
     ),
   );
-  // Benchmarks do not reroll the event or improve the model. Better paid
-  // evidence makes funded interventions more precisely targeted, producing a
-  // modest reliability/risk benefit while the seeded latent event stays fixed.
-  const choices = content.choices.map((candidate) =>
-    (candidate.effects.cashCost ?? 0) > 0
-      ? {
-          ...candidate,
-          effects: {
-            ...candidate.effects,
-            reliabilityDelta:
-              (candidate.effects.reliabilityDelta ?? 0) +
-              evidenceAccuracy * 0.8,
-            stumbleRisk:
-              (candidate.effects.stumbleRisk ?? 0) - evidenceAccuracy * 0.012,
-          },
-        }
-      : candidate,
-  );
+  // Paid evidence is applied when the intervention is resolved, not here.
+  // That way mixer recipes and authored presets share one precision path
+  // and better measurements never reroll the seeded latent event.
   return {
     id: seededId("training-event", job.id, milestoneIndex, kind),
     kind,
@@ -632,7 +912,6 @@ export function createTrainingCampaignEvent(
     milestone,
     decisionDeadlineDay: day + 5,
     ...content,
-    choices,
     evidenceAccuracy,
   };
 }
@@ -642,12 +921,14 @@ export function applyTrainingCampaignChoice(
   choiceId: string,
   day: number,
   autoResolved = false,
+  customEffects?: TrainingCampaignChoice["effects"],
 ): TrainingJob | null {
   const event = job.pendingCampaignEvent;
-  const selected = event?.choices.find(
+  if (!event) return null;
+  const selected = event.choices.find(
     (candidate) => candidate.id === choiceId,
   );
-  if (!event || !selected) return null;
+  if (!selected && !customEffects) return null;
   if (
     (job.campaignEventHistory ?? []).some(
       (resolved) => resolved.id === event.id && resolved.selectedChoiceId,
@@ -655,44 +936,73 @@ export function applyTrainingCampaignChoice(
   ) {
     return null;
   }
-  const effects = selected.effects;
+  const rawEffects = customEffects ?? selected?.effects;
+  if (!rawEffects) return null;
+  const clamped = clampTrainingCampaignIntervention(event.kind, rawEffects);
+  const effects = withCampaignEvidencePrecision(
+    clamped,
+    event.evidenceAccuracy,
+  );
   const before = job.campaignModifiers ?? emptyTrainingCampaignModifiers();
-  const recommended = Math.max(1e-9, job.recommendedPfDays ?? job.targetPfDays);
+  const funded = Math.max(1e-9, job.recommendedPfDays ?? job.targetPfDays);
   const extraCompute =
-    recommended * Math.max(0, effects.extraComputeFraction ?? 0);
+    funded * Math.max(0, effects.extraComputeFraction ?? 0);
   const rollback = Math.max(
     0,
     Math.min(0.5, effects.progressRollbackFraction ?? 0),
   );
+  const recordedId = selected?.id ?? "custom";
+  const recordedChoice: TrainingCampaignChoice = {
+    id: recordedId,
+    label: selected?.label ?? "Custom intervention",
+    description: selected?.description ?? describeCampaignIntervention(effects),
+    effects,
+    playerAuthored: Boolean(customEffects),
+    recommended: selected?.recommended,
+  };
   const resolvedEvent: TrainingCampaignEvent = {
     ...event,
-    selectedChoiceId: selected.id,
+    selectedChoiceId: recordedChoice.id,
     resolvedDay: day,
     autoResolved,
+    choices: event.choices.some((candidate) => candidate.id === recordedId)
+      ? event.choices.map((candidate) =>
+          candidate.id === recordedId ? { ...candidate, ...recordedChoice } : candidate,
+        )
+      : [...event.choices, recordedChoice],
   };
   const inheritedVerifiedBonus = boundedVerifiedRecursiveCapabilityBonus(
     job.family,
     before.verifiedRecursiveCapabilityBonus,
   );
-  // Only an eligible recursive event may mint new blueprint headroom. This is
-  // defensive as well as a generation rule: crafted/stale non-omni events and
-  // ordinary campaign choices cannot smuggle the field into a model.
+  const verificationChoice = event.choices.find(
+    (candidate) => candidate.id === "independent-verification",
+  );
+  const seededVerifiedBonus = Math.max(
+    0,
+    verificationChoice?.effects.verifiedRecursiveCapabilityBonus ??
+      effects.verifiedRecursiveCapabilityBonus ??
+      0,
+  );
+  // Only an eligible recursive event that meets the independent-verification
+  // gate may mint new blueprint headroom. Mixer recipes cannot skip it.
   const earnedVerifiedBonus =
     event.kind === "recursive_research" &&
-    selected.id === "independent-verification" &&
-    canSurfaceRecursiveResearchEvent(job)
-      ? Math.max(0, effects.verifiedRecursiveCapabilityBonus ?? 0)
+    canSurfaceRecursiveResearchEvent(job) &&
+    (meetsIndependentVerificationGate(effects) ||
+      (recordedId === "independent-verification" && !customEffects))
+      ? seededVerifiedBonus
       : 0;
   return {
     ...job,
     targetPfDays: job.targetPfDays + extraCompute,
-    recommendedPfDays: recommended + extraCompute,
+    recommendedPfDays: funded + extraCompute,
     progressPfDays: Math.max(0, job.progressPfDays * (1 - rollback)),
     pendingCampaignEvent: undefined,
     campaignEventHistory: [
       ...(job.campaignEventHistory ?? []),
       resolvedEvent,
-    ].slice(-12),
+    ].slice(-24),
     campaignModifiers: {
       capabilityDelta: before.capabilityDelta + (effects.capabilityDelta ?? 0),
       reliabilityDelta:
@@ -714,10 +1024,24 @@ export function applyTrainingCampaignChoice(
   };
 }
 
-export function recommendedTrainingCampaignChoice(
+export function dutyScientistCampaignChoice(
   event: TrainingCampaignEvent,
 ): TrainingCampaignChoice {
   return (
     event.choices.find((choice) => choice.recommended) ?? event.choices[0]!
   );
 }
+
+export const CAMPAIGN_DECISION_OPTION_LIMIT = 4;
+
+/** Four live options: duty-scientist first, then the next authored tactics. */
+export function campaignDecisionOptions(
+  event: TrainingCampaignEvent,
+): TrainingCampaignChoice[] {
+  const duty = dutyScientistCampaignChoice(event);
+  const rest = event.choices.filter((choice) => choice.id !== duty.id);
+  return [duty, ...rest].slice(0, CAMPAIGN_DECISION_OPTION_LIMIT);
+}
+
+/** @deprecated Use dutyScientistCampaignChoice. AFK policy, not live advice. */
+export const recommendedTrainingCampaignChoice = dutyScientistCampaignChoice;

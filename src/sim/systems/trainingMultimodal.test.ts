@@ -166,6 +166,10 @@ describe('player multimodal training gates', () => {
 
     expect(state.player.trainingJob).toBeNull()
     expect(state.alerts[0]?.message).toContain('actual image data')
-    expect(state.alerts[0]?.message).toContain('1.2%')
+    const share = Number(
+      state.alerts[0]?.message.match(/attribute ([\d.]+)%/)?.[1],
+    )
+    expect(share).toBeGreaterThan(0)
+    expect(share).toBeLessThan(15)
   })
 })

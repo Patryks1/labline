@@ -1,7 +1,9 @@
 import { ECONOMY, SEGMENTS } from "../balance/economy";
 import { segmentBenchmarkFit } from "../balance/benchmarks";
 import { API_PRICE_EPSILON } from "../balance/pricing";
-import type { MarketOffer, SegmentId } from "../types";
+import { tokenThroughputScore } from "../balance/tokenSpeed";
+import { offerDomainHeatBonus } from "../balance/domainHeat";
+import type { DomainHeat, MarketOffer, SegmentId } from "../types";
 
 export interface OfferFactorScores {
   intelligence: number;
@@ -21,6 +23,8 @@ export interface OfferUtilityOpts {
   frontier?: number;
   /** Best benchmark-aware usable quality among offers in this segment. */
   qualityFrontier?: number;
+  /** Current campaign domain-heat pulse. */
+  domainHeat?: DomainHeat;
 }
 
 /**
@@ -196,9 +200,10 @@ export function scoreOfferFactors(
         Math.min(100, 80 - Math.log10(effectivePrice * 8 + 0.05) * 26),
       );
 
-  // Speed: latency score + token throughput (tokPerSec)
-  const tok = offer.tokPerSec ?? 0;
-  const tokScore = Math.min(50, Math.log10(tok + 10) * 12);
+  // Speed: latency score + token throughput. The tok/s term is a 30 tok/s
+  // sigmoid knee (not a log-only curve), so 10–20 tok/s is painful while
+  // 45+ is comfortable; magnitude stays in the historic 0–50 tok band.
+  const tokScore = tokenThroughputScore(offer.tokPerSec ?? 0);
   const speed = Math.min(100, offer.latencyScore * 0.55 + tokScore + 10);
 
   // Tooling: tools modality, agents benchmark, multi-modal features
@@ -440,6 +445,7 @@ export function offerUtility(
   const competitivenessTerm = apiish
     ? Math.log(Math.max(0.001, qualityCompetitiveness)) * 0.1
     : 0;
+  const heatBonus = offerDomainHeatBonus(offer.benchmarks, opts?.domainHeat);
 
   return (
     qualityW * quality * 1.15 +
@@ -452,7 +458,8 @@ export function offerUtility(
     w.safety * (f.safety / 10) +
     nearSotaFloor +
     bandBonus +
-    competitivenessTerm -
+    competitivenessTerm +
+    heatBonus -
     viabilityPenalty
   );
 }
@@ -475,6 +482,7 @@ export function segmentShares(
   segmentId: SegmentId,
   temp?: number,
   frontier?: number,
+  domainHeat?: DomainHeat,
 ): number[] {
   const f =
     frontier ??
@@ -486,7 +494,7 @@ export function segmentShares(
   );
   return softmaxShares(
     offers.map((o) =>
-      offerUtility(o, segmentId, { frontier: f, qualityFrontier }),
+      offerUtility(o, segmentId, { frontier: f, qualityFrontier, domainHeat }),
     ),
     t,
   );

@@ -23,7 +23,6 @@ import {
   transportRoadClassAt,
 } from '../../sim/systems/transport'
 import { HudButton, HudCloseButton } from './ui/HudPrimitives'
-import { facilityEditorKindForTile } from './tileInspectorFacilityAction'
 
 const ROAD_CLASS_LABELS = ['No road', 'Local', 'Collector', 'Arterial', 'Highway'] as const
 const MUNICIPAL_KIND_LABELS = {
@@ -53,8 +52,6 @@ export function TileInspector() {
   const mapTool = useGameStore((s) => s.mapTool)
   const clearSelection = useGameStore((s) => s.clearSelection)
   const openFleetForOwner = useGameStore((s) => s.openFleetForOwner)
-  const openHallEditor = useGameStore((s) => s.openHallEditor)
-  const openHqOfficeEditor = useGameStore((s) => s.openHqOfficeEditor)
   const setSelectedRivalId = useGameStore((s) => s.setSelectedRivalId)
   const setUiSelectedRivalId = useUiStore((s) => s.setSelectedRivalId)
   const setCommandView = useGameStore((s) => s.setCommandView)
@@ -80,7 +77,6 @@ export function TileInspector() {
     isDcAnchor(tile) &&
     !constructing &&
     tile.buildingProgress >= tile.buildingTarget
-  const facilityEditorKind = facilityEditorKindForTile(tile)
   const usage = liveDc ? dcBayUsage(state, tile.x, tile.y) : null
   const region = state.map.regions.find((r) => r.id === tile.regionId)
   const statusLabel = constructing
@@ -106,9 +102,7 @@ export function TileInspector() {
       return
     }
     setUiSelectedRivalId(null)
-    const facilityId = tile.campusId ?? `facility:${tile.x},${tile.y}`
-    if (facilityEditorKind === 'data-hall') openHallEditor(facilityId)
-    else if (facilityEditorKind === 'hq-office') openHqOfficeEditor(facilityId)
+    setCommandView('sites')
   }
 
   const metrics: Array<{ label: string; value: string; tone?: string }> = []
@@ -238,7 +232,7 @@ export function TileInspector() {
         <p className="mt-2 text-[0.75rem] text-amber">Under construction.</p>
       )}
 
-      {(isRival || facilityEditorKind) && isBuildableKind(tile.kind) && (
+      {(isRival || isOurs) && isBuildableKind(tile.kind) && (
         <HudButton
           type="button"
           variant="ghost"
@@ -246,7 +240,7 @@ export function TileInspector() {
           onClick={openSelectedFacility}
           onPointerDown={(e) => e.stopPropagation()}
         >
-          {isRival ? 'Inspect rival fleet' : 'Open hall editor'}
+          {isRival ? 'Inspect rival fleet' : 'Inspect site'}
         </HudButton>
       )}
 

@@ -82,6 +82,40 @@ describe('shared lab action kernel', () => {
     expect(priced?.apiPriceOutPerMTok).toBe(4.5)
   })
 
+  it('clamps an API list below hosting cost up to the stored floor', () => {
+    const state = createGame(715)
+    const model = buildScaledModel({
+      id: 'floor-model',
+      name: 'Floor model',
+      paramsB: 1,
+      family: 'dense',
+      day: state.day,
+      dataCoverage: 1,
+      dataQuality: 70,
+      shipped: true,
+      release: 'released',
+    })
+    const withModel = {
+      ...state,
+      player: { ...state.player, models: [model] },
+    }
+    const applied = applyLabAction(withModel, withModel.playerLabId, {
+      kind: 'set_api_price',
+      modelId: model.id,
+      input: 0,
+      output: 0,
+    })
+    const priced = applied.player.models.find((candidate) => candidate.id === model.id)
+    expect(priced?.apiPriceInPerMTok).toBeGreaterThan(0)
+    expect(priced?.apiPriceOutPerMTok).toBeGreaterThan(0)
+    expect(priced?.apiPriceInPerMTok ?? 0).toBeGreaterThanOrEqual(
+      (priced?.costApiPriceIn ?? 0) - 1e-9,
+    )
+    expect(priced?.apiPriceOutPerMTok ?? 0).toBeGreaterThanOrEqual(
+      (priced?.costApiPriceOut ?? 0) - 1e-9,
+    )
+  })
+
   it('rejects a quantized route until its research is unlocked', () => {
     const state = createGame(714)
     const model = buildScaledModel({

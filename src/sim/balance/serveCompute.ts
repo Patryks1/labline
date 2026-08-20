@@ -6,6 +6,7 @@
 import type { Model, SubPlan } from '../types'
 import type { ComputeSnapshot } from '../systems/compute'
 import { ECONOMY } from './economy'
+import { servedEffortTokenMultiplier } from './modelProduct'
 import type { CommercialModelKind } from './pricing'
 import {
   modelCostMult,
@@ -65,10 +66,16 @@ export function inferenceCapacityMTok(
 /** PF demand to serve a token volume (legacy / seat scaling). */
 export function inferencePfDemand(
   mtok: number,
-  model: Pick<Model, 'paramsB' | 'activeParamsB' | 'family' | 'inferCostMult'>,
+  model: Pick<
+    Model,
+    'paramsB' | 'activeParamsB' | 'family' | 'inferCostMult' | 'productProfile'
+  >,
   servingEfficiency = 1,
 ): number {
-  return Math.max(0, mtok) * pfPerMTokForModel(model, servingEfficiency)
+  const effort = model.productProfile
+    ? servedEffortTokenMultiplier(model.productProfile)
+    : 1
+  return Math.max(0, mtok) * pfPerMTokForModel(model, servingEfficiency) * effort
 }
 
 /**

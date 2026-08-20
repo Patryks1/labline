@@ -14,12 +14,24 @@ import type {
   TrainingBenchmarkSnapshot,
   TrainingBenchmarkSuiteResult,
   TrainingCheckpointBranchDirection,
+  TrainingCampaignChoiceEffects,
   TrainingCheckpointCandidate,
   TrainingComputeFormat,
   TrainingFailureRecord,
   TrainingJob,
   TrainingNumerics,
+  PostTrainGym,
+  PostTrainGymKind,
+  SpecializationFocus,
+  ReasoningEffort,
+  ModelProductProfile,
 } from "../types";
+import {
+  gymUnlocked,
+  normalizePostTrainGyms,
+  trainingGymDomainExtras,
+  trainingGymLatentLift,
+} from "../balance/modelStudio";
 import { chargeExpense } from "./financeLedger";
 import {
   checkpointTouchesModel,
@@ -35,7 +47,7 @@ import {
   scoresFromScale,
 } from "../balance/modelScaling";
 import { getResearchNode } from "../balance/research";
-import { attachModelToEmptyPlans } from "./plans";
+import { attachModelToEmptyPlans, updatePlan } from "./plans";
 import { scheduleReleaseEvaluations } from "./evaluations";
 import {
   deriveModelCapabilities,
@@ -55,7 +67,6 @@ import {
   fundedTrainingMaturity,
   pacedTrainingPfPerDay,
   sizeGate,
-  suggestedApiPricePerMTok,
   trainCostPfDays,
 } from "../balance/training";
 import {
@@ -79,15 +90,21 @@ import {
   serviceProfileForModel,
   trainingDataModalityRequirements,
 } from "../balance/trainingV3";
+import {
+  DEFAULT_RECIPE_ALIGN_SHARE,
+  applyRecipeOutcome,
+  recipeOutcomeSignals,
+} from "../balance/trainingRecipe";
 import { createRng, hashSeed, seededId } from "../rng";
 import {
   applyTrainingCampaignChoice,
   boundedVerifiedRecursiveCapabilityBonus,
   createTrainingCampaignEvent,
   crossedTrainingCampaignMilestone,
-  recommendedTrainingCampaignChoice,
+  dutyScientistCampaignChoice,
   TRAINING_CAMPAIGN_MILESTONES,
 } from "../balance/trainingCampaign";
+import { clampTrainingCampaignIntervention } from "../balance/trainingCampaignIntervention";
 
 /** @deprecated Fixed PF targets replace calendar extensions. */
 export const TRAINING_EXTENSION_DAYS = 10;
@@ -216,17 +233,18 @@ export function trainingBenchmarkAccuracyForSpend(spend: number): {
   };
 }
 import {
-  apiUnitCostPerMTok,
+  apiHostingCostFloor,
   boundedApiListCostPerMTok,
   birthApiUnitCostPerMTok,
   blendApiPrice,
-  splitInOutCost,
+  clampApiListToHostingFloor,
   splitBlendedApiPrice,
   suggestApiInOut,
 } from "../balance/pricing";
 import {
   DATA_DOMAIN_META,
   DATA_DOMAINS,
+  applySynthQualityTax,
   defaultDataWeights,
   lqSynthCapabilityMult,
   normalizeDomainStock,
@@ -236,6 +254,7 @@ import {
 import { modelTrainVramGb } from "../balance/racks";
 import { fleetStats, resolveRackSku } from "./racks";
 import { modelCanCurateDataDomain } from "./modelEligibility";
+import { isLivePublicModel } from "../modelRelease";
 import type {
   DataDomain,
   DataMix,
@@ -260,6 +279,33 @@ import {
   trainingDataEvidenceFromManifest,
 } from "./dataAssets";
 import { modelStackModifiers, sanitizeModelStack } from "../balance/modelStack";
+import {
+  alignmentDataWeights,
+  applyEffortLiftFromRecipe,
+  branchFocusPreset,
+  buildModelProductProfile,
+  capBaseChatWeights,
+  defaultAlignmentMTok,
+  DEFAULT_POST_TRAIN_SHARE,
+  postTrainStagesFromResearch,
+  splitTrainingTokens,
+  effortBoardsFor,
+  focusMagnitude,
+  focusToMix,
+  foundationDataWeights,
+  productProfileFromModel,
+  withServedRecipe,
+  withDefaultRecipe,
+  migrateEffortRecipes,
+  INSTANT_EFFORT_ID,
+  MAX_TRAINED_EFFORTS,
+  clampThinkingTokenMult,
+  effortTrainTargetPfDays,
+  effortQualityFromTrain,
+  effortCashCost,
+  effortReasoningUnlocked,
+  gymQualityByKind,
+} from "../balance/modelProduct";
 import { normalizeModelEvaluations } from "../balance/evaluationSuites";
 import {
   syntheticTrainingProfile,
@@ -272,7 +318,8 @@ import {
   postTrainEffectProfile,
   resolvedPostTrainStageEffectiveness,
   postTrainStageEffectiveness,
-  postTrainTargetPfDays,
+  postTrainStageQuote,
+  studioPostTrainTargetPfDays,
 } from "../balance/postTraining";
 
 const POST_TRAIN_ORDER: PostTrainStage[] = [
@@ -410,6 +457,32 @@ function actualConsumedDomainWeights(
   };
 }
 
+/** True when a player campaign incident is waiting; the daily clock must not advance. */
+export function playerHasPendingTrainingDecision(state: SimState): boolean {
+  return playerTrainingJobs(state).some(
+    (job) => !job.failed && job.pendingCampaignEvent != null,
+  );
+}
+
+function gymsLinkedToJob(state: SimState, job: TrainingJob): PostTrainGym[] {
+  const gyms = normalizePostTrainGyms(state.player.postTrainGyms);
+  const attached = job.attachedGymKinds;
+  if (attached && attached.length > 0) {
+    return gyms.filter((gym) => attached.includes(gym.kind));
+  }
+  return gyms;
+}
+
+function jobNeedsLinkedPostTrain(job: TrainingJob): boolean {
+  if (job.failed || job.paused || job.pendingCampaignEvent) return false;
+  if (job.postTrainPhaseResolved) return false;
+  if (job.postTrain !== "none") return false;
+  return (
+    job.pendingPostTrainPhase === true ||
+    job.progressPfDays + 1e-9 >= job.targetPfDays
+  );
+}
+
 /** Read concurrent jobs while honoring direct legacy `trainingJob` mutations in old saves/tests. */
 export function playerTrainingJobs(state: SimState): TrainingJob[] {
   const jobs = state.player.trainingJobs ?? [];
@@ -430,6 +503,35 @@ export function withTrainingJobs(
       trainingJob: jobs[0] ?? null,
     },
   };
+}
+
+export function setTrainingLabs(
+  state: SimState,
+  jobId: string,
+  kinds: readonly PostTrainGymKind[],
+): SimState {
+  const jobs = playerTrainingJobs(state);
+  if (!jobs.some((job) => job.id === jobId)) {
+    return {
+      ...state,
+      alerts: [
+        {
+          id: `labs-missing-${state.day}-${jobId}`,
+          day: state.day,
+          severity: "warn" as const,
+          message: "Training run not found.",
+        },
+        ...state.alerts,
+      ].slice(0, 40),
+    };
+  }
+  const attachedGymKinds = [...new Set(kinds)].filter((kind) =>
+    gymUnlocked(kind, state.player.researchUnlocked),
+  );
+  return withTrainingJobs(
+    state,
+    jobs.map((job) => (job.id === jobId ? { ...job, attachedGymKinds } : job)),
+  );
 }
 
 function playerTrainingHardwareGeneration(
@@ -852,7 +954,10 @@ export function playerTrainingResourcePlan(
     ...jobs.map((job) => ({
       id: job.id,
       weight: job.computePriority ?? 50,
-      eligible: !job.paused && !job.failed && !job.pendingCampaignEvent,
+      eligible:
+        !job.paused &&
+        !job.failed &&
+        !job.pendingCampaignEvent,
       numerics:
         job.trainingNumerics ?? job.numerics ?? LEGACY_TRAINING_NUMERICS,
       ramRequiredGb: jobTrainingRamGb(state, job),
@@ -1192,6 +1297,19 @@ export function trainingLoss(
         Math.min(0.18, Math.max(0, dataRatio - 8) * 0.018);
   const qualityGap = 0.7 - quality;
   const diversityGap = 0.65 - diversity;
+  const chatShare =
+    stage === "base"
+      ? job.dataPlan?.weights?.chat ?? 0
+      : (job.dataPlan?.postTrainWeights?.chat ??
+        job.dataPlan?.weights?.chat ??
+        0);
+  const chatInBase = Math.max(0, chatShare - 0.08);
+  const postTrainMTok = job.dataPlan?.postTrainMTok ?? 0;
+  const alignmentStarve =
+    stage === "base"
+      ? 0
+      : Math.max(0, 0.18 - chatShare) * 1.4 +
+        Math.max(0, 12 - postTrainMTok) * 0.018;
 
   // This terminal band is derived from scale and the data recipe. Typical
   // jobs settle visibly in the high-threes/low-fours without a magic target.
@@ -1200,7 +1318,9 @@ export function trainingLoss(
     Math.log10(Math.max(1, job.targetParamsB)) * 0.18 +
     qualityGap * 1.2 +
     diversityGap * 0.55 +
-    Math.min(0.45, repeatPressure * 0.09);
+    Math.min(0.45, repeatPressure * 0.09) +
+    chatInBase * 2.1 +
+    alignmentStarve;
   const baseStart =
     baseBand + 5.15 + Math.log10(Math.max(1, job.targetParamsB)) * 0.28;
   const postStageAdjustment =
@@ -1209,15 +1329,18 @@ export function trainingLoss(
       : stage === "tools"
         ? 0.08
         : -0.08;
+  const postSpike =
+    stage === "base" ? 0 : 0.55 * Math.exp(-9 * p) * (0.55 + chatShare);
   const trend =
     stage === "base"
       ? baseBand +
-        (baseStart - baseBand) * Math.exp(-3.7 * p - 0.8 * p * p) -
-        0.12 * p
+        (baseStart - baseBand) * Math.exp(-2.6 * p - 1.15 * p * p) -
+        0.08 * p
       : baseBand +
         postStageAdjustment -
-        0.1 * p +
-        (0.72 + baseBand * 0.08) * Math.exp(-7.5 * p);
+        0.14 * p * (0.45 + chatShare) +
+        (0.72 + baseBand * 0.08) * Math.exp(-6.2 * p) +
+        postSpike;
 
   const stableOptimizationMethods = new Set([
     "opt_mixed",
@@ -1414,6 +1537,7 @@ export function canReleaseTrainingJob(job: TrainingJob): {
       reason: `Resolve the ${job.pendingCampaignEvent.title} training decision first.`,
     };
   }
+
   if (
     job.postTrain !== "none" &&
     job.postTrainProgress + 1e-9 < job.postTrainTarget
@@ -1766,8 +1890,13 @@ function fillDistillTeacherSynthetic(
       30,
       actualVolume / Math.max(1, minDataMTokForParams(opts.paramsB)),
     ),
-    qualityUsed:
+    qualityUsed: applySynthQualityTax(
       actualVolume > 0 ? qualityAcc / actualVolume : consume.qualityUsed,
+      actualVolume > 0
+        ? (consume.syntheticUnits + teacherSynthMTok) / actualVolume
+        : 0,
+      actualVolume > 0 ? synthLqUnits / actualVolume : 0,
+    ),
     syntheticUnits: consume.syntheticUnits + teacherSynthMTok,
     synthHqUnits,
     synthLqUnits,
@@ -2010,20 +2139,49 @@ export function startTraining(
         }));
 
   // Volume is player-chosen (MTok). Pretrain reuses full corpus; continue uses new delta.
-  const volumeMTok = Math.max(
+  const requestedTotal = Math.max(
     1,
     rawPlanTotal * (mode === "distill" ? Math.max(0.15, selfDataShare) : 1),
   );
+  const tokenSplit = splitTrainingTokens(
+    requestedTotal,
+    opts.dataPlan?.postTrainShare ??
+      (opts.dataPlan?.postTrainMTok != null
+        ? opts.dataPlan.postTrainMTok / requestedTotal
+        : DEFAULT_POST_TRAIN_SHARE),
+  );
+  const volumeMTok = tokenSplit.baseMTok;
   void minMTok;
 
+  const recipeWeights = defaultTrainingDataWeights(family, productPreset);
+  const foundationWeights = foundationDataWeights(recipeWeights);
+  const continueMix = continuationBase?.dataPlan?.weights
+    ? normalizeWeights({
+        ...recipeWeights,
+        ...continuationBase.dataPlan.weights,
+      })
+    : recipeWeights;
+  const specializeWeights = opts.specializationFocus
+    ? focusToMix(
+        opts.specializationFocus,
+        mode === "pretrain" ? foundationWeights : continueMix,
+      )
+    : undefined;
+  const lockedWeights =
+    specializeWeights ??
+    (mode === "pretrain" ? foundationWeights : recipeWeights);
   const dataPlan: TrainingDataPlan = {
     totalUnits: volumeMTok,
     totalMTok: volumeMTok,
     trainShare:
       opts.dataPlan?.trainShare ?? (mode === "continue" ? 0.88 : 0.82),
-    weights: mixUnlocked
-      ? (opts.dataPlan?.weights ?? {})
-      : defaultTrainingDataWeights(family, productPreset),
+    weights: capBaseChatWeights(
+      normalizeWeights(
+        mixUnlocked
+          ? (opts.dataPlan?.weights ?? lockedWeights)
+          : lockedWeights,
+      ),
+    ),
     allowSynthetic: opts.dataPlan?.allowSynthetic ?? true,
     includeSynthHQ: opts.dataPlan?.includeSynthHQ ?? true,
     includeSynthLQ: opts.dataPlan?.includeSynthLQ ?? false,
@@ -2063,11 +2221,11 @@ export function startTraining(
         frontierCapability: Math.max(
           teacher.capability,
           ...state.player.models
-            .filter((model) => model.release === "released" || model.shipped)
+            .filter(isLivePublicModel)
             .map((model) => model.capability),
           ...state.rivals.flatMap((rival) =>
             rival.models
-              .filter((model) => model.release === "released" || model.shipped)
+              .filter(isLivePublicModel)
               .map((model) => model.capability),
           ),
         ),
@@ -2292,6 +2450,14 @@ export function startTraining(
     continueLineageId,
     parentCheckpointId: opts.continueFromCheckpointId,
     branchDirection: opts.branchDirection,
+    lifecycle:
+      opts.lifecycle ??
+      (mode === "pretrain"
+        ? "foundation"
+        : opts.specializationFocus
+          ? "specialized"
+          : undefined),
+    specializationFocus: opts.specializationFocus,
     lineageId:
       continueLineageId ?? seededId("lineage", state.seed, jobId, opts.name),
     dataMix,
@@ -2301,6 +2467,13 @@ export function startTraining(
       syntheticMultiplier: dataPlan.syntheticMultiplier,
       uniqueMTok: dataAnalysis.uniqueMTok,
       repeatedMTok: dataAnalysis.repeatedMTok,
+      postTrainWeights:
+        opts.dataPlan?.postTrainWeights ??
+        alignmentDataWeights(
+          actualData.weights as Record<DataDomain, number>,
+        ),
+      postTrainMTok: tokenSplit.postTrainMTok,
+      postTrainShare: tokenSplit.postTrainShare,
     },
     dataConsumed: attributedConsumed,
     dataCoverage: consume.coverage,
@@ -2361,6 +2534,9 @@ export function startTraining(
           ].sort()
         : [...state.player.researchUnlocked].sort(),
     modelStack,
+    attachedGymKinds: (opts.attachedGymKinds ?? []).filter((kind) =>
+      gymUnlocked(kind, state.player.researchUnlocked),
+    ),
     dataQualityByDomain: Object.fromEntries(
       Object.entries(consume.domainQuality ?? {}).filter(
         ([domain]) => (actualData.weights[domain as DataDomain] ?? 0) > 0,
@@ -2487,48 +2663,229 @@ export function resolveTrainingCampaignEvent(
   state: SimState,
   jobId: string,
   choiceId: string,
+  customEffects?: TrainingCampaignChoiceEffects,
 ): SimState {
   const jobs = playerTrainingJobs(state);
   const job = jobs.find((candidate) => candidate.id === jobId);
   const event = job?.pendingCampaignEvent;
   const selected = event?.choices.find((choice) => choice.id === choiceId);
-  if (!job || !event || !selected) {
+  if (!job || !event || (!selected && !customEffects)) {
     return withAlert(
       state,
       "warn",
       "Training campaign decision is no longer available.",
     );
   }
-  const researchersRequired = Math.max(0, selected.effects.minResearchers ?? 0);
+  const effects = clampTrainingCampaignIntervention(
+    event.kind,
+    customEffects ?? selected?.effects ?? {},
+  );
+  const label = selected?.label ?? "Custom intervention";
+  const description = selected?.description ?? "Player-authored intervention.";
+  const researchersRequired = Math.max(0, effects.minResearchers ?? 0);
   const researchers = state.player.staff?.researcher ?? 0;
   if (researchers < researchersRequired) {
     return withAlert(
       state,
       "warn",
-      `${selected.label} needs ${researchersRequired} researchers; ${researchers} are staffed.`,
+      `${label} needs ${researchersRequired} researchers; ${researchers} are staffed.`,
     );
   }
-  const cost = Math.max(0, selected.effects.cashCost ?? 0);
+  const cost = Math.max(0, effects.cashCost ?? 0);
   if (state.player.cash + 1e-9 < cost) {
     return withAlert(
       state,
       "warn",
-      `Need $${cost.toLocaleString("en-US")} for ${selected.label}.`,
+      `Need $${cost.toLocaleString("en-US")} for ${label}.`,
     );
   }
-  const resolved = applyTrainingCampaignChoice(job, choiceId, state.day);
+  let next = state;
+  if ((effects.progressRollbackFraction ?? 0) > 0) {
+    next = createManualTrainingCheckpoint(next, {
+      sourceJobId: job.id,
+      label: `${job.name} · pre-rollback`,
+    });
+  }
+  const resolved = applyTrainingCampaignChoice(
+    job,
+    choiceId,
+    next.day,
+    false,
+    customEffects,
+  );
   if (!resolved) return state;
-  const next = withTrainingJobs(
-    cost > 0 ? chargeExpense(state, cost, "training") : state,
-    jobs.map((candidate) => (candidate.id === job.id ? resolved : candidate)),
+  next = withTrainingJobs(
+    cost > 0 ? chargeExpense(next, cost, "training") : next,
+    playerTrainingJobs(next).map((candidate) =>
+      candidate.id === job.id ? resolved : candidate,
+    ),
   );
   return withAlert(
     next,
-    selected.effects.stumbleRisk && selected.effects.stumbleRisk > 0
-      ? "warn"
-      : "info",
-    `${job.name}: ${selected.label}. ${selected.description}`,
+    effects.stumbleRisk && effects.stumbleRisk > 0 ? "warn" : "info",
+    `${job.name}: ${label}. ${description}`,
   );
+}
+
+/**
+ * Spend the spider's reserved alignment mix and attached gyms as soon as
+ * the base run hits its target. No modal — the recipe already named the data.
+ */
+export function beginLinkedPostTrain(state: SimState, jobId: string): SimState {
+  const job = playerTrainingJobs(state).find(
+    (candidate) => candidate.id === jobId,
+  );
+  if (!job || job.failed) return state;
+  if (job.postTrain !== "none" && job.postTrainProgress < job.postTrainTarget) {
+    return state;
+  }
+  const weights = job.dataPlan.postTrainWeights
+    ? normalizeWeights(job.dataPlan.postTrainWeights)
+    : alignmentDataWeights(normalizeWeights(job.dataPlan.weights));
+  const volume = Math.max(0, job.dataPlan.postTrainMTok ?? 0);
+  const cleared: TrainingJob = {
+    ...job,
+    pendingPostTrainPhase: false,
+    postTrainPhaseResolved: true,
+    stallReason: null,
+    dataPlan: {
+      ...job.dataPlan,
+      postTrainWeights: weights,
+      postTrainMTok: volume,
+    },
+  };
+  let next = withTrainingJobs(
+    state,
+    playerTrainingJobs(state).map((candidate) =>
+      candidate.id === job.id ? cleared : candidate,
+    ),
+  );
+  if (volume > 0) {
+    const consume = consumeForTraining(
+      next,
+      {
+        ...cleared.dataPlan,
+        totalMTok: volume,
+        totalUnits: volume,
+        weights,
+        trainShare: 0.9,
+      },
+      job.targetParamsB,
+      job.family,
+      job.dataMix,
+      { mode: "pretrain" },
+    );
+    if (consume.ok) {
+      next = {
+        ...next,
+        player: {
+          ...next.player,
+          data: consume.nextData,
+        },
+      };
+      if (consume.cashCost > 0) {
+        next = chargeExpense(next, consume.cashCost, "training");
+      }
+      const jobs = playerTrainingJobs(next).map((candidate) => {
+        if (candidate.id !== job.id) return candidate;
+        const consumed = { ...candidate.dataConsumed };
+        for (const domain of DATA_DOMAINS) {
+          consumed[domain] =
+            (consumed[domain] ?? 0) + (consume.consumed[domain] ?? 0);
+        }
+        return {
+          ...candidate,
+          dataConsumed: consumed,
+          dataQualityUsed:
+            (candidate.dataQualityUsed + consume.qualityUsed) / 2,
+        };
+      });
+      next = withTrainingJobs(next, jobs);
+    }
+  }
+  const firstStage = postTrainStagesFromResearch(
+    next.player.researchUnlocked,
+  )[0];
+  if (!firstStage) {
+    const gymNote =
+      (job.attachedGymKinds?.length ?? 0) > 0
+        ? " Attached gyms wait on SFT."
+        : "";
+    return withAlert(
+      next,
+      "info",
+      volume > 0
+        ? `${job.name} reserved ${volume.toFixed(0)} MTok of alignment data.${gymNote} Unlock SFT in Labs to spend it.`
+        : `${job.name} finished its base run.${gymNote} Unlock SFT in Labs to start alignment.`,
+    );
+  }
+  const started = selectPostTrain(next, job.id, firstStage);
+  const startedJob = playerTrainingJobs(started).find(
+    (candidate) => candidate.id === job.id,
+  );
+  if (startedJob && startedJob.postTrain === firstStage) {
+    return withAlert(
+      started,
+      "info",
+      `${job.name} started ${firstStage.toUpperCase()} on the reserved alignment mix${
+        (job.attachedGymKinds?.length ?? 0) > 0 ? " and attached gyms" : ""
+      }.`,
+    );
+  }
+  return started;
+}
+
+/** @deprecated Alignment now starts from the recipe; skip still clears a stuck save. */
+export function resolvePostTrainPhase(
+  state: SimState,
+  jobId: string,
+  decision: {
+    kind: "start" | "skip";
+    postTrainWeights?: Partial<Record<DataDomain, number>>;
+    postTrainMTok?: number;
+  },
+): SimState {
+  const job = playerTrainingJobs(state).find(
+    (candidate) => candidate.id === jobId,
+  );
+  if (!job || job.failed) return withAlert(state, "warn", "Run not found.");
+  if (decision.kind === "skip") {
+    return withTrainingJobs(
+      state,
+      playerTrainingJobs(state).map((candidate) =>
+        candidate.id === job.id
+          ? {
+              ...candidate,
+              pendingPostTrainPhase: false,
+              postTrainPhaseResolved: true,
+              stallReason: null,
+            }
+          : candidate,
+      ),
+    );
+  }
+  let next = state;
+  if (decision.postTrainWeights || decision.postTrainMTok != null) {
+    next = withTrainingJobs(
+      state,
+      playerTrainingJobs(state).map((candidate) =>
+        candidate.id !== job.id
+          ? candidate
+          : {
+              ...candidate,
+              dataPlan: {
+                ...candidate.dataPlan,
+                postTrainWeights:
+                  decision.postTrainWeights ??
+                  candidate.dataPlan.postTrainWeights,
+                postTrainMTok:
+                  decision.postTrainMTok ?? candidate.dataPlan.postTrainMTok,
+              },
+            },
+      ),
+    );
+  }
+  return beginLinkedPostTrain(next, jobId);
 }
 
 export function advancePostTrain(state: SimState, jobId?: string): SimState {
@@ -2612,11 +2969,23 @@ export function selectPostTrain(
   ) {
     return withAlert(state, "warn", "Unlock Process Reward Models first.");
   }
+  const quote = postTrainStageQuote(
+    job,
+    nextStage,
+    gymsLinkedToJob(state, job),
+  );
+  if (state.player.cash + 1e-9 < quote.cash) {
+    return withAlert(
+      state,
+      "warn",
+      `Need $${quote.cash.toLocaleString("en-US")} plus gym compute to start ${nextStage.toUpperCase()}. Fund Labs or raise cash.`,
+    );
+  }
   const staged: TrainingJob = {
     ...job,
     postTrain: nextStage,
     postTrainProgress: 0,
-    postTrainTarget: postTrainTargetPfDays(job, nextStage, job.targetParamsB),
+    postTrainTarget: quote.pfDays,
     postTrainDaysElapsed: 0,
     awaitingDecision: false,
     paused: false,
@@ -2634,8 +3003,9 @@ export function selectPostTrain(
       state.day,
     ),
   };
+  const charged = chargeExpense(state, quote.cash, "training");
   return withTrainingJobs(
-    state,
+    charged,
     jobs.map((candidate) => (candidate.id === job.id ? updated : candidate)),
   );
 }
@@ -2735,13 +3105,21 @@ export function keepInternal(state: SimState, jobId?: string): SimState {
 }
 
 /** Finish job and release publicly (plans/API eligible). */
-export function releaseFromJob(state: SimState, jobId?: string): SimState {
-  return finalizeJob(state, "released", jobId, true);
+export function releaseFromJob(
+  state: SimState,
+  jobId?: string,
+  opts?: { list?: boolean },
+): SimState {
+  return finalizeJob(state, "released", jobId, true, opts);
 }
 
 /** Stop a plateaued run after its calendar gate and release its current checkpoint. */
-export function releaseTrainingEarly(state: SimState, jobId: string): SimState {
-  return finalizeJob(state, "released", jobId, true);
+export function releaseTrainingEarly(
+  state: SimState,
+  jobId: string,
+  opts?: { list?: boolean },
+): SimState {
+  return finalizeJob(state, "released", jobId, true, opts);
 }
 
 /** Cheat surface: finish compute and post-training while preserving the release decision. */
@@ -2778,6 +3156,8 @@ export function completeTrainingJobsNow(state: SimState): SimState {
               models: state.player.models,
               progress: completedJob.postTrainProgress,
               daysElapsed: completedJob.postTrainDaysElapsed,
+              gyms: state.player.postTrainGyms,
+              tools: state.player.toolSkills,
             }),
           );
     const accountedJob = pass ? { ...completedJob, ...pass } : completedJob;
@@ -2789,6 +3169,8 @@ export function completeTrainingJobsNow(state: SimState): SimState {
         accountedJob,
         state.player.researchUnlocked,
         state.player.models,
+        state.player.postTrainGyms,
+        state.player.toolSkills,
       ),
     };
   });
@@ -2804,10 +3186,12 @@ function benchmarkSuiteLatentScore(
   suiteId: BenchmarkSuiteId,
   capability: number,
   safety: number,
+  gyms?: readonly PostTrainGym[],
 ): number {
   const preset = job.productPreset ?? presetFromFamily(job.family);
   const io = job.io ?? ioForPreset(preset, capability);
   const dataQuality = Math.max(1, Math.min(100, job.dataQualityUsed ?? 50));
+  const gymLift = trainingGymLatentLift(gyms, job.attachedGymKinds);
   const output = (modality: keyof typeof io.outputs) =>
     Math.max(0, Math.min(100, io.outputs[modality] ?? 0));
   switch (suiteId) {
@@ -2848,7 +3232,7 @@ function benchmarkSuiteLatentScore(
     }
     case "language":
     default:
-      return capability * 0.72 + dataQuality * 0.18 + safety * 0.1;
+      return capability * 0.72 + dataQuality * 0.18 + safety * 0.1 + gymLift;
   }
 }
 
@@ -2860,6 +3244,7 @@ function paidBenchmarkSuiteResult(
   stage: TrainableStage,
   latentCapability: number,
   latentSafety: number,
+  gyms?: readonly PostTrainGym[],
 ): TrainingBenchmarkSuiteResult {
   const measurement = trainingBenchmarkAccuracyForSpend(spend);
   const latent = benchmarkSuiteLatentScore(
@@ -2867,6 +3252,7 @@ function paidBenchmarkSuiteResult(
     suiteId,
     latentCapability,
     latentSafety,
+    gyms,
   );
   // Spend is intentionally excluded from the seed. Buying a larger sample
   // shrinks the same deterministic measurement error instead of rerolling it.
@@ -2917,7 +3303,12 @@ export function resolveTrainingBenchmarkEvaluation(
       100,
       (100 - loss * 8) *
         Math.min(1, 0.35 + progressFrac * 0.75) *
-        precision.qualityCeilingMultiplier,
+        precision.qualityCeilingMultiplier +
+        trainingGymLatentLift(
+          state.player.postTrainGyms,
+          job.attachedGymKinds,
+        ) *
+          0.35,
     ),
   );
   const latentSafety = Math.max(
@@ -2969,6 +3360,7 @@ export function resolveTrainingBenchmarkEvaluation(
       stage,
       latentCapability,
       latentSafety,
+      state.player.postTrainGyms,
     );
   }
   const resultValues = Object.values(suiteResults).filter(
@@ -2979,6 +3371,19 @@ export function resolveTrainingBenchmarkEvaluation(
     Math.max(1, resultValues.length);
   const confidence = measurement.confidence;
   const interval = inaccuracy;
+  const emptyLatent: BenchmarkScores = {
+    mmlu: capability,
+    coding: capability,
+    math: capability,
+    vision: 0,
+    law: capability * 0.6,
+    health: capability * 0.6,
+    science: capability,
+    multilingual: capability * 0.7,
+    agents: capability * 0.7,
+    safety,
+    personality: job.productProfile?.personality ?? 0,
+  };
   return {
     day: state.day,
     progress: progressFrac,
@@ -2996,6 +3401,28 @@ export function resolveTrainingBenchmarkEvaluation(
     totalCost: pending.totalCost ?? spendPerSuite * suiteIds.length,
     accuracy: measurement.accuracy,
     suiteResults,
+    effortCapabilities: Object.fromEntries(
+      migrateEffortRecipes(productProfileForJob(state, job)).flatMap(
+        (recipe) => {
+          if (!recipe.trained) return [];
+          return [
+            [
+              recipe.id,
+              applyEffortLiftFromRecipe(capability, emptyLatent, recipe)
+                .capability,
+            ],
+          ];
+        },
+      ),
+    ),
+    effortBoards: effortBoardsFor(
+      {
+        capability,
+        benchmarks: emptyLatent,
+        productProfile: productProfileForJob(state, job),
+      },
+      null,
+    ),
   };
 }
 
@@ -3335,7 +3762,7 @@ export function captureTrainingCheckpoint(
       "warn",
       reachedAny
         ? `${job.name}'s earned checkpoints are already in stealth review.`
-        : `A stealth checkpoint becomes available at ${Math.round(TRAINING_CAMPAIGN_MILESTONES[0] * 100)}% training.`,
+        : `Save a snapshot from this run when you want a weight file. Incidents at ${Math.round(TRAINING_CAMPAIGN_MILESTONES[0] * 100)}% do not create files automatically.`,
     );
   }
   const result = appendTrainingCheckpoint(state, job, milestone);
@@ -3445,6 +3872,8 @@ export interface ForkTrainingCheckpointRequest {
   checkpointId: string;
   direction: TrainingCheckpointBranchDirection;
   label?: string;
+  weights?: Partial<Record<DataDomain, number>>;
+  specializationFocus?: SpecializationFocus;
 }
 
 function branchDataWeights(
@@ -3486,6 +3915,22 @@ export function forkTrainingCheckpoint(
     return withAlert(state, "warn", "Usable checkpoint not found.");
   }
   const source = checkpoint.model;
+  const explicitFocus = request.specializationFocus;
+  const focus =
+    explicitFocus ??
+    (request.direction !== "general" && request.direction !== "custom"
+      ? branchFocusPreset(request.direction)
+      : undefined);
+  const specialized = focusMagnitude(focus) > 0.12;
+  const sourceMix = normalizeWeights(
+    source.dataPlan?.weights ??
+      defaultTrainingDataWeights(
+        source.family,
+        source.productPreset ?? presetFromFamily(source.family),
+      ),
+  );
+  const focusedMix =
+    explicitFocus && specialized ? focusToMix(explicitFocus, sourceMix) : undefined;
   return startTraining(state, {
     name: request.label?.trim() || source.name,
     family: source.family,
@@ -3498,11 +3943,18 @@ export function forkTrainingCheckpoint(
     continueFromId: source.id,
     continueFromCheckpointId: checkpoint.id,
     branchDirection: request.direction,
+    lifecycle: specialized ? "specialized" : undefined,
+    specializationFocus: specialized ? focus : undefined,
     dataPlan: {
       totalUnits: Math.max(1, newDataSinceModel(state, source)),
       totalMTok: Math.max(1, newDataSinceModel(state, source)),
       trainShare: 0.88,
-      weights: branchDataWeights(checkpoint, request.direction),
+      weights: request.weights
+        ? normalizeWeights({
+            ...branchDataWeights(checkpoint, request.direction),
+            ...request.weights,
+          })
+        : (focusedMix ?? branchDataWeights(checkpoint, request.direction)),
       allowSynthetic: false,
     },
   });
@@ -3605,7 +4057,12 @@ export function recoverFailedPostTrainFromCheckpoint(
   const postTrainTarget = Math.max(
     1e-9,
     failedJob.postTrainTarget ||
-      postTrainTargetPfDays(failedJob, recoveryStage, failedJob.targetParamsB),
+      studioPostTrainTargetPfDays(
+        failedJob,
+        recoveryStage,
+        failedJob.targetParamsB,
+        state.player.postTrainGyms,
+      ),
   );
   const stagedChild: TrainingJob = {
     ...failedJob,
@@ -3888,6 +4345,7 @@ function finalizeJob(
   release: "internal" | "released",
   jobId?: string,
   _allowEarlyRelease: boolean = false,
+  opts?: { list?: boolean },
 ): SimState {
   const jobs = playerTrainingJobs(state);
   const job = jobId
@@ -3925,7 +4383,8 @@ function finalizeJob(
           : "Training has not reached the minimum launch progress."),
     );
   }
-  const model = buildModelFromJob(state, job, release);
+  const list = release === "released" && opts?.list !== false;
+  const model = buildModelFromJob(state, job, release, list);
   // A continuation is a new immutable checkpoint/version. Keep the source in
   // the fleet so plans, API customers, teachers, and historical economics do
   // not silently move to different weights.
@@ -4009,14 +4468,18 @@ function finalizeJob(
   };
 
   if (release === "released") {
-    next = attachModelToEmptyPlans(next, model.id);
+    if (list) next = attachModelToEmptyPlans(next, model.id);
     next = scheduleReleaseEvaluations(next, model.id);
   }
   return next;
 }
 
 /** Release an existing internal model to the public product surface. */
-export function releaseModel(state: SimState, modelId: string): SimState {
+export function releaseModel(
+  state: SimState,
+  modelId: string,
+  opts?: { list?: boolean },
+): SimState {
   const idx = state.player.models.findIndex((m) => m.id === modelId);
   if (idx < 0) return state;
   const m = state.player.models[idx]!;
@@ -4027,11 +4490,19 @@ export function releaseModel(state: SimState, modelId: string): SimState {
   let listIn = m.apiPriceInPerMTok;
   let listOut = m.apiPriceOutPerMTok;
   let listBlend = m.apiPricePerMTok;
+  const hosting = apiHostingCostFloor(state, computeSnapshot(state), m);
   if (listIn == null || listOut == null) {
     listIn = m.suggestedApiPriceIn ?? m.costApiPriceIn;
     listOut = m.suggestedApiPriceOut ?? m.costApiPriceOut;
-    listBlend = Math.round(blendApiPrice(listIn, listOut) * 1000) / 1000;
   }
+  const listed = clampApiListToHostingFloor(
+    listIn ?? hosting.costIn,
+    listOut ?? hosting.costOut,
+    hosting,
+  );
+  listIn = listed.priceIn;
+  listOut = listed.priceOut;
+  listBlend = Math.round(blendApiPrice(listIn, listOut) * 1000) / 1000;
 
   const models = state.player.models.slice();
   models[idx] = {
@@ -4039,9 +4510,12 @@ export function releaseModel(state: SimState, modelId: string): SimState {
     release: "released",
     shipped: true,
     releaseDay: state.day,
+    commerciallyOffered: opts?.list !== false,
     apiPriceInPerMTok: listIn,
     apiPriceOutPerMTok: listOut,
     apiPricePerMTok: listBlend,
+    costApiPriceIn: hosting.costIn,
+    costApiPriceOut: hosting.costOut,
   };
 
   let brand = state.player.brandTrust;
@@ -4074,8 +4548,134 @@ export function releaseModel(state: SimState, modelId: string): SimState {
     ].slice(0, 40),
     onboardingStep: Math.max(state.onboardingStep, 2),
   };
-  next = attachModelToEmptyPlans(next, m.id);
+  if (opts?.list !== false) {
+    next = attachModelToEmptyPlans(next, m.id);
+  }
   next = scheduleReleaseEvaluations(next, m.id);
+  return next;
+}
+
+function stripModelFromProductSurface(
+  pricing: SimState["player"]["pricing"],
+  remainingLive: Model[],
+  modelId: string,
+): SimState["player"]["pricing"] {
+  let next = { ...pricing };
+  if (next.activeModelId === modelId) {
+    const nextActive =
+      remainingLive.find((model) => isLivePublicModel(model))?.id ??
+      remainingLive[0]?.id ??
+      null;
+    next = { ...next, activeModelId: nextActive };
+  }
+  const plans = next.plans.map((plan) => ({
+    ...plan,
+    modelIds: plan.modelIds.filter((id) => id !== modelId),
+  }));
+  return {
+    ...next,
+    apiModelIds: next.apiModelIds?.filter((id) => id !== modelId),
+    apiServePrecisionByModel: Object.fromEntries(
+      Object.entries(next.apiServePrecisionByModel ?? {}).filter(
+        ([id]) => id !== modelId,
+      ),
+    ),
+    plans,
+  };
+}
+
+/** Take a public model off the live fleet without deleting trainable weights. */
+export function archiveModel(state: SimState, modelId: string): SimState {
+  const idx = state.player.models.findIndex((model) => model.id === modelId);
+  if (idx < 0) return withAlert(state, "warn", "Model not found.");
+  const current = state.player.models[idx]!;
+  if (current.archived) {
+    return withAlert(state, "warn", `${current.name} is already archived.`);
+  }
+  if (!isLivePublicModel(current)) {
+    return withAlert(
+      state,
+      "warn",
+      "Only public models can be archived. Delete an internal checkpoint instead.",
+    );
+  }
+
+  const models = state.player.models.slice();
+  models[idx] = { ...current, archived: true };
+  const remainingLive = models.filter((model) => isLivePublicModel(model));
+  const pricing = stripModelFromProductSurface(
+    state.player.pricing,
+    remainingLive,
+    modelId,
+  );
+
+  return {
+    ...state,
+    player: {
+      ...state.player,
+      models,
+      pricing,
+    },
+    alerts: [
+      {
+        id: `archive-model-${modelId}-${state.day}`,
+        day: state.day,
+        severity: "info" as const,
+        message: `Archived ${current.name}. Off the public fleet — train or distill anytime, or restore to serve again.`,
+      },
+      ...state.alerts,
+    ].slice(0, 40),
+  };
+}
+
+/** Put an archived model back on the public serving fleet. */
+export function restoreArchivedModel(state: SimState, modelId: string): SimState {
+  const idx = state.player.models.findIndex((model) => model.id === modelId);
+  if (idx < 0) return withAlert(state, "warn", "Model not found.");
+  const current = state.player.models[idx]!;
+  if (!current.archived) {
+    return withAlert(state, "warn", `${current.name} is not archived.`);
+  }
+
+  const models = state.player.models.slice();
+  const restored = {
+    ...current,
+    archived: false,
+    release: "released" as const,
+    shipped: true,
+    commerciallyOffered: true,
+  };
+  models[idx] = restored;
+
+  let pricing = { ...state.player.pricing };
+  if (!pricing.activeModelId) {
+    pricing = { ...pricing, activeModelId: restored.id };
+  }
+  if (pricing.apiModelIds) {
+    pricing = {
+      ...pricing,
+      apiModelIds: [...new Set([...pricing.apiModelIds, restored.id])],
+    };
+  }
+
+  let next: SimState = {
+    ...state,
+    player: {
+      ...state.player,
+      models,
+      pricing,
+    },
+    alerts: [
+      {
+        id: `restore-model-${modelId}-${state.day}`,
+        day: state.day,
+        severity: "info" as const,
+        message: `Restored ${current.name} to the public fleet.`,
+      },
+      ...state.alerts,
+    ].slice(0, 40),
+  };
+  next = attachModelToEmptyPlans(next, restored.id);
   return next;
 }
 
@@ -4126,29 +4726,11 @@ export function deleteModel(state: SimState, modelId: string): SimState {
     jobs,
     affectedCheckpointIds,
   });
-  let pricing = { ...state.player.pricing };
-  if (pricing.activeModelId === modelId) {
-    const nextActive =
-      models.find((x) => x.release === "released" || x.shipped)?.id ??
-      models[0]?.id ??
-      null;
-    pricing = { ...pricing, activeModelId: nextActive };
-  }
-  // Strip from plans
-  const plans = pricing.plans.map((p) => ({
-    ...p,
-    modelIds: p.modelIds.filter((id) => id !== modelId),
-  }));
-  pricing = {
-    ...pricing,
-    apiModelIds: pricing.apiModelIds?.filter((id) => id !== modelId),
-    apiServePrecisionByModel: Object.fromEntries(
-      Object.entries(pricing.apiServePrecisionByModel ?? {}).filter(
-        ([id]) => id !== modelId,
-      ),
-    ),
-    plans,
-  };
+  const pricing = stripModelFromProductSurface(
+    state.player.pricing,
+    models,
+    modelId,
+  );
 
   return {
     ...state,
@@ -4185,29 +4767,258 @@ export function deleteModel(state: SimState, modelId: string): SimState {
   };
 }
 
+function productProfileForJob(
+  state: SimState,
+  job: TrainingJob,
+): ModelProductProfile {
+  return (
+    job.productProfile ??
+    buildModelProductProfile({
+      lifecycle: job.lifecycle,
+      focus: job.specializationFocus,
+      branchDirection: job.branchDirection,
+      postTrain: job.postTrain,
+      completedPostTrainStages: job.completedPostTrainStages,
+      postTrainStageEffectiveness: job.postTrainStageEffectiveness,
+      chatShare: job.dataPlan?.weights?.chat ?? 0,
+      chatQuality: job.dataQualityUsed ?? 50,
+      gyms: state.player.postTrainGyms,
+      stackIds: job.modelStack,
+      researchUnlocked: state.player.researchUnlocked,
+      family: job.family,
+      backbone: job.backbone,
+      reasoningEnabled: job.completedPostTrainStages?.includes("process"),
+      outcomeSeed: job.outcomeSeed,
+      existing: job.productProfile,
+    })
+  );
+}
+
+export function setDefaultEffort(
+  state: SimState,
+  id: string,
+  effort: ReasoningEffort | string,
+): SimState {
+  const recipeId = effort === "low" ? INSTANT_EFFORT_ID : String(effort);
+  return patchProductProfile(state, id, (profile) =>
+    withDefaultRecipe(profile, recipeId),
+  );
+}
+
+export function setServedEffort(
+  state: SimState,
+  id: string,
+  effort: ReasoningEffort | string,
+  served: boolean,
+): SimState {
+  const recipeId = effort === "low" ? INSTANT_EFFORT_ID : String(effort);
+  return patchProductProfile(state, id, (profile) =>
+    withServedRecipe(profile, recipeId, served),
+  );
+}
+
+export function startEffortTraining(
+  state: SimState,
+  request: {
+    id: string;
+    name: string;
+    thinkingTokenMult: number;
+    trainPfDays?: number;
+  },
+): SimState {
+  if (!effortReasoningUnlocked(state.player.researchUnlocked)) {
+    return withAlert(
+      state,
+      "warn",
+      "Process Reward research is required to train extra effort heads.",
+    );
+  }
+  const name = request.name.trim().slice(0, 24);
+  if (!name) return withAlert(state, "warn", "Name the effort head.");
+  const thinkingTokenMult = clampThinkingTokenMult(request.thinkingTokenMult);
+  const jobs = playerTrainingJobs(state);
+  const job = jobs.find((candidate) => candidate.id === request.id);
+  const model = state.player.models.find((candidate) => candidate.id === request.id);
+  const paramsB = job?.targetParamsB ?? model?.paramsB ?? 1;
+  const profile = job
+    ? productProfileForJob(state, job)
+    : model
+      ? productProfileFromModel(
+          model,
+          state.player.postTrainGyms,
+          state.player.researchUnlocked,
+        )
+      : null;
+  if (!profile) return withAlert(state, "warn", "Model not found.");
+  const recipes = migrateEffortRecipes(profile);
+  if (recipes.filter((recipe) => recipe.kind === "trained").length >= MAX_TRAINED_EFFORTS) {
+    return withAlert(state, "warn", "At most three trained effort heads.");
+  }
+  const gymQuality = gymQualityByKind(state.player.postTrainGyms, "math");
+  const required = effortTrainTargetPfDays({
+    paramsB,
+    thinkingTokenMult,
+    gymQuality,
+    researchUnlocked: state.player.researchUnlocked,
+  });
+  const funded = Math.max(1, request.trainPfDays ?? required);
+  const cash = effortCashCost(Math.min(funded, required * 1.4), paramsB);
+  if (state.player.cash + 1e-9 < cash) {
+    return withAlert(
+      state,
+      "warn",
+      `Need $${cash.toLocaleString("en-US")} to train ${name}.`,
+    );
+  }
+  const recipeId = seededId("effort", state.seed, request.id, name, String(thinkingTokenMult));
+  const nextRecipe = {
+    id: recipeId,
+    name,
+    kind: "trained" as const,
+    thinkingTokenMult,
+    trainPfDays: funded,
+    trainCash: cash,
+    trained: true,
+    quality: effortQualityFromTrain(funded, required),
+    served: true,
+  };
+  const nextProfile = {
+    ...profile,
+    effortRecipes: [...recipes, nextRecipe],
+    defaultEffortId: recipeId,
+  };
+  const charged = chargeExpense(state, cash, "training");
+  return patchProductProfile(charged, request.id, () => nextProfile);
+}
+
+export function listReleasedModel(
+  state: SimState,
+  request: {
+    modelId: string;
+    sell: boolean;
+    apiIn?: number | null;
+    apiOut?: number | null;
+    planIds?: readonly string[];
+  },
+): SimState {
+  const model = state.player.models.find(
+    (candidate) => candidate.id === request.modelId,
+  );
+  if (!model || (model.release !== "released" && !model.shipped)) {
+    return withAlert(state, "warn", "Release the model before listing it.");
+  }
+  let next: SimState = {
+    ...state,
+    player: {
+      ...state.player,
+      models: state.player.models.map((candidate) =>
+        candidate.id === request.modelId
+          ? { ...candidate, commerciallyOffered: request.sell }
+          : candidate,
+      ),
+    },
+  };
+  if (!request.sell) {
+    return setModelApiInOut(next, request.modelId, null, null);
+  }
+  const listApi = request.apiIn != null || request.apiOut != null;
+  next = listApi
+    ? setModelApiInOut(
+        next,
+        request.modelId,
+        request.apiIn ?? null,
+        request.apiOut ?? null,
+      )
+    : setModelApiInOut(next, request.modelId, null, null);
+  if (listApi) {
+    const apiIds = next.player.pricing.apiModelIds ?? [];
+    if (!apiIds.includes(request.modelId)) {
+      next = {
+        ...next,
+        player: {
+          ...next.player,
+          pricing: {
+            ...next.player.pricing,
+            apiModelIds: [...apiIds, request.modelId],
+            activeModelId: next.player.pricing.activeModelId ?? request.modelId,
+          },
+        },
+      };
+    }
+  }
+  for (const planId of request.planIds ?? []) {
+    const plan = next.player.pricing.plans.find((item) => item.id === planId);
+    if (!plan || plan.modelIds.includes(request.modelId)) continue;
+    next = updatePlan(next, planId, {
+      modelIds: [...plan.modelIds, request.modelId],
+    });
+  }
+  return next;
+}
+
+function patchProductProfile(
+  state: SimState,
+  id: string,
+  patch: (profile: ModelProductProfile) => ModelProductProfile,
+): SimState {
+  const jobs = playerTrainingJobs(state).map((job) => {
+    if (job.id !== id) return job;
+    return { ...job, productProfile: patch(productProfileForJob(state, job)) };
+  });
+
+  const models = state.player.models.map((model) => {
+    if (model.id !== id) return model;
+    const profile = productProfileFromModel(
+      model,
+      state.player.postTrainGyms,
+      state.player.researchUnlocked,
+    );
+    return { ...model, productProfile: patch(profile) };
+  });
+
+  const withJobs = withTrainingJobs(state, jobs);
+  return {
+    ...withJobs,
+    player: {
+      ...withJobs.player,
+      models,
+    },
+  };
+}
+
 export function setModelApiPrice(
   state: SimState,
   modelId: string,
   price: number | null,
 ): SimState {
   // Blended single price → split into in/out using same mix as global defaults
+  const snap = computeSnapshot(state);
   const models = state.player.models.map((m) => {
     if (m.id !== modelId) return m;
+    const hosting = apiHostingCostFloor(state, snap, m);
     if (price === null) {
       return {
         ...m,
         apiPricePerMTok: null,
         apiPriceInPerMTok: null,
         apiPriceOutPerMTok: null,
+        costApiPriceIn: hosting.costIn,
+        costApiPriceOut: hosting.costOut,
       };
     }
-    const p = Math.max(0, price);
-    const split = splitBlendedApiPrice(p);
+    const split = splitBlendedApiPrice(Math.max(0, price));
+    const listed = clampApiListToHostingFloor(
+      split.priceIn,
+      split.priceOut,
+      hosting,
+    );
     return {
       ...m,
-      apiPricePerMTok: p,
-      apiPriceInPerMTok: split.priceIn,
-      apiPriceOutPerMTok: split.priceOut,
+      apiPriceInPerMTok: listed.priceIn,
+      apiPriceOutPerMTok: listed.priceOut,
+      apiPricePerMTok: blendApiPrice(listed.priceIn, listed.priceOut),
+      costApiPriceIn: hosting.costIn,
+      costApiPriceOut: hosting.costOut,
     };
   });
   return { ...state, player: { ...state.player, models } };
@@ -4219,26 +5030,32 @@ export function setModelApiInOut(
   priceIn: number | null,
   priceOut: number | null,
 ): SimState {
+  const snap = computeSnapshot(state);
   const models = state.player.models.map((m) => {
     if (m.id !== modelId) return m;
+    const hosting = apiHostingCostFloor(state, snap, m);
     if (priceIn === null && priceOut === null) {
       return {
         ...m,
         apiPriceInPerMTok: null,
         apiPriceOutPerMTok: null,
         apiPricePerMTok: null,
+        costApiPriceIn: hosting.costIn,
+        costApiPriceOut: hosting.costOut,
       };
     }
-    const pin = Math.max(0, priceIn ?? m.apiPriceInPerMTok ?? m.costApiPriceIn);
-    const pout = Math.max(
-      0,
-      priceOut ?? m.apiPriceOutPerMTok ?? m.costApiPriceOut,
+    const listed = clampApiListToHostingFloor(
+      priceIn ?? m.apiPriceInPerMTok ?? hosting.costIn,
+      priceOut ?? m.apiPriceOutPerMTok ?? hosting.costOut,
+      hosting,
     );
     return {
       ...m,
-      apiPriceInPerMTok: pin,
-      apiPriceOutPerMTok: pout,
-      apiPricePerMTok: blendApiPrice(pin, pout),
+      apiPriceInPerMTok: listed.priceIn,
+      apiPriceOutPerMTok: listed.priceOut,
+      apiPricePerMTok: blendApiPrice(listed.priceIn, listed.priceOut),
+      costApiPriceIn: hosting.costIn,
+      costApiPriceOut: hosting.costOut,
     };
   });
   return { ...state, player: { ...state.player, models } };
@@ -4252,8 +5069,9 @@ export function applyModelApiMarkup(
 ): SimState {
   const m = state.player.models.find((x) => x.id === modelId);
   if (!m) return state;
-  const unit = apiUnitCostPerMTok(state, computeSnapshot(state), m);
-  const listCostBasis = boundedApiListCostPerMTok(m, unit.blended);
+  const snap = computeSnapshot(state);
+  const hosting = apiHostingCostFloor(state, snap, m);
+  const listCostBasis = boundedApiListCostPerMTok(m, hosting.blended);
   const sug = suggestApiInOut({
     costPerMTokBase: listCostBasis,
     paramsB: m.paramsB,
@@ -4263,27 +5081,24 @@ export function applyModelApiMarkup(
     capability: m.capability,
     markupPct,
   });
-  const realizedCost = splitInOutCost(unit.blended);
-  // Refresh stored cost basis so UI markup % stays honest next render.
-  // Realized COGS remains uncapped even when the automatic market quote is
-  // guarded; an under-provisioned endpoint therefore still shows a loss.
+  const listed = clampApiListToHostingFloor(sug.priceIn, sug.priceOut, hosting);
   const models = state.player.models.map((model) =>
     model.id === modelId
       ? {
           ...model,
-          costApiPriceIn: realizedCost.costIn,
-          costApiPriceOut: realizedCost.costOut,
-          suggestedApiPriceIn: sug.priceIn,
-          suggestedApiPriceOut: sug.priceOut,
-          suggestedApiPrice: sug.blendedPrice,
+          costApiPriceIn: hosting.costIn,
+          costApiPriceOut: hosting.costOut,
+          suggestedApiPriceIn: listed.priceIn,
+          suggestedApiPriceOut: listed.priceOut,
+          suggestedApiPrice: blendApiPrice(listed.priceIn, listed.priceOut),
         }
       : model,
   );
   return setModelApiInOut(
     { ...state, player: { ...state.player, models } },
     modelId,
-    sug.priceIn,
-    sug.priceOut,
+    listed.priceIn,
+    listed.priceOut,
   );
 }
 
@@ -4291,6 +5106,7 @@ function buildModelFromJob(
   state: SimState,
   job: TrainingJob,
   release: "internal" | "released",
+  list = release === "released",
 ): Model {
   const modelResearchUnlocked =
     job.integratedMethods ?? state.player.researchUnlocked;
@@ -4336,6 +5152,8 @@ function buildModelFromJob(
     job,
     state.player.researchUnlocked,
     modelContext,
+    state.player.postTrainGyms,
+    state.player.toolSkills,
   );
   const investmentMaturity = fundedTrainingMaturity(job);
   const completedPostStages = completedPostTrainStages(job);
@@ -4343,6 +5161,8 @@ function buildModelFromJob(
     job,
     state.player.researchUnlocked,
     modelContext,
+    state.player.postTrainGyms,
+    state.player.toolSkills,
   );
   const hasCompletedPostStage = (stage: Exclude<PostTrainStage, "none">) =>
     completedPostStages.includes(stage) &&
@@ -4737,6 +5557,17 @@ function buildModelFromJob(
     }
   }
 
+  const gymExtras = trainingGymDomainExtras(
+    state.player.postTrainGyms,
+    job.attachedGymKinds,
+  );
+  for (const [key, value] of Object.entries(gymExtras) as [
+    keyof BenchmarkScores,
+    number,
+  ][]) {
+    extras[key] = (extras[key] ?? 0) + value;
+  }
+
   // Recompute scale at final capability-influencing state for benches
   scale = scaleIntelligence({
     paramsB,
@@ -4811,36 +5642,27 @@ function buildModelFromJob(
     }
   }
 
-  // Train vs verify split: more train → smarter; more verify → safer/reliable
-  const trainShare = job.trainShare ?? 0.82;
-  const verifyShare = 1 - trainShare;
-  const dataVol = Math.max(0.01, (job.trainMTok ?? 0) + (job.verifyMTok ?? 0));
-  if (job.mode === "continue") {
-    // Continue: no 1:1 requirement — new tokens give soft lift
-    const soft = Math.min(1.4, Math.log10(1 + dataVol / 50) / 2);
-    capability = clamp(capability + soft * trainShare * 4 + soft * 1.5);
-    quality.safety = clamp(quality.safety + soft * verifyShare * 6);
-    quality.reliability = clamp(
-      quality.reliability + soft * verifyShare * 5 + soft * 2,
-    );
-    quality.reasoning = clamp(quality.reasoning + soft * trainShare * 3);
-    quality.coding = clamp(quality.coding + soft * trainShare * 2.5);
-  } else {
-    const minNeed = minDataMTokForParams(paramsB);
-    const volRatio = Math.min(2, dataVol / Math.max(1, minNeed));
-    const overData = Math.max(0, volRatio - 1);
-    capability = clamp(
-      capability * (0.92 + trainShare * 0.1 + overData * trainShare * 0.06),
-    );
-    quality.safety = clamp(
-      quality.safety + verifyShare * 12 + overData * verifyShare * 8,
-    );
-    quality.reliability = clamp(
-      quality.reliability + verifyShare * 10 + overData * verifyShare * 6,
-    );
-    quality.reasoning = clamp(quality.reasoning + trainShare * overData * 4);
-    quality.coding = clamp(quality.coding + trainShare * overData * 3);
-  }
+  const recipeSignals = recipeOutcomeSignals({
+    totalMTok:
+      Math.max(0, job.trainMTok ?? 0) +
+      Math.max(0, job.verifyMTok ?? 0) +
+      Math.max(0, job.dataPlan?.postTrainMTok ?? 0),
+    paramsB,
+    family,
+    backbone,
+    activeParamsB,
+    postTrainShare:
+      job.dataPlan?.postTrainShare ?? DEFAULT_RECIPE_ALIGN_SHARE,
+    trainShare: job.trainShare ?? 0.82,
+  });
+  const recipeApplied = applyRecipeOutcome({
+    capability,
+    quality,
+    signals: recipeSignals,
+    continueMode: job.mode === "continue",
+  });
+  capability = recipeApplied.capability;
+  Object.assign(quality, recipeApplied.quality);
 
   if (job.mode === "distill" && teacher) {
     const d = distillFromTeacher({
@@ -4951,16 +5773,17 @@ function buildModelFromJob(
   const frontierCapability = Math.max(
     syntheticTeacherCapability,
     ...state.player.models
-      .filter((model) => model.release === "released" || model.shipped)
+      .filter(isLivePublicModel)
       .map((model) => model.capability),
     ...state.rivals.flatMap((rival) =>
-      rival.models
-        .filter((model) => model.release === "released" || model.shipped)
-        .map((model) => model.capability),
+      rival.models.filter(isLivePublicModel).map((model) => model.capability),
     ),
   );
   const syntheticProfile = syntheticTrainingProfile({
-    realMTok: Math.max(0, dataVol - (job.syntheticUnits ?? 0)),
+    realMTok: Math.max(
+      0,
+      recipeSignals.totalMTok - (job.syntheticUnits ?? 0),
+    ),
     syntheticMTok: job.syntheticUnits ?? 0,
     teacherCapability: syntheticTeacherCapability,
     frontierCapability,
@@ -5130,20 +5953,20 @@ function buildModelFromJob(
   }
   inferCostMult *= precision.inferenceCostMultiplier;
 
-  // Seed list prices from the canonical capacity-based unit cost (model has
-  // not served yet). Falls back to FALLBACK_COST_PER_MTOK on empty campuses.
-  const birthCostBasis = birthApiUnitCostPerMTok(
-    state,
-    computeSnapshot(state),
-    {
-      id: `birth-${job.id}`,
-      paramsB,
-      activeParamsB,
-      family,
-      inferCostMult,
-      tokPerSecMult,
-    },
-  );
+  // Seed list prices from campus hosting cost. Suggested quotes stay inside
+  // the bounded launch envelope; the stored floor and listed prices cannot
+  // go below what it costs to host this size on the current fleet.
+  const birthModel = {
+    id: `birth-${job.id}`,
+    paramsB,
+    activeParamsB,
+    family,
+    inferCostMult,
+    tokPerSecMult,
+  };
+  const birthSnap = computeSnapshot(state);
+  const hosting = apiHostingCostFloor(state, birthSnap, birthModel);
+  const birthCostBasis = birthApiUnitCostPerMTok(state, birthSnap, birthModel);
   const apiSug = suggestApiInOut({
     costPerMTokBase: birthCostBasis,
     paramsB,
@@ -5153,23 +5976,20 @@ function buildModelFromJob(
     capability,
     markupPct: state.player.pricing.apiMarkupPct ?? 120,
   });
-  const suggested = suggestedApiPricePerMTok({
-    paramsB,
-    activeParamsB,
-    family,
-    inferCostMult,
-    capability,
-    costPerMTokBase: birthCostBasis,
-  });
+  const listed = clampApiListToHostingFloor(
+    apiSug.priceIn,
+    apiSug.priceOut,
+    hosting,
+  );
 
   const continueCompute =
     (continueBase?.continueCompute ?? 0) +
     (job.mode === "continue" ? job.progressPfDays : 0);
 
-  // Every checkpoint version gets a fresh bounded compute-derived launch
-  // price. The source version keeps its own custom list unchanged.
-  const listIn = apiSug.priceIn;
-  const listOut = apiSug.priceOut;
+  // Every checkpoint version gets a fresh compute-derived launch price.
+  // The source version keeps its own custom list unchanged.
+  const listIn = listed.priceIn;
+  const listOut = listed.priceOut;
   const listBlend = Math.round(blendApiPrice(listIn, listOut) * 1000) / 1000;
 
   const productPreset = job.productPreset ?? presetFromFamily(family);
@@ -5225,6 +6045,29 @@ function buildModelFromJob(
   const versionLabel = `0.${revision}`;
   const versionName = continueBase ? `${rootName} ${versionLabel}` : job.name;
 
+  const productProfile = buildModelProductProfile({
+    lifecycle: job.lifecycle,
+    focus: job.specializationFocus,
+    branchDirection: job.branchDirection,
+    postTrain: effectivePostTrainStage,
+    completedPostTrainStages: completedPostStages,
+    postTrainStageEffectiveness: {
+      ...(continueBase?.postTrainStageEffectiveness ?? {}),
+      ...resolvedStageEffectiveness,
+    },
+    chatShare: job.dataPlan?.weights?.chat ?? 0,
+    chatQuality: job.dataQualityByDomain?.chat ?? job.dataQualityUsed ?? 50,
+    gyms: state.player.postTrainGyms,
+    stackIds: job.modelStack,
+    researchUnlocked: state.player.researchUnlocked,
+    family,
+    backbone,
+    reasoningEnabled: reasoningTrained,
+    outcomeSeed: job.outcomeSeed,
+    existing: job.productProfile ?? continueBase?.productProfile,
+  });
+  benchmarks = { ...benchmarks, personality: productProfile.personality };
+
   return normalizeModelEvaluations({
     id: modelId,
     lineageId,
@@ -5263,6 +6106,7 @@ function buildModelFromJob(
     modalities,
     quality,
     benchmarks,
+    productProfile,
     postTrain: effectivePostTrainStage,
     completedPostTrainStages: completedPostStages,
     postTrainStageEffectiveness: {
@@ -5280,17 +6124,18 @@ function buildModelFromJob(
     releaseDay: state.day,
     shipped: release === "released",
     release,
+    commerciallyOffered: list,
     tokPerSecMult,
     inferCostMult,
     serviceProfile,
     apiPricePerMTok: listBlend,
     apiPriceInPerMTok: listIn,
     apiPriceOutPerMTok: listOut,
-    suggestedApiPrice: suggested,
-    suggestedApiPriceIn: apiSug.priceIn,
-    suggestedApiPriceOut: apiSug.priceOut,
-    costApiPriceIn: apiSug.costIn,
-    costApiPriceOut: apiSug.costOut,
+    suggestedApiPrice: listBlend,
+    suggestedApiPriceIn: listIn,
+    suggestedApiPriceOut: listOut,
+    costApiPriceIn: hosting.costIn,
+    costApiPriceOut: hosting.costOut,
     distilled: job.mode === "distill" || !!continueBase?.distilled,
     teacherId: job.teacherId ?? continueBase?.teacherId,
     distillTeacherShare:
@@ -5353,7 +6198,18 @@ function clamp(n: number, lo = 0, hi = 100) {
   return Math.max(lo, Math.min(hi, n));
 }
 
+function beginReadyLinkedPostTrain(state: SimState): SimState {
+  let next = state;
+  for (const job of playerTrainingJobs(next)) {
+    if (jobNeedsLinkedPostTrain(job)) {
+      next = beginLinkedPostTrain(next, job.id);
+    }
+  }
+  return next;
+}
+
 export function tickTraining(state: SimState): SimState {
+  state = beginReadyLinkedPostTrain(state);
   const jobs = playerTrainingJobs(state);
   if (!jobs.length) return state;
 
@@ -5381,19 +6237,19 @@ export function tickTraining(state: SimState): SimState {
     message: string;
   }> = [];
   // Campaign decisions are intentionally non-blocking for the simulation.
-  // If the player ignores one for five days, the safest recommended response
+  // If the player ignores one for five days, the duty-scientist (AFK) recipe
   // is applied automatically (including its real cash cost when affordable).
   const campaignResolvedJobs = jobs.map((job) => {
     const event = job.pendingCampaignEvent;
     if (!event || state.day < event.decisionDeadlineDay) return job;
-    const recommendation = recommendedTrainingCampaignChoice(event);
-    const cost = Math.max(0, recommendation.effects.cashCost ?? 0);
+    const duty = dutyScientistCampaignChoice(event);
+    const cost = Math.max(0, duty.effects.cashCost ?? 0);
     const qualified =
       nextState.player.cash + 1e-9 >= cost &&
       (nextState.player.staff?.researcher ?? 0) >=
-        (recommendation.effects.minResearchers ?? 0);
+        (duty.effects.minResearchers ?? 0);
     const selected = qualified
-      ? recommendation
+      ? duty
       : event.choices.find(
           (choice) =>
             nextState.player.cash + 1e-9 >=
@@ -5426,6 +6282,12 @@ export function tickTraining(state: SimState): SimState {
     if (selectedCost > 0 && nextState.player.cash + 1e-9 >= selectedCost) {
       nextState = chargeExpense(nextState, selectedCost, "training");
     }
+    if ((selected.effects.progressRollbackFraction ?? 0) > 0) {
+      nextState = createManualTrainingCheckpoint(nextState, {
+        sourceJobId: job.id,
+        label: `${job.name} · pre-rollback`,
+      });
+    }
     const resolved = applyTrainingCampaignChoice(
       job,
       selected.id,
@@ -5436,7 +6298,7 @@ export function tickTraining(state: SimState): SimState {
       id: `train-campaign-auto-${job.id}-${state.day}`,
       day: state.day,
       severity: "warn",
-      message: `${job.name}: ${event.title} auto-resolved with ${selected.label}.`,
+      message: `${job.name}: ${event.title} auto-resolved with the safe default (${selected.label}).`,
     });
     return resolved ?? job;
   });
@@ -5577,7 +6439,7 @@ export function tickTraining(state: SimState): SimState {
           id: `train-campaign-${job.id}-${campaignMilestone.index}`,
           day: state.day,
           severity: event.severity === "opportunity" ? "info" : "warn",
-          message: `${job.name}: ${event.title}. Choose an intervention within 5 days.`,
+          message: `${job.name}: ${event.title}. Craft an intervention within 5 days. Weights are not saved unless you snapshot or roll back.`,
         });
         return {
           ...job,
@@ -5651,6 +6513,8 @@ export function tickTraining(state: SimState): SimState {
             models: state.player.models,
             progress: nextProgress,
             daysElapsed: postTrainDaysElapsed,
+            gyms: state.player.postTrainGyms,
+            tools: state.player.toolSkills,
           })
         : undefined;
       const failureProgress =
@@ -5760,27 +6624,7 @@ export function tickTraining(state: SimState): SimState {
       stallReason,
     };
   });
-  let next = withTrainingJobs(nextState, nextJobs);
-  // Every newly reached campaign milestone writes one immutable candidate.
-  // Candidate generation is derived from the already-frozen job seed and does
-  // not consume or alter simulation RNG state.
-  for (const job of nextJobs) {
-    const before = jobs.find((candidate) => candidate.id === job.id);
-    const beforeReached = new Set(before?.campaignMilestonesReached ?? []);
-    for (const milestone of job.campaignMilestonesReached ?? []) {
-      if (beforeReached.has(milestone)) continue;
-      const captured = appendTrainingCheckpoint(next, job, milestone);
-      next = captured.state;
-      if (captured.candidate) {
-        tickAlerts.push({
-          id: `train-checkpoint-${captured.candidate.id}`,
-          day: state.day,
-          severity: "info",
-          message: `${job.name}: ${Math.round(milestone * 100)}% weights captured for stealth evaluation. Training continues after the campaign decision.`,
-        });
-      }
-    }
-  }
+  let next = beginReadyLinkedPostTrain(withTrainingJobs(nextState, nextJobs));
   const newlyFailed = nextJobs.filter(
     (job) => job.failed && !jobs.find((before) => before.id === job.id)?.failed,
   );

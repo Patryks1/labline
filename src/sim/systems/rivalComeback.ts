@@ -1,6 +1,10 @@
 import { architecturePretrainingCapabilityCap } from '../balance/architectureFrontiers'
 import { normalizeModelEvaluations, suiteComposite } from '../balance/evaluationSuites'
 import { buildScaledModel } from '../balance/modelBuild'
+import {
+  highestPostTrainStage,
+  postTrainStagesFromResearch,
+} from '../balance/modelProduct'
 import { deriveModelCapabilities, modalityExperienceCounts } from '../balance/modelCapabilities'
 import { bentCapabilityCeiling } from '../balance/modelScaling'
 import {
@@ -9,6 +13,7 @@ import {
   splitBlendedApiPrice,
 } from '../balance/pricing'
 import { ioForPreset } from '../balance/trainingV3'
+import { rivalEraParamCeilingB } from '../balance/rivalScale'
 import { createRng, hashSeed } from '../rng'
 import type {
   CapitalStack,
@@ -23,6 +28,7 @@ import type {
   RivalLab,
   SimState,
 } from '../types'
+import { isLivePublicModel } from '../modelRelease'
 import { updateLab } from './labEngine'
 import { chooseRivalServePrecision } from './rivalStrategy'
 
@@ -33,7 +39,9 @@ export const RIVAL_COMEBACK_FAILED_COOLDOWN_DAYS = 365
 export const RIVAL_COMEBACK_MIN_LEAD_DAYS = 21
 export const RIVAL_COMEBACK_MAX_LEAD_DAYS = 35
 
-const PRODUCT_PARAM_LADDER = [12, 22, 34, 70, 110, 180, 235, 405] as const
+const PRODUCT_PARAM_LADDER = [
+  12, 22, 34, 70, 110, 180, 235, 405, 700, 1100, 1800, 2500, 3500, 5000,
+] as const
 const INVESTORS = [
   'Atlas Sovereign Compute',
   'Northstar Continuity Fund',
@@ -334,7 +342,7 @@ function releasedModels(state: SimState): Model[] {
   return [
     ...state.player.models,
     ...state.rivals.flatMap((rival) => rival.models),
-  ].filter((model) => model.release === 'released' || model.shipped)
+  ].filter(isLivePublicModel)
 }
 
 function frontierForMarket(state: SimState, market: ProductMarket): number {
@@ -385,6 +393,9 @@ function buildAcquiredCheckpoint(
     mixWeights: domainWeightsForPreset(productPreset),
     researchUnlocked,
     researchMult: researchMultiplier,
+    postTrain: highestPostTrainStage(
+      postTrainStagesFromResearch(researchUnlocked),
+    ),
     effectiveDataRatio: dataCoverage,
     modalityExperience,
     openWeights: rival.archetype === 'open_weights',
@@ -400,7 +411,17 @@ function chooseCheckpointScale(
   desired: number,
 ): { paramsB: number; model: Model; score: number } {
   const market = productMarket(plan.productPreset ?? 'language')
-  const candidates = PRODUCT_PARAM_LADDER.map((paramsB) => {
+  const ceiling = rivalEraParamCeilingB({
+    day: state.day,
+    archetype: rival.archetype,
+    publicFrontierParamsB: Math.max(
+      0,
+      ...releasedModels(state).map((model) => model.paramsB),
+    ),
+  })
+  const rungs = PRODUCT_PARAM_LADDER.filter((paramsB) => paramsB <= ceiling * 1.05)
+  const candidates = (rungs.length > 0 ? rungs : [PRODUCT_PARAM_LADDER[0]!]).map(
+    (paramsB) => {
     const model = buildAcquiredCheckpoint(state, rival, plan, paramsB)
     return {
       paramsB,
@@ -696,7 +717,7 @@ function peerPriceAnchor(
   const ownScore = Math.max(5, rivalComebackProductScore(model, market))
   const prices: number[] = []
   for (const peer of state.player.models) {
-    if (!(peer.release === 'released' || peer.shipped) || !modelMatchesMarket(peer, market)) {
+    if (!isLivePublicModel(peer) || !modelMatchesMarket(peer, market)) {
       continue
     }
     prices.push(
@@ -707,7 +728,7 @@ function peerPriceAnchor(
   for (const rival of state.rivals) {
     if (rival.id === ownerId) continue
     for (const peer of rival.models) {
-      if (!(peer.release === 'released' || peer.shipped) || !modelMatchesMarket(peer, market)) {
+      if (!isLivePublicModel(peer) || !modelMatchesMarket(peer, market)) {
         continue
       }
       prices.push(

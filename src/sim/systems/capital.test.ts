@@ -5,10 +5,12 @@ import {
   applyForDebt,
   applyForLabDebt,
   capitalSnapshot,
+  fundRivalForCampus,
   repayDebt,
   requestEquityOffers,
   tickCapital,
 } from './capital'
+import { updateLab } from './labEngine'
 
 describe('capital stack', () => {
   it('calculates exact post-money ownership', () => {
@@ -169,5 +171,30 @@ describe('capital stack', () => {
       stage: 'none',
     })
     expect(next.alerts.some((a) => a.message.startsWith('Cash negative'))).toBe(false)
+  })
+
+  it('scales equity cheques with valuation so a hall is fundable', () => {
+    const state = createGame(410)
+    const rival = state.rivals[0]!
+    const offers = requestEquityOffers(state, rival.id)
+    expect(offers[0]!.cashRaised).toBeGreaterThanOrEqual(12_000_000)
+    expect(offers[2]!.cashRaised).toBeGreaterThanOrEqual(55_000_000)
+    expect(offers[2]!.cashRaised).toBeGreaterThan(offers[0]!.cashRaised)
+  })
+
+  it('funds a cash-poor rival with equity or campus debt before a hall', () => {
+    const state = createGame(411)
+    const rival = state.rivals[0]!
+    const broke = updateLab(state, rival.id, (lab) => ({
+      ...lab,
+      cash: 1_000_000,
+      finance: { ...lab.finance, cash: 1_000_000 },
+    }))
+    const funded = fundRivalForCampus(broke, rival.id, 128_000_000)
+    const after = funded.rivals.find((candidate) => candidate.id === rival.id)!
+    expect(after.cash).toBeGreaterThanOrEqual(128_000_000)
+    const raised =
+      (after.capital?.fundingRounds.length ?? 0) + (after.capital?.debt.length ?? 0)
+    expect(raised).toBeGreaterThan(0)
   })
 })

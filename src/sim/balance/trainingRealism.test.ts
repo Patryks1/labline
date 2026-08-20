@@ -43,7 +43,7 @@ describe('training formula v2', () => {
     expect(computeOptimalDensePfDays(405)).toBeCloseTo(227_812.5, 6)
   })
 
-  it('applies two-times calendar compression after physical work', () => {
+  it('applies 1.5× calendar compression after physical work', () => {
     const gamePfDays = trainCostPfDays({
       paramsB: 1,
       family: 'dense',
@@ -51,9 +51,9 @@ describe('training formula v2', () => {
       trainingTokensMTok: 20_000,
       formulaVersion: 2,
     })
-    expect(TRAINING_CALENDAR_COMPRESSION).toBe(2)
+    expect(TRAINING_CALENDAR_COMPRESSION).toBe(1.5)
     expect(gamePfDays).toBeCloseTo(
-      (1.3888888889 * MODEL_SYSTEMS_WORK_MULTIPLIER) / 2,
+      (1.3888888889 * MODEL_SYSTEMS_WORK_MULTIPLIER) / 1.5,
       9,
     )
   })
@@ -91,7 +91,7 @@ describe('training formula v2', () => {
       verificationTokensMTok: 2_000,
     })
     expect(withVerify - withoutVerify).toBeCloseTo(
-      (verificationPfDays(1, 2_000) * MODEL_SYSTEMS_WORK_MULTIPLIER) / 2,
+      (verificationPfDays(1, 2_000) * MODEL_SYSTEMS_WORK_MULTIPLIER) / 1.5,
       9,
     )
   })
@@ -185,11 +185,11 @@ describe('training numerical formats', () => {
       0.08 *
       estimate.precision.upfrontCashMultiplier
 
-    expect(oldSetupCost).toBeGreaterThan(12_000)
-    expect(oldSetupCost).toBeLessThan(13_000)
+    expect(oldSetupCost).toBeGreaterThan(16_000)
+    expect(oldSetupCost).toBeLessThan(17_500)
     expect(estimate.setupCost / oldSetupCost).toBeCloseTo(25, 3)
-    expect(estimate.setupCost).toBeGreaterThan(310_000)
-    expect(estimate.setupCost).toBeLessThan(320_000)
+    expect(estimate.setupCost).toBeGreaterThan(410_000)
+    expect(estimate.setupCost).toBeLessThan(430_000)
   })
 
   it('makes FP32 the highest-cost, highest-ceiling training recipe', () => {

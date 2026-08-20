@@ -1,15 +1,32 @@
-import { useMemo, useState } from 'react'
-import type { BenchmarkMetricId } from '../../../sim/types'
+import { Fragment, useMemo, useState } from 'react'
+import type {
+  BenchmarkMetricId,
+  BenchmarkSuiteId,
+  EffortBoard,
+  Model,
+  SimState,
+} from '../../../sim/types'
 import { formatParams } from '../../../sim/balance/training'
+import {
+  INSTANT_EFFORT_ID,
+  effortBoardsFor,
+  migrateEffortRecipes,
+} from '../../../sim/balance/modelProduct'
+import { blendApiPrice } from '../../../sim/balance/pricing'
+import { apiUnitCostPerMTok } from '../../../sim/balance/unitEconomics'
+import { computeSnapshot } from '../../../sim/tick'
 import {
   EVALUATION_MARKETS,
   evaluationMarketsForModel,
   suiteForEvaluationMarket,
   type EvaluationMarket,
+  type BenchmarkMetricDef,
 } from '../../../sim/balance/evaluationSuites'
 import { collectLeaderboardModels } from '../../../sim/systems/rivals'
+import { playerTrainingJobs } from '../../../sim/systems/training'
+import { isInternalFleetModel } from '../../../sim/modelRelease'
 import { useGameStore } from '../../../store/gameStore'
-import { num } from '../format'
+import { money, num } from '../format'
 import {
   buildAudienceReviewGroups,
   type PlanAudienceReview,
@@ -32,7 +49,7 @@ import {
 
 const PAGE = 15
 
-type BenchTab = 'leaderboard' | 'compare' | 'reviews'
+type BenchTab = 'leaderboard' | 'internal' | 'compare' | 'reviews'
 
 /**
  * Cross-lab eval leaderboard — top 15 by default, load older/weaker models on demand.
@@ -60,10 +77,55 @@ export function BenchmarksPanel() {
         })
   }, [state, sortId, market])
 
+  const internalRows = useMemo(() => {
+    const jobs = playerTrainingJobs(state).filter((job) => !job.failed)
+    const training = jobs.map((job) => {
+      const snapshot = job.benchmarkSnapshots?.at(-1)
+      return {
+        id: job.id,
+        name: job.name,
+        status: 'training' as const,
+        day: snapshot?.day ?? state.day,
+        capability: snapshot?.capability ?? null,
+        safety: snapshot?.safety ?? null,
+        suite: snapshot?.suite ?? snapshot?.capability ?? null,
+        pending: Boolean(job.pendingBenchmark),
+        model: null as (typeof state.player.models)[number] | null,
+        effortBoards: snapshot?.effortBoards,
+      }
+    })
+    const internal = state.player.models
+      .filter(isInternalFleetModel)
+      .map((model) => ({
+        id: model.id,
+        name: model.name,
+        status: 'internal' as const,
+        day: model.releaseDay,
+        capability: model.capability,
+        safety: model.quality.safety,
+        suite: publicBenchmarkScore(model, suiteForEvaluationMarket(market), 'mmlu')
+          ?? model.capability,
+        pending: false,
+        model,
+        effortBoards: undefined as EffortBoard[] | undefined,
+      }))
+    return [...training, ...internal]
+  }, [state, market])
+
   const suiteId = suiteForEvaluationMarket(market)
   const metrics = benchmarkMetricsForSuite(suiteId)
-
+  const snap = useMemo(() => computeSnapshot(state), [state])
   const visible = showAll ? rows : rows.slice(0, PAGE)
+  const effortColumns = useMemo(
+    () =>
+      namedEffortColumns([
+        ...visible.map((row) => row.model),
+        ...internalRows
+          .map((row) => row.model)
+          .filter((model): model is Model => model != null),
+      ]),
+    [internalRows, visible],
+  )
   const hidden = Math.max(0, rows.length - PAGE)
   const reviewGroups = useMemo(() => buildAudienceReviewGroups(state), [state])
   const selectedReviewGroup =
@@ -158,7 +220,7 @@ export function BenchmarksPanel() {
     <PanelScaffold
       eyebrow="Evals"
       title="Benchmarks"
-      description="Board, compare, and reviews."
+      description="Public field scores. Training snapshots stay on Internal. Voice is personality, not capability."
       actions={
         <div className="flex items-center gap-1.5">
           <BenchmarkEntryPoint
@@ -218,6 +280,17 @@ export function BenchmarksPanel() {
                   Leaderboard
                   <span className="font-mono text-[0.625rem] text-muted">
                     {rows.length}
+                  </span>
+                </span>
+              ),
+            },
+            {
+              id: 'internal',
+              label: (
+                <span className="inline-flex items-center gap-1.5">
+                  Internal
+                  <span className="font-mono text-[0.625rem] text-muted">
+                    {internalRows.length}
                   </span>
                 </span>
               ),
@@ -294,8 +367,9 @@ export function BenchmarksPanel() {
             <div className="flex flex-wrap items-center gap-2 text-[0.6875rem] text-muted">
               <StatusChip tone="positive">PUBLIC</StatusChip>
               <span>
-                Public releases only. Private checkpoint evidence stays in
-                Models.
+                Released models and live routers. A dash means that axis was
+                not measured. Voice is how pleasant the model is to talk to —
+                it does not raise capability.
               </span>
             </div>
 
@@ -362,6 +436,7 @@ export function BenchmarksPanel() {
                     <th className="px-1.5 py-2">Lab</th>
                     <th className="px-1.5 py-2">Size</th>
                     <th className="px-1.5 py-2">Cap</th>
+                    <EffortColumnHeaders columns={effortColumns} />
                     {metrics.map((d) => (
                       <th
                         key={d.id}
@@ -399,6 +474,9 @@ export function BenchmarksPanel() {
                             {r.isPlayer && (
                               <StatusChip tone="positive">you</StatusChip>
                             )}
+                            {r.kind === 'router' && (
+                              <StatusChip tone="research">router</StatusChip>
+                            )}
                           </span>
                         </td>
                         <td className="px-1.5 py-1.5">
@@ -418,6 +496,13 @@ export function BenchmarksPanel() {
                         <td className="px-1.5 py-1.5 font-mono tabular-nums text-bone">
                           {num(r.model.capability, 0)}
                         </td>
+                        <EffortBoardCells
+                          boards={effortBoardsFor(
+                            r.model,
+                            modelUsdBase(state, snap, r.model, r.isPlayer),
+                          )}
+                          columns={effortColumns}
+                        />
                         {metrics.map((d) => {
                           const s =
                             publicBenchmarkScore(r.model, suiteId, d.id) ?? 0
@@ -430,7 +515,11 @@ export function BenchmarksPanel() {
                                 isLead ? 'text-mint' : 'text-muted'
                               }`}
                             >
-                              {s > 0 ? s.toFixed(0) : '—'}
+                              {s > 0 ? (
+                                s.toFixed(0)
+                              ) : (
+                                <span title="Not measured">—</span>
+                              )}
                             </td>
                           )
                         })}
@@ -470,6 +559,14 @@ export function BenchmarksPanel() {
               </HudButton>
             )}
           </>
+        ) : tab === 'internal' ? (
+          <InternalBenchmarksTab
+            rows={internalRows}
+            suiteId={suiteId}
+            metrics={metrics}
+            state={state}
+            columns={effortColumns}
+          />
         ) : tab === 'compare' ? (
           <BenchmarkCompareTab
             rows={rows}
@@ -491,6 +588,119 @@ export function BenchmarksPanel() {
         )}
       </div>
     </PanelScaffold>
+  )
+}
+
+function InternalBenchmarksTab({
+  rows,
+  suiteId,
+  metrics,
+  state,
+  columns,
+}: {
+  rows: Array<{
+    id: string
+    name: string
+    status: 'training' | 'internal'
+    day: number
+    capability: number | null
+    safety: number | null
+    suite: number | null
+    pending: boolean
+    model: Model | null
+    effortBoards?: EffortBoard[]
+  }>
+  suiteId: BenchmarkSuiteId
+  metrics: readonly BenchmarkMetricDef[]
+  state: SimState
+  columns: NamedEffortColumn[]
+}) {
+  const snap = computeSnapshot(state)
+  if (rows.length === 0) {
+    return (
+      <EmptyState
+        title="No internal evals"
+        description="Start a run and benchmark it, or keep a finished model internal."
+      />
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 text-[0.6875rem] text-muted">
+        <StatusChip tone="research">LAB</StatusChip>
+        <span>
+          In-training snapshots and unreleased models. Use Benchmark on a run
+          in Models to measure weights without releasing them.
+        </span>
+      </div>
+      <div className="overflow-x-auto overscroll-x-contain rounded-lg border border-line/70">
+        <table className="w-full min-w-[640px] border-collapse text-left text-[0.8125rem]">
+          <thead>
+            <tr className="border-b border-line bg-panel-2 font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+              <th className="px-2 py-2">Model</th>
+              <th className="px-1.5 py-2">Status</th>
+              <th className="px-1.5 py-2">Cap</th>
+              <EffortColumnHeaders columns={columns} />
+              {metrics.map((metric) => (
+                <th key={metric.id} className="px-1 py-2 text-center" title={metric.label}>
+                  {metric.short}
+                </th>
+              ))}
+              <th className="px-1.5 py-2">Day</th>
+            </tr>
+          </thead>
+          <tbody className="anim-stagger">
+            {rows.map((row) => (
+              <tr key={`${row.status}-${row.id}`} className="border-b border-line/60 bg-mint/5">
+                <td className="max-w-[200px] truncate px-2 py-1.5 font-medium text-bone">
+                  {row.name}
+                </td>
+                <td className="px-1.5 py-1.5">
+                  <StatusChip tone={row.status === 'training' ? 'warning' : 'research'}>
+                    {row.pending ? 'eval' : row.status}
+                  </StatusChip>
+                </td>
+                <td className="px-1.5 py-1.5 font-mono tabular-nums text-bone">
+                  {row.capability != null ? num(row.capability, 0) : '—'}
+                </td>
+                <EffortBoardCells
+                  boards={
+                    row.model
+                      ? effortBoardsFor(
+                          row.model,
+                          modelUsdBase(state, snap, row.model, true),
+                        )
+                      : (row.effortBoards ?? [])
+                  }
+                  columns={columns}
+                />
+                {metrics.map((metric) => {
+                  const score = row.model
+                    ? publicBenchmarkScore(row.model, suiteId, metric.id)
+                    : metric.id === 'mmlu' || metric.id === 'safety'
+                      ? metric.id === 'safety'
+                        ? row.safety
+                        : row.suite
+                      : null
+                  return (
+                    <td
+                      key={metric.id}
+                      className="px-1 py-1.5 text-center font-mono tabular-nums text-muted"
+                    >
+                      {score != null && score > 0 ? score.toFixed(0) : '—'}
+                    </td>
+                  )
+                })}
+                <td className="px-1.5 py-1.5 font-mono tabular-nums text-muted">
+                  {row.day}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   )
 }
 
@@ -614,5 +824,127 @@ function AudienceReviewCard({ review }: { review: PlanAudienceReview }) {
         ))}
       </div>
     </GameCard>
+  )
+}
+
+type NamedEffortColumn = { key: string; name: string }
+
+function namedEffortColumns(models: readonly Model[]): NamedEffortColumn[] {
+  const seen = new Map<string, string>()
+  for (const model of models) {
+    for (const recipe of migrateEffortRecipes(model.productProfile)) {
+      if (!recipe.trained || recipe.kind === 'instant') continue
+      const key = recipe.name.trim().toLowerCase()
+      if (!seen.has(key)) seen.set(key, recipe.name)
+    }
+  }
+  return [...seen.entries()].map(([key, name]) => ({ key, name }))
+}
+
+function modelUsdBase(
+  state: SimState,
+  snap: ReturnType<typeof computeSnapshot>,
+  model: Model,
+  isPlayer: boolean,
+): number | null {
+  if (isPlayer) return apiUnitCostPerMTok(state, snap, model).blended
+  const inn = model.costApiPriceIn
+  const out = model.costApiPriceOut
+  if (inn == null && out == null) return null
+  return blendApiPrice(inn ?? out ?? 0, out ?? inn ?? 0)
+}
+
+function boardForColumn(
+  boards: readonly EffortBoard[],
+  key: string,
+): EffortBoard | undefined {
+  if (key === INSTANT_EFFORT_ID) {
+    return boards.find(
+      (board) => board.id === INSTANT_EFFORT_ID || board.name === 'Instant',
+    )
+  }
+  return boards.find((board) => board.name.trim().toLowerCase() === key)
+}
+
+function EffortColumnHeaders({
+  columns,
+}: {
+  columns: readonly NamedEffortColumn[]
+}) {
+  return (
+    <>
+      <th className="px-1 py-2 text-center" title="Instant capability">
+        Instant
+      </th>
+      <th
+        className="px-1 py-2 text-center"
+        title="Instant serve cost from campus compute"
+      >
+        Instant $
+      </th>
+      {columns.flatMap((column) => [
+        <th
+          key={column.key}
+          className="px-1 py-2 text-center"
+          title={`${column.name} capability`}
+        >
+          {column.name}
+        </th>,
+        <th
+          key={`${column.key}-usd`}
+          className="px-1 py-2 text-center"
+          title={`${column.name} $/MTok from raw serve compute`}
+        >
+          {column.name} $
+        </th>,
+      ])}
+    </>
+  )
+}
+
+function EffortBoardCells({
+  boards,
+  columns,
+}: {
+  boards: readonly EffortBoard[]
+  columns: readonly NamedEffortColumn[]
+}) {
+  const instant = boardForColumn(boards, INSTANT_EFFORT_ID)
+  return (
+    <>
+      <EffortCell board={instant} />
+      <EffortCostCell board={instant} />
+      {columns.map((column) => {
+        const board = boardForColumn(boards, column.key)
+        return (
+          <Fragment key={column.key}>
+            <EffortCell board={board} />
+            <EffortCostCell board={board} />
+          </Fragment>
+        )
+      })}
+    </>
+  )
+}
+
+function EffortCell({ board }: { board: EffortBoard | undefined }) {
+  return (
+    <td
+      className="px-1 py-1.5 text-center font-mono tabular-nums text-muted"
+      title={board ? `${board.tokenMult.toFixed(1)}× tokens` : 'Not trained'}
+    >
+      {board ? num(board.capability, 0) : '—'}
+    </td>
+  )
+}
+
+function EffortCostCell({ board }: { board: EffortBoard | undefined }) {
+  return (
+    <td
+      className="px-1 py-1.5 text-center font-mono tabular-nums text-muted"
+      title={board ? `${board.tokenMult.toFixed(1)}× tokens` : 'Not trained'}
+    >
+      {board?.usdPerMTok != null ? money(board.usdPerMTok) : '—'}
+    </td>
   )
 }

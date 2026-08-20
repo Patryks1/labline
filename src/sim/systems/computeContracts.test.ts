@@ -3,6 +3,7 @@ import { createGame } from "../createGame";
 import { computeSnapshot, remoteAcceleratorRamGb } from "./compute";
 import { fleetHostSnapshot } from "./hosting";
 import {
+  cloudProviderTargetBaselinePf,
   computeContractCashReserve,
   evaluateComputeProviderOffer,
   labContractCapacityPf,
@@ -13,10 +14,12 @@ import {
   signComputeContract,
   terminateComputeContract,
   tickComputeContracts,
+  tickRivalCloudPurchases,
 } from "./computeContracts";
 import { computeLabSnapshot } from "./labEngine";
 import { tickMarket } from "./market";
 import type { ComputeContract, SimState } from "../types";
+import { cloudListPriceEscalation } from "../balance/cloudPricing";
 
 function endStarterContract(state: SimState): SimState {
   const starter = state.computeContracts.find(
@@ -35,6 +38,19 @@ function providerCapacity(state: SimState, providerId: string) {
   return state.worldMarkets.cloudProviders.find(
     (provider) => provider.id === providerId,
   )!;
+}
+
+function listEscalation(state: SimState): number {
+  const industry = state.worldMarkets.cloudProviders;
+  const baseline = industry.reduce((sum, p) => sum + Math.max(0, p.baselinePf), 0);
+  const committed = industry.reduce(
+    (sum, p) => sum + Math.max(0, p.baselinePf - p.availablePf),
+    0,
+  );
+  return cloudListPriceEscalation(
+    state.day,
+    baseline > 1e-9 ? committed / baseline : 0,
+  );
 }
 
 describe("provider compute contracts", () => {
@@ -272,20 +288,25 @@ describe("provider compute contracts", () => {
     expect(after.availablePf).toBeCloseTo(after.baselinePf, 8);
   });
 
-  it("grows baseline and free inventory by the same amount up to a fixed cap", () => {
+  it("expands provider inventory toward a campaign-day ceiling instead of a 1.5× lock", () => {
+    expect(cloudProviderTargetBaselinePf(1_200, 1)).toBeGreaterThan(1_200);
+    expect(cloudProviderTargetBaselinePf(1_200, 180)).toBeGreaterThan(1_200 * 8);
+
     let state = endStarterContract(createGame(8051));
     const providerId = "cloud-northstar";
     state = {
       ...state,
+      day: 180,
       worldMarkets: {
         ...state.worldMarkets,
         cloudProviders: state.worldMarkets.cloudProviders.map((provider) =>
           provider.id === providerId
             ? {
                 ...provider,
-                baselinePf: 100,
-                availablePf: 60,
-                maxBaselinePf: 100.05,
+                baselinePf: 1_200,
+                availablePf: 800,
+                maxBaselinePf: 1_800,
+                launchBaselinePf: 1_200,
               }
             : provider,
         ),
@@ -296,12 +317,10 @@ describe("provider compute contracts", () => {
     const repeated = tickComputeContracts(state);
     const grown = providerCapacity(first, providerId);
     expect(grown).toEqual(providerCapacity(repeated, providerId));
-    expect(grown.baselinePf).toBeCloseTo(100.05, 8);
-    expect(grown.availablePf).toBeCloseTo(60.05, 8);
-
-    const capped = providerCapacity(tickComputeContracts(first), providerId);
-    expect(capped.baselinePf).toBeCloseTo(100.05, 8);
-    expect(capped.availablePf).toBeCloseTo(60.05, 8);
+    expect(grown.baselinePf).toBeGreaterThan(1_800);
+    expect(grown.availablePf - 800).toBeCloseTo(grown.baselinePf - 1_200, 8);
+    expect(grown.launchBaselinePf).toBe(1_200);
+    expect(grown.baselinePf).toBeLessThan(cloudProviderTargetBaselinePf(1_200, 180));
   });
 
   it("does not return an expired contract twice while provider capacity grows", () => {
@@ -656,11 +675,11 @@ describe("provider rate doubling", () => {
       termDays: 30,
     });
     expect(onDemand.contract.pricePerPfDay).toBeCloseTo(
-      base * PROVIDER_RATE_MULTIPLIER,
+      base * PROVIDER_RATE_MULTIPLIER * listEscalation(state),
       8,
     );
     expect(onDemand.dailyCost).toBeCloseTo(
-      10 * base * PROVIDER_RATE_MULTIPLIER,
+      10 * base * PROVIDER_RATE_MULTIPLIER * listEscalation(state),
       8,
     );
 
@@ -672,7 +691,7 @@ describe("provider rate doubling", () => {
       termDays: 120,
     });
     expect(reserved.contract.pricePerPfDay).toBeCloseTo(
-      base * PROVIDER_RATE_MULTIPLIER * 0.78,
+      base * PROVIDER_RATE_MULTIPLIER * 0.78 * listEscalation(state),
       8,
     );
 
@@ -684,7 +703,7 @@ describe("provider rate doubling", () => {
       termDays: 180,
     });
     expect(colocation.contract.pricePerPfDay).toBeCloseTo(
-      base * PROVIDER_RATE_MULTIPLIER * 0.66,
+      base * PROVIDER_RATE_MULTIPLIER * 0.66 * listEscalation(state),
       8,
     );
 
@@ -706,7 +725,7 @@ describe("provider rate doubling", () => {
       player: { ...state.player, cloudCredits: 0, computeLeaseCostToday: 0 },
     });
     expect(state.player.computeLeaseCostToday).toBeCloseTo(
-      10 * base * PROVIDER_RATE_MULTIPLIER,
+      onDemand.dailyCost,
       8,
     );
   });
@@ -725,7 +744,7 @@ describe("provider rate doubling", () => {
       termDays: 30,
     });
     expect(fresh.contract.pricePerPfDay).toBeCloseTo(
-      provider.basePricePerPfDay * PROVIDER_RATE_MULTIPLIER,
+      provider.basePricePerPfDay * PROVIDER_RATE_MULTIPLIER * listEscalation(state),
       8,
     );
     expect(starter.pricePerPfDay).toBeLessThan(fresh.contract.pricePerPfDay);
@@ -752,14 +771,14 @@ describe("provider rate doubling", () => {
       termDays: 30,
     });
     expect(quote.contract.pricePerPfDay).toBeCloseTo(
-      provider.basePricePerPfDay * PROVIDER_RATE_MULTIPLIER,
+      provider.basePricePerPfDay * PROVIDER_RATE_MULTIPLIER * listEscalation(state),
       8,
     );
 
     state = signComputeContract(state, quote);
     const cashBefore = state.rivals.find((rival) => rival.id === rivalId)!.cash;
     state = tickComputeContracts(state);
-    const invoice = 5 * provider.basePricePerPfDay * PROVIDER_RATE_MULTIPLIER;
+    const invoice = quote.dailyCost;
     expect(state.rivals.find((rival) => rival.id === rivalId)!.cash).toBeCloseTo(
       cashBefore - invoice,
       8,
@@ -847,5 +866,70 @@ describe("compute provider negotiation kernel", () => {
     expect(
       computeContractCashReserve({ pf: 10, pricePerPfDay: 240, daysTotal: 14 }),
     ).toBe(10 * 240 * 14);
+  });
+
+  it("lets rivals reserve finite provider inventory on a staggered cadence", () => {
+    const base = endStarterContract(createGame(8_130));
+    const before = Object.fromEntries(
+      base.worldMarkets.cloudProviders.map((provider) => [
+        provider.id,
+        provider.availablePf,
+      ]),
+    );
+    const purchased = Array.from({ length: 24 }, (_, offset) =>
+      tickRivalCloudPurchases({ ...base, day: 3 + offset }),
+    ).find((state) =>
+      state.computeContracts.some(
+        (contract) =>
+          contract.buyerLabId !== state.playerLabId &&
+          contract.status === "active" &&
+          !contract.sellerLabId,
+      ),
+    );
+    expect(purchased).toBeTruthy();
+    const contract = purchased!.computeContracts.find(
+      (entry) =>
+        entry.buyerLabId !== purchased!.playerLabId &&
+        entry.status === "active" &&
+        !entry.sellerLabId,
+    )!;
+    expect(contract.kind).toBe("on_demand");
+    expect(contract.pf).toBeGreaterThanOrEqual(8);
+    expect(providerAvailable(purchased!, contract.providerId)).toBeLessThan(
+      before[contract.providerId]!,
+    );
+    expect(
+      labContractCapacityPf(purchased!, contract.buyerLabId).inboundPf,
+    ).toBe(contract.pf);
+
+    const replay = tickRivalCloudPurchases({ ...base, day: purchased!.day });
+    expect(
+      replay.computeContracts.map((entry) => ({
+        id: entry.id,
+        buyerLabId: entry.buyerLabId,
+        pf: entry.pf,
+      })),
+    ).toEqual(
+      purchased!.computeContracts.map((entry) => ({
+        id: entry.id,
+        buyerLabId: entry.buyerLabId,
+        pf: entry.pf,
+      })),
+    );
+  });
+
+  it("quotes contracts larger than 1 MW when the provider has the inventory", () => {
+    const state = endStarterContract(createGame(8_131));
+    const provider = providerCapacity(state, "cloud-northstar");
+    expect(provider.availablePf).toBeGreaterThan(1_000);
+    const quote = quoteComputeContract(state, {
+      providerId: provider.id,
+      buyerLabId: state.playerLabId,
+      kind: "on_demand",
+      pf: Math.floor(provider.availablePf),
+      termDays: 90,
+    });
+    expect(quote.canSign).toBe(true);
+    expect(quote.contract.pf).toBe(Math.floor(provider.availablePf));
   });
 });

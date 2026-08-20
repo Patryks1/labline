@@ -161,6 +161,23 @@ export function constructionCrewBonus(state: SimState): number {
   return Math.min(3, Math.floor(completed / 3))
 }
 
+export function liveDcHallsForOwner(
+  state: SimState,
+  ownerId: TileOwner | string,
+): { small: number; medium: number; large: number; total: number } {
+  let small = 0
+  let medium = 0
+  let large = 0
+  for (const tile of facilityAnchorTiles(state, { ownerId: String(ownerId) })) {
+    if (!isDcKind(tile.kind)) continue
+    if (tile.buildingProgress < tile.buildingTarget) continue
+    if (tile.kind === 'dc_l') large += 1
+    else if (tile.kind === 'dc_m') medium += 1
+    else small += 1
+  }
+  return { small, medium, large, total: small + medium + large }
+}
+
 export function dcFootprint(kind: BuildableKind): { dx: number; dy: number }[] {
   const def = BUILD_DEFS.find((b) => b.kind === kind)
   if (def?.footprint?.length) return def.footprint
@@ -230,10 +247,10 @@ export const BUILD_DEFS: BuildDef[] = [
     kind: 'dc',
     label: 'DC · Small',
     blurb: '1-tile edge hall · 96 bays. Compact shell — good first site or edge POP.',
-    cash: 118_000_000,
-    days: 45,
+    cash: 128_000_000,
+    days: 42,
     rack: 96,
-    opexPerDay: 125_000,
+    opexPerDay: 148_000,
     upgradeCash: 68_000_000,
     upgradeRack: 48,
     upgradeDays: 22,
@@ -244,10 +261,10 @@ export const BUILD_DEFS: BuildDef[] = [
     kind: 'dc_m',
     label: 'DC · Medium',
     blurb: '4-tile campus (2×2) · 288 bays (3× small). Mid-game density without a mega shell.',
-    cash: 340_000_000,
-    days: 90,
+    cash: 520_000_000,
+    days: 110,
     rack: 288,
-    opexPerDay: 340_000,
+    opexPerDay: 520_000,
     upgradeCash: 180_000_000,
     upgradeRack: 96,
     upgradeDays: 38,
@@ -263,10 +280,10 @@ export const BUILD_DEFS: BuildDef[] = [
     kind: 'dc_l',
     label: 'DC · Large',
     blurb: '6-tile mega campus (3×2) · 960 bays (10× small). Hyperscale shell — power hungry.',
-    cash: 980_000_000,
-    days: 180,
+    cash: 2_450_000_000,
+    days: 220,
     rack: 960,
-    opexPerDay: 920_000,
+    opexPerDay: 2_400_000,
     upgradeCash: 420_000_000,
     upgradeRack: 192,
     upgradeDays: 60,
@@ -907,6 +924,21 @@ export function canPlaceBuilding(
     )
     if (!hasDc) {
       return { ...empty, reason: 'Build a live data hall before a cooling plant.' }
+    }
+  }
+  if (kind === 'dc_m' || kind === 'dc_l') {
+    const live = liveDcHallsForOwner(state, 'player')
+    if (kind === 'dc_m' && live.small < 1) {
+      return {
+        ...empty,
+        reason: 'Commission a small edge hall before a 2×2 campus.',
+      }
+    }
+    if (kind === 'dc_l' && live.medium < 1 && live.small < 2) {
+      return {
+        ...empty,
+        reason: 'Commission a medium campus, or two small halls, before a mega site.',
+      }
     }
   }
 

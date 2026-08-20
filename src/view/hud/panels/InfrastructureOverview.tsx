@@ -1,23 +1,15 @@
 import { useMemo, useState } from 'react'
 import { dcBayUsage } from '../../../sim/systems/dcRacks'
 import { fleetHostSnapshot, quoteRackDeployment } from '../../../sim/systems/hosting'
-import {
-  getBuildDef,
-  isBuildableKind,
-  isDcAnchor,
-  isDcKind,
-  isHqKind,
-  isScenicKind,
-} from '../../../sim/systems/map'
+import { isDcAnchor, isDcKind } from '../../../sim/systems/map'
 import { fleetStats, resolveRackSku } from '../../../sim/systems/racks'
 import { facilityAnchorTiles } from '../../../sim/systems/worldAccess'
-import type { MapTile, PanelId, SimState } from '../../../sim/types'
+import type { MapTile, SimState } from '../../../sim/types'
 import { useGameStore } from '../../../store/gameStore'
+import { facilityTypeLabel, isPlayerFacility } from './command/facilityIntel'
 import { computeSnapshot } from '../../../sim/tick'
 import { gb, mw, num, pf } from '../format'
-import { BuildingNameField } from '../ui/BuildingNameField'
 import {
-  EmptyState,
   HudButton,
   HudRange,
   MetricTile,
@@ -25,40 +17,10 @@ import {
 } from '../ui/HudPrimitives'
 import { BlockerList, GameCard, LiveDot, MeterBar, StatRow } from '../ui/kit'
 
-function isPlayerFacility(tile: MapTile) {
-  return (
-    tile.owner === 'player' &&
-    tile.kind !== 'empty' &&
-    !isScenicKind(tile.kind) &&
-    tile.campusRole !== 'pad' &&
-    isBuildableKind(tile.kind)
-  )
-}
-
-function facilityPanel(tile: MapTile): PanelId {
-  if (isDcKind(tile.kind)) return 'racks'
-  if (['substation', 'solar', 'gas', 'nuclear', 'battery', 'cooling'].includes(tile.kind)) {
-    return 'power'
-  }
-  if (tile.kind === 'fab') return 'chips'
-  if (isHqKind(tile.kind)) return 'org'
-  if (tile.kind === 'lab') return 'research'
-  return 'map'
-}
-
-function facilityType(tile: MapTile) {
-  try {
-    return getBuildDef(tile.kind as never).label
-  } catch {
-    return tile.kind
-  }
-}
-
 export function InfrastructureOverview() {
   const state = useGameStore((store) => store.state)
-  const selected = useGameStore((store) => store.selectedTile)
   const focusMapTile = useGameStore((store) => store.focusMapTile)
-  const setPanel = useGameStore((store) => store.setPanel)
+  const setCommandView = useGameStore((store) => store.setCommandView)
   const fleet = fleetStats(state)
   const host = fleetHostSnapshot(state)
   const snap = computeSnapshot(state)
@@ -80,12 +42,8 @@ export function InfrastructureOverview() {
   )
 
   const showOnMap = (tile: MapTile) => {
-    setPanel('map')
     focusMapTile(tile.x, tile.y)
-  }
-  const openFacility = (tile: MapTile) => {
-    focusMapTile(tile.x, tile.y)
-    setPanel(facilityPanel(tile))
+    setCommandView('sites')
   }
 
   return (
@@ -155,7 +113,7 @@ export function InfrastructureOverview() {
                   <span className="flex items-center justify-between gap-2 text-[0.8125rem]">
                     <strong className="inline-flex min-w-0 items-center gap-1.5 truncate text-bone">
                       <LiveDot className="text-amber" />
-                      <span className="truncate">{tile.name || facilityType(tile)}</span>
+                      <span className="truncate">{tile.name || facilityTypeLabel(tile)}</span>
                     </strong>
                     <StatusChip tone="warning">{left}d</StatusChip>
                   </span>
@@ -169,50 +127,9 @@ export function InfrastructureOverview() {
         </GameCard>
       ) : null}
 
-      <section className="space-y-1.5">
-        <div className="flex items-baseline justify-between gap-2">
-          <h3 className="text-sm font-semibold text-bone">Facilities</h3>
-          <span className="font-mono text-[0.6875rem] tabular-nums text-muted">{live.length} live</span>
-        </div>
-        {live.length === 0 ? (
-          <EmptyState title="No live facilities" description="Open Build to place your first campus." />
-        ) : (
-          <div className="anim-stagger space-y-1.5">
-            {live.map((tile) => {
-              const active = selected?.x === tile.x && selected.y === tile.y
-              const usage = isDcKind(tile.kind) && isDcAnchor(tile) ? dcBayUsage(state, tile.x, tile.y) : null
-              return (
-                <article
-                  key={`${tile.x}-${tile.y}`}
-                  className={`rounded-lg border px-3 py-2 ${
-                    active ? 'border-mint/50 bg-mint/10' : 'border-line/70 bg-panel-2/70'
-                  }`}
-                >
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                    <div className="min-w-0 flex-1">
-                      <BuildingNameField tile={tile} compact />
-                      <p className="mt-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
-                        {facilityType(tile)}
-                        {usage ? ` · ${usage.used} placed · ${usage.live} online · ${usage.staged} staged · ${mw(usage.mwLive)}` : ''}
-                        {tile.mwGeneration > 0 ? ` · ${mw(tile.mwGeneration)} gen` : ''}
-                        {tile.mwCapacity > 0 ? ` · ${mw(tile.mwCapacity)} grid` : ''}
-                      </p>
-                    </div>
-                    <div className="grid w-full grid-cols-2 gap-1 sm:w-auto sm:shrink-0">
-                      <HudButton type="button" variant="ghost" onClick={() => showOnMap(tile)}>
-                        Map
-                      </HudButton>
-                      <HudButton type="button" variant="primary" onClick={() => openFacility(tile)}>
-                        Open
-                      </HudButton>
-                    </div>
-                  </div>
-                </article>
-              )
-            })}
-          </div>
-        )}
-      </section>
+      <HudButton type="button" variant="secondary" className="w-full" onClick={() => setCommandView('sites')}>
+        Open sites intel
+      </HudButton>
     </div>
   )
 }

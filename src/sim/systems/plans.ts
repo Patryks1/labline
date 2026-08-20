@@ -20,6 +20,9 @@ import type {
   SimState,
   SubPlan,
 } from "../types";
+import { isCommerciallyOffered, isLivePublicModel } from "../modelRelease";
+import { agedMarketView } from "../balance/modelAging";
+import { planPersonalityDissatisfaction } from "../balance/modelProduct";
 import {
   customerBandForPrice,
   expectedUtilizationRange,
@@ -27,6 +30,12 @@ import {
   planActualMTokPerUser,
 } from "../balance/serveCompute";
 import { seededId } from "../rng";
+import {
+  collapseRouterShares,
+  planAssignedRouters,
+  planExposedModelIds,
+  planRouterParts,
+} from "../balance/modelRouter";
 import {
   normalizeModelEvaluations,
   suiteComposite,
@@ -219,10 +228,9 @@ export function normalizedPlanRoutes(
   plan: SubPlan,
 ): Partial<Record<ModelIOModality, PlanModalityRoute>> {
   const routes: Partial<Record<ModelIOModality, PlanModalityRoute>> = {};
+  const servingIds = new Set(planServingModelIds(state, plan));
   const released = state.player.models.filter(
-    (model) =>
-      (model.release === "released" || model.shipped) &&
-      plan.modelIds.includes(model.id),
+    (model) => isCommerciallyOffered(model) && servingIds.has(model.id),
   );
   for (const modality of Object.keys(
     MODALITY_TRAFFIC_SHARE,
@@ -341,7 +349,7 @@ function normalizedPlanModelPrecisions(
   plan: SubPlan,
 ): Record<string, PlanServePrecision> {
   return Object.fromEntries(
-    plan.modelIds.flatMap((modelId) => {
+    planServingModelIds(state, plan).flatMap((modelId) => {
       const model = state.player.models.find(
         (candidate) => candidate.id === modelId,
       );
@@ -595,42 +603,48 @@ export function allocatePlanCompute<
   return fractions;
 }
 
-/**
- * Token router for the plan's released-model roster. Free plans favor
- * efficient models; expensive plans route more traffic to higher capability.
- * Legacy primary/fallback fields are intentionally ignored here so a removed
- * model can never continue receiving hidden fallback traffic.
- */
-export function planModelTrafficMix(
-  state: SimState,
-  plan: SubPlan,
-): PlanModelTraffic[] {
-  const publicModel = (model: Model) =>
-    model.release === "released" || model.shipped;
-  const selected = plan.modelIds
+export function planServingModelIds(state: SimState, plan: SubPlan): string[] {
+  return planExposedModelIds(
+    plan,
+    state.player.models,
+    state.player.modelRouters,
+  );
+}
+
+function livePlanModels(state: SimState, ids: readonly string[]): Model[] {
+  return ids
     .map((id) =>
       state.player.models.find(
-        (model) => model.id === id && publicModel(model),
+        (model) => model.id === id && isCommerciallyOffered(model),
       ),
     )
     .filter((model): model is Model => Boolean(model));
-  if (selected.length === 0) return [];
+}
 
+function qualityEfficiencyMix(
+  state: SimState,
+  plan: SubPlan,
+  selected: readonly Model[],
+): PlanModelTraffic[] {
+  if (selected.length === 0) return [];
   const served = selected.map((model) =>
     modelForPlanServe(model, plan, state.player.researchUnlocked),
   );
-  const maxCapability = Math.max(...served.map((model) => model.capability), 1);
+  const facingCaps = served.map(
+    (model) => agedMarketView(model, state.day).capability,
+  );
+  const maxCapability = Math.max(...facingCaps, 1);
   const pfPerMTok = served.map((model) =>
     Math.max(1e-6, inferencePfDemand(1, model, 1)),
   );
   const cheapest = Math.min(...pfPerMTok);
   const free = isFreePlan(plan);
   const premium = plan.pricePerMonth > 180;
-  const weights = served.map((model, index) => {
-    const quality = Math.max(0.15, model.capability / maxCapability);
+  const weights = served.map((_model, index) => {
+    const quality = Math.max(0.15, facingCaps[index]! / maxCapability);
     const efficiency = Math.max(0.15, cheapest / pfPerMTok[index]!);
     if (free) return Math.pow(efficiency, 1.45) * (0.45 + quality * 0.55);
-    const capabilityGap = Math.max(0, maxCapability - model.capability);
+    const capabilityGap = Math.max(0, maxCapability - facingCaps[index]!);
     const sotaBias = Math.exp(-capabilityGap / (premium ? 4.5 : 7));
     if (premium)
       return Math.pow(quality, 4.5) * sotaBias * (0.88 + efficiency * 0.12);
@@ -641,6 +655,106 @@ export function planModelTrafficMix(
     model,
     share: weights[index]! / total,
   }));
+}
+
+function routerPartsToTraffic(
+  state: SimState,
+  plan: SubPlan,
+  parts: readonly { model: Model; share: number }[],
+): PlanModelTraffic[] {
+  const total = parts.reduce((sum, part) => sum + part.share, 0);
+  if (total <= 1e-9) return [];
+  return parts.map((part) => ({
+    model: modelForPlanServe(part.model, plan, state.player.researchUnlocked),
+    share: part.share / total,
+  }));
+}
+
+/**
+ * Token router for the plan's released-model roster. Free plans favor
+ * efficient models; expensive plans route more traffic to higher capability.
+ * Legacy primary/fallback fields are intentionally ignored here so a removed
+ * model can never continue receiving hidden fallback traffic.
+ */
+export function planModelTrafficMix(
+  state: SimState,
+  plan: SubPlan,
+): PlanModelTraffic[] {
+  const routed = planRouterTrafficMix(state, plan);
+  if (routed) return routed;
+  return qualityEfficiencyMix(
+    state,
+    plan,
+    livePlanModels(state, planServingModelIds(state, plan)),
+  );
+}
+
+function planRouterTrafficMix(
+  state: SimState,
+  plan: SubPlan,
+): PlanModelTraffic[] | null {
+  const assigned = planAssignedRouters(plan, state.player.modelRouters);
+  const usingPlanRouters = assigned.length > 0;
+  const routers = usingPlanRouters
+    ? assigned
+    : (() => {
+        const routerId = state.player.activeModelRouterId;
+        if (!routerId) return [];
+        return planAssignedRouters(
+          { routerIds: [routerId] },
+          state.player.modelRouters,
+        );
+      })();
+  if (routers.length === 0) return null;
+
+  const roster = new Set(plan.modelIds);
+  const memberIds = new Set(
+    routers.flatMap((router) =>
+      planExposedModelIds(
+        { modelIds: [], routerIds: [router.id] },
+        state.player.models,
+        [router],
+      ),
+    ),
+  );
+  const eligible = state.player.models.filter((model) => {
+    if (!isCommerciallyOffered(model)) return false;
+    if (usingPlanRouters) return memberIds.has(model.id);
+    return roster.size === 0 || roster.has(model.id);
+  });
+  const perRouter = routers
+    .map((router) =>
+      collapseRouterShares(planRouterParts(router, eligible, plan)),
+    )
+    .filter((parts) => parts.length > 0);
+  if (perRouter.length === 0) return null;
+  const merged = collapseRouterShares(
+    perRouter.flatMap((parts) =>
+      parts.map((part) => ({
+        lane: "default" as const,
+        model: part.model,
+        share: part.share / perRouter.length,
+      })),
+    ),
+  );
+  const routed = routerPartsToTraffic(state, plan, merged);
+  if (routed.length === 0) return null;
+
+  if (!usingPlanRouters) return routed;
+
+  const extra = livePlanModels(
+    state,
+    plan.modelIds.filter((id) => !memberIds.has(id)),
+  );
+  if (extra.length === 0) return routed;
+  const extraMix = qualityEfficiencyMix(state, plan, extra);
+  const routerWeight =
+    memberIds.size / Math.max(1, memberIds.size + extra.length);
+  const extraWeight = 1 - routerWeight;
+  return [
+    ...routed.map((lane) => ({ ...lane, share: lane.share * routerWeight })),
+    ...extraMix.map((lane) => ({ ...lane, share: lane.share * extraWeight })),
+  ];
 }
 
 export interface PremiumPlanScrutiny {
@@ -691,10 +805,13 @@ export function isFreePlan(plan: SubPlan): boolean {
   return plan.pricePerMonth <= 0;
 }
 
-/** Plan usage mult: 0.1× (tiny free) → 500× (enterprise power seats). */
+/** Plan usage mult: 0.025× (0.5 MTok/mo floor) → 500× (enterprise power seats). */
 export function clampMultiplier(n: number): number {
   if (!Number.isFinite(n)) return 1;
-  return Math.max(0.1, Math.min(500, n));
+  const min =
+    MIN_PLAN_ALLOWANCE_MTOK_PER_MONTH /
+    (ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth);
+  return Math.max(min, Math.min(500, n));
 }
 
 /** Soft max monthly price — higher only justified by token value + model quality. */
@@ -839,13 +956,7 @@ export function updatePlan(
           : p.usageMultiplier;
     const includedMTokPerMonth =
       patch.includedMTokPerMonth !== undefined
-        ? Math.max(
-            ECONOMY.basePlanUsageMTokPerDay * 0.1 * ECONOMY.daysPerMonth,
-            Math.min(
-              ECONOMY.basePlanUsageMTokPerDay * 500 * ECONOMY.daysPerMonth,
-              patch.includedMTokPerMonth,
-            ),
-          )
+        ? clampAllowanceMTokPerMonth(patch.includedMTokPerMonth)
         : patch.usageMultiplier !== undefined
           ? ECONOMY.basePlanUsageMTokPerDay *
             usageMultiplier *
@@ -906,15 +1017,19 @@ export function updatePlan(
         ? patch.servePrecisionByModel
         : patch.servePrecision !== undefined
           ? Object.fromEntries(
-              next.modelIds.map((modelId) => [modelId, patch.servePrecision!]),
+              planServingModelIds(state, next).map((modelId) => [
+                modelId,
+                patch.servePrecision!,
+              ]),
             )
           : p.servePrecisionByModel;
     next.servePrecisionByModel = normalizedPlanModelPrecisions(state, {
       ...next,
       servePrecisionByModel: requestedPrecisions,
     });
-    const firstModelPrecision = next.modelIds[0]
-      ? next.servePrecisionByModel[next.modelIds[0]]
+    const servingIds = planServingModelIds(state, next);
+    const firstModelPrecision = servingIds[0]
+      ? next.servePrecisionByModel[servingIds[0]]
       : undefined;
     if (firstModelPrecision) next.servePrecision = firstModelPrecision;
     // The model roster is authoritative after any edit. Rebuild compatibility
@@ -924,8 +1039,8 @@ export function updatePlan(
       modalityRoutes: {},
     });
     let shocks = next.demandShocks ?? [];
-    const oldIds = new Set(p.modelIds);
-    const newIds = new Set(next.modelIds);
+    const oldIds = new Set(planServingModelIds(state, p));
+    const newIds = new Set(servingIds);
     for (const modelId of newIds) {
       if (oldIds.has(modelId)) continue;
       const model = state.player.models.find(
@@ -960,11 +1075,11 @@ export function updatePlan(
         modality: "text",
         modelId,
         startedDay: state.day,
-        amplitude: next.modelIds.length > 0 ? -0.15 : -0.4,
+        amplitude: servingIds.length > 0 ? -0.15 : -0.4,
         halfLifeDays: 21,
       });
     }
-    for (const modelId of next.modelIds) {
+    for (const modelId of servingIds) {
       if (!oldIds.has(modelId)) continue;
       const model = state.player.models.find(
         (candidate) => candidate.id === modelId,
@@ -1039,7 +1154,7 @@ export function attachModelToEmptyPlans(
   modelId: string,
 ): SimState {
   const plans = state.player.pricing.plans.map((p) => {
-    if (p.modelIds.length > 0) return p;
+    if (p.modelIds.length > 0 || (p.routerIds?.length ?? 0) > 0) return p;
     const model = state.player.models.find(
       (candidate) => candidate.id === modelId,
     );
@@ -1100,9 +1215,12 @@ export function planAllowanceMTokPerMonth(plan: SubPlan): number {
   );
 }
 
+/** Lowest included usage the editor will accept (~16k tokens/day). */
+export const MIN_PLAN_ALLOWANCE_MTOK_PER_MONTH = 0.5;
+
 /** Bounds for the plan's physical monthly text entitlement. */
 export function clampAllowanceMTokPerMonth(value: number): number {
-  const min = ECONOMY.basePlanUsageMTokPerDay * 0.1 * ECONOMY.daysPerMonth;
+  const min = MIN_PLAN_ALLOWANCE_MTOK_PER_MONTH;
   const max = ECONOMY.basePlanUsageMTokPerDay * 500 * ECONOMY.daysPerMonth;
   if (!Number.isFinite(value)) return min;
   return Math.max(min, Math.min(max, value));
@@ -1467,14 +1585,20 @@ export function releasedModelCapabilityRanks(
 ): Map<string, number> {
   const released: { id: string; capability: number }[] = [];
   for (const model of state.player.models) {
-    if (model.release === "released" || model.shipped) {
-      released.push({ id: model.id, capability: model.capability });
+    if (isLivePublicModel(model)) {
+      released.push({
+        id: model.id,
+        capability: agedMarketView(model, state.day).capability,
+      });
     }
   }
   for (const rival of state.rivals) {
     for (const model of rival.models) {
-      if (model.release === "released" || model.shipped) {
-        released.push({ id: model.id, capability: model.capability });
+      if (isLivePublicModel(model)) {
+        released.push({
+          id: model.id,
+          capability: agedMarketView(model, state.day).capability,
+        });
       }
     }
   }
@@ -1630,15 +1754,14 @@ export function emptyPlanStats(): PlanDayStats[] {
 
 /** Best model on a plan for quality scoring. */
 export function bestModelOnPlan(state: SimState, plan: SubPlan) {
-  const publicOk = (m: { shipped: boolean; release?: string }) =>
-    m.release === "released" || m.shipped;
-  const models = plan.modelIds
-    .map((id) => state.player.models.find((m) => m.id === id && publicOk(m)))
-    .filter(Boolean);
+  const models = livePlanModels(state, planServingModelIds(state, plan));
   if (models.length === 0) return null;
   return (
-    models.sort((a, b) => (b!.capability ?? 0) - (a!.capability ?? 0))[0] ??
-    null
+    models.sort(
+      (a, b) =>
+        agedMarketView(b, state.day).capability -
+        agedMarketView(a, state.day).capability,
+    )[0] ?? null
   );
 }
 
@@ -1746,13 +1869,9 @@ export function planOfferingBreadth(
   state: SimState,
   plan: SubPlan,
 ): PlanOfferingBreadth {
-  const models = plan.modelIds
-    .map((id) => state.player.models.find((model) => model.id === id))
-    .filter(
-      (model): model is Model =>
-        !!model && (model.release === "released" || model.shipped),
-    )
-    .map(normalizeModelEvaluations);
+  const models = livePlanModels(state, planServingModelIds(state, plan)).map(
+    normalizeModelEvaluations,
+  );
   const definitions = [
     { modality: "image" as const, suite: "image_generation" as const, max: 7 },
     { modality: "video" as const, suite: "video_generation" as const, max: 6 },
@@ -1996,7 +2115,7 @@ export function rivalBestCapability(state: SimState): number {
   for (const r of state.rivals) {
     for (const m of r.models) {
       if (m.shipped || m.release === "released")
-        best = Math.max(best, m.capability);
+        best = Math.max(best, agedMarketView(m, state.day).capability);
     }
   }
   return best;
@@ -2028,8 +2147,8 @@ export function planSegmentPriceAffinity(
 ): number {
   const anchor = SEGMENTS.find((s) => s.id === segmentId)?.arpuHint ?? 20;
   const sigma =
-    segmentId === "consumer"
-      ? 1.0
+      segmentId === "consumer"
+      ? 1.2
       : segmentId === "enterprise" ||
           segmentId === "legal" ||
           segmentId === "healthcare"
@@ -2059,7 +2178,7 @@ export function planSegmentUsageAffinity(
   const allowance = Math.max(0.01, allowanceMTokPerMonth);
   const affinityFor = (target: number) => {
     const logRatio = Math.log(allowance / Math.max(0.01, target));
-    const sigma = logRatio < 0 ? 0.72 : 1.15;
+    const sigma = logRatio < 0 ? 0.72 : 1.35;
     const z = logRatio / sigma;
     return Math.exp(-0.5 * z * z);
   };
@@ -2075,7 +2194,15 @@ export function planSegmentUsageAffinity(
 
 export function planSegmentUsageAffinityWeight(segmentId: SegmentId): number {
   const usage = SEGMENTS.find((segment) => segment.id === segmentId)?.baseUsage ?? 0.28;
-  return 6 + Math.min(6, Math.log1p(Math.max(0, usage)) * 3.2);
+  const base = 6 + Math.min(6, Math.log1p(Math.max(0, usage)) * 3.2);
+  if (
+    segmentId === "enterprise" ||
+    segmentId === "legal" ||
+    segmentId === "healthcare"
+  ) {
+    return base * 1.7;
+  }
+  return base;
 }
 
 /**
@@ -2116,13 +2243,38 @@ export function planPremiumReadiness(input: {
 }
 
 /**
- * Soft minimum lead of a cheaper paid plan over the next dearer one.
- * Softened so exceptional value can approach (not massively exceed) the
- * tier below; price elasticity still keeps most users on cheaper plans.
- * 1.25 is an anti-inversion guard, not a demand cap — per-segment ARPU
- * affinity decides how large each tier can grow.
+ * Paid-pyramid lead of the cheaper SKU over the next dearer one.
+ * Weak value/readiness → ~1.9 (cheap stays clearly larger). Exceptional
+ * premium readiness → ~0.75 (inversion: the dearer tier may outgrow the
+ * cheaper one). Lead drops below 1 only at high strength.
  */
+export const PAID_PLAN_PYRAMID_LEAD_WEAK = 1.9;
+export const PAID_PLAN_PYRAMID_LEAD_STRONG = 0.75;
+/** Mid-strength fallback used when a caller omits value/readiness. */
 export const PAID_PLAN_PYRAMID_LEAD = 1.25;
+
+function pyramidSmootherstep(t: number): number {
+  const x = Math.max(0, Math.min(1, t));
+  return x * x * x * (x * (x * 6 - 15) + 10);
+}
+
+export function paidPlanPyramidLead(input?: {
+  valueRatio?: number;
+  readiness?: number;
+}): number {
+  const value = Math.max(0, input?.valueRatio ?? 1);
+  const ready = Math.max(0, Math.min(1, input?.readiness ?? 0.42));
+  const valueSignal = 1 - Math.exp(-value / 1.15);
+  const strength = Math.max(
+    0,
+    Math.min(1, valueSignal * 0.55 + ready * 0.45),
+  );
+  return (
+    PAID_PLAN_PYRAMID_LEAD_WEAK +
+    (PAID_PLAN_PYRAMID_LEAD_STRONG - PAID_PLAN_PYRAMID_LEAD_WEAK) *
+      pyramidSmootherstep(strength)
+  );
+}
 
 /** EMA blend of yesterday's seats vs today's target (stickiness / teleporting). */
 export const PLAN_SEAT_STICKINESS = 0.6;
@@ -2148,6 +2300,7 @@ export function applyHighUsagePlanCohorts<
     subscribers: number;
     valueRatio: number;
     effectiveAllowanceMTok: number;
+    readiness?: number;
   },
 >(buckets: T[]): T[] {
   const paid = buckets
@@ -2168,7 +2321,11 @@ export function applyHighUsagePlanCohorts<
       tier.effectiveAllowanceMTok <
       below.effectiveAllowanceMTok * 1.5
     ) continue;
-    const cohortShare = Math.max(0.04, 0.16 / 2 ** (index - 1));
+    const ready = Math.max(0, Math.min(1, tier.readiness ?? 0.4));
+    const cohortShare = Math.max(
+      0.05,
+      (0.14 + 0.22 * ready) / 2 ** (index - 1),
+    );
     const deficit = total * cohortShare - tier.subscribers;
     if (deficit <= 1e-9) continue;
 
@@ -2185,22 +2342,29 @@ export function applyHighUsagePlanCohorts<
 }
 
 /**
- * Enforce cheap ≥ mid ≥ expensive by shrinking dearer tiers until each
- * cheaper SKU leads the next by {@link PAID_PLAN_PYRAMID_LEAD}.
- * Mutates subscriber counts in place; returns the same array.
+ * Enforce a value-aware cheap→dear lead. Each dearer SKU is capped by
+ * cheaper / lead(value, readiness). Weak premiums stay smaller; exceptional
+ * Pro/Max offerings may invert (lead < 1). Mutates in place.
  */
 export function enforcePlanSubscriberPyramid<
-  T extends { plan: Pick<SubPlan, "pricePerMonth">; subscribers: number },
+  T extends {
+    plan: Pick<SubPlan, "pricePerMonth">;
+    subscribers: number;
+    valueRatio?: number;
+    readiness?: number;
+  },
 >(buckets: T[]): T[] {
   const paid = buckets
     .filter((bucket) => bucket.plan.pricePerMonth > 0)
     .sort((a, b) => a.plan.pricePerMonth - b.plan.pricePerMonth);
-  // Cheap → expensive: each dearer tier is capped by the already-final cheaper
-  // count so the lead cascades (Plus ≥ Pro×lead ≥ Team×lead²).
   for (let i = 1; i < paid.length; i += 1) {
     const dearer = paid[i]!;
     const cheaper = paid[i - 1]!;
-    const maxDearer = cheaper.subscribers / PAID_PLAN_PYRAMID_LEAD;
+    const lead = paidPlanPyramidLead({
+      valueRatio: dearer.valueRatio,
+      readiness: dearer.readiness,
+    });
+    const maxDearer = cheaper.subscribers / Math.max(0.2, lead);
     if (dearer.subscribers > maxDearer) {
       dearer.subscribers = Math.max(0, maxDearer);
     }
@@ -2210,7 +2374,9 @@ export function enforcePlanSubscriberPyramid<
 
 /**
  * Move a fraction of high-utilization seats up one paid tier when the next
- * tier's valueRatio is acceptable. Mutates subscriber counts in place.
+ * tier's valueRatio is acceptable. Pressure scales with utilization and
+ * optional frontier proximity so a SOTA lab converts more heavy users.
+ * Mutates subscriber counts in place.
  */
 export function applyPlanUptierMigration<
   T extends {
@@ -2218,6 +2384,7 @@ export function applyPlanUptierMigration<
     subscribers: number;
     usageRate: number;
     valueRatio: number;
+    frontierProximity?: number;
   },
 >(buckets: T[]): T[] {
   const paid = buckets
@@ -2228,13 +2395,18 @@ export function applyPlanUptierMigration<
     const to = paid[i + 1]!;
     if (from.usageRate + 1e-9 < PLAN_UPTIER_UTILIZATION) continue;
     if (to.valueRatio + 1e-9 < PLAN_UPTIER_VALUE_FLOOR) continue;
-    const pressure = Math.min(
+    const utilPressure = Math.min(
       1,
       (from.usageRate - PLAN_UPTIER_UTILIZATION) /
         Math.max(1e-6, 1 - PLAN_UPTIER_UTILIZATION),
     );
+    const frontier =
+      to.frontierProximity ?? from.frontierProximity ?? 0.55;
     const migrate =
-      from.subscribers * PLAN_UPTIER_MIGRATE_FRAC * (0.35 + 0.65 * pressure);
+      from.subscribers *
+      PLAN_UPTIER_MIGRATE_FRAC *
+      (0.35 + 0.65 * utilPressure) *
+      (0.7 + 0.75 * Math.max(0, Math.min(1, frontier)));
     if (migrate <= 1e-9) continue;
     from.subscribers = Math.max(0, from.subscribers - migrate);
     to.subscribers += migrate;
@@ -2310,16 +2482,18 @@ export function planAttractiveness(
     plan,
     state.player.researchUnlocked,
   );
+  const facing = agedMarketView(model, state.day);
+  const cap = facing.capability;
 
   const frontier = Math.max(
-    model.capability,
+    cap,
     ...state.player.models
-      .filter((m) => m.release === "released" || m.shipped)
-      .map((m) => m.capability),
+      .filter(isLivePublicModel)
+      .map((m) => agedMarketView(m, state.day).capability),
     rivalBestCapability(state),
     40,
   );
-  const gap = Math.max(0, frontier - model.capability);
+  const gap = Math.max(0, frontier - cap);
   const sota = Math.max(0, Math.min(1, 1 - gap / 28));
   // Value perception is judged at the market reference API price when the
   // caller provides one; entitlement mechanics below keep the lab's own list.
@@ -2334,16 +2508,21 @@ export function planAttractiveness(
   const readiness = planPremiumReadiness({
     pricePerMonth: plan.pricePerMonth,
     brandTrust: state.player.brandTrust,
-    modelCapability: model.capability,
+    modelCapability: cap,
     frontierCapability: frontier,
     modelReliability: model.quality.reliability,
   });
 
+  const personality =
+    model.productProfile?.personality ??
+    model.benchmarks.personality ??
+    model.quality.chat;
   const quality =
-    model.capability * 0.42 +
+    cap * 0.42 +
     model.quality.reliability * 0.22 +
-    model.quality.chat * 0.12 +
+    personality * 0.12 +
     sota * 30;
+  const personalityPenalty = planPersonalityDissatisfaction(personality) * 28;
 
   // Explicit token offer (log of monthly MTok). Subsidy plans derive their
   // effective allowance from the per-model entitlements. The 72 cap leaves
@@ -2363,7 +2542,7 @@ export function planAttractiveness(
 
   const tooHigh = planPriceTooHighScore(plan, {
     apiPricePerMTok: api,
-    modelCapability: model.capability,
+    modelCapability: cap,
     frontierCapability: frontier,
   });
 
@@ -2379,8 +2558,8 @@ export function planAttractiveness(
         );
   const smarterAtPrice =
     plan.pricePerMonth > 0 && plan.pricePerMonth <= rivalSub * 1.25
-      ? Math.max(0, model.capability - rivalCap) * 0.95
-      : Math.max(0, model.capability - rivalCap) * 0.4;
+      ? Math.max(0, cap - rivalCap) * 0.95
+      : Math.max(0, cap - rivalCap) * 0.4;
 
   // Canonical value-for-money: advertised API-value subsidy ÷ seat price.
   const rawValueRatio = planAdvertisedValueRatio(plan, api, allowMo);
@@ -2405,17 +2584,17 @@ export function planAttractiveness(
       ? 0
       : Math.max(0, valueFloor - rawValueRatio) / Math.max(0.1, valueFloor);
 
-  // SOTA pulls upgrades within a tier's readiness — it does not hand expensive
-  // SKUs a mass-market crowd when brand/quality are weak.
+  // SOTA pulls suitable customers toward ready premium SKUs. Cheap tiers
+  // still get a launch bump when readiness is weak (early game).
   const sotaBand =
     plan.pricePerMonth <= 0
-      ? 10
+      ? 8
       : plan.pricePerMonth <= 40
-        ? 14
+        ? 8 + (1 - readiness) * 6
         : plan.pricePerMonth <= 120
-          ? 10
-          : 7;
-  const sotaPull = Math.pow(sota, 1.35) * sotaBand * readiness;
+          ? 10 + readiness * 8
+          : 8 + readiness * 10;
+  const sotaPull = Math.pow(sota, 1.35) * sotaBand * Math.max(0.35, readiness);
   const pricePenalty = tooHigh * 38;
   const premiumPenalty =
     premiumPlanScrutiny(plan, state.player.pricing.plans, (candidate) =>
@@ -2437,7 +2616,7 @@ export function planAttractiveness(
   const upgrade = planUpgradePressure({
     pricePerMonth: plan.pricePerMonth,
     subsidyGbp,
-    modelCapability: model.capability,
+    modelCapability: cap,
     modelReliability: model.quality.reliability,
     kind: commercialModelKind(model),
     frontierCapability: frontier,
@@ -2518,7 +2697,9 @@ export function planAttractiveness(
     allowancePenalty * priceSensitivity -
     enterprisePenalty -
     workloadPenalty -
-    instabilityPenalty
+    instabilityPenalty -
+    personalityPenalty *
+      (segmentId === "consumer" || segmentId === "enterprise" ? 1 : 0.35)
   );
 }
 

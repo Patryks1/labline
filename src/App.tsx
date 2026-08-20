@@ -4,6 +4,7 @@ import { GameMap } from './view/three/GameMap'
 import { TopBar } from './view/hud/TopBar'
 import { BottomBar } from './view/hud/BottomBar'
 import { TrainingActivityBar } from './view/hud/TrainingActivityBar'
+import { CampaignDecisionHost } from './view/hud/panels/models/CampaignDecisionHost'
 import { LeftRail } from './view/hud/LeftRail'
 import { CommandDock } from './view/hud/CommandDock'
 import { HotkeyHelp } from './view/hud/HotkeyHelp'
@@ -91,6 +92,7 @@ function GameShell() {
         onOpenModels={openModels}
         onOpenModelsRun={openModelsRun}
       />
+      <CampaignDecisionHost />
       <ObjectivesDock />
       <VictoryOverlay />
       <PauseMenu />

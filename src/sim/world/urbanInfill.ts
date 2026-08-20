@@ -249,13 +249,15 @@ function computeUrbanInfillPlan(world: StaticWorld): UrbanInfillPlan {
       .filter((id) => mix32(id ^ seed ^ 0x1af1_11) % 100 < URBAN_INFILL_SELECT_PERCENT * 2)
       .sort((a, b) => mix32(a ^ seed) - mix32(b ^ seed) || a - b)
     const major = city.tier !== 'village'
+    const tiny = city.radius < 3
     // Tier-scaled guarantees so every non-village city offers in-city HQ pads:
     // metros mark two flagship large-HQ sites plus three 2×2 campuses,
-    // satellites one flagship plus two campuses, towns two campuses. All are
-    // best-effort windows; tiny settlements degrade to whatever fits.
-    const flagshipAttempts = city.tier === 'metro' ? 2 : city.tier === 'satellite' ? 1 : 0
-    const mediumAttempts = city.tier === 'metro' ? 3 : major ? 2 : 0
-    const minSingles = city.tier === 'metro' || city.tier === 'satellite' ? 6 : major ? 4 : 0
+    // satellites one flagship plus two campuses, towns two campuses. Compact
+    // radius-2 satellites keep street-front 1×1 lots instead of consuming the
+    // hamlet as overlapping 2×2 pads.
+    const flagshipAttempts = tiny ? 0 : city.tier === 'metro' ? 2 : city.tier === 'satellite' ? 1 : 0
+    const mediumAttempts = tiny ? 0 : city.tier === 'metro' ? 3 : major ? 2 : 0
+    const minSingles = tiny ? 4 : city.tier === 'metro' || city.tier === 'satellite' ? 6 : major ? 4 : 0
     let used = 0
     let minCells = mediumAttempts * 4 + minSingles
 

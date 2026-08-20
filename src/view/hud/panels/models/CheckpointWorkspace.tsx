@@ -87,6 +87,36 @@ export function CheckpointWorkspace({
 
   return (
     <div className="space-y-3">
+      <section className="rounded-lg border border-mint/35 bg-mint/5 p-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="hud-eyebrow">Checkpoint purpose</p>
+            <h3 className="mt-1 text-sm font-semibold text-bone">
+              Fork this snapshot onto a new data mix
+            </h3>
+            <p className="mt-1 hidden max-w-3xl text-[0.6875rem] leading-5 text-muted sm:block">
+              A checkpoint is a frozen weight file, not a save slot. Branch it
+              into Code, Cyber, Chat, Agents, Reasoning, or Safety with
+              independent data, compute, and post-training. The parent run keeps
+              going.
+            </p>
+          </div>
+          <HudButton
+            type="button"
+            variant="primary"
+            disabled={!onBranch || entries.length === 0}
+            onClick={() => {
+              const latest = selectedGroup?.checkpoints.at(-1);
+              if (latest) onBranch?.(latest.id);
+            }}
+            className="min-h-11"
+          >
+            <GitFork size="0.875rem" />
+            Branch from latest
+          </HudButton>
+        </div>
+      </section>
+
       <section className="rounded-lg border border-line/65 bg-panel-2/45 p-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -218,7 +248,7 @@ export function CheckpointWorkspace({
       ) : (
         <EmptyState
           title="No checkpoints yet"
-          description="Milestone checkpoints appear automatically. You can also save the current weights manually from any active run."
+          description="Weight files are created when you save, branch, measure, or roll back. Incidents do not write files by themselves."
         />
       )}
     </div>

@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { useGameStore } from '../../store/gameStore'
 import { CommandDock, sumChannelRows } from './CommandDock'
+import { FacilitiesIntelView } from './panels/command/FacilitiesIntelView'
 
 describe('CommandDock disclosure semantics', () => {
   it('exposes a labelled region and controls for the expanded dock and channels', () => {
@@ -22,9 +23,18 @@ describe('CommandDock disclosure semantics', () => {
       expect(markup).toContain('aria-controls="command-dock-panel"')
       expect(markup).toContain('aria-controls="command-channel-api"')
       expect(markup).toContain('aria-label="API breakdown"')
+      expect(markup).toContain('>Sites<')
     } finally {
       useGameStore.setState(previous)
     }
+  })
+})
+
+describe('command dock sites channel', () => {
+  it('renders campus intel for the sites view', () => {
+    const markup = renderToStaticMarkup(createElement(FacilitiesIntelView))
+    expect(markup).toContain('Campus')
+    expect(markup).toContain('No facilities yet')
   })
 })
 

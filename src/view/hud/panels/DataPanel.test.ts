@@ -146,6 +146,7 @@ describe("DataPanel market wiring", () => {
     );
 
     expect(markup).toContain("Corpus routing");
+    expect(markup).toContain("teacher size");
     expect(markup).toContain("Teacher for Code corpus");
     expect(markup).toContain("Teacher for Video corpus");
     expect(markup).toContain("Auto · Glyph Route");

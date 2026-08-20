@@ -48,6 +48,7 @@ function emptyBenchmarks(): BenchmarkScores {
     multilingual: 0,
     agents: 0,
     safety: 0,
+    personality: 0,
   };
 }
 
@@ -344,6 +345,23 @@ export function moeRoutingCapacityMultiplier(
  * Rough targets (perfect data still multiplies):
  *  70M → 0.015 · 1B → 0.06 · 7B → 0.23 · 70B → 0.65 · 405B → 0.88 · 1T → 0.92
  */
+
+/**
+ * Absolute capability from SFT/RLHF/process/tools. Smaller models keep more
+ * of this bonus, so late research + gyms can substitute for some scale.
+ */
+export function postTrainSizePunch(
+  postTrainStrength: number,
+  paramPotential: number,
+  reasoningEnabled: boolean,
+): number {
+  const post = Math.max(0, Math.min(1, postTrainStrength));
+  if (post <= 1e-9) return 0;
+  const headroom = Math.max(0.18, 1.08 - Math.max(0, paramPotential));
+  const reasoning = reasoningEnabled ? 6 : 0;
+  return post * (4 + reasoning) * Math.pow(headroom, 1.12);
+}
+
 export function paramScalePotential(
   paramsB: number,
   activeParamsB?: number,
@@ -383,7 +401,11 @@ export function normalizeDataQuality(opts: {
  * floor, 6N preserves the existing strong campaign recipe, and 20N is the
  * modern dense compute-optimal reference. Underfeeding hurts hard.
  */
-export function dataFitScore(coverage: number, dataQuality: number): number {
+export function dataFitScore(
+  coverage: number,
+  dataQuality: number,
+  paramPotential = 0.5,
+): number {
   const c = Math.max(0, coverage);
   // Hybrid curve: 1:1 is viable, 6:1 strong, ~20:1 frontier.
   // Unique high-quality data is never punished; marginal value simply falls.
@@ -398,8 +420,17 @@ export function dataFitScore(coverage: number, dataQuality: number): number {
             ? 1 + ((c - 6) / 14) * 0.12
             : Math.min(1.16, 1.12 + Math.log2(1 + (c - 20) / 20) * 0.025);
   const q = Math.max(0.3, Math.min(1.35, dataQuality));
+  // Oversized models starve harder below 1N, so early corpora peak on small
+  // recipes instead of a half-empty 70B.
+  const starve =
+    c >= 1
+      ? 1
+      : Math.pow(
+          Math.max(0.02, c),
+          0.42 + 0.75 * Math.max(0, Math.min(1, paramPotential)),
+        );
   // Big models with trash data: quality bites harder via product
-  return Math.max(0.1, Math.min(1.18, vol * (0.42 + q * 0.58)));
+  return Math.max(0.06, Math.min(1.18, vol * starve * (0.42 + q * 0.58)));
 }
 
 /** Entropy-style generalist mix score + domain specialty boosts. */
@@ -474,10 +505,14 @@ export function mixFit(weights?: Partial<Record<string, number>>): {
   const domainBoost: Record<string, number> = {};
   for (const k of keys) {
     const share = w[k] ?? 0;
+    const neglected = specialization * Math.max(0, 0.22 - share) * 1.4;
     const dominantLift = dominantDomains.includes(k)
-      ? specialization * Math.sqrt(share) * 0.45
+      ? specialization * Math.sqrt(share) * 0.55
       : 0;
-    domainBoost[k] = Math.min(1, share * 1.65 + dominantLift);
+    domainBoost[k] = Math.max(
+      0,
+      Math.min(1, share * 1.7 + dominantLift - neglected),
+    );
   }
   return {
     general: Math.max(0.5, Math.min(1.08, general)),
@@ -499,7 +534,11 @@ export function scaleIntelligence(input: ScaleInputs): ScaleResult {
     input.backbone,
   );
   const architectureDataCoverage = architectureAdjustedDataCoverage(input);
-  const dataFit = dataFitScore(architectureDataCoverage, input.dataQuality);
+  const dataFit = dataFitScore(
+    architectureDataCoverage,
+    input.dataQuality,
+    paramPotential,
+  );
   const { general: mixGeneral, domainBoost } = mixFit(input.mixWeights);
   const research = Math.max(0.9, Math.min(1.14, input.researchMult ?? 1));
   // Allow deep early-launch haircuts; floor keeps near-zero progress from
@@ -509,13 +548,16 @@ export function scaleIntelligence(input: ScaleInputs): ScaleResult {
   const capBonus = input.overtrainCapBonus ?? 0;
   const overtrain = overtrainBonus(architectureDataCoverage, capBonus);
 
-  // Core product: size × data × mix. Post-train / research are soft (can't invent scale).
-  let intelligence =
-    paramPotential * dataFit * mixGeneral * research * (0.88 + complete * 0.12);
-  // Post-train alignment lifts a bit but never past size×data ceiling
+  // Size × data × research. Mix generalist tax hits headline capability;
+  // specialist benches use this core so a code-only run can still punch.
+  const core =
+    paramPotential * dataFit * research * (0.88 + complete * 0.12);
+  let intelligence = core * mixGeneral;
+  // Post-train alignment lifts a bit but never past size×data ceiling.
+  // Late gyms/process still matter more than a raw extra percent of pretrain.
   intelligence = Math.min(
-    paramPotential * 1.12 * Math.min(1.15, dataFit),
-    intelligence * (1 + post * 0.08),
+    paramPotential * 1.18 * Math.min(1.15, dataFit),
+    intelligence * (1 + post * 0.14),
   );
   intelligence = Math.max(0.03, Math.min(0.96, intelligence));
 
@@ -525,10 +567,18 @@ export function scaleIntelligence(input: ScaleInputs): ScaleResult {
     Math.max(0, research - 1) * OVERTRAIN.RESEARCH_RAW_WEIGHT +
     (input.reasoningEnabled ? OVERTRAIN.REASONING_RAW : 0) +
     overtrain;
+  // Extra post-train punch is larger on small models so a late, well-aligned
+  // 7B with gyms can stand in for an un-aligned mid-size run — not a 70B.
+  const postTrainPunch = postTrainSizePunch(
+    post,
+    paramPotential,
+    Boolean(input.reasoningEnabled),
+  );
   const rawCapability =
     SCALE.CAP_FLOOR +
     (SCALE.CAP_CEIL - SCALE.CAP_FLOOR) * intelligence +
-    techRawBonus;
+    techRawBonus +
+    postTrainPunch;
   const ceiling = capabilityCeiling(input);
   // Post-ceiling progression bend: gains past ~52 get progressively harder,
   // asymptoting at 52 + 42/steepness (94 at the default steepness of 1).
@@ -540,7 +590,7 @@ export function scaleIntelligence(input: ScaleInputs): ScaleResult {
   );
 
   const benchCeilings = benchCeilingsFromIntelligence(
-    intelligence,
+    core,
     domainBoost,
     input.family,
   );
@@ -588,6 +638,12 @@ const BENCH_META: Record<
     ceil: 96,
     difficulty: 0.9,
     domains: ["law", "health", "chat"],
+  },
+  personality: {
+    floor: 8,
+    ceil: 92,
+    difficulty: 0.85,
+    domains: ["chat"],
   },
 };
 

@@ -1,5 +1,10 @@
-import { blendApiPrice } from '../balance/pricing'
+import {
+  apiHostingCostFloor,
+  blendApiPrice,
+  clampApiListToHostingFloor,
+} from '../balance/pricing'
 import { getResearchNode } from '../balance/research'
+import { computeSnapshot } from './compute'
 import type {
   Allocation,
   LabAction,
@@ -203,22 +208,29 @@ export function applyLabActionToTarget<T extends LabActionTarget>(
   }
 
   if (action.kind === 'set_api_price') {
-    const price = blendApiPrice(action.input, action.output)
+    const owned = target.models.find((model) => model.id === action.modelId)
+    const listed = owned
+      ? clampApiListToHostingFloor(action.input, action.output, {
+          costIn: owned.costApiPriceIn,
+          costOut: owned.costApiPriceOut,
+        })
+      : { priceIn: action.input, priceOut: action.output }
+    const price = blendApiPrice(listed.priceIn, listed.priceOut)
     return {
       ...target,
       pricing: {
         ...target.pricing,
         apiPricePerMTok: price,
-        apiPriceInPerMTok: action.input,
-        apiPriceOutPerMTok: action.output,
+        apiPriceInPerMTok: listed.priceIn,
+        apiPriceOutPerMTok: listed.priceOut,
       },
       models: target.models.map((model) =>
         model.id === action.modelId
           ? {
               ...model,
               apiPricePerMTok: price,
-              apiPriceInPerMTok: action.input,
-              apiPriceOutPerMTok: action.output,
+              apiPriceInPerMTok: listed.priceIn,
+              apiPriceOutPerMTok: listed.priceOut,
             }
           : model,
       ),
@@ -317,9 +329,39 @@ export function applyLabAction(state: SimState, labId: string, action: LabAction
   const target = targetForState(state, labId)
   if (!previewLabActionForTarget(target, action).legal) return state
   if (labId === state.playerLabId) {
+    let nextAction = action
+    let player = state.player
+    if (action.kind === 'set_api_price') {
+      const model = player.models.find((candidate) => candidate.id === action.modelId)
+      if (model) {
+        const hosting = apiHostingCostFloor(state, computeSnapshot(state), model)
+        const listed = clampApiListToHostingFloor(
+          action.input,
+          action.output,
+          hosting,
+        )
+        player = {
+          ...player,
+          models: player.models.map((candidate) =>
+            candidate.id === model.id
+              ? {
+                  ...candidate,
+                  costApiPriceIn: hosting.costIn,
+                  costApiPriceOut: hosting.costOut,
+                }
+              : candidate,
+          ),
+        }
+        nextAction = {
+          ...action,
+          input: listed.priceIn,
+          output: listed.priceOut,
+        }
+      }
+    }
     return syncLabIndex({
       ...state,
-      player: applyLabActionToTarget(state.player, action),
+      player: applyLabActionToTarget(player, nextAction),
     })
   }
   return syncLabIndex({

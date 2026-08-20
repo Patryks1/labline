@@ -1,10 +1,13 @@
 import { estimateServingMemory } from "../balance/tokenServe";
+import { planExposedModelIds, soldApiRouters, releasedRouterMemberIds } from "../balance/modelRouter";
 import type {
   Model,
+  ModelRouter,
   ProductPricing,
   ServePrecision,
   SimState,
 } from "../types";
+import { isLivePublicModel } from "../modelRelease";
 
 export interface HostedServingPlacement {
   model: Model;
@@ -21,15 +24,15 @@ export interface ServingPlacementNeed {
 }
 
 function publicModels(models: Model[]): Model[] {
-  return models.filter(
-    (model) => model.release === "released" || model.shipped,
-  );
+  return models.filter(isLivePublicModel);
 }
 
 /** Models that must be resident at once for the active API and enabled plans. */
 export function hostedServingModels(input: {
   models: Model[];
   pricing: ProductPricing;
+  modelRouters?: readonly ModelRouter[];
+  activeModelRouterId?: string | null;
 }): Model[] {
   const published = publicModels(input.models);
   if (published.length === 0) return [];
@@ -42,10 +45,25 @@ export function hostedServingModels(input: {
       (id) => publicIds.has(id),
     ),
   );
+  for (const router of soldApiRouters({
+    apiRouterIds: input.pricing.apiRouterIds,
+    apiModelIds: input.pricing.apiModelIds,
+    activeModelRouterId: input.activeModelRouterId,
+    routers: input.modelRouters,
+    models: input.models,
+  })) {
+    for (const id of releasedRouterMemberIds(router, input.models)) {
+      if (publicIds.has(id)) apiIds.add(id);
+    }
+  }
   const subscriptionIds = new Set<string>();
   for (const plan of input.pricing.plans) {
     if (!plan.enabled) continue;
-    for (const id of plan.modelIds) {
+    for (const id of planExposedModelIds(
+      plan,
+      input.models,
+      input.modelRouters,
+    )) {
       if (publicIds.has(id)) subscriptionIds.add(id);
     }
   }
@@ -60,13 +78,18 @@ export function servingPrecisionForModel(
   pricing: ProductPricing,
   model: Model,
   apiListed = true,
+  routers?: readonly ModelRouter[],
 ): ServePrecision {
   const candidates: ServePrecision[] = [
     ...(apiListed
       ? [pricing.apiServePrecisionByModel?.[model.id] ?? "fp16"]
       : []),
     ...pricing.plans
-      .filter((plan) => plan.enabled && plan.modelIds.includes(model.id))
+      .filter(
+        (plan) =>
+          plan.enabled &&
+          planExposedModelIds(plan, [model], routers).includes(model.id),
+      )
       .map(
         (plan) =>
           plan.servePrecisionByModel?.[model.id] ??
@@ -88,6 +111,8 @@ export function servingPlacementNeedForLab(input: {
   models: Model[];
   pricing: ProductPricing;
   demandMTok: number;
+  modelRouters?: readonly ModelRouter[];
+  activeModelRouterId?: string | null;
 }): ServingPlacementNeed {
   const models = hostedServingModels(input);
   if (models.length === 0) {
@@ -109,6 +134,17 @@ export function servingPlacementNeedForLab(input: {
   );
   const contextTokens = 1_024;
   const apiIds = new Set(input.pricing.apiModelIds ?? []);
+  for (const router of soldApiRouters({
+    apiRouterIds: input.pricing.apiRouterIds,
+    apiModelIds: input.pricing.apiModelIds,
+    activeModelRouterId: input.activeModelRouterId,
+    routers: input.modelRouters,
+    models: input.models,
+  })) {
+    for (const id of releasedRouterMemberIds(router, input.models)) {
+      apiIds.add(id);
+    }
+  }
   const implicitApiFallback = input.pricing.apiModelIds == null;
   const placements = models.map((model) => {
     const precision = servingPrecisionForModel(
@@ -116,6 +152,7 @@ export function servingPlacementNeedForLab(input: {
       model,
       apiIds.has(model.id) ||
         (implicitApiFallback && model.id === input.pricing.activeModelId),
+      input.modelRouters,
     );
     return {
       model,
@@ -147,6 +184,8 @@ export function servingPlacementNeed(state: SimState): ServingPlacementNeed {
   return servingPlacementNeedForLab({
     models: state.player.models,
     pricing: state.player.pricing,
+    modelRouters: state.player.modelRouters,
+    activeModelRouterId: state.player.activeModelRouterId,
     demandMTok: state.lastMarket?.playerDemandMTok ?? 0,
   });
 }

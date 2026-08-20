@@ -56,7 +56,28 @@ describe("CheckpointBranchDialog", () => {
     expect(markup).toContain("Reasoning");
     expect(markup).toContain("Start branch");
     expect(markup).toContain('data-checkpoint-branch-workflow="true"');
+    expect(markup).toContain('data-focus-studio="true"');
+    expect(markup).toContain("Specialize mix");
     expect(markup).not.toContain(">×<");
+    expect(markup).not.toContain("data-custom-mix-editor");
+  });
+
+  it("opens a mix editor when Custom is the selected specialisation", () => {
+    const markup = renderToStaticMarkup(
+      createElement(CheckpointBranchDialog, {
+        open: true,
+        checkpoint: {
+          ...candidate(),
+          branchDirection: "custom",
+        },
+        sourceRunName: "Aster",
+        onClose: vi.fn(),
+        onSubmit: vi.fn(),
+      }),
+    );
+
+    expect(markup).toContain('data-custom-mix-editor="true"');
+    expect(markup).toContain("Custom mix");
   });
 
   it("renders nothing while closed", () => {

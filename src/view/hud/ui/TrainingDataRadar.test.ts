@@ -1,4 +1,4 @@
-import { createElement } from 'react'
+import { createElement, type ComponentProps } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import { DATA_DOMAINS, createEmptyLabData, emptyDomainStock } from '../../../sim/balance/data'
@@ -21,31 +21,116 @@ function blankAllocations(fill = 10): Record<DataDomain, number> {
   ) as Record<DataDomain, number>
 }
 
+function radarProps(
+  overrides: Partial<ComponentProps<typeof TrainingDataRadar>> = {},
+) {
+  return {
+    baseWeights: blankAllocations(10),
+    postWeights: blankAllocations(10),
+    baseMTok: 78,
+    postMTok: 22,
+    data: createEmptyLabData(),
+    teachers: [],
+    syntheticTeacherIds: {},
+    includeSynthHQ: false,
+    includeSynthLQ: false,
+    onOwnedChange: vi.fn(),
+    onTeacherChange: vi.fn(),
+    onOpenPlanLibrary: vi.fn(),
+    trainShare: 0.82,
+    onTrainShareChange: vi.fn(),
+    ...overrides,
+  }
+}
+
 describe('training data radar', () => {
-  it('keeps direct radar handles keyboard-addressable alongside shared controls', () => {
+  it('keeps the spider as the recipe: three zones, tokens, and click-to-edit', () => {
     const markup = renderToStaticMarkup(
-      createElement(TrainingDataRadar, {
-        weights: blankAllocations(10),
-        totalMTok: 100,
-        data: createEmptyLabData(),
-        teachers: [],
-        syntheticTeacherIds: {},
-        includeSynthHQ: false,
-        includeSynthLQ: false,
-        onChange: vi.fn(),
-        onAutoBalance: vi.fn(),
-        onTeacherChange: vi.fn(),
-        onIncludeSynthHQChange: vi.fn(),
-        onIncludeSynthLQChange: vi.fn(),
-      }),
+      createElement(TrainingDataRadar, radarProps()),
     )
 
     expect(markup).toContain('aria-label="Draggable radar chart for training data domains"')
     expect(markup).toContain('training-data-radar-layout')
     expect(markup).toContain('role="slider"')
-    expect(markup).toContain('aria-label="Code token volume"')
-    expect(markup).toContain('hud-button--ghost')
-    expect(markup).toContain('class="hud-input')
+    expect(markup).toContain('aria-label="Code base volume"')
+    expect(markup).toContain('aria-label="Math base volume"')
+    expect(markup).toContain('aria-label="Code data volume"')
+    expect(markup).toContain('aria-label="Edit Code base down"')
+    expect(markup).toContain('aria-label="Edit Code base up"')
+    expect(markup).not.toContain('aria-label="Code synthetic volume"')
+    expect(markup).toContain('Load plan')
+    expect(markup).toContain('Use all data')
+    expect(markup).toContain('Zoom in')
+    expect(markup).toContain('Fit recipe')
+    expect(markup).toContain('Focus selected domain')
+    expect(markup).not.toMatch(/>Q\d/)
+    expect(markup).toContain('Verification holdout')
+    expect(markup).toContain('data-radar-legend="true"')
+    expect(markup).toContain('Tokens the run actually trains on')
+    expect(markup).toContain('Overflow past base, same pile')
+    expect(markup).toContain('Holdout from the center of this domain')
+    expect(markup).toContain('not trained')
+    expect(markup).toContain('data-radar-label="code"')
+    expect(markup).toContain('data-radar-label="math"')
+    expect(markup).toContain('Verify')
+    expect(markup).not.toContain('aria-label="Code verify volume"')
+    expect(markup).toContain('data-radar-pop="true"')
+    expect(markup).toContain('training-data-radar-pop')
+    expect(markup).toContain('aria-label="Edit Code all"')
+    expect(markup).toContain('aria-label="Edit Code base"')
+    expect(markup).toContain('aria-label="Edit Code align"')
+    expect(markup).not.toContain('aria-label="Edit Code verify"')
+    expect(markup).toContain('data-readonly="true"')
+    expect(markup).not.toContain('Domain volume')
+    expect(markup).not.toContain('Alignment overflow')
+    expect(markup).not.toContain('Balance owned stock')
+    expect(markup).not.toContain('aria-label="Recipe zone"')
+    expect(markup).not.toContain('Auto · best teacher')
+  })
+
+  it('draws base, post-train, and synthetic on one graph without zone tabs', () => {
+    const markup = renderToStaticMarkup(
+      createElement(TrainingDataRadar, radarProps({ syntheticUnlocked: true })),
+    )
+
+    expect(markup).toContain('>Base</strong>')
+    expect(markup).toContain('>Align</strong>')
+    expect(markup).toContain('>Synthetic</strong>')
+    expect(markup).toContain('Generated tokens past the pile')
+    expect(markup).toContain('aria-label="Code synthetic volume"')
+    expect(markup).not.toContain('data-radar-zone')
+    expect(markup).not.toContain('aria-label="Recipe zone"')
+    expect(markup).not.toContain('aria-label="Data phase"')
+  })
+
+  it('hides the synthetic band until Synthetic Generators is unlocked', () => {
+    const markup = renderToStaticMarkup(
+      createElement(TrainingDataRadar, radarProps()),
+    )
+
+    expect(markup).not.toContain('aria-label="Code synthetic volume"')
+    expect(markup).not.toContain('>Synthetic</strong>')
+    expect(markup).not.toContain('aria-label="Edit Code synth"')
+    expect(markup).not.toContain('Synth in pile')
+    expect(markup).toContain('Use all data')
+    expect(markup).toContain('aria-label="Code data volume"')
+  })
+
+  it('shows the selected domain volumes next to its spider label', () => {
+    const markup = renderToStaticMarkup(
+      createElement(TrainingDataRadar, radarProps({ syntheticUnlocked: true })),
+    )
+
+    expect(markup).toContain('data-radar-label="code"')
+    expect(markup).not.toMatch(/>Q\d/)
+    expect(markup).toContain('data-radar-pop="true"')
+    expect(markup).toContain('aria-label="Code recipe volumes"')
+    expect(markup).toContain('aria-label="Edit Code all"')
+    expect(markup).toContain('aria-label="Edit Code base"')
+    expect(markup).toContain('aria-label="Edit Code align"')
+    expect(markup).toContain('aria-label="Edit Code synth"')
+    expect(markup).not.toContain('aria-label="Edit Code verify"')
+    expect(markup).not.toContain('aria-label="Code post-train MTok"')
   })
 
   it('moves one domain without silently changing any other token allocation', () => {
@@ -90,7 +175,6 @@ describe('training data radar', () => {
       selectedMTok: 25,
     })
 
-    // Cap is inventory-driven, not selection-driven — a tiny recipe can still grow.
     expect(availability.capMTok).toBe(12_000)
     expect(availability.usableRealMTok).toBe(12_000)
     expect(availability.selectedMTok).toBe(25)
@@ -103,7 +187,7 @@ describe('training data radar', () => {
       availability.capMTok,
     )
     expect(raised.code).toBe(4_000)
-    for (const domain of DATA_DOMAINS.filter((d) => d !== 'code')) {
+    for (const domain of DATA_DOMAINS.filter((entry) => entry !== 'code')) {
       expect(raised[domain]).toBe(25)
     }
   })
@@ -170,7 +254,7 @@ describe('training data domain fill (drag past owned corpus)', () => {
       syntheticMultiplier: 2,
     })
 
-    expect(fill.capMTok).toBe(300) // 100 real × (1 + 2×)
+    expect(fill.capMTok).toBe(300)
     expect(fill.synthTake).toBe(150)
     expect(fill.shortfall).toBe(0)
   })
@@ -184,7 +268,7 @@ describe('training data domain fill (drag past owned corpus)', () => {
       syntheticHeadroomMTok: 200,
     })
 
-    expect(fill.capMTok).toBe(900) // (100 real + 200 teacher) × (1 + 2×)
+    expect(fill.capMTok).toBe(900)
     expect(fill.synthTake).toBe(400)
     expect(fill.shortfall).toBe(0)
   })
@@ -198,9 +282,27 @@ describe('training data domain fill (drag past owned corpus)', () => {
       syntheticHeadroomMTok: 100,
     })
 
-    expect(fill.capMTok).toBe(1600) // 8 × (100 + 100)
+    expect(fill.capMTok).toBe(1600)
     expect(fill.synthTake).toBe(1500)
     expect(fill.shortfall).toBe(100_000 - 1600)
+  })
+
+  it('takes unpurged pile synth even when extra synth is turned off', () => {
+    const fill = trainingDataDomainFill({
+      needMTok: 100,
+      realAvailableMTok: 40,
+      synthHQStockMTok: 60,
+      synthLQStockMTok: 0,
+      includeSynthHQ: false,
+      includeSynthLQ: false,
+      syntheticMultiplier: 0,
+    })
+
+    expect(fill.realTake).toBeCloseTo(40)
+    expect(fill.hqTake).toBeCloseTo(60)
+    expect(fill.lqTake).toBe(0)
+    expect(fill.synthTake).toBe(0)
+    expect(fill.shortfall).toBe(0)
   })
 
   it('consumes stocked HQ/LQ synthetic before fresh expansion', () => {

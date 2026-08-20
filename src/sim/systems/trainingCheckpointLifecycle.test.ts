@@ -51,7 +51,7 @@ function campaignAtTenPercent(seed: number): SimState {
     ...job,
     targetPfDays,
     recommendedPfDays: targetPfDays,
-    progressPfDays: targetPfDays * 0.1,
+    progressPfDays: targetPfDays * 0.49,
     minCalendarDays: 30,
     daysElapsed: 0,
     campaignMilestonesReached: [],
@@ -68,36 +68,49 @@ function campaignAtTenPercent(seed: number): SimState {
   return state;
 }
 
+function captureAfterFirstMilestone(seed: number): SimState {
+  const crossed = tickTraining(campaignAtTenPercent(seed));
+  return captureTrainingCheckpoint(crossed, crossed.player.trainingJob!.id);
+}
+
 describe("stealth training checkpoint lifecycle", () => {
-  it("automatically captures immutable milestone weights outside the model fleet", () => {
+  it("does not write a weight file when a milestone incident opens", () => {
     const before = campaignAtTenPercent(7101);
     const sourceSeed = before.player.trainingJob!.outcomeSeed;
     const next = tickTraining(before);
+    const job = next.player.trainingJob!;
+
+    expect(next.player.trainingCheckpoints ?? []).toEqual([]);
+    expect(job.pendingCampaignEvent).toBeDefined();
+    expect(job.campaignMilestonesReached).toEqual([0.5]);
+    expect(job.outcomeSeed).toBe(sourceSeed);
+    expect(next.player.trainingJobs).toHaveLength(1);
+  });
+
+  it("captures a milestone file only when the player saves it", () => {
+    const next = captureAfterFirstMilestone(7101);
     const job = next.player.trainingJob!;
     const checkpoint = next.player.trainingCheckpoints?.[0];
 
     expect(checkpoint).toMatchObject({
       sourceJobId: job.id,
-      milestone: 0.12,
+      milestone: 0.5,
       ordinal: 1,
       status: "stealth",
       stage: "base",
-      telemetry: { progress: 0.12, stage: "base" },
+      telemetry: { progress: 0.5, stage: "base" },
     });
     expect(checkpoint!.model).toMatchObject({
       release: "internal",
       shipped: false,
       checkpointCandidateId: checkpoint!.id,
       sourceTrainingJobId: job.id,
-      checkpointProgress: 0.12,
+      checkpointProgress: 0.5,
     });
     expect(checkpoint!.lineageId).toBe(job.lineageId);
-    expect(checkpoint!.model.lineageId).toBe(job.lineageId);
-    expect(job.outcomeSeed).toBe(sourceSeed);
     expect(next.player.models).not.toContainEqual(
       expect.objectContaining({ id: checkpoint!.model.id }),
     );
-    expect(next.player.trainingJobs).toHaveLength(1);
   });
 
   it("supports manual stealth capture for an earned milestone and deduplicates it", () => {
@@ -126,7 +139,7 @@ describe("stealth training checkpoint lifecycle", () => {
     const legacyJob: TrainingJob = {
       ...source,
       progressPfDays: source.targetPfDays * 0.9,
-      campaignMilestonesReached: [0.12, 0.32, 0.58, 0.82],
+      campaignMilestonesReached: [0.5],
       pendingCampaignEvent: undefined,
       daysElapsed: 20,
     };
@@ -145,14 +158,14 @@ describe("stealth training checkpoint lifecycle", () => {
     }
     const checkpoints = state.player.trainingCheckpoints!;
     expect(checkpoints.map((checkpoint) => checkpoint.milestone)).toEqual([
-      0.82, 0.58, 0.32, 0.12,
+      0.5,
     ]);
     expect(new Set(checkpoints.map((checkpoint) => checkpoint.id)).size).toBe(
-      4,
+      1,
     );
     expect(
       checkpoints.map((checkpoint) => checkpoint.telemetry.progress),
-    ).toEqual([0.82, 0.58, 0.32, 0.12]);
+    ).toEqual([0.5]);
 
     const repeated = captureTrainingCheckpoint(state, legacyJob.id);
     expect(repeated.player.trainingCheckpoints).toEqual(checkpoints);
@@ -160,7 +173,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("promotes to retained internal, then uses the existing public release path", () => {
-    const captured = tickTraining(campaignAtTenPercent(7103));
+    const captured = captureAfterFirstMilestone(7103);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const sourceJob = captured.player.trainingJob!;
     const cash = captured.player.cash;
@@ -189,7 +202,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("deletes only unpromoted stealth weights from the archive", () => {
-    const captured = tickTraining(campaignAtTenPercent(7104));
+    const captured = captureAfterFirstMilestone(7104);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const discarded = discardTrainingCheckpoint(captured, candidate.id);
     expect(discarded.player.trainingCheckpoints).toEqual([]);
@@ -204,7 +217,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("round-trips the candidate, embedded model and lineage without promoting it", () => {
-    const captured = tickTraining(campaignAtTenPercent(7105));
+    const captured = captureAfterFirstMilestone(7105);
     const restored = roundTripState(captured);
     const candidate = restored.player.trainingCheckpoints![0]!;
 
@@ -212,13 +225,13 @@ describe("stealth training checkpoint lifecycle", () => {
     expect(candidate.model.release).toBe("internal");
     expect(candidate.model.shipped).toBe(false);
     expect(candidate.model.lineageId).toBe(candidate.lineageId);
-    expect(candidate.telemetry.progress).toBeCloseTo(0.12);
+    expect(candidate.telemetry.progress).toBeCloseTo(0.5);
     expect(restored.player.models).toHaveLength(0);
     expect(restored.player.trainingJobs).toHaveLength(1);
   });
 
   it("queues concurrent evaluations, charges each once, and preserves public economics", () => {
-    const captured = tickTraining(campaignAtTenPercent(7106));
+    const captured = captureAfterFirstMilestone(7106);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const request = {
       suiteIds: ["language"] as const,
@@ -308,7 +321,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("implements rollback as a new data-consuming branch and preserves source history", () => {
-    const captured = tickTraining(campaignAtTenPercent(7121));
+    const captured = captureAfterFirstMilestone(7121);
     const checkpoint = captured.player.trainingCheckpoints![0]!;
     const source = captured.player.trainingJob!;
     const checkpointWithOldWatermark = {
@@ -345,7 +358,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("runs code and chat branches concurrently from the same private checkpoint", () => {
-    const captured = tickTraining(campaignAtTenPercent(7122));
+    const captured = captureAfterFirstMilestone(7122);
     const checkpoint = captured.player.trainingCheckpoints![0]!;
     const source = captured.player.trainingJob!;
     const prepared: SimState = {
@@ -395,7 +408,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("starts a cyber-specialised child while the source run continues", () => {
-    const captured = tickTraining(campaignAtTenPercent(7123));
+    const captured = captureAfterFirstMilestone(7123);
     const checkpoint = captured.player.trainingCheckpoints![0]!;
     const source = captured.player.trainingJob!;
     const prepared: SimState = {
@@ -430,6 +443,7 @@ describe("stealth training checkpoint lifecycle", () => {
       branchDirection: "cyber",
       progressPfDays: 0,
     });
+    expect(child.specializationFocus?.coding).toBeGreaterThan(0.5);
     expect(child.dataPlan.weights.code ?? 0).toBeGreaterThan(
       checkpoint.model.dataPlan!.weights.code ?? 0,
     );
@@ -440,8 +454,44 @@ describe("stealth training checkpoint lifecycle", () => {
     expect(unchangedParent.progressPfDays).toBe(source.progressPfDays);
   });
 
+  it("applies an explicit specialization focus mix when forking", () => {
+    const captured = captureAfterFirstMilestone(7124);
+    const checkpoint = captured.player.trainingCheckpoints![0]!;
+    const prepared: SimState = {
+      ...captured,
+      player: {
+        ...captured.player,
+        trainingCheckpoints: [
+          {
+            ...checkpoint,
+            model: { ...checkpoint.model, dataWatermarkMTok: 0 },
+          },
+        ],
+      },
+    };
+    const branched = forkTrainingCheckpoint(prepared, {
+      checkpointId: checkpoint.id,
+      direction: "code",
+      specializationFocus: {
+        coding: 0.9,
+        science: 0,
+        research: 0.2,
+        personality: 0,
+        chat: 0.1,
+      },
+    });
+    const child = branched.player.trainingJobs!.find(
+      (job) => job.id !== captured.player.trainingJob!.id,
+    )!;
+    expect(child.specializationFocus?.coding).toBeCloseTo(0.9);
+    expect(child.lifecycle).toBe("specialized");
+    expect(child.dataPlan.weights.code ?? 0).toBeGreaterThan(
+      checkpoint.model.dataPlan!.weights.code ?? 0,
+    );
+  });
+
   it("blocks promotion but discard cancels an in-flight private evaluation", () => {
-    const captured = tickTraining(campaignAtTenPercent(7107));
+    const captured = captureAfterFirstMilestone(7107);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const scheduled = scheduleCheckpointEvaluation(captured, candidate.id, {
       suiteIds: ["language"],
@@ -461,7 +511,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("deletes completed reports and every queued study across save/load", () => {
-    const captured = tickTraining(campaignAtTenPercent(7136));
+    const captured = captureAfterFirstMilestone(7136);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const first = scheduleCheckpointEvaluation(captured, candidate.id, {
       suiteIds: ["language"],
@@ -514,7 +564,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("migrates legacy discarded tombstones and their queued studies away", () => {
-    const captured = tickTraining(campaignAtTenPercent(7137));
+    const captured = captureAfterFirstMilestone(7137);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const scheduled = scheduleCheckpointEvaluation(captured, candidate.id, {
       suiteIds: ["language"],
@@ -541,7 +591,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("evaluates a promoted checkpoint and copies the report onto its retained model", () => {
-    const captured = tickTraining(campaignAtTenPercent(7108));
+    const captured = captureAfterFirstMilestone(7108);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const promoted = promoteTrainingCheckpoint(captured, candidate.id);
     const scheduled = scheduleCheckpointEvaluation(promoted, candidate.id, {
@@ -567,7 +617,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("deleting retained checkpoint weights cascades its archive and queued study", () => {
-    const captured = tickTraining(campaignAtTenPercent(7111));
+    const captured = captureAfterFirstMilestone(7111);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const promoted = promoteTrainingCheckpoint(captured, candidate.id);
     const scheduled = scheduleCheckpointEvaluation(promoted, candidate.id, {
@@ -590,7 +640,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("keeps deleted exact weights when a distinct child becomes their concrete owner", () => {
-    const captured = tickTraining(campaignAtTenPercent(7135));
+    const captured = captureAfterFirstMilestone(7135);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const sourceJob = captured.player.trainingJob!;
     const promoted = promoteTrainingCheckpoint(captured, candidate.id);
@@ -662,7 +712,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("cascades finalized base-model checkpoints, reports, and pending studies", () => {
-    const captured = tickTraining(campaignAtTenPercent(7130));
+    const captured = captureAfterFirstMilestone(7130);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const first = scheduleCheckpointEvaluation(captured, candidate.id, {
       suiteIds: ["language"],
@@ -758,7 +808,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("preserves a checkpoint while a retained exact version owns it", () => {
-    const captured = tickTraining(campaignAtTenPercent(7131));
+    const captured = captureAfterFirstMilestone(7131);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const promoted = promoteTrainingCheckpoint(captured, candidate.id);
     const publicPromoted = releaseModel(promoted, candidate.model.id);
@@ -802,7 +852,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("cancelling a run removes unowned checkpoints and every queued study", () => {
-    const captured = tickTraining(campaignAtTenPercent(7132));
+    const captured = captureAfterFirstMilestone(7132);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const withCheckpointStudy = scheduleCheckpointEvaluation(
       captured,
@@ -832,7 +882,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("keeps a promoted exact checkpoint when its source run is cancelled", () => {
-    const captured = tickTraining(campaignAtTenPercent(7134));
+    const captured = captureAfterFirstMilestone(7134);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const promoted = promoteTrainingCheckpoint(captured, candidate.id);
     const cancelled = cancelTraining(
@@ -853,7 +903,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("keeps a checkpoint through source cancellation while a child branch needs it", () => {
-    const captured = tickTraining(campaignAtTenPercent(7133));
+    const captured = captureAfterFirstMilestone(7133);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const sourceJob = captured.player.trainingJob!;
     const prepared: SimState = {
@@ -886,7 +936,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("refuses to evaluate weights after their checkpoint record is deleted", () => {
-    const captured = tickTraining(campaignAtTenPercent(7109));
+    const captured = captureAfterFirstMilestone(7109);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const discarded = discardTrainingCheckpoint(captured, candidate.id);
     const scheduled = scheduleCheckpointEvaluation(discarded, candidate.id, {
@@ -901,7 +951,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("round-trips pending and completed evaluation evidence with nested arrays", () => {
-    const captured = tickTraining(campaignAtTenPercent(7110));
+    const captured = captureAfterFirstMilestone(7110);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const first = scheduleCheckpointEvaluation(captured, candidate.id, {
       suiteIds: ["language"],
@@ -936,7 +986,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("keeps sequential studies independently identified without rerolling evidence direction", () => {
-    const captured = tickTraining(campaignAtTenPercent(7112));
+    const captured = captureAfterFirstMilestone(7112);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const firstScheduled = scheduleCheckpointEvaluation(
       captured,
@@ -989,7 +1039,7 @@ describe("stealth training checkpoint lifecycle", () => {
   });
 
   it("refuses a seventeenth study without charging cash or laundering the archive", () => {
-    const captured = tickTraining(campaignAtTenPercent(7113));
+    const captured = captureAfterFirstMilestone(7113);
     const candidate = captured.player.trainingCheckpoints![0]!;
     const scheduled = scheduleCheckpointEvaluation(captured, candidate.id, {
       suiteIds: ["language"],

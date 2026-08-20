@@ -20,6 +20,7 @@ import {
   MAX_FOUNDATION_SLOPE_GAP,
   RESIDENTIAL_VARIANTS_PER_CHUNK,
   SimViewportRenderSource,
+  URBAN_PARCEL_FOOTPRINT_SCALE,
   URBAN_VARIANTS_PER_CHUNK,
   acceptsNaturalSpacing,
   biomeDetailThreshold,
@@ -468,8 +469,8 @@ describe('SimViewportRenderSource', () => {
     const anchorY = Math.floor(parcel!.anchorTileId / source.width)
     expect(record.x).toBeCloseTo((anchorX + (parcel!.width - 1) * 0.5) * source.tileSize)
     expect(record.z).toBeCloseTo((anchorY + (parcel!.height - 1) * 0.5) * source.tileSize)
-    expect(record.scaleX).toBeCloseTo(parcel!.width * source.tileSize * 0.92)
-    expect(record.scaleZ).toBeCloseTo(parcel!.height * source.tileSize * 0.92)
+    expect(record.scaleX).toBeCloseTo(parcel!.width * source.tileSize * URBAN_PARCEL_FOOTPRINT_SCALE[parcel!.class])
+    expect(record.scaleZ).toBeCloseTo(parcel!.height * source.tileSize * URBAN_PARCEL_FOOTPRINT_SCALE[parcel!.class])
 
     const expectedSelection = parcel!.footprintTileIds.map((id) => ({
       x: id % source.width,

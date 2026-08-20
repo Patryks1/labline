@@ -20,6 +20,7 @@ describe('TrainingActivityBar', () => {
     expect(markup).toContain('>Idle</span>')
     expect(markup).not.toContain('Training idle')
     expect(markup).toContain('>Models</button>')
+    expect(markup).toContain('data-open-models="true"')
     expect(markup).not.toContain('training-activity-bar__surface hud-surface pointer-events-auto')
   })
 
@@ -61,7 +62,7 @@ describe('TrainingActivityBar', () => {
     const actions: TrainingActivityAction[] = [
       { kind: 'open-run', label: 'View run', jobId: 'run-view' },
       { kind: 'open-run', label: 'Review run', jobId: 'run-review' },
-      { kind: 'open-run', label: 'Resolve decision', jobId: 'run-decision' },
+      { kind: 'decide', label: 'Decide', jobId: 'run-decision' },
       { kind: 'resume', label: 'Resume', jobId: 'run-paused' },
       {
         kind: 'recover',
@@ -74,7 +75,7 @@ describe('TrainingActivityBar', () => {
     expect(actions.map(modelsRunTargetForActivityAction)).toEqual([
       'run-view',
       'run-review',
-      'run-decision',
+      null,
       null,
       null,
     ])

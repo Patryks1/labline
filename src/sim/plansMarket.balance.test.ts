@@ -23,7 +23,9 @@ import {
   planAttractiveness,
   availablePlanPrecisionsForModel,
   enforcePlanSubscriberPyramid,
-  PAID_PLAN_PYRAMID_LEAD,
+  paidPlanPyramidLead,
+  PAID_PLAN_PYRAMID_LEAD_WEAK,
+  PAID_PLAN_PYRAMID_LEAD_STRONG,
   planHasApiValueSubsidy,
   planModelServePrecision,
   planModelTrafficMix,
@@ -446,6 +448,17 @@ describe('plan mult / high ARPU UI path', () => {
       }),
     )
   })
+
+  it('updatePlan lets included usage go down to 0.5 MTok/month', () => {
+    let s = createGame(200)
+    const id = s.player.pricing.plans[0]!.id
+    s = updatePlan(s, id, { includedMTokPerMonth: 0.5 })
+    const p = s.player.pricing.plans.find((x) => x.id === id)!
+    expect(planAllowanceMTokPerMonth(p)).toBeCloseTo(0.5)
+    s = updatePlan(s, id, { includedMTokPerMonth: 0.2 })
+    const clamped = s.player.pricing.plans.find((x) => x.id === id)!
+    expect(planAllowanceMTokPerMonth(clamped)).toBeCloseTo(0.5)
+  })
 })
 
 describe('plan token value vs rivals', () => {
@@ -677,21 +690,33 @@ describe('plan token value vs rivals', () => {
     expect(strong).toBeGreaterThan(weak)
     expect(strong).toBeGreaterThan(0.7)
 
-    const clamped = enforcePlanSubscriberPyramid([
-      { plan: { pricePerMonth: 20 }, subscribers: 100 },
-      { plan: { pricePerMonth: 80 }, subscribers: 500 },
-      { plan: { pricePerMonth: 250 }, subscribers: 400 },
+    expect(paidPlanPyramidLead({ valueRatio: 0.5, readiness: 0.2 })).toBeGreaterThan(1.6)
+    expect(paidPlanPyramidLead({ valueRatio: 3.2, readiness: 0.92 })).toBeLessThan(0.9)
+    expect(paidPlanPyramidLead({ valueRatio: 3.2, readiness: 0.92 })).toBeGreaterThanOrEqual(
+      PAID_PLAN_PYRAMID_LEAD_STRONG - 0.02,
+    )
+    expect(paidPlanPyramidLead({ valueRatio: 0.4, readiness: 0.15 })).toBeLessThanOrEqual(
+      PAID_PLAN_PYRAMID_LEAD_WEAK + 0.02,
+    )
+
+    const weakClamp = enforcePlanSubscriberPyramid([
+      { plan: { pricePerMonth: 20 }, subscribers: 100, valueRatio: 0.55, readiness: 0.2 },
+      { plan: { pricePerMonth: 80 }, subscribers: 500, valueRatio: 0.55, readiness: 0.2 },
+      { plan: { pricePerMonth: 250 }, subscribers: 400, valueRatio: 0.4, readiness: 0.15 },
       { plan: { pricePerMonth: 0 }, subscribers: 50 },
     ])
-    const plus = clamped.find((b) => b.plan.pricePerMonth === 20)!
-    const pro = clamped.find((b) => b.plan.pricePerMonth === 80)!
-    const team = clamped.find((b) => b.plan.pricePerMonth === 250)!
-    expect(plus.subscribers + 1e-6).toBeGreaterThanOrEqual(
-      pro.subscribers * PAID_PLAN_PYRAMID_LEAD,
-    )
-    expect(pro.subscribers + 1e-6).toBeGreaterThanOrEqual(
-      team.subscribers * PAID_PLAN_PYRAMID_LEAD,
-    )
+    const plusWeak = weakClamp.find((b) => b.plan.pricePerMonth === 20)!
+    const proWeak = weakClamp.find((b) => b.plan.pricePerMonth === 80)!
+    expect(plusWeak.subscribers).toBeGreaterThan(proWeak.subscribers * 1.5)
+
+    const strongClamp = enforcePlanSubscriberPyramid([
+      { plan: { pricePerMonth: 20 }, subscribers: 100, valueRatio: 3.2, readiness: 0.92 },
+      { plan: { pricePerMonth: 80 }, subscribers: 500, valueRatio: 3.2, readiness: 0.92 },
+      { plan: { pricePerMonth: 0 }, subscribers: 50 },
+    ])
+    const plusStrong = strongClamp.find((b) => b.plan.pricePerMonth === 20)!
+    const proStrong = strongClamp.find((b) => b.plan.pricePerMonth === 80)!
+    expect(proStrong.subscribers).toBeGreaterThan(plusStrong.subscribers)
 
     let s = shipModel(createGame(204), 68)
     const modelId = s.player.models[0]!.id
@@ -754,10 +779,10 @@ describe('plan token value vs rivals', () => {
     const proStats = s.lastMarket.planStats.find((p) => p.planId === 'pro')!
     const teamStats = s.lastMarket.planStats.find((p) => p.planId === 'team')!
     expect(free.subscribers).toBeGreaterThan(plusStats.subscribers)
-    expect(plusStats.subscribers).toBeGreaterThan(proStats.subscribers)
+    expect(plusStats.subscribers).toBeGreaterThan(teamStats.subscribers)
     expect(proStats.subscribers).toBeGreaterThan(teamStats.subscribers)
-    expect(plusStats.subscribers).toBeGreaterThanOrEqual(
-      proStats.subscribers * (PAID_PLAN_PYRAMID_LEAD - 0.05),
+    expect(plusStats.subscribers + proStats.subscribers).toBeGreaterThan(
+      teamStats.subscribers,
     )
   })
 
@@ -1390,7 +1415,7 @@ describe('facility opex scales with GPUs', () => {
     const oFull = playerBuildingOpex(full)
     expect(oFull).toBeGreaterThan(oEmpty)
     // GPU term alone should be material
-    expect(ECONOMY.facilityOpexMultiplier).toBe(1)
+    expect(ECONOMY.facilityOpexMultiplier).toBeGreaterThanOrEqual(1.3)
     expect(oFull - oEmpty).toBeGreaterThan(
       48 * (ECONOMY.rackOpexPerGpuDay ?? 400) * 0.9,
     )
@@ -1626,6 +1651,82 @@ describe('subscription plan demand rebalance', () => {
     expect(ratios.pro, JSON.stringify(ratios)).toBeGreaterThan(0.08)
     expect(ratios.max, JSON.stringify(ratios)).toBeGreaterThan(0.05)
     expect(ratios.premium, JSON.stringify(ratios)).toBeGreaterThan(0.2)
+  })
+
+  it('lets Plus dominate early and Pro+Max earn real late-game seats and revenue', () => {
+    const tickPlans = (state: SimState, days: number) => {
+      let next = state
+      for (let day = 0; day < days; day += 1) {
+        next = tickMarket({ ...next, day: next.day + 1 })
+      }
+      return next
+    }
+    const seatsOf = (state: SimState, id: string) =>
+      state.lastMarket.planStats.find((plan) => plan.planId === id)?.subscribers ?? 0
+    const revenueOf = (state: SimState, id: string) =>
+      state.lastMarket.planStats.find((plan) => plan.planId === id)?.dayRevenue ?? 0
+
+    let early = shipModel(createGame(401), 40)
+    const earlyId = early.player.models[0]!.id
+    early = withHall(early, 80)
+    early = {
+      ...early,
+      player: {
+        ...early.player,
+        brandTrust: 48,
+        allocation: { training: 0.1, inference: 0.8, research: 0.1 },
+        pricing: {
+          ...early.player.pricing,
+          plans: defaultPlans().map((plan) => ({ ...plan, modelIds: [earlyId] })),
+        },
+      },
+    }
+    early = tickPlans(early, 6)
+    const earlyPlus = seatsOf(early, 'plan-plus')
+    const earlyPro = seatsOf(early, 'plan-pro')
+    const earlyMax = seatsOf(early, 'plan-max')
+    expect(earlyPlus, 'early Plus should lead paid seats').toBeGreaterThan(
+      earlyPro + earlyMax,
+    )
+
+    let late = shipModel(createGame(402), 78)
+    const lateId = late.player.models[0]!.id
+    late = withHall(late, 280)
+    late = {
+      ...late,
+      rivals: late.rivals.map((rival) => ({ ...rival, models: [] })),
+      player: {
+        ...late.player,
+        brandTrust: 88,
+        allocation: { training: 0.05, inference: 0.9, research: 0.05 },
+        servingEfficiency: 1.4,
+        pricing: {
+          ...late.player.pricing,
+          plans: defaultPlans().map((plan) =>
+            plan.id === 'plan-pro' || plan.id === 'plan-max'
+              ? {
+                  ...plan,
+                  modelIds: [lateId],
+                  includedMTokPerMonth:
+                    (plan.includedMTokPerMonth ?? 100) * 1.15,
+                }
+              : { ...plan, modelIds: [lateId] },
+          ),
+        },
+      },
+    }
+    late = tickPlans(late, 8)
+    const latePlus = seatsOf(late, 'plan-plus')
+    const latePro = seatsOf(late, 'plan-pro')
+    const lateMax = seatsOf(late, 'plan-max')
+    const latePremium = latePro + lateMax
+    expect(latePremium, 'late Pro+Max seats vs Plus').toBeGreaterThanOrEqual(
+      latePlus * 0.8,
+    )
+    expect(
+      revenueOf(late, 'plan-pro') + revenueOf(late, 'plan-max'),
+      'late Pro+Max revenue vs Plus',
+    ).toBeGreaterThan(revenueOf(late, 'plan-plus'))
   })
 
   it('applies rival seat conversion exactly once', () => {

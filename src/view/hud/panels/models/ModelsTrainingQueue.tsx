@@ -5,10 +5,28 @@ import {
   sortTrainingJobViewModels,
   type TrainingActivityTone,
 } from "../../trainingJobViewModel";
+import { formatParams } from "../../../../sim/balance/training";
 import { HudButton, HudMeter, StatusChip } from "../../ui/HudPrimitives";
 import { checkpointBranchDirectionLabel } from "./checkpointBranching";
 
-export type ModelsWorkspaceView = "runs" | "checkpoints" | "fleet";
+export type ModelsWorkspaceView =
+  | "runs"
+  | "checkpoints"
+  | "labs"
+  | "routers"
+  | "fleet";
+
+const VIEW_ITEMS: ReadonlyArray<{
+  view: ModelsWorkspaceView;
+  label: string;
+  unit: string;
+}> = [
+  { view: "runs", label: "Runs", unit: "in flight" },
+  { view: "checkpoints", label: "Checkpoints", unit: "checkpoints" },
+  { view: "labs", label: "Gyms", unit: "gyms" },
+  { view: "routers", label: "Routers", unit: "routers" },
+  { view: "fleet", label: "Fleet", unit: "models" },
+];
 
 function toneForStatus(tone: TrainingActivityTone): "neutral" | "positive" | "warning" | "danger" {
   return tone;
@@ -27,7 +45,6 @@ export function ModelsTrainingQueue({
   viewCounts,
   onSelect,
   onViewChange,
-  onNewModel,
   onResume,
   onRecover,
 }: {
@@ -38,7 +55,6 @@ export function ModelsTrainingQueue({
   viewCounts: Record<ModelsWorkspaceView, number>;
   onSelect: (jobId: string) => void;
   onViewChange: (view: ModelsWorkspaceView) => void;
-  onNewModel: () => void;
   onResume?: (jobId: string) => void;
   onRecover?: (jobId: string, checkpointId: string) => void;
 }) {
@@ -56,78 +72,90 @@ export function ModelsTrainingQueue({
       data-model-training-queue="true"
       className="models-training-queue rounded-lg border border-line/70 bg-panel-2/55 p-2.5"
     >
-      <header className="flex items-center justify-between gap-2 px-0.5 pb-2">
-        <div className="min-w-0">
-          <p className="hud-eyebrow">Training activity</p>
-          <p className="mt-0.5 truncate text-[0.6875rem] text-muted">
-            {viewModels.length === 0
-              ? "Start a run or open a saved version."
-              : `${viewModels.length} run${viewModels.length === 1 ? "" : "s"} · select one to inspect`}
-          </p>
-        </div>
-        <HudButton
-          type="button"
-          variant="secondary"
-          className="min-h-11 shrink-0 px-2.5 text-[0.6875rem]"
-          data-action="new-model"
-          onClick={onNewModel}
-        >
-          + Train model
-        </HudButton>
+      <header className="px-0.5 pb-2">
+        <p className="hud-eyebrow">Campaign</p>
       </header>
 
       <nav
         aria-label="Models workspace views"
         data-models-view-nav="true"
-        className="mb-2 rounded-md border border-line/55 bg-void/20 p-1"
+        className="models-view-nav mb-2 space-y-1.5"
       >
-        <p className="px-2 py-1 text-[0.5625rem] font-semibold uppercase tracking-[0.16em] text-muted">
-          Views
-        </p>
-        <ul className="grid gap-px" aria-label="Model workspace views">
-          {([
-            ["runs", "Runs"],
-            ["checkpoints", "Checkpoints"],
-            ["fleet", "Fleet"],
-          ] as const).map(([view, label]) => {
+        {VIEW_ITEMS.filter((item) => item.view === "runs").map(
+          ({ view, label, unit }) => {
             const active = activeView === view;
+            const count = viewCounts[view];
             return (
-              <li key={view}>
+              <HudButton
+                key={view}
+                type="button"
+                variant="ghost"
+                aria-current={active ? "page" : undefined}
+                aria-pressed={active}
+                aria-label={`${label}, ${count} ${unit}`}
+                data-view={view}
+                data-selected={active ? "true" : "false"}
+                onClick={() => onViewChange(view)}
+                className={`!flex min-h-12 !w-full !flex-col !items-start !justify-center !gap-0.5 !rounded-md !border !px-2.5 !py-2 !text-left ${
+                  active
+                    ? "!border-mint/50 !bg-mint/10 !text-mint"
+                    : "!border-line/60 !bg-void/30 !text-muted hover:!border-line hover:!text-bone"
+                }`}
+              >
+                <span className="text-[0.75rem] font-semibold leading-none">
+                  {label}
+                </span>
+                <span className="font-mono text-[0.6875rem] tabular-nums leading-none text-bone">
+                  {count} {unit}
+                </span>
+              </HudButton>
+            );
+          },
+        )}
+        <p className="px-0.5 pt-1 font-mono text-[0.5625rem] uppercase tracking-[0.12em] text-muted">
+          Catalogs
+        </p>
+        <div className="flex flex-wrap gap-1 rounded-lg bg-void/50 p-1">
+          {VIEW_ITEMS.filter((item) => item.view !== "runs").map(
+            ({ view, label, unit }) => {
+              const active = activeView === view;
+              const count = viewCounts[view];
+              return (
                 <HudButton
+                  key={view}
                   type="button"
                   variant="ghost"
                   aria-current={active ? "page" : undefined}
-                  aria-label={`${label}, ${viewCounts[view]} ${view === "runs" ? "runs" : view === "checkpoints" ? "checkpoints" : "models"}`}
+                  aria-pressed={active}
+                  aria-label={`${label}, ${count} ${unit}`}
                   data-view={view}
                   data-selected={active ? "true" : "false"}
                   onClick={() => onViewChange(view)}
-                  className={`!flex !min-h-9 !w-full !items-center !justify-between !rounded-sm !border-0 !border-l-2 !px-2 !text-left !text-[0.6875rem] !font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/45 ${
+                  className={`!flex min-h-11 min-w-[4.5rem] flex-1 !flex-col !items-start !justify-center !gap-0.5 !rounded-md !border-0 !px-2 !py-1.5 !text-left ${
                     active
-                      ? "!border-mint !bg-mint/8 !text-mint"
-                      : "!border-transparent !bg-transparent !text-muted hover:!bg-panel-2 hover:!text-bone"
+                      ? "!bg-panel-2 !text-mint"
+                      : "!bg-transparent !text-muted hover:!bg-panel-2/80 hover:!text-bone"
                   }`}
                 >
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span
-                      aria-hidden="true"
-                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                        active ? "bg-mint" : "bg-line"
-                      }`}
-                    />
-                    <span>{label}</span>
+                  <span className="text-[0.625rem] font-semibold leading-none">
+                    {label}
                   </span>
-                  <span className="font-mono text-[0.625rem] tabular-nums text-muted">
-                    {viewCounts[view]}
+                  <span className="font-mono text-[0.6875rem] tabular-nums leading-none text-bone">
+                    {count}
                   </span>
                 </HudButton>
-              </li>
-            );
-          })}
-        </ul>
+              );
+            },
+          )}
+        </div>
       </nav>
 
       {viewModels.length > 0 ? (
-        <div role="list" className="grid gap-1.5">
+        <div
+          role="list"
+          className="grid max-h-[28rem] gap-1.5 overflow-y-auto panel-scroll"
+          data-run-count={viewModels.length}
+        >
           {viewModels.map((viewModel) => {
             const selected = viewModel.id === selectedJobId;
             const action = viewModel.primaryAction;
@@ -163,6 +191,14 @@ export function ModelsTrainingQueue({
                         {viewModel.statusLabel}
                       </StatusChip>
                     </span>
+                    <span className="mt-0.5 block font-mono text-[0.625rem] tabular-nums text-muted">
+                      {viewModel.job.targetParamsB
+                        ? `${formatParams(viewModel.job.targetParamsB)} · `
+                        : ""}
+                      {viewModel.allocatedPf.toFixed(2)} PF/d
+                      {" · "}
+                      {viewModel.etaLabel}
+                    </span>
                     {viewModel.job.parentCheckpointId ? (
                       <span className="mt-1 flex items-center gap-1.5 text-[0.625rem] text-research">
                         <span aria-hidden="true">↳</span>
@@ -175,8 +211,8 @@ export function ModelsTrainingQueue({
                     <HudMeter
                       value={viewModel.stageProgress}
                       tone={viewModel.statusTone === "danger" ? "danger" : "train"}
-                      label={`${viewModel.stageLabel} · ${viewModel.etaLabel}`}
-                      detail={`${Math.round(viewModel.stageProgress * 100)}%`}
+                      label={`${viewModel.stageLabel} · ${Math.round(viewModel.stageProgress * 100)}%`}
+                      detail={viewModel.etaLabel}
                       live={!viewModel.job.failed && !viewModel.job.paused}
                     />
                     {viewModel.issueLabel ? (
@@ -217,10 +253,7 @@ export function ModelsTrainingQueue({
           data-model-training-empty="true"
           role="status"
         >
-          <p className="text-[0.6875rem] font-semibold text-bone">No training runs</p>
-          <p className="mt-0.5 text-[0.625rem] leading-relaxed text-muted">
-            Start one with Train model above.
-          </p>
+          <p className="text-[0.6875rem] font-semibold text-bone">No runs</p>
         </div>
       )}
     </aside>

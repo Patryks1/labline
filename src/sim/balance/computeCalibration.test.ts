@@ -85,8 +85,8 @@ describe('end-to-end model compute calibration', () => {
       seventyRaw * MODEL_SYSTEMS_WORK_MULTIPLIER,
       8,
     )
-    expect(eight.gamePfDays).toBeCloseTo(60, 10)
-    expect(seventy.gamePfDays).toBeCloseTo(4_593.75, 8)
+    expect(eight.gamePfDays).toBeCloseTo(80, 10)
+    expect(seventy.gamePfDays).toBeCloseTo(6_125, 8)
 
     const economics = estimateTrainingEconomics({
       paramsB: 8,

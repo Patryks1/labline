@@ -40,7 +40,7 @@ export const SEGMENTS: SegmentDef[] = [
     baseUsage: 0.14,
     // Price-led freemium / light API — huge pool, light tokens
     weights: { quality: 0.32, price: 0.4, latency: 0.18, trust: 0.05, safety: 0.05, features: 0.1 },
-    benchmarkWeights: { mmlu: 0.35, coding: 0.2, multilingual: 0.2, safety: 0.1, math: 0.15 },
+    benchmarkWeights: { mmlu: 0.28, coding: 0.16, multilingual: 0.16, safety: 0.1, math: 0.12, personality: 0.18 },
     prefersSub: false,
     qualityFloor: 16,
     arpuHint: 0,
@@ -51,7 +51,7 @@ export const SEGMENTS: SegmentDef[] = [
     baseSize: 780_000_000,
     baseUsage: 0.28,
     weights: { quality: 0.48, price: 0.18, latency: 0.1, trust: 0.12, safety: 0.12, features: 0.1 },
-    benchmarkWeights: { mmlu: 0.25, coding: 0.15, math: 0.1, multilingual: 0.15, safety: 0.2, vision: 0.15 },
+    benchmarkWeights: { mmlu: 0.18, coding: 0.1, math: 0.08, multilingual: 0.12, safety: 0.16, vision: 0.12, personality: 0.24 },
     prefersSub: true,
     qualityFloor: 30,
     arpuHint: 20,
@@ -95,7 +95,7 @@ export const SEGMENTS: SegmentDef[] = [
     baseSize: 100_000_000,
     baseUsage: 4.5,
     weights: { quality: 0.42, price: 0.06, latency: 0.08, trust: 0.22, safety: 0.22, features: 0.1 },
-    benchmarkWeights: { mmlu: 0.2, coding: 0.25, safety: 0.25, agents: 0.15, multilingual: 0.15 },
+    benchmarkWeights: { mmlu: 0.16, coding: 0.22, safety: 0.22, agents: 0.12, multilingual: 0.12, personality: 0.16 },
     prefersSub: true,
     qualityFloor: 44,
     arpuHint: 120,
@@ -142,7 +142,7 @@ export const ECONOMY = {
   daysPerMonth: 30,
   /** Base wholesale $/MWh before regional mult & grid scarcity */
   // Compute campuses face industrial firm-power pricing, not household power.
-  energyBasePrice: 95,
+  energyBasePrice: 115,
   /** Variable upkeep for owned generation as a share of equivalent grid MWh. */
   onsiteGenerationCostShare: 0.6,
   /**
@@ -194,15 +194,15 @@ export const ECONOMY = {
   basePlanUsageMTokPerDay: 20 / 30,
   /**
    * API users: MTok/user/day at usageIntensity = 1.
-   * Tuned so capable, peer-priced API offers can match or beat subscription
-   * token demand on API-native segments (hobby/indie/startup/science/creative).
+   * Kept below subscription conversion so token API cannot print late-game
+   * cash while seats stay a rounding error.
    */
-  apiBaseMTokPerUserDay: 0.055,
+  apiBaseMTokPerUserDay: 0.03,
   /**
    * Fraction of the addressable audience generating a useful AI workload on
    * an average day. Adoption is not the same thing as daily compute activity.
    */
-  marketDailyActiveUsageShare: 0.28,
+  marketDailyActiveUsageShare: 0.22,
   /**
    * @deprecated Legacy constant. Prefer `pfPerMTokForModel` on a 7B dense
    * reference. Retained for old saves/tests; not used by settlement.
@@ -215,14 +215,14 @@ export const ECONOMY = {
    * Kept for tests / maxSeats fallbacks.
    */
   subCapacityShare: 0.38,
-  /** Default API share of inference under constraint (0–1). API is the larger demand pool. */
-  defaultApiVsSubPriority: 0.62,
+  /** Default API share of inference under constraint (0–1). Seats take the larger share. */
+  defaultApiVsSubPriority: 0.46,
   /** Live 8-accelerator node opex/day beyond power and amortization. */
-  rackOpexPerGpuDay: 140,
+  rackOpexPerGpuDay: 210,
   /** Extra $/day per MW of live fleet draw beyond energy bill */
-  rackOpexPerMwDay: 5_000,
+  rackOpexPerMwDay: 7_200,
   /** Facility shells, cooling, fleet operations, security, and maintenance. */
-  facilityOpexMultiplier: 1,
+  facilityOpexMultiplier: 1.35,
   /** Early util floor before software research — serving starts power-hungry */
   startingUtilCap: 0.38,
   /**
@@ -282,7 +282,7 @@ export const ECONOMY = {
   } as Record<string, number>,
 
   buildingOpex: {
-    dc: 125_000,
+    dc: 148_000,
     substation: 28_000,
     solar: 16_000,
     gas: 78_000,

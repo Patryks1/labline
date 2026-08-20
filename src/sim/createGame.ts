@@ -1,4 +1,5 @@
 import { DEMAND_MODEL_VERSION, ECONOMY, SEGMENTS } from './balance/economy'
+import { baselineDomainHeat } from './balance/domainHeat'
 import { createEmptyLabData, emptyDataMarket, generateDataMarketOffers } from './balance/data'
 import { calendarForDay, createInitialProgression, defaultCampaignRules } from './campaign'
 import {
@@ -15,6 +16,10 @@ import { migrateDataHallLayouts } from './systems/dataHallLayouts'
 import { migrateHqOfficeLayouts } from './systems/hqOffice'
 import { createInitialMap } from './systems/map'
 import { defaultPlans } from './systems/plans'
+import {
+  defaultPostTrainGyms,
+  defaultToolSkills,
+} from './balance/modelStudio'
 import {
   createRegionInterconnections,
   normalizeSiteEnergyState,
@@ -387,6 +392,10 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       trainingJobs: [],
       trainingJob: null,
       safetyCampaign: null,
+      postTrainGyms: defaultPostTrainGyms(),
+      toolSkills: defaultToolSkills(),
+      modelRouters: [],
+      activeModelRouterId: null,
       dataSupplierContracts: [],
       pricing: {
         apiPricePerMTok: 2.4,
@@ -515,6 +524,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       size: s.baseSize,
       usageIntensity: s.baseUsage,
     })),
+    domainHeat: baselineDomainHeat(),
     map: {
       width: map.width,
       height: map.height,

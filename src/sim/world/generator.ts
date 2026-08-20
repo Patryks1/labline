@@ -117,6 +117,10 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value))
 }
 
+function posMod(value: number, modulus: number): number {
+  return ((value % modulus) + modulus) % modulus
+}
+
 function coordinateHash(x: number, y: number, seed: number): number {
   let value = Math.imul(x ^ seed, 0x45d9f3b) ^ Math.imul(y + seed, 0x27d4eb2d)
   value ^= value >>> 16
@@ -244,7 +248,7 @@ export function createWorldDescriptorV7(options: WorldGenerationOptions): WorldD
     terrainAlgorithmVersion: 1,
     biomeVersion: 1,
     transportAlgorithmVersion: 2,
-    settlementAlgorithmVersion: 6,
+    settlementAlgorithmVersion: 7,
     municipalCampusAlgorithmVersion: 2,
     cityStatsModelVersion: 1,
     riverAlgorithmVersion: 1,
@@ -1353,6 +1357,33 @@ function settlementDistance(city: StaticCity, x: number, y: number): number {
   return (Math.abs(nx) ** 2.6 + Math.abs(ny) ** 2.6) ** (1 / 2.6)
 }
 
+function settlementEdgeWobble(city: StaticCity, x: number, y: number, seed: number): number {
+  return ((coordinateHash(x >> 1, y >> 1, seed ^ (city.index * 131 + 0x5f1)) & 0xff) / 255 - 0.5) * 0.2
+}
+
+function nearestRoadDistance(
+  transport: Uint16Array,
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  maxDistance: number,
+): number {
+  if (transportClass(transport[y * width + x] ?? 0) !== TRANSPORT_ROAD_CLASS.none) return 0
+  for (let distance = 1; distance <= maxDistance; distance++) {
+    for (let oy = -distance; oy <= distance; oy++) {
+      for (let ox = -distance; ox <= distance; ox++) {
+        if (Math.abs(ox) + Math.abs(oy) !== distance) continue
+        const nx = x + ox
+        const ny = y + oy
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
+        if (transportClass(transport[ny * width + nx] ?? 0) !== TRANSPORT_ROAD_CLASS.none) return distance
+      }
+    }
+  }
+  return maxDistance + 1
+}
+
 function stampV3Settlements(
   descriptor: WorldDescriptor,
   cities: readonly V3Settlement[],
@@ -2298,7 +2329,8 @@ function rebuildV6OrganicSettlementRoads(
     const trunkDirections = [0, 1, 2, 3]
       .map((direction) => (direction + orientation) & 3)
       .filter((direction) => direction !== omitted)
-    const trunkLength = Math.max(5, Math.round(city.radius * 1.25))
+    const organic = descriptor.settlementAlgorithmVersion >= 7
+    const trunkLength = Math.max(5, Math.round(city.radius * (organic ? 1.35 : 1.25)))
     const branchAnchors: number[] = []
     for (let trunk = 0; trunk < trunkDirections.length; trunk++) {
       const variance = coordinateHash(city.index, trunk, descriptor.seed ^ 0x51b3) % Math.max(2, Math.round(city.radius * 0.35))
@@ -2309,14 +2341,16 @@ function rebuildV6OrganicSettlementRoads(
         Math.max(2, Math.round(city.radius * 0.42)),
         0x100 + trunk * 29,
       )
-      for (let index = 3; index + 2 < created.length; index += 4 + (trunk & 1)) {
+      const stride = organic ? 3 : 4 + (trunk & 1)
+      for (let index = 3; index + 2 < created.length; index += stride) {
         branchAnchors.push(created[index]!)
       }
     }
 
     // Side streets are deliberately short, staggered and one-sided. They
     // create suburban fingers and cul-de-sacs instead of closing into blocks.
-    const branchTarget = city.tier === 'metro' ? 11 : city.tier === 'satellite' ? 8 : city.tier === 'town' ? 6 : 4
+    const branchTarget = (city.tier === 'metro' ? 11 : city.tier === 'satellite' ? 8 : city.tier === 'town' ? 6 : 4)
+      + (organic ? (city.tier === 'metro' ? 6 : city.tier === 'satellite' ? 4 : 2) : 0)
     for (let branch = 0; branch < Math.min(branchTarget, branchAnchors.length); branch++) {
       const anchorId = branchAnchors[(branch * 3 + city.index) % branchAnchors.length]!
       const anchorX = anchorId % width
@@ -2365,6 +2399,300 @@ function rebuildV6OrganicSettlementRoads(
     if (city.tier !== 'village' && cityRoads.length > 5) {
       const anchorId = cityRoads[Math.min(cityRoads.length - 1, 3 + (city.index % 3))]!
       growStreet(anchorId, omitted, Math.max(3, Math.round(city.radius * 0.48)), 2, 0x900 + city.index)
+    }
+  }
+}
+
+/**
+ * V7 lays an incomplete, jittered block grid through the civic core so
+ * buildings can sit on streets around courtyards instead of filling a solid
+ * ellipse. Skipped segments keep the inherited organic spines from becoming
+ * a stamped checkerboard.
+ */
+function paintV7CoreStreetFabric(
+  descriptor: WorldDescriptorV6 | WorldDescriptorV7,
+  cities: readonly StaticCity[],
+  kind: Uint8Array,
+  transport: Uint16Array,
+  elevation: Int16Array,
+): void {
+  const { width, height, seed } = descriptor
+  const road = (id: number) => transportClass(transport[id] ?? 0) !== TRANSPORT_ROAD_CLASS.none
+
+  for (const city of cities) {
+    if (city.tier === 'village') continue
+    const spacing = city.tier === 'metro' ? 4 : 5
+    const offsetX = posMod(coordinateHash(city.cx, city.index, seed ^ 0xa11e), spacing)
+    const offsetY = posMod(coordinateHash(city.cy, city.index, seed ^ 0xb22f), spacing)
+    const extent = Math.max(4, Math.ceil(city.radius * (city.tier === 'metro' ? 0.7 : 0.55)))
+    const coreLimit = city.tier === 'metro' ? 0.64 : 0.52
+
+    const paintCell = (x: number, y: number, previous: RoutePoint | undefined): RoutePoint | undefined => {
+      if (x <= 0 || y <= 0 || x >= width - 1 || y >= height - 1) return undefined
+      const id = y * width + x
+      if (kind[id] === TERRAIN_KIND.lake || rawTileSlope(descriptor, elevation, x, y) > 0.16) return undefined
+      const wobble = settlementEdgeWobble(city, x, y, seed)
+      if (settlementDistance(city, x, y) > coreLimit + wobble) return undefined
+      if (coordinateHash(x, y, seed ^ (city.index * 0x45 + 0x70c1)) % (city.tier === 'metro' ? 8 : 5) === 0) {
+        return undefined
+      }
+      if (!road(id)) {
+        markRoad(transport, id, TRANSPORT_ROAD_CLASS.local, TRANSPORT_FLAGS.settlement, kind)
+      }
+      if (previous) connectRoadPoints(descriptor, transport, previous, { x, y })
+      return { x, y }
+    }
+
+    for (let y = city.cy - extent; y <= city.cy + extent; y++) {
+      if (posMod(y - city.cy - offsetY, spacing) !== 0) continue
+      let previous: RoutePoint | undefined
+      for (let x = city.cx - extent; x <= city.cx + extent; x++) {
+        previous = paintCell(x, y, previous)
+      }
+    }
+    for (let x = city.cx - extent; x <= city.cx + extent; x++) {
+      if (posMod(x - city.cx - offsetX, spacing) !== 0) continue
+      let previous: RoutePoint | undefined
+      for (let y = city.cy - extent; y <= city.cy + extent; y++) {
+        previous = paintCell(x, y, previous)
+      }
+    }
+  }
+}
+
+/**
+ * Street-served lots, courtyards, pocket parks, and gapped suburbs. Interiors
+ * farther than two tiles from a road stay rural grass so the city outline can
+ * breathe instead of reading as a filled rectangle.
+ */
+function zoneV7Settlements(
+  descriptor: WorldDescriptorV6 | WorldDescriptorV7,
+  cities: readonly StaticCity[],
+  kind: Uint8Array,
+  feature: Uint16Array,
+  transport: Uint16Array,
+  elevation: Int16Array,
+  biome: Uint8Array,
+  district: Uint8Array,
+): void {
+  const { width, height, seed } = descriptor
+  for (const city of cities) {
+    const featureId = encodeCityFeature(city.index)
+    const extent = Math.ceil(city.radius * 1.55)
+    const compact = city.radius <= 3
+    const coreEdge = city.tier === 'metro' ? 0.5 : city.tier === 'village' ? 0.42 : 0.48
+    const mixedEdge = city.tier === 'village' ? 0.7 : 0.8
+    const suburbEdge = city.tier === 'village' ? 1.18 : 1.4
+
+    for (let y = Math.max(1, city.cy - extent); y <= Math.min(height - 2, city.cy + extent); y++) {
+      for (let x = Math.max(1, city.cx - extent); x <= Math.min(width - 2, city.cx + extent); x++) {
+        const id = y * width + x
+        if (district[id] === V6_DISTRICT_UTILITY || kind[id] === TERRAIN_KIND.lake ||
+            transportClass(transport[id]!) !== TRANSPORT_ROAD_CLASS.none) continue
+        if (feature[id] !== 0 && feature[id] !== featureId) continue
+        if (!settlementBiomeIsFriendly(biome[id]!) || rawTileSlope(descriptor, elevation, x, y) > 0.16) continue
+
+        const wobble = settlementEdgeWobble(city, x, y, seed)
+        const distance = settlementDistance(city, x, y)
+        const roadDistance = nearestRoadDistance(transport, width, height, x, y, 3)
+        const parkPatch = coordinateHash(x >> 2, y >> 2, seed ^ (city.index * 0x271 + 0x70b1)) % 100
+        const parkDetail = coordinateHash(x, y, seed ^ 0x39ad) % 100
+        const lotRoll = coordinateHash(x, y, seed ^ (city.index * 0x10d + 0x4d21)) % 100
+
+        if (compact) {
+          if (distance > suburbEdge) continue
+          if (roadDistance > 2) continue
+          if (distance <= coreEdge + wobble) {
+            district[id] = V6_DISTRICT_CORE
+            kind[id] = parkPatch < 12 && parkDetail < 50 ? TERRAIN_KIND.park : TERRAIN_KIND.city
+          } else if (distance <= mixedEdge + wobble * 0.75) {
+            district[id] = parkPatch < 20 ? V6_DISTRICT_GREEN_BUFFER : V6_DISTRICT_MIXED
+            kind[id] = parkPatch < 20 ? TERRAIN_KIND.park : (lotRoll < 55 ? TERRAIN_KIND.city : TERRAIN_KIND.house)
+          } else {
+            district[id] = V6_DISTRICT_SUBURB
+            kind[id] = parkPatch < 16 ? TERRAIN_KIND.park : (lotRoll < 22 ? TERRAIN_KIND.empty : TERRAIN_KIND.house)
+          }
+          feature[id] = featureId
+          continue
+        }
+
+        if (distance <= coreEdge + wobble) {
+          if (roadDistance > 2) continue
+          district[id] = V6_DISTRICT_CORE
+          const courtyard = roadDistance === 2 && parkPatch < (city.tier === 'metro' ? 55 : 32)
+          const pocket = roadDistance === 1 && parkPatch < (city.tier === 'metro' ? 12 : 8) && parkDetail < 55
+          kind[id] = courtyard || pocket ? TERRAIN_KIND.park : TERRAIN_KIND.city
+          feature[id] = featureId
+          continue
+        }
+
+        if (distance <= mixedEdge + wobble * 0.75) {
+          if (roadDistance > 2) continue
+          const neighbourhoodPark = parkPatch < (city.tier === 'metro' ? 22 : 12)
+          const innerGreen = roadDistance === 2 && parkPatch < (city.tier === 'metro' ? 38 : 16)
+          if (neighbourhoodPark || innerGreen) {
+            district[id] = neighbourhoodPark ? V6_DISTRICT_GREEN_BUFFER : V6_DISTRICT_MIXED
+            kind[id] = TERRAIN_KIND.park
+          } else if (roadDistance > 1 && lotRoll >= (city.tier === 'metro' ? 22 : 12)) {
+            continue
+          } else {
+            district[id] = V6_DISTRICT_MIXED
+            kind[id] = lotRoll < 62 ? TERRAIN_KIND.city : TERRAIN_KIND.house
+          }
+          feature[id] = featureId
+          continue
+        }
+
+        if (distance <= mixedEdge + 0.16 + wobble * 0.3) {
+          if (parkPatch < (city.tier === 'metro' ? 40 : 22) && parkDetail < 78 && roadDistance <= 2) {
+            district[id] = V6_DISTRICT_GREEN_BUFFER
+            kind[id] = TERRAIN_KIND.park
+            feature[id] = featureId
+          }
+          continue
+        }
+
+        if (distance > suburbEdge + wobble * 0.45) continue
+        if (roadDistance === 2) {
+          if (lotRoll < 30) {
+            district[id] = V6_DISTRICT_SUBURB
+            kind[id] = TERRAIN_KIND.empty
+            feature[id] = featureId
+          }
+          continue
+        }
+        if (roadDistance > 1) continue
+        district[id] = V6_DISTRICT_SUBURB
+        if (parkPatch < 14 && parkDetail < 70) kind[id] = TERRAIN_KIND.park
+        else if (lotRoll < 16) kind[id] = TERRAIN_KIND.empty
+        else kind[id] = TERRAIN_KIND.house
+        feature[id] = featureId
+      }
+    }
+
+    const plazaOffsets = [[1, 1], [-2, 1], [1, -2], [-2, -2], [2, -1], [-1, 2]] as const
+    const plazaStart = coordinateHash(city.cx, city.cy, seed ^ 0x51c3) % plazaOffsets.length
+    const plazaCount = compact ? 0 : city.tier === 'metro' ? 2 : 1
+    for (let plaza = 0; plaza < plazaCount; plaza++) {
+      const plazaPick = plazaOffsets[(plazaStart + plaza * 2) % plazaOffsets.length]!
+      for (let oy = 0; oy < 2; oy++) {
+        for (let ox = 0; ox < 2; ox++) {
+          const x = city.cx + plazaPick[0] + ox
+          const y = city.cy + plazaPick[1] + oy
+          if (x <= 0 || y <= 0 || x >= width - 1 || y >= height - 1) continue
+          const id = y * width + x
+          if (district[id] === V6_DISTRICT_UTILITY || kind[id] === TERRAIN_KIND.lake) continue
+          if (transportClass(transport[id]!) !== TRANSPORT_ROAD_CLASS.none) continue
+          kind[id] = TERRAIN_KIND.park
+          feature[id] = featureId
+          if (district[id] !== V6_DISTRICT_UTILITY) district[id] = V6_DISTRICT_CORE
+        }
+      }
+    }
+
+    let officePads = 0
+    const officePadTarget = compact || city.tier === 'town' || city.tier === 'village'
+      ? 0
+      : city.tier === 'metro' ? 4 : 3
+    const usedPadTiles = new Set<number>()
+    const padSearchRadius = city.tier === 'metro' ? 8 : 12
+    const padUsable = (originX: number, originY: number): boolean => {
+      for (let py = 0; py < 2; py++) {
+        for (let px = 0; px < 2; px++) {
+          const x = originX + px
+          const y = originY + py
+          if (x <= 0 || y <= 0 || x >= width - 1 || y >= height - 1) return false
+          const id = y * width + x
+          if (usedPadTiles.has(id)) return false
+          if (district[id] === V6_DISTRICT_UTILITY || kind[id] === TERRAIN_KIND.lake) return false
+          if (transportClass(transport[id]!) !== TRANSPORT_ROAD_CLASS.none) return false
+          const owner = cityIndexFromFeature(feature[id]!)
+          if (owner !== undefined && owner !== city.index) return false
+        }
+      }
+      for (let py = 0; py < 2; py++) {
+        for (let px = 0; px < 2; px++) {
+          const x = originX + px
+          const y = originY + py
+          if (([[0, -1], [1, 0], [0, 1], [-1, 0]] as const).some(([dx, dy]) =>
+            transportClass(transport[(y + dy) * width + (x + dx)] ?? 0) !== TRANSPORT_ROAD_CLASS.none
+          )) return true
+        }
+      }
+      return false
+    }
+    outer: for (let radius = 1; radius <= padSearchRadius && officePads < officePadTarget; radius++) {
+      for (let oy = -radius; oy <= radius; oy++) {
+        for (let ox = -radius; ox <= radius; ox++) {
+          if (Math.max(Math.abs(ox), Math.abs(oy)) !== radius) continue
+          const originX = city.cx + ox
+          const originY = city.cy + oy
+          if (!padUsable(originX, originY)) continue
+          for (let py = 0; py < 2; py++) {
+            for (let px = 0; px < 2; px++) {
+              const id = (originY + py) * width + (originX + px)
+              kind[id] = TERRAIN_KIND.city
+              feature[id] = featureId
+              district[id] = V6_DISTRICT_CORE
+              usedPadTiles.add(id)
+            }
+          }
+          officePads++
+          if (officePads >= officePadTarget) break outer
+        }
+      }
+    }
+
+    const industrialCandidates: { id: number; score: number }[] = []
+    for (let y = Math.max(1, city.cy - extent); y <= Math.min(height - 2, city.cy + extent); y++) {
+      for (let x = Math.max(1, city.cx - extent); x <= Math.min(width - 2, city.cx + extent); x++) {
+        const id = y * width + x
+        const distance = settlementDistance(city, x, y)
+        if (distance < 0.88 || distance > 1.38 || kind[id] === TERRAIN_KIND.lake) continue
+        if (district[id] === V6_DISTRICT_UTILITY) continue
+        if (transportClass(transport[id]!) !== TRANSPORT_ROAD_CLASS.none) continue
+        if (!settlementBiomeIsFriendly(biome[id]!) || rawTileSlope(descriptor, elevation, x, y) > 0.14) continue
+        const serviced = [id - width, id + 1, id + width, id - 1].some((neighbor) => {
+          const roadClass = transportClass(transport[neighbor] ?? 0)
+          return roadClass >= TRANSPORT_ROAD_CLASS.collector ||
+            ((transport[neighbor] ?? 0) & TRANSPORT_FLAGS.regional) !== 0
+        })
+        if (!serviced) continue
+        industrialCandidates.push({
+          id,
+          score: Math.round(distance * 4096) +
+            (coordinateHash(x, y, seed ^ (city.index * 0x521 + 0x1d35)) & 0xfff),
+        })
+      }
+    }
+    industrialCandidates.sort((a, b) => a.score - b.score || a.id - b.id)
+    const industrialTarget = compact ? 0
+      : city.tier === 'metro' ? 6 : city.tier === 'satellite' ? 4 : city.tier === 'town' ? 3 : 0
+    const industrialAnchor = industrialCandidates[0]
+    if (industrialAnchor && industrialTarget > 0) {
+      const anchorX = industrialAnchor.id % width
+      const anchorY = Math.floor(industrialAnchor.id / width)
+      industrialCandidates.sort((a, b) => {
+        const ax = a.id % width
+        const ay = Math.floor(a.id / width)
+        const bx = b.id % width
+        const by = Math.floor(b.id / width)
+        const aDistance = Math.abs(ax - anchorX) + Math.abs(ay - anchorY)
+        const bDistance = Math.abs(bx - anchorX) + Math.abs(by - anchorY)
+        return aDistance - bDistance || a.score - b.score || a.id - b.id
+      })
+      let industrialCount = 0
+      for (const candidate of industrialCandidates) {
+        if (industrialCount >= industrialTarget) break
+        if (usedPadTiles.has(candidate.id)) continue
+        const x = candidate.id % width
+        const y = Math.floor(candidate.id / width)
+        if (Math.abs(x - anchorX) + Math.abs(y - anchorY) > industrialTarget + 1) break
+        kind[candidate.id] = TERRAIN_KIND.warehouse
+        feature[candidate.id] = featureId
+        district[candidate.id] = V6_DISTRICT_MIXED
+        industrialCount++
+      }
     }
   }
 }
@@ -2449,6 +2777,10 @@ function addV6ZoningAndMunicipalPower(
     pruneSmallLocalRoadLoops(descriptor, transport, 8, new Set(), true)
     pruneAdjacentParallelLocalRoads(descriptor, transport, new Set())
   }
+  if (descriptor.settlementAlgorithmVersion >= 7) {
+    paintV7CoreStreetFabric(descriptor, cities, kind, transport, elevation)
+    pruneAdjacentParallelLocalRoads(descriptor, transport, new Set())
+  }
 
   const plants: MunicipalPowerPlant[] = []
   const reserved = new Set<number>()
@@ -2526,43 +2858,47 @@ function addV6ZoningAndMunicipalPower(
     }))
   }
 
-  for (const city of cities) {
-    const featureId = encodeCityFeature(city.index)
-    const extent = Math.ceil(city.radius * 1.55)
-    for (let y = Math.max(1, city.cy - extent); y <= Math.min(descriptor.height - 2, city.cy + extent); y++) {
-      for (let x = Math.max(1, city.cx - extent); x <= Math.min(descriptor.width - 2, city.cx + extent); x++) {
-        const id = y * descriptor.width + x
-        if (district[id] === V6_DISTRICT_UTILITY || kind[id] === TERRAIN_KIND.lake ||
-            transportClass(transport[id]!) !== TRANSPORT_ROAD_CLASS.none) continue
-        if (feature[id] !== 0 && feature[id] !== featureId) continue
-        if (!settlementBiomeIsFriendly(biome[id]!) || rawTileSlope(descriptor, elevation, x, y) > 0.16) continue
-        const distance = settlementDistance(city, x, y)
-        if (distance <= 0.44) {
-          district[id] = V6_DISTRICT_CORE
-          kind[id] = TERRAIN_KIND.city
-        } else if (distance <= 0.72) {
-          district[id] = V6_DISTRICT_MIXED
-          kind[id] = coordinateHash(x, y, descriptor.seed ^ (city.index * 0x10d + 0x4d21)) % 100 < 86
-            ? TERRAIN_KIND.city : TERRAIN_KIND.park
-        } else if (distance <= 0.9) {
-          district[id] = V6_DISTRICT_GREEN_BUFFER
-          kind[id] = TERRAIN_KIND.park
-        } else if (distance <= 1.38) {
-          let serviced = false
-          for (let oy = -2; oy <= 2 && !serviced; oy++) {
-            for (let ox = -2; ox <= 2; ox++) {
-              if (Math.abs(ox) + Math.abs(oy) > 2) continue
-              if (transportClass(transport[(y + oy) * descriptor.width + x + ox] ?? 0) !== TRANSPORT_ROAD_CLASS.none) {
-                serviced = true
-                break
+  if (descriptor.settlementAlgorithmVersion >= 7) {
+    zoneV7Settlements(descriptor, cities, kind, feature, transport, elevation, biome, district)
+  } else {
+    for (const city of cities) {
+      const featureId = encodeCityFeature(city.index)
+      const extent = Math.ceil(city.radius * 1.55)
+      for (let y = Math.max(1, city.cy - extent); y <= Math.min(descriptor.height - 2, city.cy + extent); y++) {
+        for (let x = Math.max(1, city.cx - extent); x <= Math.min(descriptor.width - 2, city.cx + extent); x++) {
+          const id = y * descriptor.width + x
+          if (district[id] === V6_DISTRICT_UTILITY || kind[id] === TERRAIN_KIND.lake ||
+              transportClass(transport[id]!) !== TRANSPORT_ROAD_CLASS.none) continue
+          if (feature[id] !== 0 && feature[id] !== featureId) continue
+          if (!settlementBiomeIsFriendly(biome[id]!) || rawTileSlope(descriptor, elevation, x, y) > 0.16) continue
+          const distance = settlementDistance(city, x, y)
+          if (distance <= 0.44) {
+            district[id] = V6_DISTRICT_CORE
+            kind[id] = TERRAIN_KIND.city
+          } else if (distance <= 0.72) {
+            district[id] = V6_DISTRICT_MIXED
+            kind[id] = coordinateHash(x, y, descriptor.seed ^ (city.index * 0x10d + 0x4d21)) % 100 < 86
+              ? TERRAIN_KIND.city : TERRAIN_KIND.park
+          } else if (distance <= 0.9) {
+            district[id] = V6_DISTRICT_GREEN_BUFFER
+            kind[id] = TERRAIN_KIND.park
+          } else if (distance <= 1.38) {
+            let serviced = false
+            for (let oy = -2; oy <= 2 && !serviced; oy++) {
+              for (let ox = -2; ox <= 2; ox++) {
+                if (Math.abs(ox) + Math.abs(oy) > 2) continue
+                if (transportClass(transport[(y + oy) * descriptor.width + x + ox] ?? 0) !== TRANSPORT_ROAD_CLASS.none) {
+                  serviced = true
+                  break
+                }
               }
             }
-          }
-          if (!serviced) continue
-          district[id] = V6_DISTRICT_SUBURB
-          kind[id] = TERRAIN_KIND.house
-        } else continue
-        feature[id] = featureId
+            if (!serviced) continue
+            district[id] = V6_DISTRICT_SUBURB
+            kind[id] = TERRAIN_KIND.house
+          } else continue
+          feature[id] = featureId
+        }
       }
     }
   }
@@ -3958,7 +4294,10 @@ function generateStaticWorldV6FromDescriptor(descriptor: WorldDescriptorV6 | Wor
       descriptor.settlementAlgorithmVersion >= 4,
     )
   }
-  if (descriptor.settlementAlgorithmVersion >= 5) {
+  if (descriptor.settlementAlgorithmVersion >= 7) {
+    // Keep 2x2 asphalt squares from reconnecting; larger civic blocks stay closed.
+    pruneSmallLocalRoadLoops(descriptor, transport, 4, new Set(), false)
+  } else if (descriptor.settlementAlgorithmVersion >= 5) {
     // Final topology may reconnect neighboring settlement tiles after the
     // physical spacing pass. Open only those rebuilt edges: the real tile gaps
     // were already established before zoning and campus placement.

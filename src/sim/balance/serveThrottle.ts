@@ -1,4 +1,5 @@
 import type { ServeThrottlePolicy } from '../types'
+import { planTokenSpeedDissatisfaction } from './tokenSpeed'
 
 /**
  * Overload throttle math — the day-granularity interpretation:
@@ -10,6 +11,7 @@ import type { ServeThrottlePolicy } from '../types'
  *   are muted — but speedStrain rises and tomorrow's offers are slower
  *   (demand cools through the speed/latency utility terms instead).
  * - 'balanced': the first ~25 points of overload are throttled, the rest shed.
+ * - 'surge': same absorb curve as balanced, plus a posted API price hike.
  */
 
 const clamp01 = (n: number) => Math.max(0, Math.min(1, n))
@@ -30,6 +32,7 @@ export function throttleAbsorbShare(
     case 'throttle':
       return 1
     case 'balanced':
+    case 'surge':
     default:
       return Math.min(1, 0.25 / u)
   }
@@ -81,10 +84,41 @@ export function throttleSpillScale(absorbShare: number): number {
   return 1 - 0.6 * clamp01(absorbShare)
 }
 
-/** Plan dissatisfaction from slow streams. Free users tolerate more. */
+/**
+ * Peak-pricing EMA. Mirrors stream-strain: rises with unserved load, heals
+ * when headroom returns. Only 'surge' policy accumulates; other policies decay.
+ */
+export function nextSurgeLevel(
+  prev: number,
+  unservedRatio: number,
+  policy: ServeThrottlePolicy,
+): number {
+  if (policy !== 'surge') return Math.max(0, clamp01(prev) * 0.6 - 0.03)
+  return nextSpeedStrain(prev, unservedRatio, throttleAbsorbShare('balanced', unservedRatio))
+}
+
+/** Posted API price multiplier: 1 + min(0.8, ema * 1.6). */
+export function surgePriceMultiplier(level: number): number {
+  return 1 + Math.min(0.8, Math.max(0, level) * 1.6)
+}
+
+/** Small gouging-perception brand hit while a posted surge is live. */
+export function surgeBrandPressure(multiplier: number): number {
+  return Math.max(0, multiplier - 1) * 0.15
+}
+
+/**
+ * Plan dissatisfaction from slow streams. Strain is overload throttling;
+ * optional tokPerSec adds the 30 tok/s knee (free users ~half as sensitive).
+ * The two combine smoothly; omitting tokPerSec preserves the strain-only curve.
+ */
 export function planSlownessDissatisfaction(
   strain: number,
   isFree: boolean,
+  tokPerSec?: number,
 ): number {
-  return Math.min(0.6, clamp01(strain) * (isFree ? 0.35 : 0.7))
+  const strainPart = Math.min(0.6, clamp01(strain) * (isFree ? 0.35 : 0.7))
+  const speedPart =
+    tokPerSec == null ? 0 : planTokenSpeedDissatisfaction(tokPerSec, isFree)
+  return Math.min(0.85, 1 - (1 - strainPart) * (1 - speedPart))
 }

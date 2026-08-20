@@ -27,6 +27,11 @@ import {
   moeRoutingCapacityMultiplier,
 } from './modelScaling'
 import {
+  DEFAULT_RECIPE_ALIGN_SHARE,
+  recipeOutcomeSignals,
+  type RecipeOutcomeSignals,
+} from './trainingRecipe'
+import {
   estimateTrainingEconomics,
   modalityComputeMultiplier,
 } from './training'
@@ -50,6 +55,7 @@ export interface TrainingDataAnalysis {
   lowQualityRetention: number
   provenanceRetention: number
   modalityComputeMult: number
+  recipe: RecipeOutcomeSignals
   risk: 'low' | 'medium' | 'high'
   warnings: string[]
 }
@@ -310,6 +316,24 @@ export function analyzeTrainingData(opts: {
       )
     }
   }
+  const recipe = recipeOutcomeSignals({
+    totalMTok: requested + Math.max(0, opts.plan.postTrainMTok ?? 0),
+    paramsB: opts.paramsB,
+    family: opts.family,
+    backbone: opts.backbone,
+    activeParamsB: opts.activeParamsB,
+    postTrainShare: opts.plan.postTrainShare ?? DEFAULT_RECIPE_ALIGN_SHARE,
+    trainShare,
+  })
+  if (recipe.postTrainShare < 0.18) {
+    warnings.push(
+      'Alignment is below 18% of the recipe; chat and safety will stay closer to a raw base.',
+    )
+  } else if (recipe.baseShare < 0.2) {
+    warnings.push(
+      'Base is below 20% of the recipe; general capability is starved for optimization tokens.',
+    )
+  }
   const highRisk =
     effectiveDataRatio < minRatio * 0.6 ||
     repeatedEpochs > 8 ||
@@ -334,6 +358,7 @@ export function analyzeTrainingData(opts: {
     lowQualityRetention: lqPenalty,
     provenanceRetention: provenanceMultiplier,
     modalityComputeMult,
+    recipe,
     risk: highRisk ? 'high' : mediumRisk ? 'medium' : 'low',
     warnings,
   }

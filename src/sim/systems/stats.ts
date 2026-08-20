@@ -15,7 +15,7 @@ import { computeSnapshot, inferenceTokensPerDay, type ComputeSnapshot } from './
 import { buildingDisplayName, energyPriceForState } from './map'
 import { facilityAnchorTiles } from './worldAccess'
 
-export type StatsSectionId = 'pnl' | 'models' | 'compute' | 'facilities' | 'trends'
+export type StatsSectionId = 'pnl' | 'capital' | 'compute' | 'facilities' | 'trends'
 
 export interface MoneyLine {
   id: string

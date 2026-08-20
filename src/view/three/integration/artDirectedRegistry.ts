@@ -379,17 +379,33 @@ export function createArtDirectedArchetypeRegistry(): ArchetypeRegistry {
   }
 
   const urbanKits = [
-    [SceneryArchetype.cityPodium, 'city-podium', 31, 37],
-    [SceneryArchetype.cityArcade, 'city-arcade', 41, 43],
-    [SceneryArchetype.cityCivicHall, 'city-civic-hall', 47, 53],
-    [SceneryArchetype.cityLibrary, 'city-library', 59, 61],
-    [SceneryArchetype.cityMarket, 'city-market', 67, 71],
-    [SceneryArchetype.cityHotel, 'city-hotel', 73, 79],
-    [SceneryArchetype.cityTransitHub, 'city-transit-hub', 83, 89],
-  ] as const
-  for (const [id, name, seedA] of urbanKits) {
-    const geometry = seedA % 3 === 0 ? midRise : seedA % 3 === 1 ? officeTower : skyscraper
-    register(registry, materials, id, name, geometry.near, geometry.mid, geometry.far)
+    [SceneryArchetype.cityPodium, 'city-podium', 'podium'] as const,
+    [SceneryArchetype.cityArcade, 'city-arcade', 'arcade'] as const,
+    [SceneryArchetype.cityCivicHall, 'city-civic-hall', 'civicHall'] as const,
+    [SceneryArchetype.cityLibrary, 'city-library', 'library'] as const,
+    [SceneryArchetype.cityMarket, 'city-market', 'market'] as const,
+    [SceneryArchetype.cityHotel, 'city-hotel', 'hotel'] as const,
+    [SceneryArchetype.cityTransitHub, 'city-transit-hub', 'transitHub'] as const,
+  ]
+  const urbanFar = {
+    podium: officeTower.far,
+    arcade: midRise.far,
+    civicHall: midRise.far,
+    library: midRise.far,
+    market: midRise.far,
+    hotel: officeTower.far,
+    transitHub: skyscraper.far,
+  } as const
+  for (const [id, name, style] of urbanKits) {
+    register(
+      registry,
+      materials,
+      id,
+      name,
+      createDistrictBuildingGeometry(style, LodTier.near),
+      createDistrictBuildingGeometry(style, LodTier.mid),
+      urbanFar[style],
+    )
   }
 
   const logisticsKits = [
@@ -1159,6 +1175,71 @@ function createSingleBuildingGeometry(style: SingleBuildingStyle, lod: BuildingL
     lod,
   }
   return geometry
+}
+
+type DistrictBuildingStyle =
+  | 'podium'
+  | 'arcade'
+  | 'civicHall'
+  | 'library'
+  | 'market'
+  | 'hotel'
+  | 'transitHub'
+
+function createDistrictBuildingGeometry(
+  style: DistrictBuildingStyle,
+  lod: BuildingLod,
+): THREE.BufferGeometry {
+  const parts: THREE.BufferGeometry[] = []
+  const detail = lod === LodTier.near ? 2 : lod === LodTier.mid ? 1 : 0
+  if (detail > 0) {
+    parts.push(tintedBox(0.9, 0.022, 0.86, 0, 0.011, 0, BUILDING_PALETTE.paving, 0.08))
+  }
+  if (style === 'podium') {
+    parts.push(tintedBox(0.82, 0.2, 0.74, 0, 0.12, 0, BUILDING_PALETTE.concrete, 0.2))
+    parts.push(tintedBox(0.5, 0.78, 0.46, 0, 0.61, 0, BUILDING_PALETTE.blueGlass, 0.22))
+    parts.push(tintedBox(0.54, 0.05, 0.5, 0, 1.025, 0, LIGHT_METAL, 0.1))
+  } else if (style === 'arcade') {
+    parts.push(tintedBox(0.8, 0.46, 0.58, 0, 0.25, -0.02, BUILDING_PALETTE.brick, 0.28))
+    parts.push(tintedBox(0.84, 0.06, 0.62, 0, 0.51, -0.02, [0.22, 0.16, 0.12], 0.1))
+    if (detail > 0) {
+      parts.push(tintedBox(0.16, 0.2, 0.04, -0.22, 0.16, 0.28, BUILDING_PALETTE.darkGlass, 0.08))
+      parts.push(tintedBox(0.16, 0.2, 0.04, 0, 0.16, 0.28, BUILDING_PALETTE.darkGlass, 0.08))
+      parts.push(tintedBox(0.16, 0.2, 0.04, 0.22, 0.16, 0.28, BUILDING_PALETTE.darkGlass, 0.08))
+    }
+  } else if (style === 'civicHall') {
+    parts.push(tintedBox(0.84, 0.42, 0.62, 0, 0.23, 0, BUILDING_PALETTE.stone, 0.28))
+    const pediment = paint(new THREE.ConeGeometry(0.48, 0.16, 3), BUILDING_PALETTE.stone, 0.12)
+    pediment.rotateY(Math.PI)
+    pediment.translate(0, 0.52, 0)
+    parts.push(pediment)
+    if (detail > 0) {
+      parts.push(cylinder(0.03, 0.035, 0.28, 6, -0.22, 0.16, 0.32, BUILDING_PALETTE.cream))
+      parts.push(cylinder(0.03, 0.035, 0.28, 6, 0.22, 0.16, 0.32, BUILDING_PALETTE.cream))
+    }
+  } else if (style === 'library') {
+    parts.push(tintedBox(0.78, 0.38, 0.56, 0, 0.21, 0.04, BUILDING_PALETTE.stone, 0.26))
+    parts.push(tintedBox(0.52, 0.28, 0.4, 0.06, 0.54, -0.04, BUILDING_PALETTE.concrete, 0.18))
+    if (detail > 0) {
+      parts.push(tintedBox(0.36, 0.12, 0.02, -0.08, 0.22, 0.33, BUILDING_PALETTE.darkGlass, 0.08))
+    }
+  } else if (style === 'market') {
+    parts.push(tintedBox(0.76, 0.28, 0.54, 0, 0.16, 0, BUILDING_PALETTE.brick, 0.24))
+    parts.push(tintedBox(0.88, 0.05, 0.7, 0, 0.325, 0, [0.55, 0.38, 0.18], 0.12))
+    if (detail === 2) {
+      parts.push(tintedBox(0.2, 0.08, 0.16, -0.2, 0.12, 0.28, BUILDING_PALETTE.cream, 0.08))
+      parts.push(tintedBox(0.2, 0.08, 0.16, 0.18, 0.12, 0.28, BUILDING_PALETTE.warmWindow, 0.08))
+    }
+  } else if (style === 'hotel') {
+    parts.push(tintedBox(0.7, 0.16, 0.62, 0, 0.1, 0, BUILDING_PALETTE.concrete, 0.18))
+    parts.push(tintedBox(0.46, 1.18, 0.42, 0, 0.77, 0, BUILDING_PALETTE.cream, 0.22))
+    parts.push(tintedBox(0.38, 0.16, 0.34, 0, 1.44, 0, BUILDING_PALETTE.blueGlass, 0.16))
+  } else {
+    parts.push(tintedBox(0.86, 0.32, 0.52, 0, 0.18, 0, BUILDING_PALETTE.concrete, 0.2))
+    parts.push(tintedBox(0.94, 0.05, 0.36, 0, 0.365, 0.08, LIGHT_METAL, 0.1))
+    parts.push(tintedBox(0.28, 0.42, 0.28, 0.24, 0.42, -0.08, BUILDING_PALETTE.darkGlass, 0.16))
+  }
+  return compound(parts)
 }
 
 function kebabCase(value: string): string {

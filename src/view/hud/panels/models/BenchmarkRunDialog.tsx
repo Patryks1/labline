@@ -57,9 +57,9 @@ export function BenchmarkRunDialog({
     <ConsoleDialog
       open={open}
       titleId={`benchmark-run-${job.id}`}
-      eyebrow="Private evaluation order"
+      eyebrow="Measure, do not train"
       title={`Benchmark ${job.name}`}
-      description="Choose only the suites this checkpoint can serve. Higher spend buys broader samples, repeat adjudication and tighter measurements—it does not improve the model itself."
+      description="This snapshots the current weights and scores Instant plus every trained effort head. Named heads need Process Reward research. Extra spend buys tighter intervals, not a stronger model."
       onClose={onClose}
       maxWidthClass="max-w-4xl"
       footer={

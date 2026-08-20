@@ -6,6 +6,8 @@ import {
   moeRoutingCapacityMultiplier,
   overtrainBonus,
   overtrainCap,
+  paramScalePotential,
+  postTrainSizePunch,
   scaleIntelligence,
 } from "./modelScaling";
 import { commercialModelKind } from "./pricing";
@@ -62,6 +64,15 @@ describe("general capability ceilings", () => {
     expect(distilled.capability).toBeGreaterThan(pretrain.capability + 30);
     expect(distilled.capability).toBeCloseTo(70.4, 1);
     expect(distilled.limitingFactor).toBe("teacher");
+  });
+});
+
+describe("post-train size punch", () => {
+  it("gives smaller models more capability from the same post-train work", () => {
+    const small = postTrainSizePunch(0.9, paramScalePotential(7), true);
+    const large = postTrainSizePunch(0.9, paramScalePotential(70), true);
+    expect(small).toBeGreaterThan(large);
+    expect(small).toBeGreaterThan(5);
   });
 });
 
@@ -143,9 +154,9 @@ describe("overtrain / compute-intensity axis", () => {
       trainComplete: 1,
       postTrainStrength: 0.7,
     });
-    // Tech-dominated late tiny arc (~34 with current OVERTRAIN weights).
+    // Tech + post-train punch on a tiny late model (~mid 30s–low 40s).
     expect(late.capability).toBeGreaterThanOrEqual(32);
-    expect(late.capability).toBeLessThanOrEqual(42);
+    expect(late.capability).toBeLessThanOrEqual(48);
   });
 });
 
@@ -167,11 +178,11 @@ describe("early / late capability design targets", () => {
     const m878 = scaleIntelligence({ ...earlyRecipe, paramsB: 0.878 });
 
     expect(m70.capability).toBeGreaterThanOrEqual(4);
-    expect(m70.capability).toBeLessThanOrEqual(7);
+    expect(m70.capability).toBeLessThanOrEqual(9);
     expect(m600.capability).toBeGreaterThanOrEqual(6);
-    expect(m600.capability).toBeLessThanOrEqual(11);
+    expect(m600.capability).toBeLessThanOrEqual(12);
     // Leaderboard case: sub-1B must not read as mid-pack.
-    expect(m878.capability).toBeLessThanOrEqual(12);
+    expect(m878.capability).toBeLessThanOrEqual(14);
   });
 
   it("lets early 7B sit mid-teens–mid-20s and early 70B mid-pack", () => {
@@ -179,7 +190,7 @@ describe("early / late capability design targets", () => {
     const m70 = scaleIntelligence({ ...earlyRecipe, paramsB: 70 });
 
     expect(m7.capability).toBeGreaterThanOrEqual(16);
-    expect(m7.capability).toBeLessThanOrEqual(26);
+    expect(m7.capability).toBeLessThanOrEqual(28);
     expect(m70.capability).toBeGreaterThanOrEqual(45);
     expect(m70.capability).toBeLessThanOrEqual(65);
   });
@@ -197,7 +208,55 @@ describe("early / late capability design targets", () => {
       postTrainStrength: 0.7,
     });
     expect(lateTiny.capability).toBeGreaterThanOrEqual(32);
-    expect(lateTiny.capability).toBeLessThanOrEqual(42);
+    expect(lateTiny.capability).toBeLessThanOrEqual(48);
+  });
+
+  it("makes a well-fed early 1B beat a data-starved 70B, then needs scale later", () => {
+    const earlySmall = scaleIntelligence({
+      ...earlyRecipe,
+      paramsB: 1,
+      dataCoverage: 6,
+    });
+    const starvedLarge = scaleIntelligence({
+      ...earlyRecipe,
+      paramsB: 70,
+      // Same ~8B-token corpus as a 1B at 8N.
+      dataCoverage: 8 / 70,
+    });
+    const laterLarge = scaleIntelligence({
+      ...earlyRecipe,
+      paramsB: 70,
+      dataCoverage: 8,
+    });
+    expect(earlySmall.capability).toBeGreaterThan(starvedLarge.capability);
+    expect(laterLarge.capability).toBeGreaterThan(earlySmall.capability + 20);
+  });
+
+  it("lets a late post-trained 7B close in on a raw 70B without matching it", () => {
+    const rawSeventy = scaleIntelligence({
+      paramsB: 70,
+      dataCoverage: 8,
+      dataQuality: 1,
+      researchMult: 1.04,
+      family: "dense",
+      mixWeights: { chat: 0.5, code: 0.25, math: 0.25 },
+      trainComplete: 1,
+      postTrainStrength: 0.1,
+    });
+    const alignedSeven = scaleIntelligence({
+      paramsB: 7,
+      dataCoverage: 20,
+      dataQuality: 1.3,
+      researchMult: 1.12,
+      reasoningEnabled: true,
+      overtrainCapBonus: 6,
+      family: "dense",
+      mixWeights: { chat: 0.4, code: 0.3, math: 0.3 },
+      trainComplete: 1,
+      postTrainStrength: 0.95,
+    });
+    expect(alignedSeven.capability).toBeGreaterThan(rawSeventy.capability - 12);
+    expect(alignedSeven.capability).toBeLessThan(rawSeventy.capability);
   });
 });
 
@@ -214,6 +273,7 @@ describe("reasoning workload classification", () => {
       multilingual: 40,
       agents: 35,
       safety: 50,
+      personality: 28,
     };
     expect(
       commercialModelKind({
@@ -271,6 +331,39 @@ describe("first-class math and science scaling", () => {
     });
     expect(tiny.capability).toBeLessThan(20);
     expect(tiny.benchCeilings.math).toBeLessThan(70);
+  });
+
+  it("lets a code-only mix beat a generalist on coding while losing elsewhere", () => {
+    const base = {
+      paramsB: 20,
+      dataCoverage: 6,
+      dataQuality: 1,
+      trainComplete: 1,
+      postTrainStrength: 0.5,
+    };
+    const general = scaleIntelligence({
+      ...base,
+      mixWeights: {
+        chat: 0.22,
+        code: 0.22,
+        math: 0.2,
+        science: 0.18,
+        law: 0.1,
+        health: 0.08,
+      },
+    });
+    const coder = scaleIntelligence({
+      ...base,
+      mixWeights: { code: 0.92, math: 0.08 },
+    });
+
+    expect(coder.capability).toBeLessThan(general.capability);
+    expect(coder.benchCeilings.coding).toBeGreaterThan(
+      general.benchCeilings.coding,
+    );
+    expect(coder.benchCeilings.multilingual).toBeLessThan(
+      general.benchCeilings.multilingual,
+    );
   });
 
   it("makes narrow math and science corpora lead their own benchmark family", () => {

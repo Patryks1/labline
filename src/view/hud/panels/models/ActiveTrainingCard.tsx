@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useGameStore } from "../../../../store/gameStore";
-import type { PostTrainStage, TrainingJob } from "../../../../sim/types";
+import { useUiStore } from "../../../../store/uiStore";
+import type { PostTrainGym, PostTrainGymKind, PostTrainStage, TrainingJob } from "../../../../sim/types";
 import {
   canReleaseTrainingJob,
   earlyReleasePenalty,
@@ -11,7 +12,7 @@ import {
   formatParams,
   fundedTrainingMaturity,
 } from "../../../../sim/balance/training";
-import { postTrainTargetPfDays } from "../../../../sim/balance/postTraining";
+import { postTrainStageQuote } from "../../../../sim/balance/postTraining";
 import {
   formatTokens,
   DATA_DOMAINS,
@@ -27,13 +28,21 @@ import {
 } from "./TrainingLossChart";
 import { BenchmarkEntryPoint } from "./BenchmarkEntryPoint";
 import { TrainingEvidencePanel } from "./TrainingEvidencePanel";
+import { TrainingLabsPicker } from "./LabsTab";
 import type { CheckpointUiRecord } from "./checkpointUi";
 import { architectureBlueprintProfile } from "../../../../sim/balance/architectureFrontiers";
 import {
+  campaignStageLabel,
   classifyTrainingStatus,
+  resolveCampaignSpineStep,
   trainingReleaseDisabledReason,
   trainingRemainingTime,
+  type CampaignSpineId,
 } from "./trainingPresentation";
+import { CampaignSpine } from "./CampaignSpine";
+import { EffortStudio } from "./EffortStudio";
+import { buildModelProductProfile } from "../../../../sim/balance/modelProduct";
+import { describeCampaignIntervention } from "../../../../sim/balance/trainingCampaignIntervention";
 
 type TrainStage = Exclude<PostTrainStage, "none">;
 
@@ -83,6 +92,8 @@ export function ActiveTrainingCard({
   onBranchCheckpoint,
   onRecoverFromCheckpoint,
   onSelectPostTrain,
+  onSetLabs,
+  gyms,
   checkpointMarkers = [],
   checkpointEvidence = [],
   onOpenCheckpointHistory,
@@ -110,15 +121,13 @@ export function ActiveTrainingCard({
     jobId: string,
     stage: Exclude<PostTrainStage, "none">,
   ) => void;
+  onSetLabs?: (jobId: string, kinds: PostTrainGymKind[]) => void;
+  gyms?: readonly PostTrainGym[];
 }) {
   const [cancelConfirm, setCancelConfirm] = useState(false);
   const [launchConfirm, setLaunchConfirm] = useState(false);
-  const resolveTrainingCampaignEvent = useGameStore(
-    (s) => s.resolveTrainingCampaignEvent,
-  );
-  const researcherCount = useGameStore(
-    (s) => s.state.player.staff?.researcher ?? 0,
-  );
+  const [spineFocus, setSpineFocus] = useState<CampaignSpineId | null>(null);
+
   const dataManifest = useGameStore((s) =>
     s.state.player.data.manifests?.find(
       (manifest) => manifest.id === job.dataManifestId,
@@ -297,7 +306,7 @@ export function ActiveTrainingCard({
 
   return (
     <GameCard
-      eyebrow="Live training"
+      eyebrow="Campaign"
       title={
         <span className="flex items-center gap-2">
           <LiveDot
@@ -325,6 +334,41 @@ export function ActiveTrainingCard({
       }
     >
       <div className="space-y-3">
+        <CampaignSpine
+          current={resolveCampaignSpineStep(job, minimum.completeReady)}
+          focus={
+            spineFocus ?? resolveCampaignSpineStep(job, minimum.completeReady)
+          }
+          onFocus={setSpineFocus}
+        />
+        <p className="font-mono text-[0.6875rem] leading-5 text-muted">
+          You are here: {campaignStageLabel(job)}. One mid-base incident.
+          Alignment uses the recipe mix and attached gyms after the base run.
+          Snapshots are opt-in.
+        </p>
+
+        {job.pendingCampaignEvent ? (
+          <div className="rounded-md border border-amber/45 bg-amber/10 p-3">
+            <p className="hud-eyebrow">Incident paused this run</p>
+            <strong className="mt-1 block text-[0.875rem] text-bone">
+              {job.pendingCampaignEvent.title}
+            </strong>
+            <p className="mt-1 text-[0.75rem] leading-5 text-muted">
+              Four options. The bottom prompt stays up if you close the modal.
+            </p>
+            <HudButton
+              type="button"
+              variant="primary"
+              className="mt-2.5"
+              onClick={() =>
+                useUiStore.getState().openCampaignDecision(job.id)
+              }
+            >
+              Open decision
+            </HudButton>
+          </div>
+        ) : null}
+
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <p className="text-[0.8125rem] text-muted">
             {modeLabel} · {job.family}
@@ -334,7 +378,8 @@ export function ActiveTrainingCard({
           </p>
           <div className="text-right font-mono text-[0.75rem] tabular-nums">
             <p className="text-train">
-              {num(allocatedPf)} PF/d · priority {job.computePriority ?? 50}
+              {num(allocatedPf)} PF/d · {campaignStageLabel(job)} · priority{" "}
+              {job.computePriority ?? 50}
             </p>
             {resources ? (
               <>
@@ -372,7 +417,7 @@ export function ActiveTrainingCard({
           value={progress}
           detail={
             done
-              ? `${etaDetail} · ${num(job.progressPfDays)} / ${num(job.recommendedPfDays ?? job.targetPfDays)} PF funded`
+              ? `${etaDetail} · ${num(job.progressPfDays)} / ${num(job.recommendedPfDays ?? job.targetPfDays)} PF funded plan`
               : `${pct}% · ${etaDetail} · ${num(Math.max(0, job.targetPfDays - job.progressPfDays))} PF remaining`
           }
           tone="train"
@@ -477,90 +522,6 @@ export function ActiveTrainingCard({
           </div>
         ) : null}
 
-        {job.pendingCampaignEvent ? (
-          <div
-            className={`rounded-md border p-3 ${
-              job.pendingCampaignEvent.severity === "opportunity"
-                ? "border-research/45 bg-research/10"
-                : job.pendingCampaignEvent.severity === "critical"
-                  ? "border-danger/45 bg-danger/10"
-                  : "border-amber/45 bg-amber/10"
-            }`}
-          >
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div>
-                <p className="hud-eyebrow">
-                  Campaign decision ·{" "}
-                  {(job.pendingCampaignEvent.milestone * 100).toFixed(2)}%
-                  checkpoint
-                </p>
-                <strong className="mt-1 block text-[0.875rem] text-bone">
-                  {job.pendingCampaignEvent.title}
-                </strong>
-              </div>
-              <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
-                Auto-resolves D{job.pendingCampaignEvent.decisionDeadlineDay}
-              </span>
-            </div>
-            <p className="mt-1.5 text-[0.75rem] leading-5 text-bone">
-              {job.pendingCampaignEvent.description}
-            </p>
-            <p className="mt-1 font-mono text-[0.6875rem] leading-5 text-muted">
-              Signal: {job.pendingCampaignEvent.signal}
-            </p>
-            <p className="mt-1 font-mono text-[0.625rem] leading-5 text-muted">
-              Decision evidence{" "}
-              {(
-                (job.pendingCampaignEvent.evidenceAccuracy ?? 0.35) * 100
-              ).toFixed(2)}
-              %
-              {job.benchmarkSnapshots?.length
-                ? " · paid checkpoint measurements improve interventions without rerolling the run"
-                : " · evaluate a retained checkpoint to improve intervention precision"}
-            </p>
-            <div className="mt-2.5 grid grid-cols-1 gap-2 lg:grid-cols-3">
-              {job.pendingCampaignEvent.choices.map((choice) => {
-                const cost = choice.effects.cashCost ?? 0;
-                const researchersRequired = choice.effects.minResearchers ?? 0;
-                const disabled =
-                  cash + 1e-9 < cost || researcherCount < researchersRequired;
-                return (
-                  <button
-                    key={choice.id}
-                    type="button"
-                    disabled={disabled}
-                    title={
-                      cash + 1e-9 < cost
-                        ? `Need ${money(cost)}.`
-                        : researcherCount < researchersRequired
-                          ? `Need ${researchersRequired} researchers.`
-                          : undefined
-                    }
-                    onClick={() =>
-                      resolveTrainingCampaignEvent(job.id, choice.id)
-                    }
-                    className="rounded-md border border-line/60 bg-void/35 p-2.5 text-left transition hover:border-train/60 hover:bg-train/5 disabled:cursor-not-allowed disabled:opacity-45"
-                  >
-                    <span className="flex items-center justify-between gap-2">
-                      <strong className="text-[0.75rem] text-bone">
-                        {choice.label}
-                      </strong>
-                      {choice.recommended ? (
-                        <span className="font-mono text-[0.5625rem] uppercase tracking-[0.12em] text-train">
-                          recommended
-                        </span>
-                      ) : null}
-                    </span>
-                    <span className="mt-1 block text-[0.6875rem] leading-5 text-muted">
-                      {choice.description}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        ) : null}
-
         {(job.campaignEventHistory?.length ?? 0) > 0 ? (
           <details className="group rounded-md border border-line/50 bg-void/25">
             <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 marker:hidden">
@@ -570,7 +531,7 @@ export function ActiveTrainingCard({
               </span>
             </summary>
             <div className="space-y-1 border-t border-line/40 px-2.5 pb-2.5 pt-2">
-              {job.campaignEventHistory!.slice(-3).map((event) => {
+              {job.campaignEventHistory!.map((event) => {
                 const selected = event.choices.find(
                   (choice) => choice.id === event.selectedChoiceId,
                 );
@@ -584,7 +545,10 @@ export function ActiveTrainingCard({
                     </span>
                     <span className="text-right text-bone">
                       {selected?.label ?? "Resolved"}
-                      {event.autoResolved ? " · auto" : ""}
+                      {event.autoResolved ? " · AFK" : ""}
+                      {selected?.effects
+                        ? ` · ${describeCampaignIntervention(selected.effects)}`
+                        : ""}
                     </span>
                   </div>
                 );
@@ -593,11 +557,27 @@ export function ActiveTrainingCard({
           </details>
         ) : null}
 
-        <TrainingEvidencePanel
-          job={job}
-          checkpoints={checkpointEvidence}
-          onOpenCheckpointHistory={onOpenCheckpointHistory}
-        />
+        <section data-campaign-stage="measure" className="space-y-3">
+          <TrainingEvidencePanel
+            job={job}
+            checkpoints={checkpointEvidence}
+            onOpenCheckpointHistory={onOpenCheckpointHistory}
+          />
+        </section>
+
+        {onSetLabs ? (
+          <div className="rounded-md border border-line/60 bg-void/30 p-2.5">
+            <p className="hud-eyebrow">Gyms on this run</p>
+            <div className="mt-2">
+              <TrainingLabsPicker
+                gyms={gyms}
+                researchUnlocked={unlocked}
+                selected={job.attachedGymKinds ?? []}
+                onChange={(kinds) => onSetLabs(job.id, kinds)}
+              />
+            </div>
+          </div>
+        ) : null}
 
         {diagnosticStall ? (
           <p className="text-[0.75rem] text-amber">{diagnosticStall}</p>
@@ -701,7 +681,7 @@ export function ActiveTrainingCard({
               </>
             ) : null}
             <StatRow
-              label="Recommended"
+              label="Funded plan"
               value={`${Math.min(100, recommendedProgress * 100).toFixed(2)}%`}
             />
           </div>
@@ -807,7 +787,7 @@ export function ActiveTrainingCard({
                 }
                 onClick={() => onSaveCheckpoint(job.id)}
               >
-                Save checkpoint
+                Save snapshot
               </HudButton>
               <HudButton
                 variant="secondary"
@@ -867,7 +847,7 @@ export function ActiveTrainingCard({
                 }
                 onClick={() => onSaveCheckpoint(job.id)}
               >
-                Save checkpoint
+                Save snapshot
               </HudButton>
               <HudButton
                 variant="secondary"
@@ -927,16 +907,48 @@ export function ActiveTrainingCard({
           )}
         </div>
 
+        {job.productProfile ||
+        job.completedPostTrainStages?.includes("process") ||
+        done ? (
+          <EffortStudio
+            subjectId={job.id}
+            paramsB={job.targetParamsB}
+            profile={
+              job.productProfile ??
+              buildModelProductProfile({
+                lifecycle: job.lifecycle,
+                focus: job.specializationFocus,
+                postTrain: job.postTrain,
+                completedPostTrainStages: job.completedPostTrainStages,
+                postTrainStageEffectiveness: job.postTrainStageEffectiveness,
+                chatShare: job.dataPlan?.weights.chat ?? 0,
+                chatQuality: job.dataQualityUsed ?? 50,
+                reasoningEnabled: job.completedPostTrainStages?.includes("process"),
+                outcomeSeed: job.outcomeSeed,
+              })
+            }
+            capability={job.benchmarkSnapshots?.at(-1)?.capability}
+          />
+        ) : null}
+
         {done ? (
-          <div className="rounded-md border border-research/25 bg-research/5 p-2.5">
+          <div
+            data-campaign-stage="specialize"
+            className="rounded-md border border-research/25 bg-research/5 p-2.5"
+          >
             <div className="mb-1.5 flex items-center justify-between gap-2">
               <span className="text-[0.8125rem] font-semibold text-bone">
-                Optional post-training
+                Specialize
               </span>
               <span className="font-mono text-[0.6875rem] text-muted">
-                choose next stage
+                cash + gym quality gate the pass
               </span>
             </div>
+            <p className="mb-2 text-[0.6875rem] leading-5 text-muted">
+              SFT, RLHF, process, and tools are paid campaigns. Fund gyms first
+              or you will burn extra PF-days for weaker outcomes. Continue-train
+              released or internal models to refresh a stage.
+            </p>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {(Object.keys(POST_TRAIN_META) as TrainStage[]).map((stage) => {
                 const meta = POST_TRAIN_META[stage];
@@ -951,18 +963,17 @@ export function ActiveTrainingCard({
                   (stageHistory.has(stage) && job.postTrain !== stage) ||
                   (job.postTrainStagesCompletedThisRun ?? []).includes(stage) ||
                   (job.postTrain === stage && !currentStageIncomplete);
-                const stageTarget = postTrainTargetPfDays(
-                  job,
-                  stage,
-                  job.targetParamsB,
-                );
+                const quote = postTrainStageQuote(job, stage, gyms);
+                const unaffordable = cash + 1e-9 < quote.cash;
                 const lockReason = applied
                   ? "Already applied in this version. Continue-train a new version to refresh it with diminishing returns."
                   : locked
                     ? `Research ${meta.research} required.`
                     : busy
                       ? `${job.postTrain.toUpperCase()} is already in progress.`
-                      : undefined;
+                      : unaffordable
+                        ? `Need ${money(quote.cash)} and a stronger gym.`
+                        : undefined;
                 const stateLabel = applied
                   ? "done"
                   : locked
@@ -974,7 +985,7 @@ export function ActiveTrainingCard({
                   <button
                     key={stage}
                     type="button"
-                    disabled={applied || locked || busy}
+                    disabled={applied || locked || busy || unaffordable}
                     title={lockReason}
                     onClick={() => onSelectPostTrain(job.id, stage)}
                     className={`rounded-md border p-2.5 text-left disabled:cursor-not-allowed disabled:opacity-55 ${
@@ -995,7 +1006,8 @@ export function ActiveTrainingCard({
                       Gains: {meta.feature}
                     </span>
                     <span className="mt-1 block font-mono text-[0.6875rem] leading-5">
-                      {meta.data} · {num(stageTarget, 0)} PF target
+                      {meta.data} · {money(quote.cash)} · {num(quote.pfDays, 0)} PF
+                      · gym {Math.round(quote.gymQuality * 100)}%
                     </span>
                     <span className="block text-[0.6875rem]">
                       Expected loss spike {meta.spike}

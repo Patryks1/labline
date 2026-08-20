@@ -5,6 +5,7 @@
  */
 import { ECONOMY } from '../balance/economy'
 import type { ComputeLease, ComputeListing, LabId, RivalLab, SimState } from '../types'
+import { isLivePublicModel } from '../modelRelease'
 import { createRng, seededId } from '../rng'
 import { energyPriceForState } from './map'
 import { fleetStats } from './racks'
@@ -186,9 +187,7 @@ export function playerSparePf(state: SimState): number {
   const alloc = state.player.allocation
   // Used: rough util of train+serve based on jobs / market
   const training = !!state.player.trainingJob
-  const serving = state.player.models.some(
-    (m) => m.release === 'released' || m.shipped,
-  )
+  const serving = state.player.models.some(isLivePublicModel)
   const usedFrac =
     (training ? alloc.training * 0.95 : alloc.training * 0.2) +
     (serving ? alloc.inference * 0.75 : alloc.inference * 0.15) +

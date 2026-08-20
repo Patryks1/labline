@@ -77,7 +77,7 @@ describe("TrainingEvidencePanel", () => {
     );
 
     expect(markup).toContain("Benchmarks &amp; reviews");
-    expect(markup).toContain("Benchmark saves these exact weights first");
+    expect(markup).toContain("Measuring does not train the model");
     expect(markup).toContain("No benchmark evidence yet");
   });
 

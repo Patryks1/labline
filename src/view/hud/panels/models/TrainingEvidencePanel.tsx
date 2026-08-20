@@ -65,13 +65,14 @@ export function TrainingEvidencePanel({
     >
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
-          <p className="hud-eyebrow text-research">Checkpoint evidence</p>
+          <p className="hud-eyebrow text-research">Measure this checkpoint</p>
           <h4 className="mt-1 text-[0.875rem] font-semibold text-bone">
             Benchmarks &amp; reviews
           </h4>
           <p className="mt-1 text-[0.6875rem] leading-5 text-muted">
-            Benchmark saves these exact weights first; the source run keeps
-            training while its suites and blind review complete.
+            Measuring does not train the model. It snapshots these weights,
+            then the suites and blind review run while the source job keeps
+            going.
           </p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-1.5 font-mono text-[0.625rem] tabular-nums text-muted">
@@ -125,6 +126,30 @@ export function TrainingEvidencePanel({
               value={money(latestSnapshot.totalCost ?? 0)}
               detail={`${pct(latestSnapshot.confidence ?? 0)} confidence`}
             />
+            {latestSnapshot.effortBoards?.length ? (
+              latestSnapshot.effortBoards.map((board) => (
+                <EvidenceMetric
+                  key={board.id}
+                  label={board.name}
+                  value={board.capability.toFixed(0)}
+                  detail={
+                    board.usdPerMTok != null
+                      ? `${board.tokenMult.toFixed(1)}× · ${money(board.usdPerMTok)}/MTok`
+                      : `${board.tokenMult.toFixed(1)}× tokens`
+                  }
+                />
+              ))
+            ) : latestSnapshot.effortCapabilities ? (
+              <EvidenceMetric
+                label="Effort caps"
+                value={Object.entries(latestSnapshot.effortCapabilities)
+                  .map(([id, value]) =>
+                    value == null ? `${id} —` : `${id} ${value.toFixed(0)}`,
+                  )
+                  .join(' · ')}
+                detail="named heads"
+              />
+            ) : null}
           </div>
         </div>
       ) : null}

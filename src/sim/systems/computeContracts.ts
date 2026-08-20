@@ -1,4 +1,5 @@
 import { createRng, hashSeed, seededId } from '../rng'
+import { cloudListPriceEscalation } from '../balance/cloudPricing'
 import type {
   CloudProvider,
   ComputeContract,
@@ -10,9 +11,14 @@ import { computeLabSnapshot, updateLab } from './labEngine'
 import { formatComputeMw } from './computeMarket'
 
 const MIN_PF = 1
-const MAX_PF = 10_000
-const PROVIDER_DAILY_GROWTH_RATE = 0.0005
-const PROVIDER_DEFAULT_GROWTH_CAP_MULTIPLIER = 1.5
+/** ~2 GW at mwPerPfProxy 0.001 — large enough for late-game hyperscaler leases. */
+const MAX_PF = 2_000_000
+const PROVIDER_DAILY_GROWTH_RATE = 0.004
+const PROVIDER_EXPANSION_HORIZON_DAYS = 60
+const PROVIDER_EXPANSION_EXPONENT = 2.4
+const PROVIDER_CATCH_UP_RATE = 0.06
+const RIVAL_CLOUD_RESERVE_FRAC = 0.12
+const RIVAL_CLOUD_MAX_TAKE_FRAC = 0.25
 /**
  * Wholesale provider rate multiplier (balance pass). Applied once where quotes
  * are generated, so on-demand daily rates, spot scarcity pricing, reserved and
@@ -54,6 +60,12 @@ function isComputeContractQuote(
 
 function clamp(min: number, max: number, value: number): number {
   return Math.max(min, Math.min(max, value))
+}
+
+/** Campaign-day inventory target for one provider, from its launch baseline. */
+export function cloudProviderTargetBaselinePf(launchBaselinePf: number, day: number): number {
+  const progress = Math.max(0, day) / PROVIDER_EXPANSION_HORIZON_DAYS
+  return Math.max(0, launchBaselinePf) * Math.pow(1 + progress, PROVIDER_EXPANSION_EXPONENT)
 }
 
 function providerReservesCapacity(kind: ComputeContractKind): boolean {
@@ -118,7 +130,19 @@ function quotedPrice(
             : kind === 'rival_resale'
               ? 1.08
               : 1
-  return Math.max(1, provider.basePricePerPfDay * PROVIDER_RATE_MULTIPLIER * multiplier)
+  const industry = state.worldMarkets.cloudProviders
+  const industryBaseline = industry.reduce((sum, p) => sum + Math.max(0, p.baselinePf), 0)
+  const industryCommitted = industry.reduce(
+    (sum, p) => sum + Math.max(0, p.baselinePf - p.availablePf),
+    0,
+  )
+  const demandPressure =
+    industryBaseline > 1e-9 ? industryCommitted / industryBaseline : 0
+  const escalation = cloudListPriceEscalation(state.day, demandPressure)
+  return Math.max(
+    1,
+    provider.basePricePerPfDay * PROVIDER_RATE_MULTIPLIER * multiplier * escalation,
+  )
 }
 
 function quotedInterruptionRisk(
@@ -424,7 +448,7 @@ export function signComputeContract(
     news: [
       active.availableDay != null && active.availableDay > state.day
         ? `Day ${state.day}: ${active.providerName} reserves ${formatComputeMw(active.pf)} of ${active.kind.replace('_', ' ')} capacity for delivery on day ${active.availableDay}.`
-        : `Day ${state.day}: ${active.providerName} supplies ${formatComputeMw(active.pf)} on ${active.kind.replace('_', ' ')} terms.`,
+        : `Day ${state.day}: ${active.providerName} supplies ${formatComputeMw(active.pf)} to ${buyerLabel(state, active.buyerLabId)} on ${active.kind.replace('_', ' ')} terms.`,
       ...state.news,
     ].slice(0, 48),
   }
@@ -445,29 +469,131 @@ function releaseProviderCapacity(
   )
 }
 
+function buyerLabel(state: SimState, labId: LabId): string {
+  if (labId === state.playerLabId) return state.player.name
+  return state.rivals.find((rival) => rival.id === labId)?.name ?? labId
+}
+
 /** Expand free inventory without changing the capacity already leased to customers. */
-function growProviderCapacity(provider: CloudProvider): CloudProvider {
+function growProviderCapacity(provider: CloudProvider, day: number): CloudProvider {
+  const launchBaselinePf = provider.launchBaselinePf ?? provider.baselinePf
   const maxBaselinePf = Math.max(
     provider.baselinePf,
-    provider.maxBaselinePf ??
-      provider.baselinePf * PROVIDER_DEFAULT_GROWTH_CAP_MULTIPLIER,
+    cloudProviderTargetBaselinePf(launchBaselinePf, day),
   )
+  const gap = Math.max(0, maxBaselinePf - provider.baselinePf)
   const growthPf = Math.min(
-    provider.baselinePf * PROVIDER_DAILY_GROWTH_RATE,
-    maxBaselinePf - provider.baselinePf,
+    gap,
+    Math.max(provider.baselinePf * PROVIDER_DAILY_GROWTH_RATE, gap * PROVIDER_CATCH_UP_RATE),
   )
   if (growthPf <= 0) {
-    return provider.maxBaselinePf !== maxBaselinePf
-      ? { ...provider, maxBaselinePf }
+    return provider.launchBaselinePf !== launchBaselinePf || provider.maxBaselinePf !== maxBaselinePf
+      ? { ...provider, launchBaselinePf, maxBaselinePf }
       : provider
   }
   const baselinePf = provider.baselinePf + growthPf
   return {
     ...provider,
+    launchBaselinePf,
     baselinePf,
     maxBaselinePf,
     availablePf: Math.min(baselinePf, provider.availablePf + growthPf),
   }
+}
+
+function rivalCloudShare(archetype: string): number {
+  if (archetype === 'hyperscale') return 0.2
+  if (archetype === 'efficiency') return 0.12
+  return 0.09
+}
+
+function rivalCloudBuyInterval(state: SimState, rivalId: LabId, urgent: boolean): number {
+  if (urgent) return 3
+  return 5 + (hashSeed(state.seed, rivalId, 'cloud-buy-cadence') % 7)
+}
+
+function rivalDesiredCloudPf(state: SimState, rivalId: LabId): number {
+  const rival = state.rivals.find((entry) => entry.id === rivalId)
+  if (!rival) return 0
+  const industryBaseline = state.worldMarkets.cloudProviders.reduce(
+    (sum, provider) => sum + Math.max(0, provider.baselinePf),
+    0,
+  )
+  const pressure =
+    0.4 +
+    Math.min(0.6, (rival.lastUnserved ?? 0) * 2) +
+    (rival.trainingJob ? 0.25 : 0) +
+    Math.min(0.35, state.day / 400)
+  return Math.max(24, industryBaseline * rivalCloudShare(rival.archetype) * pressure)
+}
+
+function maybeSignRivalCloudContract(state: SimState, rivalId: LabId): SimState {
+  const rival = state.rivals.find((entry) => entry.id === rivalId)
+  if (!rival || state.day < 3) return state
+  const inboundPf = labContractCapacityPf(state, rivalId).inboundPf
+  const desiredPf = rivalDesiredCloudPf(state, rivalId)
+  const shortfall = desiredPf - inboundPf
+  if (shortfall < 8) return state
+  const urgent =
+    (rival.lastUnserved ?? 0) > 0.12 ||
+    (Boolean(rival.trainingJob) && inboundPf < desiredPf * 0.5)
+  const interval = rivalCloudBuyInterval(state, rivalId, urgent)
+  if ((state.day + (hashSeed(state.seed, rivalId, 'cloud-buy-phase') % interval)) % interval !== 0) {
+    return state
+  }
+  const recentlySigned = state.computeContracts.some(
+    (contract) =>
+      contract.buyerLabId === rivalId &&
+      !contract.sellerLabId &&
+      contract.status !== 'expired' &&
+      contract.signedDay != null &&
+      state.day - contract.signedDay < interval,
+  )
+  if (recentlySigned) return state
+
+  const providers = [...state.worldMarkets.cloudProviders].sort(
+    (a, b) => a.basePricePerPfDay - b.basePricePerPfDay || a.id.localeCompare(b.id),
+  )
+  const provider = providers.find((entry) => {
+    const reserve = Math.max(24, Math.floor(entry.baselinePf * RIVAL_CLOUD_RESERVE_FRAC))
+    return entry.availablePf - reserve >= 8
+  })
+  if (!provider) return state
+  const reserve = Math.max(24, Math.floor(provider.baselinePf * RIVAL_CLOUD_RESERVE_FRAC))
+  const takeCap = Math.floor(provider.availablePf * RIVAL_CLOUD_MAX_TAKE_FRAC)
+  const pf = Math.max(
+    8,
+    Math.min(Math.ceil(shortfall), takeCap, Math.floor(provider.availablePf - reserve)),
+  )
+  if (pf < 8) return state
+  const quote = quoteComputeContract(state, {
+    providerId: provider.id,
+    buyerLabId: rivalId,
+    kind: 'on_demand',
+    pf,
+    termDays: urgent ? 90 : 180,
+  })
+  if (!quote.canSign) return state
+  if (rival.cash < computeContractCashReserve(quote.contract) * 1.25) return state
+  return signComputeContract(state, quote)
+}
+
+/**
+ * Rivals rent finite provider inventory on a staggered cadence so the player
+ * still sees open MW, but the cloud desk is a shared market.
+ */
+export function tickRivalCloudPurchases(state: SimState): SimState {
+  const ordered = [...state.rivals].sort((a, b) => {
+    const rank =
+      hashSeed(state.seed, state.day, a.id, 'cloud-buy-order') -
+      hashSeed(state.seed, state.day, b.id, 'cloud-buy-order')
+    return rank !== 0 ? rank : a.id.localeCompare(b.id)
+  })
+  let next = state
+  for (const rival of ordered) {
+    next = maybeSignRivalCloudContract(next, rival.id)
+  }
+  return next
 }
 
 function chargeLabCash(state: SimState, labId: LabId, amount: number): SimState {
@@ -667,7 +793,7 @@ export function tickComputeContracts(state: SimState): SimState {
     contracts.push(contract)
   }
 
-  providers = providers.map(growProviderCapacity)
+  providers = providers.map((provider) => growProviderCapacity(provider, state.day))
 
   return {
     ...next,

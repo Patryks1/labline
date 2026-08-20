@@ -97,13 +97,13 @@ export interface TrainingDataDomainAvailability {
   selectedMTok: number
   /** Real stock after reservations. */
   usableRealMTok: number
-  /** Enabled HQ synthetic stock after reservations (0 when excluded). */
+  /** Unpurged HQ synthetic stock after reservations. Always rides along. */
   usableSynthHQMTok: number
-  /** Enabled LQ synthetic stock after reservations (0 when excluded). */
+  /** Unpurged LQ synthetic stock after reservations. Always rides along. */
   usableSynthLQMTok: number
   /**
-   * Authoritative usable stock: processed owned real data + enabled processed
-   * synthetic stock − data reserved by active jobs.
+   * Authoritative usable stock: processed owned real data + unpurged
+   * synthetic pile − data reserved by active jobs.
    */
   usableMTok: number
   /** Hard drag cap: usable stock plus bounded synthetic expansion headroom. */
@@ -145,17 +145,20 @@ export function trainingDataDomainAvailability(opts: {
     return volume - taken
   }
   const usableRealMTok = afterReservation(processedRealMTok)
-  const reservedSynthHQMTok = afterReservation(processedSynthHQMTok)
-  const reservedSynthLQMTok = afterReservation(processedSynthLQMTok)
-  const usableSynthHQMTok = opts.includeSynthHQ ? reservedSynthHQMTok : 0
-  const usableSynthLQMTok = opts.includeSynthLQ ? reservedSynthLQMTok : 0
+  // Unpurged synthetic tokens sit in the processed pile and always ride along.
+  // Include flags only controlled extra generated fill; they cannot hide dirt.
+  void opts.includeSynthHQ
+  void opts.includeSynthLQ
+  const usableSynthHQMTok = afterReservation(processedSynthHQMTok)
+  const usableSynthLQMTok = afterReservation(processedSynthLQMTok)
   const usableMTok = usableRealMTok + usableSynthHQMTok + usableSynthLQMTok
   const syntheticHeadroomMTok = Math.max(0, opts.syntheticHeadroomMTok ?? 0)
-  const capMTok = trainingDataDomainCapMTok(
-    usableMTok,
+  const expandedCap = trainingDataDomainCapMTok(
+    usableRealMTok,
     syntheticHeadroomMTok,
     opts.syntheticMultiplier ?? 0,
   )
+  const capMTok = Math.max(usableMTok, expandedCap)
   return {
     rawMTok: Math.max(0, opts.rawMTok ?? 0),
     processedRealMTok,
@@ -237,21 +240,19 @@ export function trainingDataDomainFill(opts: {
     selectedMTok: opts.needMTok,
   })
   const need = Math.max(0, opts.needMTok)
-  const realTake = Math.min(need, availability.usableRealMTok)
-  const hqTake = opts.includeSynthHQ
-    ? Math.min(Math.max(0, need - realTake), availability.usableSynthHQMTok)
-    : 0
-  const lqTake = opts.includeSynthLQ
-    ? Math.min(
-        Math.max(0, need - realTake - hqTake),
-        availability.usableSynthLQMTok,
-      )
-    : 0
+  const pileReal = availability.usableRealMTok
+  const pileHQ = availability.usableSynthHQMTok
+  const pileLQ = availability.usableSynthLQMTok
+  const pileMass = pileReal + pileHQ + pileLQ
+  const pileTake = Math.min(need, pileMass)
+  const realTake = pileMass > 1e-9 ? pileTake * (pileReal / pileMass) : 0
+  const hqTake = pileMass > 1e-9 ? pileTake * (pileHQ / pileMass) : 0
+  const lqTake = pileMass > 1e-9 ? pileTake * (pileLQ / pileMass) : 0
   const capMTok = availability.capMTok
   const synthTake = Math.min(
-    Math.max(0, need - realTake - hqTake - lqTake),
-    Math.max(0, capMTok - realTake - hqTake - lqTake),
+    Math.max(0, need - pileTake),
+    Math.max(0, capMTok - pileTake),
   )
-  const shortfall = Math.max(0, need - realTake - hqTake - lqTake - synthTake)
+  const shortfall = Math.max(0, need - pileTake - synthTake)
   return { capMTok, realTake, hqTake, lqTake, synthTake, shortfall }
 }

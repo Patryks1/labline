@@ -96,12 +96,41 @@ describe('dense workspace mobile presentation', () => {
     expect(markup).not.toContain('team seats')
   })
 
-  it('uses no more than two plan values per row on phones', () => {
-    useGameStore.setState({ state: createGame(64_213) })
+  it('uses no more than two plan values per row on phones', async () => {
+    const source = await Bun.file(new URL('./StatsPanel.tsx', import.meta.url)).text()
+    expect(source).toContain(
+      'mt-1 grid grid-cols-2 gap-2 font-mono text-[0.8125rem] tabular-nums sm:grid-cols-3',
+    )
+    expect(source).toContain('col-span-2 text-center sm:col-span-1 sm:text-right')
+  })
+
+  it('packs the Finances position strip into a complete 2×3 instrument', () => {
+    useGameStore.setState({ state: createGame(64_224) })
     const markup = renderToStaticMarkup(createElement(StatsPanel))
 
-    expect(markup).toContain('grid-cols-2')
-    expect(markup).toContain('sm:grid-cols-3')
+    expect(markup).toContain('aria-label="Company position"')
+    expect(markup).toContain('finance-readout__grid')
+    expect(markup).toContain('Open Capital')
+    expect(markup).not.toContain('xl:grid-cols-5')
+    expect(markup).not.toContain('metric-tile--serve')
+  })
+
+  it('hosts capital as a Finances tab instead of dumping it under P&L', () => {
+    useGameStore.setState({ state: createGame(64_223) })
+    const markup = renderToStaticMarkup(createElement(StatsPanel))
+
+    expect(markup).toContain('aria-label="Command sections"')
+    expect(markup).toContain('>Capital</span>')
+    expect(markup).not.toContain('>Models</span>')
+    expect(markup).not.toContain('Capital stack')
+    expect(markup).not.toContain('Ownership, credit, and recovery decisions.')
+
+    const capital = renderToStaticMarkup(
+      createElement(OrgPanel, { workspace: 'capital', embedded: true }),
+    )
+    expect(capital).toContain('Capital stack')
+    expect(capital).toContain('Equity term sheets')
+    expect(capital).not.toContain('Ownership, credit, and recovery decisions.')
   })
 
   it('keeps contextual company and capacity controls out of nested tablists', () => {

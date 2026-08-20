@@ -5,7 +5,7 @@ export type ModelsWorkflowStep = "define" | "data" | "compute" | "review";
 const STEPS: ReadonlyArray<{ id: ModelsWorkflowStep; label: string; compactLabel: string }> = [
   { id: "define", label: "Define", compactLabel: "Def" },
   { id: "data", label: "Data", compactLabel: "Data" },
-  { id: "compute", label: "Compute", compactLabel: "CPU" },
+  { id: "compute", label: "Compute", compactLabel: "Recipe" },
   { id: "review", label: "Review", compactLabel: "Rev" },
 ];
 

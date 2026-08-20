@@ -74,6 +74,12 @@ export const BENCHMARK_DEFS: BenchmarkDef[] = [
     short: 'Safe',
     description: 'Refusal quality, jailbreak resistance, harmlessness.',
   },
+  {
+    id: 'personality',
+    name: 'Personality',
+    short: 'Voice',
+    description: 'Steerability, warmth, and how pleasant the assistant is to use.',
+  },
 ]
 
 export function emptyBenchmarks(): BenchmarkScores {
@@ -88,6 +94,7 @@ export function emptyBenchmarks(): BenchmarkScores {
     multilingual: 0,
     agents: 0,
     safety: 0,
+    personality: 0,
   }
 }
 

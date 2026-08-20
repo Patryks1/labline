@@ -214,7 +214,7 @@ export function TopBar() {
           onOpenDetails={() => {
             if (activeMetric === 'share') setPanel('market')
             else if (activeMetric === 'brand') setPanel('marketing')
-            else if (activeMetric === 'valuation') setPanel('org')
+            else if (activeMetric === 'valuation') setPanel('stats')
             else {
               setPanel('stats')
               setCommandView('pnl')

@@ -10,6 +10,7 @@ import { capabilityCeiling } from "./modelScaling";
 import {
   applyTrainingCampaignChoice,
   boundedVerifiedRecursiveCapabilityBonus,
+  campaignDecisionOptions,
   canSurfaceRecursiveResearchEvent,
   CLOSED_LOOP_MIN_EFFECTIVE_DATA_RATIO,
   createTrainingCampaignEvent,
@@ -122,13 +123,13 @@ function stateWithJob(
 
 describe("training campaign events", () => {
   it("crosses each milestone once", () => {
-    const first = crossedTrainingCampaignMilestone(job(), 0.1, 0.15);
-    expect(first).toEqual({ milestone: 0.12, index: 0 });
+    const first = crossedTrainingCampaignMilestone(job(), 0.4, 0.55);
+    expect(first).toEqual({ milestone: 0.5, index: 0 });
     expect(
       crossedTrainingCampaignMilestone(
-        job({ campaignMilestonesReached: [0.12] }),
-        0.1,
-        0.15,
+        job({ campaignMilestonesReached: [0.5] }),
+        0.4,
+        0.55,
       ),
     ).toBeNull();
   });
@@ -137,7 +138,7 @@ describe("training campaign events", () => {
     const dense = createTrainingCampaignEvent(job(), 0.12, 0, 20);
     const repeat = createTrainingCampaignEvent(job(), 0.12, 0, 20);
     expect(repeat).toEqual(dense);
-    expect(dense.choices).toHaveLength(3);
+    expect(dense.choices.length).toBeGreaterThanOrEqual(6);
     expect(dense.choices.some((choice) => choice.recommended)).toBe(true);
 
     const moeKinds = Array.from(
@@ -221,17 +222,24 @@ describe("training campaign events", () => {
     expect(measured.kind).toBe(baseline.kind);
     expect(measured.title).toBe(baseline.title);
     expect(measured.evidenceAccuracy).toBe(0.95);
-    const baselinePaid = baseline.choices.find(
+    const paidId = baseline.choices.find(
       (choice) => (choice.effects.cashCost ?? 0) > 0,
+    )!.id;
+    const baselineResolved = applyTrainingCampaignChoice(
+      job({ progressPfDays: 32, pendingCampaignEvent: baseline }),
+      paidId,
+      31,
     )!;
-    const measuredPaid = measured.choices.find(
-      (choice) => choice.id === baselinePaid.id,
+    const measuredResolved = applyTrainingCampaignChoice(
+      job({ progressPfDays: 32, pendingCampaignEvent: measured }),
+      paidId,
+      31,
     )!;
-    expect(measuredPaid.effects.reliabilityDelta ?? 0).toBeGreaterThan(
-      baselinePaid.effects.reliabilityDelta ?? 0,
+    expect(measuredResolved.campaignModifiers!.reliabilityDelta).toBeGreaterThan(
+      baselineResolved.campaignModifiers!.reliabilityDelta,
     );
-    expect(measuredPaid.effects.stumbleRisk ?? 0).toBeLessThan(
-      baselinePaid.effects.stumbleRisk ?? 0,
+    expect(measuredResolved.campaignModifiers!.stumbleRisk).toBeLessThan(
+      baselineResolved.campaignModifiers!.stumbleRisk,
     );
   });
 
@@ -254,6 +262,72 @@ describe("training campaign events", () => {
       emptyTrainingCampaignModifiers(),
     );
     expect(source.pendingCampaignEvent).toBe(pendingCampaignEvent);
+  });
+
+  it("authors a custom intervention on the same effect ledger", () => {
+    const pendingCampaignEvent = createTrainingCampaignEvent(
+      job(),
+      0.12,
+      0,
+      20,
+    );
+    const source = job({ progressPfDays: 20, pendingCampaignEvent });
+    const resolved = applyTrainingCampaignChoice(
+      source,
+      "custom",
+      21,
+      false,
+      {
+        cashCost: 120_000,
+        extraComputeFraction: 0.04,
+        progressRollbackFraction: 0.02,
+        reliabilityDelta: 1.5,
+      },
+    )!;
+    expect(resolved.pendingCampaignEvent).toBeUndefined();
+    expect(resolved.recommendedPfDays).toBeCloseTo(104, 8);
+    expect(resolved.progressPfDays).toBeCloseTo(19.6, 8);
+    expect(resolved.campaignModifiers?.reliabilityDelta).toBeGreaterThan(1.5);
+    expect(resolved.campaignEventHistory?.at(-1)?.selectedChoiceId).toBe(
+      "custom",
+    );
+  });
+
+  it("surfaces four live decision options from a larger tactic catalog", () => {
+    const spike = createTrainingCampaignEvent(
+      job({ id: "spike-job", outcomeRisk: "high" }),
+      0.12,
+      0,
+      20,
+    );
+    expect(spike.choices.length).toBeGreaterThan(4);
+    expect(campaignDecisionOptions(spike)).toHaveLength(4);
+    expect(campaignDecisionOptions(spike)[0]?.recommended).toBe(true);
+  });
+
+  it("offers more than three tactics for loss spikes and data anomalies", () => {
+    const spike = createTrainingCampaignEvent(
+      job({ id: "spike-job", outcomeRisk: "high" }),
+      0.12,
+      0,
+      20,
+    );
+    const anomalies = Array.from({ length: 24 }, (_, index) =>
+      createTrainingCampaignEvent(
+        job({
+          id: `anom-${index}`,
+          outcomeSeed: index * 17 + 3,
+          synthLqShare: 0.8,
+          repeatedDataEpochs: 9,
+        }),
+        0.32,
+        1,
+        30,
+      ),
+    );
+    const anomaly = anomalies.find((event) => event.kind === "data_anomaly");
+    expect(spike.choices.length).toBeGreaterThan(3);
+    expect(anomaly?.choices.length ?? 0).toBeGreaterThan(3);
   });
 });
 
@@ -334,12 +408,12 @@ describe("architecture frontier campaign integration", () => {
     expect(
       eligibleEvents.some((event) => event.kind === "recursive_research"),
     ).toBe(true);
-    expect(createTrainingCampaignEvent(eligible, 0.82, 3, 30).kind).toBe(
+    expect(createTrainingCampaignEvent(eligible, 0.5, 0, 30).kind).toBe(
       "recursive_research",
     );
     expect(crossedTrainingCampaignMilestone(eligible, 0, 1)).toEqual({
-      milestone: 0.82,
-      index: 3,
+      milestone: 0.5,
+      index: 0,
     });
     for (const event of eligibleEvents.filter(
       (candidate) => candidate.kind === "recursive_research",

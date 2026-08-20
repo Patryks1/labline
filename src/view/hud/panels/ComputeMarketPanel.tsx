@@ -10,6 +10,7 @@ import {
 import { useGameStore } from "../../../store/gameStore";
 import {
   EMPTY_NEGOTIATION,
+  createEmptyNegotiation,
   formatNegotiationTimestamp,
   reopenEndedNegotiation,
   useUiStore,
@@ -101,6 +102,16 @@ function clamp(min: number, max: number, value: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+/** Opening package: a slice of open inventory, never a 1 MW ceiling. */
+export function defaultCloudContractPf(availablePf: number): number {
+  const available = Math.max(1, Math.floor(availablePf));
+  return Math.max(1, Math.min(available, Math.max(24, Math.round(available * 0.12))));
+}
+
+export function maxCloudContractPf(availablePf: number): number {
+  return Math.max(1, Math.floor(availablePf));
+}
+
 function providerEvent(day: number, providerId: string): ProviderEvent {
   const hash = [...providerId].reduce(
     (sum, char) => sum + char.charCodeAt(0),
@@ -138,10 +149,16 @@ export function ComputeMarketPanel() {
       state.worldMarkets.cloudProviders[0]?.id ??
       "",
   );
-  const [cloudPf, setCloudPf] = useState(24);
+  const initialProvider = state.worldMarkets.cloudProviders.find(
+    (provider) => provider.id === cloudProviderId,
+  );
+  const [cloudPf, setCloudPf] = useState(() =>
+    defaultCloudContractPf(initialProvider?.availablePf ?? 24),
+  );
   const [cloudTerm, setCloudTerm] = useState(90);
   const [offerPercent, setOfferPercent] = useState(95);
   const updateComputeNegotiation = useUiStore((store) => store.updateComputeNegotiation);
+  const resetComputeNegotiations = useUiStore((store) => store.resetComputeNegotiations);
   const conversation = useUiStore((store) => store.computeNegotiations[cloudProviderId] ?? EMPTY_NEGOTIATION);
   const negotiationStatus = conversation.status;
   const negotiationMessage = conversation.message ?? "";
@@ -157,6 +174,19 @@ export function ComputeMarketPanel() {
   const continueNegotiation = () => {
     saveConversation({ status: "idle", message: undefined });
   };
+  const resetDeskPackage = (availablePf: number) => {
+    setCloudPf(defaultCloudContractPf(availablePf));
+    setCloudTerm(90);
+    setOfferPercent(95);
+  };
+  useEffect(() => {
+    const provider = state.worldMarkets.cloudProviders.find(
+      (entry) => entry.id === cloudProviderId,
+    );
+    resetComputeNegotiations();
+    resetDeskPackage(provider?.availablePf ?? 24);
+    // Intentionally mount-only: re-entering the desk starts a fresh contract.
+  }, []);
   useEffect(() => {
     if (!conversation.proposal || (conversation.status !== "countered" && conversation.status !== "agreed")) return;
     setCloudPf(conversation.proposal.capacity);
@@ -413,15 +443,7 @@ export function ComputeMarketPanel() {
                           (provider) => provider.id === nextId,
                         );
                       setCloudProviderId(nextId);
-                      setCloudPf((current) =>
-                        Math.max(
-                          1,
-                          Math.min(
-                            current,
-                            Math.floor(nextProvider?.availablePf ?? 1),
-                          ),
-                        ),
-                      );
+                      setCloudPf(defaultCloudContractPf(nextProvider?.availablePf ?? 1));
                     }}
                     className="min-h-11 min-w-0 flex-1 border-0 bg-transparent text-right text-[0.8125rem] font-medium text-bone outline-none"
                     aria-label="Compute provider"
@@ -494,13 +516,7 @@ export function ComputeMarketPanel() {
                           min={Number(pfToMw(1).toFixed(3))}
                           max={Number(
                             pfToMw(
-                              Math.max(
-                                1,
-                                Math.min(
-                                  1000,
-                                  Math.floor(selectedProvider?.availablePf ?? 1),
-                                ),
-                              ),
+                              maxCloudContractPf(selectedProvider?.availablePf ?? 1),
                             ).toFixed(3),
                           )}
                           step={Number(pfToMw(1).toFixed(3))}
@@ -511,7 +527,7 @@ export function ComputeMarketPanel() {
                               Math.max(
                                 1,
                                 Math.min(
-                                  1000,
+                                  maxCloudContractPf(selectedProvider?.availablePf ?? 1),
                                   Math.round(mwToPf(value)),
                                 ),
                               ),
@@ -682,11 +698,12 @@ export function ComputeMarketPanel() {
                       variant="ghost"
                       className="flex w-full items-center justify-center gap-1.5"
                       title="Open a fresh negotiation with this provider while the current contract runs"
-                      onClick={() =>
-                        updateComputeNegotiation(cloudProviderId, (current) =>
-                          reopenEndedNegotiation(current, false),
-                        )
-                      }
+                      onClick={() => {
+                        updateComputeNegotiation(cloudProviderId, () =>
+                          createEmptyNegotiation(),
+                        );
+                        resetDeskPackage(selectedProvider?.availablePf ?? 24);
+                      }}
                     >
                       <Handshake size={15} />
                       Negotiate another contract

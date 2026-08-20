@@ -51,7 +51,7 @@ describe("CheckpointEvaluationDialog", () => {
     expect(markup).toContain('aria-modal="true"');
     expect(markup).toContain("Image generation");
     expect(markup).not.toContain("Language &amp; reasoning");
-    expect(markup).toContain("Internal lab");
+    expect(markup).toContain("Internal red team");
     expect(markup).toContain("NDA external");
     expect(markup).toContain("Partner pilot");
     expect(markup).toContain("$50.00K/suite");

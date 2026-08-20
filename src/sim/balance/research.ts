@@ -143,7 +143,8 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     id: 'sys_router',
     trunk: 'inference',
     name: 'Model Router',
-    description: 'Route easy traffic to small models. Save frontier capacity.',
+    description:
+      'Assign one specialist per category — chat, code, math, science — and route traffic onto the right model.',
     costPfDays: 24,
     daysMin: 8,
     prereqs: ['sys_batching'],

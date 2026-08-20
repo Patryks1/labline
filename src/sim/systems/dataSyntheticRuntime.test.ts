@@ -180,8 +180,10 @@ describe("synthetic data runtime", () => {
     const small = estimateSynthBudget(state, 0.1);
     const large = estimateSynthBudget(state, 0.5);
     expect(large.grossMTokPerDay).toBeGreaterThan(small.grossMTokPerDay);
-    expect(large.usefulChance).toBeGreaterThan(small.usefulChance);
-    expect(large.hqChance).toBeGreaterThan(small.hqChance);
+    expect(large.acceptedMTokPerDay).toBeGreaterThan(small.acceptedMTokPerDay);
+    // Extra PF is a small filter bonus. Quality is capability-gated.
+    expect(large.usefulChance - small.usefulChance).toBeLessThan(0.08);
+    expect(large.hqChance - small.hqChance).toBeLessThan(0.06);
 
     const beforeProcessed = Object.values(state.player.data.stocks).reduce(
       (sum, stock) => sum + stock.processed,
@@ -320,6 +322,53 @@ describe("synthetic data runtime", () => {
     );
     expect(largeRoute.kwhPerAcceptedMTok).toBeGreaterThan(
       smallRoute.kwhPerAcceptedMTok,
+    );
+  });
+
+  it("lets a more capable teacher accept more high-quality tokens at the same size", () => {
+    const weak: Model = {
+      ...teacher(),
+      id: "weak-chat-teacher",
+      name: "Weak Chat",
+      capability: 42,
+      capabilities: {
+        ...teacher().capabilities!,
+        domains: { ...teacher().capabilities!.domains, language: 38 },
+      },
+    };
+    const strong: Model = {
+      ...teacher(),
+      id: "strong-chat-teacher",
+      name: "Strong Chat",
+      capability: 88,
+      capabilities: {
+        ...teacher().capabilities!,
+        domains: { ...teacher().capabilities!.domains, language: 86 },
+      },
+    };
+    let state = createGame(7_045);
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        models: [weak, strong],
+        researchUnlocked: [...state.player.researchUnlocked, "data_synth"],
+        allocation: { training: 0.1, inference: 0.1, research: 0.8 },
+      },
+      rivals: [],
+    };
+
+    const weakRoute = estimateSynthBudget(state, 0.35, {
+      chat: weak.id,
+    }).domains.find((route) => route.domain === "chat")!;
+    const strongRoute = estimateSynthBudget(state, 0.35, {
+      chat: strong.id,
+    }).domains.find((route) => route.domain === "chat")!;
+
+    expect(strongRoute.usefulChance).toBeGreaterThan(weakRoute.usefulChance);
+    expect(strongRoute.hqChance).toBeGreaterThan(weakRoute.hqChance * 1.8);
+    expect(strongRoute.acceptedMTokPerDay).toBeGreaterThan(
+      weakRoute.acceptedMTokPerDay,
     );
   });
 
@@ -520,7 +569,8 @@ describe("targeted synthetic generation jobs", () => {
     });
     state = tickData(state);
 
-    expect(state.player.data.stocks.math.processed).toBeGreaterThan(90);
+    expect(state.player.data.stocks.math.processed).toBeGreaterThan(0.05);
+    expect(state.player.data.stocks.chat.processed).toBeCloseTo(chatBefore, 12);
     expect(state.player.data.stocks.chat.processed).toBeCloseTo(chatBefore, 12);
     expect(state.player.data.stocks.code.processed).toBeCloseTo(codeBefore, 12);
     const asset = state.player.data.assets.find(

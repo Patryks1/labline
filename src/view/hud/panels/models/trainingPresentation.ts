@@ -36,6 +36,53 @@ export function trainingRemainingTime({
   };
 }
 
+export type CampaignSpineId = "base" | "align" | "ship";
+
+export const CAMPAIGN_SPINE_STEPS: ReadonlyArray<{
+  id: CampaignSpineId;
+  label: string;
+  hint: string;
+}> = [
+  { id: "base", label: "Base", hint: "Raw corpus, one incident" },
+  { id: "align", label: "Align", hint: "Chat data and post-train" },
+  { id: "ship", label: "Ship", hint: "Keep internal or release" },
+];
+
+export function resolveCampaignSpineStep(
+  job: Pick<
+    TrainingJob,
+    | "failed"
+    | "pendingCampaignEvent"
+    | "postTrain"
+    | "postTrainProgress"
+    | "postTrainTarget"
+    | "progressPfDays"
+    | "targetPfDays"
+  >,
+  completeReady = false,
+): CampaignSpineId {
+  if (job.failed) return "base";
+  if (job.pendingCampaignEvent) return "base";
+  if (job.postTrain !== "none" && job.postTrainProgress < job.postTrainTarget) {
+    return "align";
+  }
+  if (completeReady || job.progressPfDays + 1e-9 >= job.targetPfDays) {
+    return "ship";
+  }
+  return "base";
+}
+
+export function campaignStageLabel(job: TrainingJob): string {
+  if (job.failed) return "Failed";
+  if (job.pendingCampaignEvent) return "Base incident";
+  if (job.postTrain !== "none" && job.postTrainProgress < job.postTrainTarget)
+    return `Align · ${job.postTrain.toUpperCase()}`;
+  const funded = Math.max(1e-9, job.recommendedPfDays ?? job.targetPfDays);
+  const pct = Math.round((job.progressPfDays / funded) * 100);
+  if (job.progressPfDays + 1e-9 >= job.targetPfDays) return "Ready to ship";
+  return `Base ${pct}%`;
+}
+
 export function trainingReleaseDisabledReason(
   gate: ReleaseGate,
 ): string | undefined {

@@ -18,6 +18,7 @@ const scores = (value: number): BenchmarkScores => ({
   multilingual: value,
   agents: value,
   safety: value,
+  personality: value,
 });
 
 function model(id: string, value = 70, patch: Partial<Model> = {}): Model {
@@ -259,7 +260,7 @@ describe("stealth checkpoint evaluation", () => {
       seed: 44,
       scheduledDay: 3,
     });
-    expect(report.suites[0]!.metrics).toHaveLength(10);
+    expect(report.suites[0]!.metrics).toHaveLength(11);
     expect(report.suites[0]!.metrics[0]!.rival).toMatchObject({
       modelId: "leader",
       labName: "Northstar",

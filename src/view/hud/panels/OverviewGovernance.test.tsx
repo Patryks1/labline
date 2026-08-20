@@ -32,6 +32,8 @@ describe('Overview governance ownership', () => {
 
     expect(infrastructure).not.toContain('Operating policies')
     expect(infrastructure).not.toContain('Governance')
+    expect(infrastructure).not.toContain('>Facilities<')
+    expect(infrastructure).toContain('Open sites intel')
     expect(company).not.toContain('Operating policies')
     expect(company).not.toContain('Governance')
     expect(compact).not.toContain('Operating policies')

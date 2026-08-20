@@ -96,8 +96,11 @@ export function CapitalActionSelector({
  */
 export function OrgPanel({
   workspace = "company",
+  embedded = false,
 }: {
   workspace?: "company" | "marketing" | "capital";
+  /** Skip a second Finances chrome when Capital is hosted as a tab. */
+  embedded?: boolean;
 }) {
   const state = useGameStore((s) => s.state);
   const setState = (next: typeof state) =>
@@ -120,6 +123,10 @@ export function OrgPanel({
   const dayDebt = dailyLoanPayment(loans);
   const credit = useMemo(() => bankCreditSnapshot(state), [state]);
   const offers = useMemo(() => loanOffers(state), [state]);
+  const packagedOffers = useMemo(
+    () => offers.filter((o) => o.id !== "bailout"),
+    [offers],
+  );
   const firmOffers = state.worldMarkets.loanOffers.filter(
     (offer) =>
       offer.labId === state.playerLabId && offer.expiresDay >= state.day,
@@ -393,31 +400,8 @@ export function OrgPanel({
     );
   }
 
-  return (
-    <PanelScaffold
-      eyebrow={capitalWorkspace ? "Finances" : "People"}
-      title={capitalWorkspace ? "Capital" : "Company"}
-      description={
-        capitalWorkspace
-          ? "Ownership, credit, and recovery decisions."
-          : "HQ capacity, hiring, and the people who run the lab."
-      }
-      actions={
-        !capitalWorkspace ? (
-          <StatusChip
-            tone={
-              companyHealth >= 70
-                ? "positive"
-                : companyHealth >= 40
-                  ? "warning"
-                  : "danger"
-            }
-          >
-            Health {companyHealth}
-          </StatusChip>
-        ) : undefined
-      }
-    >
+  const body = (
+    <>
       {!capitalWorkspace ? <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <MetricTile
           label="Headcount"
@@ -482,7 +466,7 @@ export function OrgPanel({
         </div>
       )}
 
-      <div key={companyTab} className="panel-swap mt-3 space-y-3">
+      <div key={companyTab} className={`panel-swap space-y-3${embedded ? '' : ' mt-3'}`}>
         {companyTab === "staff" ? (
           <>
             <HqOfficeSummary state={state} hqs={hqs} />
@@ -864,7 +848,7 @@ export function OrgPanel({
                   </div>
                 )}
 
-                {isBailoutEligible(state) && (
+                {state.player.cash < 0 && isBailoutEligible(state) && (
                   <div className="rounded-lg border border-danger/40 bg-danger/10 p-2.5 space-y-1.5">
                     <div className="text-[0.8125rem] font-medium text-danger">
                       Cash stress — bailout available
@@ -884,49 +868,40 @@ export function OrgPanel({
                   </div>
                 )}
 
-                {!creditRequestOpen && offers.length > 0 && (
+                {!creditRequestOpen && packagedOffers.length > 0 && (
                   <div className="space-y-1">
                     <h4 className="text-[0.75rem] font-medium uppercase tracking-wider text-muted">
                       Packaged facilities
                     </h4>
-                    {offers.slice(0, 4).map((o) => {
-                      const daily =
-                        o.termDays > 0
-                          ? (o.principal * (1 + o.interestTotal)) / o.termDays
-                          : 0;
-                      const bail = o.id === "bailout";
+                    {packagedOffers.slice(0, 4).map((o) => {
+                        const daily =
+                          o.termDays > 0
+                            ? (o.principal * (1 + o.interestTotal)) / o.termDays
+                            : 0;
                         return (
-                        <HudButton
-                          key={o.id}
-                          type="button"
-                          variant={bail ? "danger" : "ghost"}
-                          className={`flex min-h-11 w-full items-center justify-between gap-2 rounded-lg border px-2.5 py-2 text-left ${
-                            bail
-                              ? "border-danger/40 bg-danger/10 hover:border-danger/60"
-                              : "border-line hover:border-mint/40"
-                          }`}
-                          onClick={() => takeLoan(o.id)}
-                        >
-                          <div className="min-w-0">
-                            <div
-                              className={`text-[0.8125rem] ${bail ? "text-danger" : "text-bone"}`}
-                            >
-                              Apply · {o.label}
-                            </div>
-                            <div className="font-mono text-[0.6875rem] text-muted">
-                              {o.termDays}d ·{" "}
-                              {(o.interestTotal * 100).toFixed(1)}% ·{" "}
-                              {money(daily)}/d
-                            </div>
-                          </div>
-                          <span
-                            className={`shrink-0 font-mono text-[0.8125rem] ${bail ? "text-danger" : "text-mint"}`}
+                          <HudButton
+                            key={o.id}
+                            type="button"
+                            variant="ghost"
+                            className="flex min-h-11 w-full items-center justify-between gap-2 rounded-lg border border-line px-2.5 py-2 text-left hover:border-mint/40"
+                            onClick={() => takeLoan(o.id)}
                           >
-                            {money(o.principal)}
-                          </span>
-                        </HudButton>
-                      );
-                    })}
+                            <div className="min-w-0">
+                              <div className="text-[0.8125rem] text-bone">
+                                Apply · {o.label}
+                              </div>
+                              <div className="font-mono text-[0.6875rem] text-muted">
+                                {o.termDays}d ·{" "}
+                                {(o.interestTotal * 100).toFixed(1)}% ·{" "}
+                                {money(daily)}/d
+                              </div>
+                            </div>
+                            <span className="shrink-0 font-mono text-[0.8125rem] text-mint">
+                              {money(o.principal)}
+                            </span>
+                          </HudButton>
+                        );
+                      })}
                   </div>
                 )}
 
@@ -1032,6 +1007,39 @@ export function OrgPanel({
         ) : null}
 
       </div>
+    </>
+  );
+
+  if (capitalWorkspace && embedded) {
+    return body;
+  }
+
+  return (
+    <PanelScaffold
+      eyebrow={capitalWorkspace ? "Finances" : "People"}
+      title={capitalWorkspace ? "Capital" : "Company"}
+      description={
+        capitalWorkspace
+          ? "Ownership, credit, and recovery decisions."
+          : "HQ capacity, hiring, and the people who run the lab."
+      }
+      actions={
+        !capitalWorkspace ? (
+          <StatusChip
+            tone={
+              companyHealth >= 70
+                ? "positive"
+                : companyHealth >= 40
+                  ? "warning"
+                  : "danger"
+            }
+          >
+            Health {companyHealth}
+          </StatusChip>
+        ) : undefined
+      }
+    >
+      {body}
     </PanelScaffold>
   );
 }

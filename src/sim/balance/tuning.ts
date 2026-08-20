@@ -33,6 +33,10 @@ export interface BalanceTuning {
   dataQualityMult: number
   /** 0.25–2.5: multiplier on synthetic data effectiveness. */
   syntheticEfficiencyMult: number
+  /** 0.25–2.5: multiplier on synthetic candidate tokens generated per PF. */
+  syntheticVolumeMult: number
+  /** 0.25–2.5: multiplier on high-quality share of accepted synthetic tokens. */
+  syntheticHqShareMult: number
   /** 0.25–2.5: multiplier on product/API revenue. */
   incomeMult: number
   /** 0.25–2.5: multiplier on operating expenses (fleet/hosting/staff). */
@@ -53,6 +57,8 @@ export const DEFAULT_BALANCE_TUNING: BalanceTuning = {
   dataCollectionMult: 1,
   dataQualityMult: 1,
   syntheticEfficiencyMult: 1,
+  syntheticVolumeMult: 1,
+  syntheticHqShareMult: 1,
   incomeMult: 1,
   expenseMult: 1,
   distillRetentionMult: 1,
@@ -200,7 +206,25 @@ export const BALANCE_TUNING_GROUPS: ReadonlyArray<{
       {
         key: 'syntheticEfficiencyMult',
         label: 'Synthetic data efficiency',
-        hint: 'Scales how much effective signal generated tokens carry.',
+        hint: 'Scales how much effective signal generated tokens carry when training.',
+        min: 0.25,
+        max: 2.5,
+        step: 0.05,
+        format: pct,
+      },
+      {
+        key: 'syntheticVolumeMult',
+        label: 'Synthetic generation volume',
+        hint: 'Scales attempted synthetic tokens per research PF. Size still sets PF per token; this is the global tap.',
+        min: 0.25,
+        max: 2.5,
+        step: 0.05,
+        format: pct,
+      },
+      {
+        key: 'syntheticHqShareMult',
+        label: 'Synthetic high-Q share',
+        hint: 'Scales how much of accepted synthetic data is high quality. Capability still gates the base curve.',
         min: 0.25,
         max: 2.5,
         step: 0.05,

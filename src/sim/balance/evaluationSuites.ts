@@ -49,6 +49,7 @@ export function inferReasoningEnabled(input: {
 /** Shared hard-cap and dependency policy for player, rival, preview, and migrated models. */
 export function applyBenchmarkPolicy(input: BenchmarkPolicyInput): BenchmarkScores {
   const out = { ...input.scores }
+  if (!Number.isFinite(out.personality)) out.personality = 0
   const reasoning = inferReasoningEnabled(input)
   const generationOnly = input.family === 'diffusion' || input.family === 'video'
   const nonReasoningCap = 40 + 20 * clamp01((input.intelligence - 0.35) / 0.45)
@@ -131,6 +132,7 @@ export const SUITE_METRICS: Record<BenchmarkSuiteId, readonly BenchmarkMetricDef
     ['multilingual', 'Multilingual', 'Languages'],
     ['agents', 'Agents & tools', 'Agents'],
     ['safety', 'Safety evals', 'Safety'],
+    ['personality', 'Personality', 'Voice'],
   ].map(([id, label, short]) => ({ id: id as BenchmarkMetricId, label, short })),
   image_generation: [
     ['prompt_alignment', 'Prompt alignment', 'Prompt'],
@@ -314,7 +316,13 @@ export function normalizeModelEvaluations(model: Model): Model {
   const reasoningEnabled = inferReasoningEnabled(model)
   const intelligence = clamp01((model.capability - 9) / 85)
   const benchmarks = applyBenchmarkPolicy({
-    scores: model.benchmarks,
+    scores: {
+      ...model.benchmarks,
+      personality:
+        model.benchmarks.personality ||
+        model.productProfile?.personality ||
+        0,
+    },
     intelligence,
     capability: model.capability,
     family: model.family,

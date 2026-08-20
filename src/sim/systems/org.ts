@@ -1,6 +1,7 @@
 import { ECONOMY } from '../balance/economy'
 import { aggregateEffects } from './research'
 import type { MarketingChannel, MarketingChannels, SimState } from '../types'
+import { isLivePublicModel } from '../modelRelease'
 import { grantPartnershipData } from './data'
 import { applyDailyMarketing } from './marketing'
 // hireTalent deprecated — use systems/staff hireStaff via HQs
@@ -228,7 +229,7 @@ export function tickOrg(state: SimState): SimState {
   const model = state.player.models.find(
     (m) =>
       m.id === state.player.pricing.activeModelId &&
-      (m.release === 'released' || m.shipped),
+      isLivePublicModel(m),
   )
   const pain = state.player.servicePain ?? 0
   const unserved = state.lastMarket.unservedRatio ?? 0

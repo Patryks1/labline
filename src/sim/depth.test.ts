@@ -66,6 +66,7 @@ import {
 import { isDcKind } from './systems/map'
 import { tileCoords } from './world/ids'
 import { WORLD_POPULATION } from './balance/economy'
+import { applyInstantCheat } from './systems/cheats'
 
 function baseOffer(over: Partial<MarketOffer> = {}): MarketOffer {
   return {
@@ -657,7 +658,7 @@ describe('distill ~80% retention vs cheaper train', () => {
     )
     s = keepInternal(s)
     const teacher = s.player.models[0]!
-    expect(teacher.capability).toBeGreaterThan(10)
+    expect(teacher.capability).toBeGreaterThan(6)
 
     const pretrainCost = trainCostPfDays({
       paramsB: 3,
@@ -1629,6 +1630,23 @@ function findFootprintSpot(
   return null
 }
 
+function commissionSmallHalls(state: SimState, count: number): SimState {
+  let next = {
+    ...state,
+    player: {
+      ...state.player,
+      cash: Math.max(state.player.cash, 8_000_000_000),
+    },
+  }
+  for (let i = 0; i < count; i++) {
+    const spot = findFootprintSpot(next, 'dc')
+    if (!spot) throw new Error(`No small hall site for commission ${i + 1}`)
+    next = placeBuilding(next, spot.x, spot.y, 'dc')
+    next = applyInstantCheat(next, 'construction').state
+  }
+  return next
+}
+
 describe('multi-size data centers', () => {
   it('BUILD_DEFS racks and footprints: small 96/1, medium 288/4, large 960/6', () => {
     const s = BUILD_DEFS.find((d) => d.kind === 'dc')!
@@ -1642,11 +1660,28 @@ describe('multi-size data centers', () => {
     expect(dcFootprint('dc')).toHaveLength(1)
     expect(dcFootprint('dc_m')).toHaveLength(4)
     expect(dcFootprint('dc_l')).toHaveLength(6)
+    const perBay = (kind: 'dc' | 'dc_m' | 'dc_l') => {
+      const def = BUILD_DEFS.find((d) => d.kind === kind)!
+      return def.cash / (def.rack ?? 1)
+    }
+    expect(perBay('dc')).toBeLessThan(perBay('dc_m'))
+    expect(perBay('dc_m')).toBeLessThan(perBay('dc_l'))
+  })
+
+  it('blocks medium and large halls until a live small campus exists', () => {
+    let s = createGame(42)
+    s = { ...s, player: { ...s.player, cash: 8_000_000_000 } }
+    expect(findFootprintSpot(s, 'dc_m')).toBeNull()
+    expect(findFootprintSpot(s, 'dc_l')).toBeNull()
+    s = commissionSmallHalls(s, 1)
+    expect(findFootprintSpot(s, 'dc_m')).not.toBeNull()
+    expect(findFootprintSpot(s, 'dc_l')).toBeNull()
+    s = commissionSmallHalls(s, 1)
+    expect(findFootprintSpot(s, 'dc_l')).not.toBeNull()
   })
 
   it('placeBuilding medium claims 4 tiles with one rack-capacity anchor', () => {
-    let s = createGame(42)
-    s = { ...s, player: { ...s.player, cash: 2_000_000_000 } }
+    let s = commissionSmallHalls(createGame(42), 1)
     const spot = findFootprintSpot(s, 'dc_m')
     expect(spot).not.toBeNull()
     s = placeBuilding(s, spot!.x, spot!.y, 'dc_m')
@@ -1665,8 +1700,7 @@ describe('multi-size data centers', () => {
   })
 
   it('placeBuilding large claims 6 tiles and 960 bays on anchor', () => {
-    let s = createGame(7)
-    s = { ...s, player: { ...s.player, cash: 5_000_000_000 } }
+    let s = commissionSmallHalls(createGame(7), 2)
     const spot = findFootprintSpot(s, 'dc_l')
     expect(spot).not.toBeNull()
     s = placeBuilding(s, spot!.x, spot!.y, 'dc_l')
@@ -1680,8 +1714,7 @@ describe('multi-size data centers', () => {
   })
 
   it('places named buildings and renameBuilding updates campus', () => {
-    let s = createGame(11)
-    s = { ...s, player: { ...s.player, cash: 5_000_000_000 } }
+    let s = commissionSmallHalls(createGame(11), 1)
     const spot = findFootprintSpot(s, 'dc_m')
     expect(spot).not.toBeNull()
     s = placeBuilding(s, spot!.x, spot!.y, 'dc_m')

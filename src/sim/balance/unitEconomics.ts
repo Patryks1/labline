@@ -144,6 +144,98 @@ export function splitInOutCost(blended: number): {
   }
 }
 
+export type ApiHostingCostSource = 'campus' | 'cloud_reference'
+
+export interface ApiHostingCostFloor {
+  blended: number
+  costIn: number
+  costOut: number
+  source: ApiHostingCostSource
+  opsDay: number
+  capacityMTok: number
+  components: ServingOpsDayBreakdown
+  /** Campus ops (energy + amort + opex + lease) attributed per MTok. */
+  campusPerMTok: number
+  bandwidthPerMTok: number
+}
+
+/**
+ * Listing floor for a public API ($/MTok).
+ *
+ * Real LLM APIs quote from GPU-hour economics at *target serving utilization*,
+ * not from yesterday's token trickle:
+ *   - Prefill (input) is compute-bound; decode (output) is memory-bound and
+ *     typically 3–6× more expensive per token. The 0.5× / 13/6× split keeps a
+ *     70/30 mix at one blended unit (~4.3× out/in).
+ *   - Fully-loaded COGS = (energy + accelerator amort + hall opex + leases)
+ *     × inference share ÷ this model's daily token capacity + egress.
+ *   - Larger models (more active parameters, heavier families) produce fewer
+ *     MTok per PF-day, so the same campus bills more per million tokens.
+ *   - With no deployable replica, the floor is a cloud-rental launch quote
+ *     instead of dividing fixed campus costs by a dust denominator.
+ *
+ * Training tokens are sunk and never enter this floor.
+ */
+export function apiHostingCostFloor(
+  state: SimState,
+  snap: ComputeSnapshot,
+  model: Pick<
+    Model,
+    'id' | 'paramsB' | 'activeParamsB' | 'family' | 'inferCostMult' | 'tokPerSecMult'
+  >,
+  opts?: { energyPricePerMWh?: number },
+): ApiHostingCostFloor {
+  const unit = apiUnitCostPerMTok(state, snap, model, {
+    ...opts,
+    forceEstimate: true,
+  })
+  const deployableCapacityMTok = tokensPerDayFromSnapshotPrecise(
+    snap,
+    model,
+    state.player.servingEfficiency,
+  )
+  if (deployableCapacityMTok <= 1e-6) {
+    const blended = launchReferenceApiCostPerMTok(model)
+    const split = splitInOutCost(blended)
+    return {
+      blended,
+      costIn: split.costIn,
+      costOut: split.costOut,
+      source: 'cloud_reference',
+      opsDay: unit.opsDay,
+      capacityMTok: 0,
+      components: unit.components,
+      campusPerMTok: 0,
+      bandwidthPerMTok: ECONOMY.bandwidthPerMTok,
+    }
+  }
+  return {
+    blended: unit.blended,
+    costIn: unit.costIn,
+    costOut: unit.costOut,
+    source: 'campus',
+    opsDay: unit.opsDay,
+    capacityMTok: unit.capacityMTok,
+    components: unit.components,
+    campusPerMTok: unit.opsDay / unit.capacityMTok,
+    bandwidthPerMTok: ECONOMY.bandwidthPerMTok,
+  }
+}
+
+/** Lift a public in/out list so neither side sits below the hosting floor. */
+export function clampApiListToHostingFloor(
+  priceIn: number,
+  priceOut: number,
+  floor: Pick<ApiHostingCostFloor, 'costIn' | 'costOut'>,
+): { priceIn: number; priceOut: number } {
+  const inPrice = Number.isFinite(priceIn) ? priceIn : floor.costIn
+  const outPrice = Number.isFinite(priceOut) ? priceOut : floor.costOut
+  return {
+    priceIn: Math.max(floor.costIn, inPrice),
+    priceOut: Math.max(floor.costOut, outPrice),
+  }
+}
+
 /**
  * Settlement-composition serving ops for the player campus.
  * Components match `attributedServingFixedCost` in market.ts:

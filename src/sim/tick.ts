@@ -9,7 +9,10 @@ import {
 
 import { tickRivals } from "./systems/rivals";
 import { tickResearch } from "./systems/research";
-import { tickTraining } from "./systems/training";
+import {
+  playerHasPendingTrainingDecision,
+  tickTraining,
+} from "./systems/training";
 import { tickChipDeliveries } from "./systems/chips";
 import { tickRackDeliveries } from "./systems/dcRacks";
 import { tickMap } from "./systems/map";
@@ -20,8 +23,9 @@ import {
   tickPowerExportContracts,
 } from "./systems/facilities";
 import { tickComputeMarket } from "./systems/computeMarket";
-import { tickComputeContracts } from "./systems/computeContracts";
+import { tickComputeContracts, tickRivalCloudPurchases } from "./systems/computeContracts";
 import { tickMarket } from "./systems/market";
+import { nextDomainHeat } from "./balance/domainHeat";
 import { tickEvents } from "./systems/events";
 import { tickFab } from "./systems/silicon";
 import { tickOrg } from "./systems/org";
@@ -126,6 +130,7 @@ export function tickDay(state: SimState): SimState {
     state.progression.runPhase === "failed"
   )
     return state;
+  if (playerHasPendingTrainingDecision(state)) return state;
 
   // Balance knobs travel with the run; sync them so every balance function
   // below observes this campaign's tuning (and tests observe their own).
@@ -184,6 +189,7 @@ export function tickDay(state: SimState): SimState {
   s = runTickSystem(s, "tickData", tickData);
   s = runTickSystem(s, "tickDataSupplierContracts", tickDataSupplierContracts);
   s = runTickSystem(s, "tickRivals", tickRivals);
+  s = runTickSystem(s, "tickRivalCloudPurchases", tickRivalCloudPurchases);
   // One player-research authority per day. Preserve an in-flight legacy
   // project from older saves; otherwise named pods own both queued and active
   // program progression. The system-level guards enforce the same invariant
@@ -206,6 +212,16 @@ export function tickDay(state: SimState): SimState {
     tickCheckpointEvaluations,
   );
   s = runTickSystem(s, "tickSafetyCampaign", tickSafetyCampaign);
+
+  s = {
+    ...s,
+    domainHeat: nextDomainHeat(
+      s.domainHeat,
+      s.day,
+      s.seed,
+      s.calendar.era,
+    ),
+  };
 
   // 7–8. Resolve unconstrained demand, capacity shortages, and settlement.
   s = runTickSystem(s, "tickMarket", tickMarket);

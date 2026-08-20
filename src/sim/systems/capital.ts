@@ -163,20 +163,23 @@ export function requestEquityOffers(
   )
   const confidence = clamp(capital.investorConfidence, 0, 1)
   const terms = [
-    { name: 'Northstar Growth', cash: 10_000_000, multiple: 0.9, topUp: 0 },
-    { name: 'Horizon Compute Fund', cash: 25_000_000, multiple: 1.05, topUp: 0.025 },
-    { name: 'Civic Frontier Partners', cash: 50_000_000, multiple: 1.2, topUp: 0.04 },
+    { name: 'Northstar Growth', frac: 0.09, floor: 12_000_000, multiple: 0.9, topUp: 0 },
+    { name: 'Horizon Compute Fund', frac: 0.16, floor: 28_000_000, multiple: 1.05, topUp: 0.025 },
+    { name: 'Civic Frontier Partners', frac: 0.24, floor: 55_000_000, multiple: 1.2, topUp: 0.04 },
   ]
   return terms.map((term, index) => {
+    const cash = Math.round(
+      clamp(Math.max(valuation * term.frac, term.floor), 12_000_000, 900_000_000) / 1_000_000,
+    ) * 1_000_000
     const preMoneyValuation = Math.round(valuation * term.multiple * (0.8 + confidence * 0.4))
-    const postMoneyValuation = preMoneyValuation + term.cash
+    const postMoneyValuation = preMoneyValuation + cash
     return {
       id: `equity-${labId}-${state.day}-${index}`,
       investorName: term.name,
-      cashRaised: term.cash,
+      cashRaised: cash,
       preMoneyValuation,
       postMoneyValuation,
-      investorOwnership: term.cash / postMoneyValuation,
+      investorOwnership: cash / postMoneyValuation,
       optionPoolTopUp: term.topUp,
       confidenceRequired: 0.35 + index * 0.15,
       expiresDay: state.day + 30,
@@ -504,13 +507,16 @@ function labDebtCapacity(
       }
     case 'project_finance':
       return {
-        max: siteCollateral * 0.72,
-        collateral: siteCollateral,
+        max: Math.max(
+          siteCollateral * 0.72,
+          Math.min(lab.finance.valuation * 0.42, 320_000_000),
+        ),
+        collateral: Math.max(siteCollateral, lab.finance.valuation * 0.2),
         covenant: 'Campus reaches commercial operation',
       }
     case 'venture_debt':
       return {
-        max: lab.finance.valuation * 0.12,
+        max: lab.finance.valuation * 0.18,
         collateral: 0,
         covenant: 'Maintain at least 90 days runway',
       }
@@ -524,6 +530,110 @@ function labDebtCapacity(
         covenant: 'Positive trailing-year operating cash flow',
       }
   }
+}
+
+const RIVAL_CAMPUS_EQUITY_COOLDOWN_DAYS = 90
+const RIVAL_CAMPUS_MIN_FOUNDER_OWNERSHIP = 0.28
+
+function alignIndexedLabFromRival(state: SimState, labId: LabId): SimState {
+  if (labId === state.playerLabId) return state
+  const rival = state.rivals.find((entry) => entry.id === labId)
+  const indexed = state.labs?.[labId]
+  if (!rival || !indexed) return state
+  return {
+    ...state,
+    labs: {
+      ...state.labs,
+      [labId]: {
+        ...indexed,
+        cash: rival.cash,
+        finance: { ...indexed.finance, ...(rival.finance ?? {}), cash: rival.cash },
+        data: rival.data ?? indexed.data,
+        capital: rival.capital ?? indexed.capital,
+      },
+    },
+  }
+}
+
+/**
+ * Raise equity and/or campus debt so a rival can afford a planned hall or
+ * interconnect. No-ops when cash already covers `neededCash`.
+ */
+export function fundRivalForCampus(
+  state: SimState,
+  labId: LabId,
+  neededCash: number,
+): SimState {
+  if (labId === state.playerLabId) return state
+  const target = Math.max(0, neededCash)
+  if (target <= 0) return state
+  let next = alignIndexedLabFromRival(state, labId)
+  let lab = getLab(next, labId)
+  if (lab.cash >= target) return next
+
+  const capital = lab.capital ?? defaultCapital()
+  const lastRoundDay = Math.max(
+    Number.NEGATIVE_INFINITY,
+    ...capital.fundingRounds.map((round) => round.day),
+  )
+  const daysSinceRound = Number.isFinite(lastRoundDay)
+    ? next.day - lastRoundDay
+    : 999
+  const founderOwn = capital.capTable
+    .filter((stake) => stake.kind === 'founder')
+    .reduce((sum, stake) => sum + stake.ownership, 0)
+  const confidence = capital.investorConfidence
+
+  if (daysSinceRound >= RIVAL_CAMPUS_EQUITY_COOLDOWN_DAYS && confidence >= 0.32) {
+    const gap = target - lab.cash
+    const offer = requestEquityOffers(next, labId)
+      .filter((candidate) => candidate.confidenceRequired <= confidence)
+      .filter((candidate) => {
+        const investorOwn =
+          candidate.cashRaised /
+          (candidate.preMoneyValuation + candidate.cashRaised)
+        const nextFounder =
+          founderOwn * (1 - investorOwn) * (1 - candidate.optionPoolTopUp)
+        return nextFounder >= RIVAL_CAMPUS_MIN_FOUNDER_OWNERSHIP
+      })
+      .toSorted((a, b) => {
+        const aCovers = a.cashRaised >= gap
+        const bCovers = b.cashRaised >= gap
+        if (aCovers !== bCovers) return aCovers ? -1 : 1
+        if (aCovers && bCovers) return a.cashRaised - b.cashRaised
+        return b.cashRaised - a.cashRaised
+      })[0]
+    if (offer) {
+      next = acceptEquityOffer(next, offer, labId)
+      lab = getLab(next, labId)
+    }
+  }
+
+  if (lab.cash >= target) return next
+
+  const remaining = target - lab.cash
+  const projectCap = labDebtCapacity(next, labId, 'project_finance').max
+  if (remaining > 0 && projectCap >= 100_000) {
+    next = applyForLabDebt(
+      next,
+      labId,
+      'project_finance',
+      Math.min(remaining * 1.06, projectCap),
+    )
+    lab = getLab(next, labId)
+  }
+  if (lab.cash >= target) return next
+
+  const stillShort = target - lab.cash
+  if (stillShort > 0) {
+    next = applyForLabDebt(
+      next,
+      labId,
+      lab.finance.dayRevenue > 0 ? 'revolver' : 'venture_debt',
+      stillShort * 1.08,
+    )
+  }
+  return next
 }
 
 /** Lab-neutral typed debt service used by rival planners and scenario tools. */

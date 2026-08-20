@@ -19,6 +19,7 @@ import {
   recommendedDataMTok,
   recommendedDataUnits,
   resolveDataPlan,
+  applySynthQualityTax,
   totalProcessed,
   totalRaw,
   totalSources,
@@ -55,6 +56,10 @@ import {
   teacherDomainStrength,
 } from "../balance/syntheticTraining";
 import { activeBalanceTuning } from "../balance/tuning";
+import {
+  synthAcceptanceChances,
+  synthTeacherActiveParamsB,
+} from "../balance/syntheticGeneration";
 import {
   appendDatasetAsset,
   pruneDatasetAssetsForDomain,
@@ -793,6 +798,8 @@ export function startSynthGen(
     teacherReliability: model.quality.reliability,
     researchPf: pfDay,
     tier,
+    activeParamsB: synthTeacherActiveParamsB(model),
+    family: model.family,
   });
   const estDays =
     generatedPerDay > 0.01 && !continuous
@@ -944,21 +951,6 @@ export function synthTeacherFit(
   return { domainCapability, modalityFit, toolFit, overallFit };
 }
 
-function synthTeacherWorkMultiplier(model: Model, domain: DataDomain): number {
-  const activeParams = Math.max(0.007, model.activeParamsB ?? model.paramsB);
-  const scaleBurden = 1 + Math.log10(1 + activeParams) * 0.38;
-  const modalityBurden =
-    domain === "video"
-      ? 1.75
-      : domain === "image"
-        ? 1.32
-        : domain === "audio"
-          ? 1.2
-          : 1;
-  const architectureBurden = model.family === "omni" ? 1.14 : 1;
-  return scaleBurden * modalityBurden * architectureBurden;
-}
-
 function synthTeacherRoutingScore(model: Model, domain: DataDomain): number {
   const fit = synthTeacherFit(model, domain);
   if (!modelCanCurateDataDomain(model, domain)) return -Infinity;
@@ -1063,40 +1055,24 @@ function synthDomainBudget(
     };
   }
   const fit = synthTeacherFit(model, domain);
-  const computeSignal = researchPf / Math.max(2, researchPf + 8);
-  const workMultiplier = synthTeacherWorkMultiplier(model, domain);
   const grossMTokPerDay = syntheticGenerationMTokPerDay({
     domain,
     teacherDomainCapability: fit.domainCapability,
     teacherReliability: model.quality.reliability,
-    researchPf: researchPf / workMultiplier,
+    researchPf,
     tier: "lq",
+    activeParamsB: synthTeacherActiveParamsB(model),
+    family: model.family,
   });
-  const usefulChance = Math.max(
-    0.04,
-    Math.min(
-      0.96,
-      0.06 +
-        fit.overallFit * 0.58 +
-        fit.modalityFit * 0.16 +
-        clamp01(model.quality.reliability / 100) * 0.12 +
-        computeSignal * 0.08,
-    ),
-  );
-  const verifierBonus =
-    domain === "code" || domain === "math" ? 0.08 * fit.toolFit : 0;
-  const hqChance = Math.max(
-    0.03,
-    Math.min(
-      0.94,
-      0.02 +
-        fit.overallFit * 0.55 +
-        (fit.domainCapability / 100) * 0.18 +
-        clamp01(model.quality.reliability / 100) * 0.13 +
-        computeSignal * 0.08 +
-        verifierBonus,
-    ),
-  );
+  const { usefulChance, hqChance } = synthAcceptanceChances({
+    domain,
+    domainCapability: fit.domainCapability,
+    overallFit: fit.overallFit,
+    modalityFit: fit.modalityFit,
+    toolFit: fit.toolFit,
+    reliability: model.quality.reliability,
+    researchPf,
+  });
   const acceptedMTokPerDay = grossMTokPerDay * usefulChance;
   const energyMWhPerDay = powerMw * 24;
   const energyCost = energyMWhPerDay * energyPriceForState(state);
@@ -1361,6 +1337,8 @@ export function estimateSynthMTokPerDay(
     teacherReliability: model.quality.reliability,
     researchPf: pf,
     tier: "hq",
+    activeParamsB: synthTeacherActiveParamsB(model),
+    family: model.family,
   });
 }
 
@@ -1836,7 +1814,7 @@ export function tickData(state: SimState): SimState {
       0,
       Math.min(1, job.filterIntensity ?? 0.5),
     );
-    const gen =
+    const attempted =
       syntheticGenerationMTokPerDay({
         domain: job.domain,
         teacherDomainCapability: teacherCapabilityForDataDomain(
@@ -1846,10 +1824,24 @@ export function tickData(state: SimState): SimState {
         teacherReliability: model.quality.reliability,
         researchPf: pf,
         tier,
+        activeParamsB: synthTeacherActiveParamsB(model),
+        family: model.family,
       }) *
       pfScale *
       // Harder filtering rejects more candidates before deposit.
       (1 - 0.3 * filterIntensity);
+    const fit = synthTeacherFit(model, job.domain);
+    const chances = synthAcceptanceChances({
+      domain: job.domain,
+      domainCapability: fit.domainCapability,
+      overallFit: fit.overallFit,
+      modalityFit: fit.modalityFit,
+      toolFit: fit.toolFit,
+      reliability: model.quality.reliability,
+      researchPf: pf * pfScale,
+    });
+    const useful = attempted * chances.usefulChance;
+    const gen = tier === "hq" ? useful * chances.hqChance : useful;
     const pfDaysSpent = (job.pfDaysSpent ?? 0) + pf * pfScale;
     const continuous = job.continuous === true;
     const next = continuous
@@ -2153,22 +2145,29 @@ export function consumeForLabData(
     const need = total * weights[d];
     if (need <= 0.01) continue;
     const stock = normalizeDomainStock(data.stocks[d]);
-    // Real packs (web + user) — always allowed
-    const real = Math.max(
-      0,
-      stock.processed - (stock.fromSynthHQ + stock.fromSynthLQ),
-    );
-    const hqAvail = useHQ ? stock.fromSynthHQ * newFrac : 0;
-    const lqAvail = useLQ ? stock.fromSynthLQ * newFrac : 0;
-    const realAvail = real * newFrac;
-
-    let remaining = need;
-    const takeReal = Math.min(realAvail, remaining);
-    remaining -= takeReal;
-    const takeHQ = Math.min(hqAvail, remaining);
-    remaining -= takeHQ;
-    const takeLQ = Math.min(lqAvail, remaining);
-    remaining -= takeLQ;
+    const pile = Math.max(0, stock.processed) * newFrac;
+    const hqInPile = Math.max(0, stock.fromSynthHQ) * newFrac;
+    const lqInPile = Math.max(0, stock.fromSynthLQ) * newFrac;
+    const realInPile = Math.max(0, pile - hqInPile - lqInPile);
+    const pileMass = realInPile + hqInPile + lqInPile;
+    const pileTake = Math.min(need, pile);
+    const realShare = pileMass > 1e-9 ? realInPile / pileMass : 1;
+    const hqShare = pileMass > 1e-9 ? hqInPile / pileMass : 0;
+    const lqShare = pileMass > 1e-9 ? lqInPile / pileMass : 0;
+    let takeReal = pileTake * realShare;
+    let takeHQ = pileTake * hqShare;
+    let takeLQ = pileTake * lqShare;
+    let remaining = need - pileTake;
+    if (useHQ && remaining > 0.01) {
+      const extraHq = Math.min(Math.max(0, hqInPile - takeHQ), remaining);
+      takeHQ += extraHq;
+      remaining -= extraHq;
+    }
+    if (useLQ && remaining > 0.01) {
+      const extraLq = Math.min(Math.max(0, lqInPile - takeLQ), remaining);
+      takeLQ += extraLq;
+      remaining -= extraLq;
+    }
     const short = remaining;
     const specBoost = 0;
 
@@ -2207,11 +2206,13 @@ export function consumeForLabData(
   const coverage = isContinue
     ? Math.min(30, actualVolume / Math.max(1, newSinceTrain * 0.5 + 1))
     : Math.min(30, actualVolume / Math.max(1, minMTok));
-  let qualityUsed = qualityW > 0 ? qualityAcc / qualityW : 40;
   const synthLqShare = qualityW > 0 ? synthLqUnits / qualityW : 0;
-  if (synthLqShare > 0.08) {
-    qualityUsed = Math.max(12, qualityUsed * (1 - synthLqShare * 0.35));
-  }
+  const synthShare = qualityW > 0 ? syntheticUnits / qualityW : 0;
+  const qualityUsed = applySynthQualityTax(
+    qualityW > 0 ? qualityAcc / qualityW : 40,
+    synthShare,
+    synthLqShare,
+  );
 
   return {
     ok: true,
@@ -2413,6 +2414,18 @@ export function consumeForTraining(
       qualityVolume += volume;
     }
     const trainShare = base.plan.trainShare;
+    const synthHqUnits =
+      (base.synthHqUnits ?? 0) +
+      syntheticProvenance
+        .filter((item) => item.qualityTier === "hq")
+        .reduce((sum, item) => sum + item.volumeMTok, 0);
+    const synthLqUnits =
+      (base.synthLqUnits ?? 0) +
+      syntheticProvenance
+        .filter((item) => item.qualityTier === "lq")
+        .reduce((sum, item) => sum + item.volumeMTok, 0);
+    const syntheticUnits = base.syntheticUnits + syntheticAdded;
+    const synthLqShare = actualVolume > 0 ? synthLqUnits / actualVolume : 0;
     return {
       ...base,
       plan: { ...base.plan, totalMTok: actualVolume, totalUnits: actualVolume },
@@ -2421,27 +2434,15 @@ export function consumeForTraining(
         30,
         actualVolume / Math.max(1, minDataMTokForParams(paramsB)),
       ),
-      qualityUsed:
+      qualityUsed: applySynthQualityTax(
         qualityVolume > 0 ? qualityAcc / qualityVolume : base.qualityUsed,
-      syntheticUnits: base.syntheticUnits + syntheticAdded,
-      synthHqUnits:
-        (base.synthHqUnits ?? 0) +
-        syntheticProvenance
-          .filter((item) => item.qualityTier === "hq")
-          .reduce((sum, item) => sum + item.volumeMTok, 0),
-      synthLqUnits:
-        (base.synthLqUnits ?? 0) +
-        syntheticProvenance
-          .filter((item) => item.qualityTier === "lq")
-          .reduce((sum, item) => sum + item.volumeMTok, 0),
-      synthLqShare:
-        actualVolume > 0
-          ? ((base.synthLqUnits ?? 0) +
-              syntheticProvenance
-                .filter((item) => item.qualityTier === "lq")
-                .reduce((sum, item) => sum + item.volumeMTok, 0)) /
-            actualVolume
-          : 0,
+        actualVolume > 0 ? syntheticUnits / actualVolume : 0,
+        synthLqShare,
+      ),
+      syntheticUnits,
+      synthHqUnits,
+      synthLqUnits,
+      synthLqShare,
       cashCost: base.cashCost + syntheticAdded * 250,
       trainMTok: actualVolume * trainShare,
       verifyMTok: actualVolume * (1 - trainShare),
@@ -2474,10 +2475,18 @@ export function consumeForTraining(
     qualityAcc += q * take;
     qualityW += take;
   }
+  const actualVolume = Object.values(base.consumed).reduce(
+    (sum, value) => sum + (value ?? 0),
+    0,
+  );
   return {
     ...base,
     domainQuality,
-    qualityUsed: qualityW > 0 ? qualityAcc / qualityW : base.qualityUsed,
+    qualityUsed: applySynthQualityTax(
+      qualityW > 0 ? qualityAcc / qualityW : base.qualityUsed,
+      actualVolume > 0 ? base.syntheticUnits / actualVolume : 0,
+      base.synthLqShare ?? 0,
+    ),
     nextData: cloneLabData(ensureLabData(state)),
   };
 }

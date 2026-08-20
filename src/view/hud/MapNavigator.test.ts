@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { createElement, type ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
@@ -5,10 +7,40 @@ import { createGame } from '../../sim/createGame'
 import { buildMapNavigatorData, navigatorCitySummary, type NavigatorCityLabel } from './mapNavigatorData'
 import {
   CloudVisibilityButton,
+  MapNavigator,
+  NavigatorCameraControls,
   NavigatorCityLabelLayer,
   NavigatorCompass,
+  NavigatorOverlayLayers,
   MapViewportOverlay,
 } from './MapNavigator'
+
+describe('MapNavigator chrome', () => {
+  it('keeps the compact close chevron from stacking on the next-building chevron', () => {
+    const css = readFileSync(fileURLToPath(new URL('../../index.css', import.meta.url)), 'utf8')
+    const hide = '.map-navigator > .hud-close-button.map-navigator-compact-close'
+    const hideAt = css.indexOf(`${hide} {\n  display: none`)
+    const hudCloseAt = css.indexOf('.hud-close-button {\n  display: inline-grid')
+
+    expect(hideAt).toBeGreaterThanOrEqual(0)
+    expect(hudCloseAt).toBeGreaterThanOrEqual(0)
+    expect(css).toContain('does not stack on top of the sitebar')
+  })
+
+  it('keeps overlay layers off the command row so right-side icons cannot stack', () => {
+    const markup = renderToStaticMarkup(createElement(MapNavigator))
+    const layersAt = markup.indexOf('aria-label="Map layers"')
+    const commandAt = markup.indexOf('map-navigator-commandbar')
+    const toolsAt = markup.indexOf('map-navigator-tools')
+
+    expect(layersAt).toBeGreaterThanOrEqual(0)
+    expect(commandAt).toBeGreaterThanOrEqual(0)
+    expect(toolsAt).toBeGreaterThan(commandAt)
+    expect(layersAt).toBeGreaterThan(toolsAt)
+    expect(markup).toContain('aria-label="Building filter"')
+    expect(markup).toContain('aria-label="Show clouds"')
+  })
+})
 
 describe('CloudVisibilityButton', () => {
   it('exposes its visible state and hide action accessibly', () => {
@@ -32,6 +64,43 @@ describe('CloudVisibilityButton', () => {
 
     expect(markup).toContain('aria-pressed="false"')
     expect(markup).toContain('title="Show clouds"')
+  })
+})
+
+describe('NavigatorOverlayLayers', () => {
+  it('stacks overlay toggles in a dedicated left-hand layer rail', () => {
+    const markup = renderToStaticMarkup(createElement(NavigatorOverlayLayers, {
+      overlay: 'power',
+      onSelect: () => undefined,
+    }))
+
+    expect(markup).toContain('aria-label="Map layers"')
+    expect(markup).toContain('map-navigator-layers')
+    expect(markup).toContain('aria-label="Zones"')
+    expect(markup).toContain('aria-label="Power"')
+    expect(markup).toContain('aria-label="Latency"')
+    expect(markup).toContain('aria-label="Risk"')
+    expect(markup).toContain('aria-pressed="true"')
+  })
+})
+
+describe('NavigatorCameraControls', () => {
+  it('renders phosphor icons instead of missing unicode glyphs', () => {
+    const markup = renderToStaticMarkup(createElement(NavigatorCameraControls, {
+      mapCameraTilt: 'standard',
+      onRotate: () => undefined,
+      onCycleTilt: () => undefined,
+      onReset: () => undefined,
+    }))
+
+    expect(markup).toContain('aria-label="Rotate map left"')
+    expect(markup).toContain('aria-label="Rotate map right"')
+    expect(markup).toContain('aria-label="Reset map perspective"')
+    expect(markup).toContain('aria-label="Cycle map tilt, current standard"')
+    expect(markup).not.toContain('↶')
+    expect(markup).not.toContain('↷')
+    expect(markup.match(/<svg/g)?.length).toBeGreaterThanOrEqual(4)
+    expect(markup).toContain('current standard')
   })
 })
 

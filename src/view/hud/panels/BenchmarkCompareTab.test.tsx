@@ -18,6 +18,7 @@ function fixtureRow(suiteId: BenchmarkSuiteId): LeaderboardRow {
     labName: 'You',
     color: 0x3dffc0,
     isPlayer: true,
+    kind: 'model',
     model: {
       id: 'model-atlas',
       name: 'Atlas',

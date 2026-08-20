@@ -18,8 +18,14 @@ import type {
   SimState,
   TrainingProgram,
 } from "../types";
+import { isLivePublicModel } from "../modelRelease";
 import { createRng, hashSeed } from "../rng";
 import { BENCHMARK_DEFS } from "../balance/benchmarks";
+import {
+  composeRouterModel,
+  publicRouterParts,
+} from "../balance/modelRouter";
+import { normalizeModelRouters } from "../balance/modelStudio";
 import {
   createEmptyLabData,
   DATA_DOMAIN_META,
@@ -27,9 +33,13 @@ import {
   minDataMTokForParams,
   normalizeWeights,
   normalizeDomainStock,
-  recommendedDataMTok,
   totalProcessed,
 } from "../balance/data";
+import {
+  chooseRivalTrainingRecipeKnobs,
+  planTrainingRecipe,
+  usableStockByDomain,
+} from "../balance/trainingRecipe";
 import { buildScaledModel } from "../balance/modelBuild";
 import {
   estimateTrainingEconomics,
@@ -54,6 +64,10 @@ import {
   modalityMaturity,
   teacherCapabilityForDataDomain,
 } from "../balance/modelCapabilities";
+import {
+  synthAcceptanceChances,
+  synthTeacherActiveParamsB,
+} from "../balance/syntheticGeneration";
 import { labInferCapacityPf, labResearchPf, labTrainPf } from "./labCompute";
 import { rivalEffectiveFlops } from "./computeMarket";
 import {
@@ -65,7 +79,7 @@ import {
   researchDaysTarget,
   researchPfTargetForNode,
 } from "./research";
-import { consumeForLabData } from "./data";
+import { consumeForLabData, synthTeacherFit } from "./data";
 import {
   TERRAIN_KIND,
   tileCoords,
@@ -74,7 +88,7 @@ import {
   type TileId,
 } from "../world";
 import { commitWorldBatch, usesCompactWorld } from "./worldAccess";
-import { getBuildDef } from "./map";
+import { dcFootprint, getBuildDef } from "./map";
 import { scheduleReleaseEvaluations } from "./evaluations";
 import { modelOfferApiPrice } from "./market";
 import { releaseDueRivalComebacks } from "./rivalComeback";
@@ -94,12 +108,15 @@ import {
   syntheticGenerationMTokPerDay,
   updateDataQualityIndex,
 } from "./dataRuntime";
+import { fundRivalForCampus } from "./capital";
 import { competitiveCatchUpSnapshot } from "./sharedMarkets";
 import { defaultMarketingChannels } from "./org";
 import { applyLabActionToTarget } from "./labActionKernel";
 import {
   advanceRivalStrategy,
   allocationForRivalStrategy,
+  chooseRivalDcSize,
+  chooseRivalScaleCandidate,
   chooseRivalServePrecision,
   chooseRivalTrainingNumerics,
   planRivalResearchPath,
@@ -108,6 +125,19 @@ import {
   rivalTrainingHardwareGeneration,
 } from "./rivalStrategy";
 import {
+  rivalEraDataComfortMult,
+  rivalEraParamCeilingB,
+  rivalMoeActiveRatio,
+  rivalMoeAdoptionChance,
+  applyRivalReleaseLuck,
+  rivalReleaseLuckBonus,
+} from "../balance/rivalScale";
+import {
+  highestPostTrainStage,
+  postTrainStagesFromResearch,
+} from "../balance/modelProduct";
+import {
+  DEFAULT_TRAINING_NUMERICS,
   estimateTrainingMemoryGb,
   LEGACY_TRAINING_NUMERICS,
   trainingFormatThroughput,
@@ -393,7 +423,7 @@ export function rivalNextModelBet(
 ): RivalModelBet {
   const unlocked = new Set(rival.researchUnlocked);
   const released = rival.models.filter(
-    (model) => model.release === "released" || model.shipped,
+    (model) => isLivePublicModel(model),
   );
   const milestones = rival.releaseMilestones ?? [];
   const hasPreset = (preset: ModelProductPreset, backbone?: ModelBackbone) =>
@@ -590,6 +620,7 @@ export function rivalCatchUpScaleTarget(input: {
   currentParamsB: number;
   comfortableParamsB: number;
   capabilityGap: number;
+  maxParamsB?: number;
 }): number {
   const gap = Math.max(0, Math.min(40, input.capabilityGap));
   const gapGrowth = 1 + gap * 0.035;
@@ -598,10 +629,24 @@ export function rivalCatchUpScaleTarget(input: {
     input.currentParamsB * 1.1,
     Math.max(0.05, input.comfortableParamsB) * 2.5,
   );
+  const ceiling = Math.max(8, input.maxParamsB ?? 240);
   return Math.min(
-    240,
+    ceiling,
     Math.max(input.baselineTargetParamsB, Math.min(capitalTarget, dataBound)),
   );
+}
+
+export function publicFrontierParamsB(state: SimState): number {
+  let best = 0;
+  for (const model of state.player.models) {
+    if (isLivePublicModel(model)) best = Math.max(best, model.paramsB);
+  }
+  for (const rival of state.rivals) {
+    for (const model of rival.models) {
+      if (isLivePublicModel(model)) best = Math.max(best, model.paramsB);
+    }
+  }
+  return best;
 }
 
 /** Exact research inputs used by the player scaling and train-cost paths. */
@@ -844,7 +889,7 @@ function rivalPricing(api: number): ProductPricing {
     apiPriceInPerMTok: apiSplit.priceIn,
     apiPriceOutPerMTok: apiSplit.priceOut,
     apiMarkupPct: 100,
-    apiVsSubPriority: 0.62,
+    apiVsSubPriority: ECONOMY.defaultApiVsSubPriority,
     activeModelId: null,
     enterpriseContractBonus: 0,
     plans: [
@@ -904,7 +949,7 @@ function rivalPeerApiAnchor(
   const ownValue = modelPriceValue(model);
   const normalized: number[] = [];
   for (const peer of state.player.models) {
-    if (!(peer.release === "released" || peer.shipped)) continue;
+    if (!isLivePublicModel(peer)) continue;
     if (commercialModelKind(peer) !== kind) continue;
     normalized.push(
       rivalListedApiPrice(state.player.pricing, peer) *
@@ -1326,7 +1371,7 @@ export function tickRivals(state: SimState): SimState {
     (best, model) =>
       Math.max(
         best,
-        model.release === "released" || model.shipped ? model.capability : 0,
+        isLivePublicModel(model) ? model.capability : 0,
       ),
     0,
   );
@@ -1336,6 +1381,7 @@ export function tickRivals(state: SimState): SimState {
   const competitiveResponse = competitiveCatchUpSnapshot(state);
 
   const rivals = state.rivals.map((unboundedRival) => {
+    try {
     const r = boundRivalTrainingHistory(unboundedRival);
     // Physical facilities/contracts do not change while this controller plans
     // its day. Resolve that expensive compact-world snapshot once, while still
@@ -1765,16 +1811,43 @@ export function tickRivals(state: SimState): SimState {
           (totalProcessed(data) < minDataMTokForParams(3) &&
             synthRng.range(0, 1) < 0.35);
         const finalTier = useLq && !wantHQ ? "lq" : tier;
-        const dom = synthRng.pick(rivalDataPriority(next.archetype));
-        const step = syntheticGenerationMTokPerDay({
+        const ranked = rivalDataPriority(next.archetype)
+          .map((domain) => ({
+            domain,
+            fit: synthTeacherFit(teacher, domain),
+          }))
+          .sort((left, right) => right.fit.overallFit - left.fit.overallFit);
+        const chosen = ranked[0] ?? {
+          domain: "chat" as DataDomain,
+          fit: synthTeacherFit(teacher, "chat"),
+        };
+        const dom = chosen.domain;
+        const researchPf =
+          rivalResearchPf(next, state, effectiveFlopsPf) * synthShare;
+        const attempted = syntheticGenerationMTokPerDay({
           domain: dom,
           teacherDomainCapability: teacherCapabilityForDataDomain(teacher, dom),
           teacherReliability: teacher.quality.reliability,
-          researchPf:
-            rivalResearchPf(next, state, effectiveFlopsPf) * synthShare,
+          researchPf,
           tier: finalTier,
+          activeParamsB: synthTeacherActiveParamsB(teacher),
+          family: teacher.family,
         });
-        if (step > 0.5) {
+        const fit = chosen.fit;
+        const chances = synthAcceptanceChances({
+          domain: dom,
+          domainCapability: fit.domainCapability,
+          overallFit: fit.overallFit,
+          modalityFit: fit.modalityFit,
+          toolFit: fit.toolFit,
+          reliability: teacher.quality.reliability,
+          researchPf,
+        });
+        const useful = attempted * chances.usefulChance;
+        const hq = useful * chances.hqChance;
+        const lq = useful - hq;
+        const step = useful;
+        if (step > 1e-4) {
           const st = normalizeDomainStock(data.stocks[dom]);
           // One canonical lineage per lab/domain/tier. Retired teacher models
           // remain in bounded provenance instead of creating an unbounded
@@ -1814,8 +1887,8 @@ export function tickRivals(state: SimState): SimState {
           const processedBefore = st.processed;
           st.processed += step;
           st.fromSynth += step;
-          if (finalTier === "hq") st.fromSynthHQ += step;
-          else st.fromSynthLQ += step;
+          st.fromSynthHQ += hq;
+          st.fromSynthLQ += lq;
           st.quality =
             st.processed > 0
               ? (st.quality * processedBefore + syntheticQuality * step) /
@@ -1848,7 +1921,7 @@ export function tickRivals(state: SimState): SimState {
       const pm = state.player.models.find(
         (m) =>
           m.id === state.player.pricing.activeModelId &&
-          (m.release === "released" || m.shipped),
+          isLivePublicModel(m),
       );
       if (pm && pm.quality.safety < 45) {
         next.brandTrust = Math.min(100, next.brandTrust + 0.15);
@@ -2014,8 +2087,10 @@ export function tickRivals(state: SimState): SimState {
       let job = { ...next.trainingJob };
       const burn = job.cashBurnPerDay ?? 0;
       const memoryReady = rivalTrainingMemoryReady(next, job, physicalCompute);
-      const canFund = memoryReady && next.cash >= burn;
-      if (canFund) next.cash -= burn;
+      const canFund = memoryReady;
+      if (canFund && burn > 0) {
+        next.cash = Math.max(0, next.cash - Math.min(burn, next.cash));
+      }
       const trainingNumerics = job.trainingNumerics ?? LEGACY_TRAINING_NUMERICS;
       job.trainingNumerics = trainingNumerics;
       const formatThroughput = trainingFormatThroughput(
@@ -2145,8 +2220,15 @@ export function tickRivals(state: SimState): SimState {
           dataCoverage: job.effectiveDataRatio ?? job.dataCoverage,
           dataQuality: job.dataQuality,
           mixWeights: runWeights,
+          trainShare: job.trainShare,
+          postTrainShare: job.postTrainShare,
+          recipeTotalMTok:
+            (job.totalMTok ?? 0) + (job.postTrainMTok ?? 0),
           researchUnlocked: next.researchUnlocked,
           researchMult: trainingModifiers.researchMult,
+          postTrain: highestPostTrainStage(
+            postTrainStagesFromResearch(next.researchUnlocked),
+          ),
           synthLqShare: job.synthLqShare,
           outcomeSeed:
             job.outcomeSeed ??
@@ -2160,6 +2242,10 @@ export function tickRivals(state: SimState): SimState {
           shipped: true,
           release: "released",
         });
+        released = applyRivalReleaseLuck(
+          released,
+          rivalReleaseLuckBonus(releaseRng.next(), releaseRng.next()),
+        );
         released = {
           ...released,
           trainComputeSpent: job.progressPfDays,
@@ -2265,16 +2351,17 @@ export function tickRivals(state: SimState): SimState {
       } else {
         next.trainingJob = job;
       }
-    } else if (
-      canStartTrain &&
-      !next.trainingJob &&
-      (next.models.length === 0
-        ? (isCatchUpChallenger && competitiveResponse.frontierStale) ||
-          trainingRng.range(0, 1) < 0.55
-        : (isCatchUpChallenger && competitiveResponse.frontierStale) ||
-          (state.day % cadence === 0 &&
-            (isCatchUpChallenger || trainingRng.range(0, 1) < 0.45)))
-    ) {
+    } else if (!next.trainingJob) {
+      const cadenceHit = state.day % cadence === 0;
+      const startRoll =
+        next.models.length === 0
+          ? (isCatchUpChallenger && competitiveResponse.frontierStale) ||
+            trainingRng.range(0, 1) < 0.55
+          : (isCatchUpChallenger && competitiveResponse.frontierStale) ||
+            (cadenceHit &&
+              (isCatchUpChallenger || trainingRng.range(0, 1) < 0.45));
+      const wantStart = canStartTrain && startRoll;
+      if (wantStart) {
       // Start a new job sized for available data (risk under-train like player)
       const prev = next.models[0];
       let family: Model["family"] = "dense";
@@ -2286,7 +2373,13 @@ export function tickRivals(state: SimState): SimState {
 
       // Comfortable size at 1:1 tokens:params given corpus
       const comfortable = Math.max(0.05, corpus / 1000);
+      const eraCeiling = rivalEraParamCeilingB({
+        day: state.day,
+        archetype: next.archetype,
+        publicFrontierParamsB: publicFrontierParamsB(state),
+      });
       let paramsB: number;
+      let organicParamsB: number | undefined;
       if (!prev) {
         // First model: small (≤~0.5B with 500 MTok) unless they risk
         if (next.archetype === "open_weights")
@@ -2327,23 +2420,26 @@ export function tickRivals(state: SimState): SimState {
           next.archetype === "hyperscale"
             ? 1.16 + trainingRng.range(0, 0.16) * pace.researchSpeed
             : 1.08 + trainingRng.range(0, 0.12) * pace.researchSpeed;
-        paramsB = Math.min(120, prev.paramsB * growth);
+        paramsB = Math.min(eraCeiling, prev.paramsB * growth);
+        organicParamsB = paramsB;
         if (isCatchUpChallenger) {
           paramsB = rivalCatchUpScaleTarget({
             baselineTargetParamsB: paramsB,
             currentParamsB: prev.paramsB,
             comfortableParamsB: comfortable,
             capabilityGap: competitiveResponse.capabilityGap,
+            maxParamsB: eraCeiling,
           });
         }
-        // Don't leap to multi-10B without data
+        const comfortMult = rivalEraDataComfortMult(
+          state.day,
+          isCatchUpChallenger,
+        );
         paramsB = Math.min(
           paramsB,
-          Math.max(
-            prev.paramsB * 1.05,
-            comfortable * (isCatchUpChallenger ? 2.5 : 1.15),
-          ),
+          Math.max(prev.paramsB * 1.05, comfortable * comfortMult),
         );
+        paramsB = Math.min(paramsB, eraCeiling);
         if (family === "moe") {
           activeParamsB =
             prev.family === "moe"
@@ -2358,9 +2454,177 @@ export function tickRivals(state: SimState): SimState {
       productPreset = modelBet.productPreset;
       io = modelBet.io;
       modalities = modelBet.modalities;
-      activeParamsB = modelBet.activeParamsRatio
-        ? Math.max(0.1, paramsB * modelBet.activeParamsRatio)
-        : undefined;
+      if (prev && organicParamsB != null) {
+        const prevPreset =
+          prev.productPreset ??
+          (prev.family === "diffusion"
+            ? "image_generation"
+            : prev.family === "video"
+              ? "video_generation"
+              : prev.family === "omni"
+                ? "omni"
+                : "language");
+        if (productPreset !== prevPreset) {
+          paramsB = Math.min(paramsB, organicParamsB);
+        }
+      }
+      const hasMoeResearch = next.researchUnlocked.includes("moe_basics");
+      const canSparse =
+        productPreset === "language" ||
+        productPreset === "omni" ||
+        productPreset === "vision_language";
+      const moeChance = canSparse
+        ? rivalMoeAdoptionChance(next.archetype, paramsB, hasMoeResearch)
+        : 0;
+      if (
+        moeChance >= 1 ||
+        (moeChance > 0 && trainingRng.range(0, 1) < moeChance)
+      ) {
+        family = family === "omni" ? "omni" : "moe";
+        backbone = "moe";
+        const ratio =
+          modelBet.activeParamsRatio ??
+          rivalMoeActiveRatio(next.archetype, trainingRng.range(0, 1));
+        activeParamsB = Math.max(0.1, paramsB * ratio);
+      } else {
+        activeParamsB = modelBet.activeParamsRatio
+          ? Math.max(0.1, paramsB * modelBet.activeParamsRatio)
+          : activeParamsB;
+      }
+
+      if (
+        prev &&
+        (productPreset === "language" ||
+          productPreset === "omni" ||
+          productPreset === "vision_language") &&
+        (next.archetype !== "multimodal" ||
+          (next.releaseMilestones ?? []).some(
+            (milestone) => milestone.productPreset === "omni",
+          ))
+      ) {
+        try {
+        const hallS = getBuildDef("dc");
+        const hallM = getBuildDef("dc_m");
+        const hallL = getBuildDef("dc_l");
+        const trainPf = rivalTrainPf(next, state, effectiveFlopsPf);
+        const scaleDecision = chooseRivalScaleCandidate(
+          {
+            archetype: next.archetype,
+            researchUnlocked: next.researchUnlocked,
+            currentParamsB: prev.paramsB,
+            currentActiveParamsB: prev.activeParamsB,
+            currentCapability: prev.capability,
+            frontierCapability: Math.max(
+              playerCap,
+              prev.capability,
+            ),
+            corpusMTok: corpus,
+            cash: next.cash,
+            dailyOperatingBurn: Math.max(
+              50_000,
+              next.finance?.dayTotalOut ?? 80_000,
+            ),
+            expectedTrainPfPerDay: Math.max(0.05, trainPf),
+            totalPf: Math.max(0.05, effectiveFlopsPf),
+            trainEfficiency: next.trainEfficiency ?? 1,
+            researchMult: 1.08,
+            numerics: DEFAULT_TRAINING_NUMERICS,
+            activationCheckpointing:
+              next.researchUnlocked.includes("opt_checkpoint"),
+            availableHbmGb: physicalCompute.vramGb,
+            availableSystemRamGb: physicalCompute.systemRamGb,
+            pue: next.pue ?? 1.25,
+            hostingUtilization: Math.min(
+              1.4,
+              (next.lastDemandPf ?? 0) / Math.max(0.05, next.lastCapacityPf ?? 1),
+            ),
+            marketShare: share,
+            inferenceAllocation: next.allocation.inference,
+            dataQuality: Math.max(0.25, Math.min(1.4, next.dataQuality || 1)),
+            mixWeights: rivalProductTrainingWeights(
+              next.archetype,
+              family,
+              productPreset,
+            ),
+            modalityComputeMult: 1,
+            isCatchUpChallenger,
+            maxParamsB: eraCeiling,
+            rackCapacityBays: Math.max(
+              0,
+              (next.rackFleet ?? []).reduce(
+                (sum, install) =>
+                  sum + (install.status === "live" ? install.count : 0),
+                0,
+              ),
+            ),
+            racksUsed: Math.max(
+              0,
+              (next.rackFleet ?? []).reduce(
+                (sum, install) =>
+                  sum + (install.status === "live" ? install.count : 0),
+                0,
+              ),
+            ),
+            mwSupplyCapacity: physicalCompute.powerMw,
+            mwDemand: physicalCompute.powerMw,
+            unitCosts: {
+              rackPf: Math.max(
+                1,
+                physicalCompute.installedLocalPf /
+                  Math.max(
+                    1,
+                    (next.rackFleet ?? []).reduce(
+                      (sum, install) =>
+                        sum + (install.status === "live" ? install.count : 0),
+                      0,
+                    ),
+                  ),
+              ),
+              rackPrice: 313_500,
+              interconnectCostPerMw: 52_000_000 / 14,
+              generationCostPerMw: 48_000_000 / 18,
+              hallCash: {
+                small: hallS.cash,
+                medium: hallM.cash,
+                large: hallL.cash,
+              },
+              hallRacks: {
+                small: hallS.rack ?? 96,
+                medium: hallM.rack ?? 288,
+                large: hallL.rack ?? 960,
+              },
+            },
+          },
+          { family, backbone },
+        );
+        const ladderPick = scaleDecision.selected;
+        const growthTarget = paramsB;
+        if (
+          ladderPick &&
+          ladderPick.paramsB > prev.paramsB * 1.02 &&
+          ladderPick.paramsB <= Math.max(growthTarget, prev.paramsB * 1.28) * 1.001
+        ) {
+          paramsB = Math.min(eraCeiling, ladderPick.paramsB);
+          if (ladderPick.activeParamsB != null) {
+            activeParamsB = ladderPick.activeParamsB;
+          }
+        }
+        const comfortMult = rivalEraDataComfortMult(
+          state.day,
+          isCatchUpChallenger,
+        );
+        paramsB = Math.min(
+          paramsB,
+          Math.max(prev.paramsB * 1.05, comfortable * comfortMult),
+          eraCeiling,
+        );
+        } catch (error) {
+          console.error(
+            `[tickRivals] scale ladder failed for ${next.id} on day ${state.day}:`,
+            error,
+          );
+        }
+      }
 
       const dataNeed = minDataMTokForParams(paramsB);
       const useHQ =
@@ -2370,22 +2634,32 @@ export function tickRivals(state: SimState): SimState {
         !!next.trainAllowSynthLQ ||
         (corpus < dataNeed * 0.55 && trainingRng.range(0, 1) < 0.4);
 
-      // Shared recipe path with player (consumeForLabData)
+      const recipeKnobs = chooseRivalTrainingRecipeKnobs(
+        next.archetype,
+        trainingRng,
+        { isCatchUp: isCatchUpChallenger },
+      );
+      const plannedRecipe = planTrainingRecipe({
+        paramsB,
+        family,
+        backbone,
+        activeParamsB,
+        weights: rivalProductTrainingWeights(
+          next.archetype,
+          family,
+          productPreset,
+        ),
+        usableByDomain: usableStockByDomain(next.data!.stocks),
+        postTrainShare: recipeKnobs.postTrainShare,
+        trainShare: recipeKnobs.trainShare,
+        volumePolicy: recipeKnobs.volumePolicy,
+        allowSynthetic: useHQ || useLQ,
+        includeSynthHQ: useHQ,
+        includeSynthLQ: useLQ,
+      });
       const recipe = consumeForLabData(
         next.data!,
-        {
-          totalMTok: recommendedDataMTok(paramsB, family),
-          totalUnits: recommendedDataMTok(paramsB, family),
-          trainShare: 0.82,
-          weights: rivalProductTrainingWeights(
-            next.archetype,
-            family,
-            productPreset,
-          ),
-          allowSynthetic: useHQ || useLQ,
-          includeSynthHQ: useHQ,
-          includeSynthLQ: useLQ,
-        },
+        plannedRecipe.dataPlan,
         paramsB,
         family,
         {
@@ -2490,17 +2764,30 @@ export function tickRivals(state: SimState): SimState {
           return next;
         }
         if (next.cash < cashSunk) {
-          if (
-            state.day % 7 ===
-            hashSeed(state.seed, next.id, "train-news") % 7
-          ) {
-            news.push(
-              `Day ${state.day}: ${next.name} delays training — insufficient cash.`,
-            );
+          const prevPreset =
+            prev?.productPreset ??
+            (prev?.family === "diffusion"
+              ? "image_generation"
+              : prev?.family === "video"
+                ? "video_generation"
+                : prev?.family === "omni"
+                  ? "omni"
+                  : "language");
+          const newProductPilot =
+            !!prev && productPreset !== prevPreset && paramsB < 16;
+          if (!newProductPilot) {
+            if (
+              state.day % 7 ===
+              hashSeed(state.seed, next.id, "train-news") % 7
+            ) {
+              news.push(
+                `Day ${state.day}: ${next.name} delays training — insufficient cash.`,
+              );
+            }
+            return next;
           }
-          return next;
         }
-        next.cash -= cashSunk;
+        next.cash = Math.max(0, next.cash - Math.min(cashSunk, next.cash));
 
         const job: RivalTrainJob = {
           id: jobId,
@@ -2522,6 +2809,8 @@ export function tickRivals(state: SimState): SimState {
           includeSynthLQ: useLQ,
           synthLqShare: recipe.synthLqShare ?? 0,
           trainShare: recipe.plan.trainShare,
+          postTrainShare: plannedRecipe.postTrainShare,
+          postTrainMTok: plannedRecipe.alignMTok,
           totalMTok: usable,
           outcomeSeed: hashSeed(
             state.seed,
@@ -2582,6 +2871,7 @@ export function tickRivals(state: SimState): SimState {
           );
         }
       }
+      }
     }
 
     // Rivals run the same growth loop as the player. Budgets scale with their
@@ -2608,6 +2898,13 @@ export function tickRivals(state: SimState): SimState {
       ...next,
       pricing: synchronizeRivalPlanPrices(next.pricing),
     };
+    } catch (error) {
+      console.error(
+        `[tickRivals] ${unboundedRival.id} failed on day ${state.day}:`,
+        error,
+      );
+      return unboundedRival;
+    }
   });
 
   // Grow rival campuses on the shared map (visible DCs + gen + grid draws)
@@ -2626,7 +2923,7 @@ export function tickRivals(state: SimState): SimState {
   for (const rival of s.rivals) {
     for (const model of rival.models) {
       if (
-        (model.release === "released" || model.shipped) &&
+        isLivePublicModel(model) &&
         !priorModels.has(`${rival.id}:${model.id}`)
       ) {
         s = scheduleReleaseEvaluations(s, model.id, rival.id);
@@ -2699,6 +2996,80 @@ export function boundRivalTrainingHistory(rival: RivalLab): RivalLab {
   };
 }
 
+type RivalCampusBuildKind = "dc" | "dc_m" | "dc_l" | "substation" | "solar" | "gas" | "hq";
+
+function isRivalHallKind(
+  kind: RivalCampusBuildKind,
+): kind is "dc" | "dc_m" | "dc_l" {
+  return kind === "dc" || kind === "dc_m" || kind === "dc_l";
+}
+
+function rivalCampusHunger(input: {
+  hqCount: number;
+  dcCount: number;
+  lastUnserved: number;
+  cash: number;
+  smallHallCash: number;
+}): number {
+  if (input.hqCount === 0 || input.dcCount === 0) return 1;
+  return Math.min(
+    0.92,
+    0.28 +
+      Math.min(0.45, input.lastUnserved * 1.8) +
+      (input.cash >= input.smallHallCash * 0.8 && input.dcCount < 4 ? 0.16 : 0),
+  );
+}
+
+function rivalHallKindForExpansion(
+  rival: RivalLab,
+  dcCount: number,
+): "dc" | "dc_m" | "dc_l" {
+  const demand =
+    rival.campusPlan?.projectedRackDemand ??
+    Math.max(24, rival.chips ?? 0);
+  return chooseRivalDcSize(demand, rival.archetype, dcCount);
+}
+
+function spendRivalCash(
+  state: SimState,
+  labId: RivalLab["id"],
+  amount: number,
+): SimState {
+  const cashOf = (cash: number) => cash - amount;
+  const rivals = state.rivals.map((rival) =>
+    rival.id === labId
+      ? {
+          ...rival,
+          cash: cashOf(rival.cash),
+          finance: rival.finance
+            ? { ...rival.finance, cash: cashOf(rival.cash) }
+            : rival.finance,
+        }
+      : rival,
+  );
+  const indexed = state.labs?.[labId];
+  const labs = indexed
+    ? {
+        ...state.labs,
+        [labId]: {
+          ...indexed,
+          cash: cashOf(indexed.cash),
+          finance: { ...indexed.finance, cash: cashOf(indexed.cash) },
+        },
+      }
+    : state.labs;
+  return { ...state, rivals, labs };
+}
+
+function rivalDcSizeLabel(
+  kind: RivalCampusBuildKind,
+): "small" | "medium" | "large" | undefined {
+  if (kind === "dc_l") return "large";
+  if (kind === "dc_m") return "medium";
+  if (kind === "dc") return "small";
+  return undefined;
+}
+
 /**
  * Rivals claim empty land, densify halls, and add substations / generation so
  * they pull more shared-grid MW as the game progresses (and show on the map).
@@ -2709,8 +3080,10 @@ export function expandRivalCampuses(state: SimState): SimState {
   // Rival AI and player systems continue to operate on the same MapTile
   // semantics without allocating a second million-object world every day.
   const tiles = state.map.tiles.slice();
-  let rivals = state.rivals.map((r) => ({ ...r }));
+  let next = state;
   const news: string[] = [];
+  const econ = state.config.economyMult ?? 1;
+  const smallHallCash = Math.floor(getBuildDef("dc").cash * econ);
   const ownedByRival = new Map<string, MapTile[]>();
   const emptyByRegion = new Map<string, MapTile[]>();
   for (const tile of tiles) {
@@ -2736,8 +3109,8 @@ export function expandRivalCampuses(state: SimState): SimState {
     return tile?.x === x && tile.y === y ? index : -1;
   };
 
-  for (let ri = 0; ri < rivals.length; ri++) {
-    const r = rivals[ri]!;
+  for (let ri = 0; ri < next.rivals.length; ri++) {
+    let r = next.rivals[ri]!;
     const rng = rivalActionRng(
       state.seed,
       r.id,
@@ -2756,8 +3129,13 @@ export function expandRivalCampuses(state: SimState): SimState {
     const hqs = owned.filter(
       (t) => t.kind === "hq" || t.kind === "hq_m" || t.kind === "hq_l",
     );
-    const hunger =
-      hqs.length === 0 ? 1 : 0.15 + Math.min(0.6, (r.lastUnserved ?? 0) * 1.8);
+    const hunger = rivalCampusHunger({
+      hqCount: hqs.length,
+      dcCount: dcs.length,
+      lastUnserved: r.lastUnserved ?? 0,
+      cash: r.cash,
+      smallHallCash,
+    });
     if (rng.range(0, 1) > hunger) continue;
     const gens = owned.filter(
       (t) => t.kind === "solar" || t.kind === "gas" || t.kind === "nuclear",
@@ -2797,7 +3175,7 @@ export function expandRivalCampuses(state: SimState): SimState {
 
     const needPower = dcs.length > feeds.length + gens.length;
     const needGen = dcs.length > 0 && gens.length < Math.ceil(dcs.length / 2);
-    let kind: "dc" | "substation" | "solar" | "gas" | "hq" = "dc";
+    let kind: RivalCampusBuildKind = "dc";
     if (hqs.length === 0) kind = "hq";
     else if (needGen && rng.range(0, 1) < 0.45)
       kind = rng.range(0, 1) < 0.55 ? "solar" : "gas";
@@ -2814,16 +3192,20 @@ export function expandRivalCampuses(state: SimState): SimState {
     const t = { ...tiles[si]! };
     const def = getBuildDef(kind);
     const totalCash =
-      Math.floor(def.cash * (state.config.economyMult ?? 1)) +
-      Math.max(0, t.landValue);
+      Math.floor(def.cash * econ) + Math.max(0, t.landValue);
+    if (r.cash < totalCash) {
+      next = fundRivalForCampus(next, r.id, totalCash + def.opexPerDay * 20);
+      r = next.rivals[ri]!;
+    }
     if (r.cash < totalCash) continue;
-    rivals[ri] = { ...r, cash: r.cash - totalCash };
+    next = spendRivalCash(next, r.id, totalCash);
+    r = next.rivals[ri]!;
     t.owner = r.id;
     t.kind = kind;
     t.buildingProgress = 0;
     t.buildingTarget = def.days;
     t.name =
-      kind === "dc"
+      isRivalHallKind(kind)
         ? `${r.name} Hall`
         : kind === "hq"
           ? `${r.name} HQ`
@@ -2836,10 +3218,11 @@ export function expandRivalCampuses(state: SimState): SimState {
       t.opexPerDay = def.opexPerDay;
       t.note =
         "Rival headquarters under construction; desks gate future hiring.";
-    } else if (kind === "dc") {
+    } else if (isRivalHallKind(kind)) {
       t.rackCapacity = def.rack ?? 0;
       t.racksUsed = 0;
       t.opexPerDay = def.opexPerDay;
+      t.dcSize = rivalDcSizeLabel(kind);
       t.note =
         "Rival data hall under construction; racks are purchased separately.";
     } else if (kind === "substation") {
@@ -2864,10 +3247,9 @@ export function expandRivalCampuses(state: SimState): SimState {
   }
 
   return {
-    ...state,
-    rivals,
-    map: { ...state.map, tiles },
-    news: [...news, ...state.news].slice(0, 48),
+    ...next,
+    map: { ...next.map, tiles },
+    news: [...news, ...next.news].slice(0, 48),
   };
 }
 
@@ -2876,24 +3258,20 @@ function claimFacilityFootprint(
   facility: Facility,
   world: NonNullable<SimState["map"]["world"]>,
 ) {
-  const { x, y } = tileCoords(facility.anchor, world.descriptor.width);
-  // Reserve the anchor plus a conservative neighborhood for multi-tile campuses.
-  // Exact blueprint footprint varies by kind; claiming a 3x3 around anchors prevents
-  // same-batch collisions during weekly rival campus expansion.
-  for (let dy = -1; dy <= 1; dy++) {
-    for (let dx = -1; dx <= 1; dx++) {
-      const nx = x + dx;
-      const ny = y + dy;
-      if (
-        nx < 0 ||
-        ny < 0 ||
-        nx >= world.descriptor.width ||
-        ny >= world.descriptor.height
-      )
-        continue;
-      claimed.add(
-        tileId(nx, ny, world.descriptor.width, world.descriptor.height),
-      );
+  const width = world.descriptor.width;
+  const height = world.descriptor.height;
+  const cells =
+    facility.footprint.length > 0 ? facility.footprint : [facility.anchor];
+  for (const cell of cells) {
+    claimed.add(cell);
+    const { x, y } = tileCoords(cell, width);
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+        claimed.add(tileId(nx, ny, width, height));
+      }
     }
   }
 }
@@ -2902,9 +3280,13 @@ function expandCompactRivalCampuses(state: SimState): SimState {
   const world = state.map.world!;
   const batch = world.beginBatch();
   const claimed = new Set<TileId>();
-  let rivals = state.rivals.map((rival) => ({ ...rival }));
+  let next = state;
   const news: string[] = [];
   let changed = false;
+  const econ = state.config.economyMult ?? 1;
+  const smallHallCash = Math.floor(getBuildDef("dc").cash * econ);
+  const width = world.descriptor.width;
+  const height = world.descriptor.height;
 
   const available = (id: TileId): boolean =>
     !claimed.has(id) &&
@@ -2912,31 +3294,39 @@ function expandCompactRivalCampuses(state: SimState): SimState {
     world.getOwner(id) === "neutral" &&
     world.getKind(id) === TERRAIN_KIND.empty;
 
-  const nearbySite = (
+  const footprintAt = (
+    origin: TileId,
+    kind: RivalCampusBuildKind,
+  ): TileId[] | undefined => {
+    const { x, y } = tileCoords(origin, width);
+    const cells: TileId[] = [];
+    for (const { dx, dy } of dcFootprint(kind)) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) return undefined;
+      const id = tileId(nx, ny, width, height);
+      if (!available(id)) return undefined;
+      cells.push(id);
+    }
+    return cells;
+  };
+
+  const nearbyFootprint = (
     anchor: TileId,
+    kind: RivalCampusBuildKind,
     rng: ReturnType<typeof createRng>,
-  ): TileId | undefined => {
-    const { x: ax, y: ay } = tileCoords(anchor, world.descriptor.width);
-    const candidates: TileId[] = [];
-    for (let dy = -2; dy <= 2; dy++) {
-      for (let dx = -2; dx <= 2; dx++) {
-        if (dx === 0 && dy === 0) continue;
+  ): { origin: TileId; cells: TileId[] } | undefined => {
+    const { x: ax, y: ay } = tileCoords(anchor, width);
+    const radius = dcFootprint(kind).length > 1 ? 6 : 2;
+    const candidates: { origin: TileId; cells: TileId[] }[] = [];
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
         const x = ax + dx;
         const y = ay + dy;
-        if (
-          x < 0 ||
-          y < 0 ||
-          x >= world.descriptor.width ||
-          y >= world.descriptor.height
-        )
-          continue;
-        const id = tileId(
-          x,
-          y,
-          world.descriptor.width,
-          world.descriptor.height,
-        );
-        if (available(id)) candidates.push(id);
+        if (x < 0 || y < 0 || x >= width || y >= height) continue;
+        const origin = tileId(x, y, width, height);
+        const cells = footprintAt(origin, kind);
+        if (cells) candidates.push({ origin, cells });
       }
     }
     return candidates.length > 0
@@ -2944,34 +3334,30 @@ function expandCompactRivalCampuses(state: SimState): SimState {
       : undefined;
   };
 
-  const regionalSite = (
+  const regionalFootprint = (
     regionId: string,
+    kind: RivalCampusBuildKind,
     rng: ReturnType<typeof createRng>,
-  ): TileId | undefined => {
+  ): { origin: TileId; cells: TileId[] } | undefined => {
     const region = world.staticWorld.regions.find(
       (entry) => entry.id === regionId,
     );
     const minX = region?.originX ?? 0;
     const minY = region?.originY ?? 0;
-    const maxX = Math.min(
-      world.descriptor.width,
-      minX + (region?.width ?? world.descriptor.width),
-    );
-    const maxY = Math.min(
-      world.descriptor.height,
-      minY + (region?.height ?? world.descriptor.height),
-    );
-    for (let attempt = 0; attempt < 256; attempt++) {
+    const maxX = Math.min(width, minX + (region?.width ?? width));
+    const maxY = Math.min(height, minY + (region?.height ?? height));
+    for (let attempt = 0; attempt < 320; attempt++) {
       const x = rng.int(minX, Math.max(minX, maxX - 1));
       const y = rng.int(minY, Math.max(minY, maxY - 1));
-      const id = tileId(x, y, world.descriptor.width, world.descriptor.height);
-      if (available(id)) return id;
+      const origin = tileId(x, y, width, height);
+      const cells = footprintAt(origin, kind);
+      if (cells) return { origin, cells };
     }
     return undefined;
   };
 
-  for (let ri = 0; ri < rivals.length; ri++) {
-    const rival = rivals[ri]!;
+  for (let ri = 0; ri < next.rivals.length; ri++) {
+    let rival = next.rivals[ri]!;
     const rng = rivalActionRng(
       state.seed,
       rival.id,
@@ -2999,10 +3385,13 @@ function expandCompactRivalCampuses(state: SimState): SimState {
         facility.kind === "hq_m" ||
         facility.kind === "hq_l",
     );
-    const hunger =
-      hqs.length === 0
-        ? 1
-        : 0.15 + Math.min(0.6, (rival.lastUnserved ?? 0) * 1.8);
+    const hunger = rivalCampusHunger({
+      hqCount: hqs.length,
+      dcCount: dcs.length,
+      lastUnserved: rival.lastUnserved ?? 0,
+      cash: rival.cash,
+      smallHallCash,
+    });
     if (rng.range(0, 1) > hunger) continue;
     const gens = owned.filter(
       (facility) =>
@@ -3015,42 +3404,53 @@ function expandCompactRivalCampuses(state: SimState): SimState {
         facility.kind === "substation" || facility.kind === "battery",
     );
 
-    const anchor =
-      owned.length > 0
-        ? owned[rng.int(0, owned.length - 1)]!.anchor
-        : undefined;
-    const spot =
-      anchor === undefined
-        ? regionalSite(rival.regionId, rng)
-        : nearbySite(anchor, rng);
-    if (spot === undefined) continue;
-
     const needPower = dcs.length > feeds.length + gens.length;
     const needGen = dcs.length > 0 && gens.length < Math.ceil(dcs.length / 2);
-    let kind: "dc" | "substation" | "solar" | "gas" | "hq" = "dc";
+    let kind: RivalCampusBuildKind = "dc";
     if (hqs.length === 0) kind = "hq";
     else if (needGen && rng.range(0, 1) < 0.45)
       kind = rng.range(0, 1) < 0.55 ? "solar" : "gas";
     else if (needPower && rng.range(0, 1) < 0.5) kind = "substation";
-    else if (dcs.length > 0)
-      kind =
-        rng.range(0, 1) < 0.65
-          ? "dc"
-          : rng.range(0, 1) < 0.5
-            ? "substation"
-            : "solar";
+    else if (dcs.length === 0) kind = "dc";
+    else if (rng.range(0, 1) < 0.65)
+      kind = rivalHallKindForExpansion(rival, dcs.length);
+    else
+      kind = rng.range(0, 1) < 0.5 ? "substation" : "solar";
+
+    const isHall = kind === "dc" || kind === "dc_m" || kind === "dc_l";
+    const hint =
+      owned.length > 0
+        ? owned[rng.int(0, owned.length - 1)]!.anchor
+        : undefined;
+    let site =
+      hint === undefined
+        ? regionalFootprint(rival.regionId, kind, rng)
+        : nearbyFootprint(hint, kind, rng);
+    if (!site && isHall && kind !== "dc") {
+      kind = "dc";
+      site =
+        hint === undefined
+          ? regionalFootprint(rival.regionId, kind, rng)
+          : nearbyFootprint(hint, kind, rng);
+    }
+    if (!site) continue;
 
     const def = getBuildDef(kind);
-    const totalCash = Math.floor(def.cash * (state.config.economyMult ?? 1));
+    const totalCash = Math.floor(def.cash * econ);
+    if (rival.cash < totalCash) {
+      next = fundRivalForCampus(next, rival.id, totalCash + def.opexPerDay * 20);
+      rival = next.rivals[ri]!;
+    }
     if (rival.cash < totalCash) continue;
-    rivals[ri] = { ...rival, cash: rival.cash - totalCash };
+    next = spendRivalCash(next, rival.id, totalCash);
+    rival = next.rivals[ri]!;
 
     let stats: NonNullable<Facility["stats"]>;
     let note: string;
     if (kind === "hq") {
       stats = { opexPerDay: def.opexPerDay };
       note = "Rival headquarters under construction; desks gate future hiring.";
-    } else if (kind === "dc") {
+    } else if (isHall) {
       stats = {
         rackCapacity: def.rack ?? 0,
         racksUsed: 0,
@@ -3068,47 +3468,30 @@ function expandCompactRivalCampuses(state: SimState): SimState {
       stats = { mwGeneration: def.gen ?? 0, opexPerDay: def.opexPerDay };
       note = "Rival peaker under construction for firm power.";
     }
-    const name =
-      kind === "dc"
-        ? `${rival.name} Hall`
-        : kind === "hq"
-          ? `${rival.name} HQ`
-          : kind === "substation"
-            ? `${rival.name} Grid`
-            : kind === "solar"
-              ? `${rival.name} Solar`
-              : `${rival.name} Peaker`;
-    batch.addFacility({
-      id: `rival-${rival.id}-${state.day}-${spot}`,
+    const name = isHall
+      ? `${rival.name} Hall`
+      : kind === "hq"
+        ? `${rival.name} HQ`
+        : kind === "substation"
+          ? `${rival.name} Grid`
+          : kind === "solar"
+            ? `${rival.name} Solar`
+            : `${rival.name} Peaker`;
+    const facility: Facility = {
+      id: `rival-${rival.id}-${state.day}-${site.origin}`,
       kind,
       ownerId: rival.id,
-      anchor: spot,
-      footprint: [spot],
+      anchor: site.origin,
+      footprint: site.cells,
       level: 1,
       constructionProgress: 0,
       constructionTarget: def.days,
-      powered: kind === "dc" ? false : undefined,
+      powered: isHall ? false : undefined,
       stats,
-      data: { name, note, dcSize: kind === "dc" ? "small" : undefined },
-    });
-    // Reserve the full footprint for this mutation batch so later rivals cannot collide.
-    claimFacilityFootprint(
-      claimed,
-      {
-        id: `rival-${rival.id}-${state.day}-${spot}`,
-        kind,
-        ownerId: rival.id,
-        anchor: spot,
-        footprint: [spot],
-        level: 1,
-        constructionProgress: 0,
-        constructionTarget: def.days,
-        powered: kind === "dc" ? false : undefined,
-        stats,
-        data: { name, note, dcSize: kind === "dc" ? "small" : undefined },
-      },
-      world,
-    );
+      data: { name, note, dcSize: rivalDcSizeLabel(kind) },
+    };
+    batch.addFacility(facility);
+    claimFacilityFootprint(claimed, facility, world);
     changed = true;
     if (state.day % 11 === hashSeed(state.seed, rival.id, "campus-news") % 11) {
       news.push(
@@ -3119,15 +3502,15 @@ function expandCompactRivalCampuses(state: SimState): SimState {
 
   if (!changed) {
     batch.rollback();
-    return state;
+    return next;
   }
-  const committed = commitWorldBatch(state, batch);
+  const committed = commitWorldBatch(next, batch);
   return {
     ...committed,
-    rivals,
-    news: [...news, ...state.news].slice(0, 48),
+    news: [...news, ...committed.news].slice(0, 48),
   };
 }
+
 
 /** Flatten public player + rival models for the public leaderboard UI. */
 export function collectLeaderboardModels(state: SimState): {
@@ -3136,6 +3519,7 @@ export function collectLeaderboardModels(state: SimState): {
   color: number;
   model: Model;
   isPlayer: boolean;
+  kind: "model" | "router";
 }[] {
   const rows: {
     labId: string;
@@ -3143,17 +3527,35 @@ export function collectLeaderboardModels(state: SimState): {
     color: number;
     model: Model;
     isPlayer: boolean;
+    kind: "model" | "router";
   }[] = [];
   for (const m of state.player.models) {
     // Internal and stealth checkpoints are deliberately absent. Their latent
     // scores are only visible through paid, noisy checkpoint-evaluation reports.
-    if (!(m.release === "released" || m.shipped)) continue;
+    if (!isLivePublicModel(m)) continue;
     rows.push({
       labId: "player",
       labName: state.player.name,
       color: 0x3dffc0,
       model: m,
       isPlayer: true,
+      kind: "model",
+    });
+  }
+  for (const router of normalizeModelRouters(state.player.modelRouters)) {
+    if (router.id !== state.player.activeModelRouterId) continue;
+    const composed = composeRouterModel(
+      router,
+      publicRouterParts(router, state.player.models),
+    );
+    if (!composed) continue;
+    rows.push({
+      labId: "player",
+      labName: state.player.name,
+      color: 0x3dffc0,
+      model: composed,
+      isPlayer: true,
+      kind: "router",
     });
   }
   for (const r of state.rivals) {
@@ -3164,6 +3566,7 @@ export function collectLeaderboardModels(state: SimState): {
         color: r.color,
         model: m,
         isPlayer: false,
+        kind: "model",
       });
     }
   }

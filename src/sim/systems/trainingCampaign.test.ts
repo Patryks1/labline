@@ -3,10 +3,12 @@ import { createGame } from '../createGame'
 import { roundTripState } from '../save'
 import { createTrainingCampaignEvent } from '../balance/trainingCampaign'
 import type { SimState, TrainingJob } from '../types'
+import { tickDay } from '../tick'
 import {
   playerTrainingResourcePlan,
   playerTrainingJobs,
   resolveTrainingCampaignEvent,
+  setDefaultEffort,
   startTraining,
   tickTraining,
 } from './training'
@@ -37,7 +39,7 @@ function campaignAtTenPercent(seed: number): SimState {
     ...job,
     targetPfDays,
     recommendedPfDays: targetPfDays,
-    progressPfDays: targetPfDays * 0.1,
+    progressPfDays: targetPfDays * 0.49,
     minCalendarDays: 30,
     daysElapsed: 0,
     campaignMilestonesReached: [],
@@ -60,8 +62,8 @@ describe('training campaign integration', () => {
     const withDecision = tickTraining(state)
     const eventJob = withDecision.player.trainingJob!
     expect(eventJob.pendingCampaignEvent).toBeDefined()
-    expect(eventJob.campaignMilestonesReached).toEqual([0.12])
-    expect(eventJob.progressPfDays / eventJob.targetPfDays).toBeCloseTo(0.12, 10)
+    expect(eventJob.campaignMilestonesReached).toEqual([0.5])
+    expect(eventJob.progressPfDays / eventJob.targetPfDays).toBeCloseTo(0.5, 10)
 
     const progressAtDecision = eventJob.progressPfDays
     const energyAtDecision = eventJob.energyMwDays
@@ -69,6 +71,26 @@ describe('training campaign integration', () => {
     expect(nextDay.player.trainingJob!.progressPfDays).toBe(progressAtDecision)
     expect(nextDay.player.trainingJob!.energyMwDays).toBe(energyAtDecision)
     expect(nextDay.player.trainingJob!.stallReason).toContain('Campaign decision')
+  })
+
+  it('holds the campaign clock while a training decision is pending', () => {
+    const withDecision = tickTraining(campaignAtTenPercent(6520))
+    expect(withDecision.player.trainingJob!.pendingCampaignEvent).toBeDefined()
+    const frozen = tickDay(withDecision)
+    expect(frozen.day).toBe(withDecision.day)
+  })
+
+  it('persists a trained default effort on the active job', () => {
+    const state = startTraining(richState(6521), {
+      name: 'Effort Lab',
+      family: 'dense',
+      paramsB: 1,
+    })
+    const job = state.player.trainingJob!
+    const next = setDefaultEffort(state, job.id, 'low')
+    expect(next.player.trainingJob?.productProfile?.defaultEffort).toBe('low')
+    const refused = setDefaultEffort(next, job.id, 'high')
+    expect(refused.player.trainingJob?.productProfile?.defaultEffort).toBe('low')
   })
 
   it('does not skip campaign checkpoints when one daily allocation can finish the run', () => {
@@ -100,8 +122,26 @@ describe('training campaign integration', () => {
     }
 
     const ticked = tickTraining(state)
-    expect(ticked.player.trainingJob!.pendingCampaignEvent?.milestone).toBe(0.12)
+    expect(ticked.player.trainingJob!.pendingCampaignEvent?.milestone).toBe(0.5)
     expect(ticked.player.trainingJob!.awaitingDecision).not.toBe(true)
+  })
+
+  it('captures a weight file when the confirmed intervention rolls back', () => {
+    const withDecision = tickTraining(campaignAtTenPercent(6511))
+    const job = withDecision.player.trainingJob!
+    expect(withDecision.player.trainingCheckpoints ?? []).toEqual([])
+    const rollbackChoice = job.pendingCampaignEvent!.choices.find(
+      (choice) => (choice.effects.progressRollbackFraction ?? 0) > 0,
+    )!
+    const resolved = resolveTrainingCampaignEvent(
+      withDecision,
+      job.id,
+      rollbackChoice.id,
+    )
+    expect(resolved.player.trainingCheckpoints?.length).toBeGreaterThan(0)
+    expect(resolved.player.trainingJob!.progressPfDays).toBeLessThan(
+      job.progressPfDays,
+    )
   })
 
   it('charges a selected intervention once and persists its evidence in the campaign log', () => {
@@ -242,5 +282,32 @@ describe('training campaign integration', () => {
     const allocation = playerTrainingResourcePlan(pendingState)
     expect(allocation.jobs[pending.id]!.effectivePf).toBe(0)
     expect(allocation.jobs[active!.id]!.effectivePf).toBeGreaterThan(0)
+  })
+
+  it('starts linked alignment from the recipe when the base run completes', () => {
+    let state = startTraining(richState(6530), {
+      name: 'Align Me',
+      family: 'dense',
+      paramsB: 1,
+      computePriority: 100,
+    })
+    const job = state.player.trainingJob!
+    const ready: TrainingJob = {
+      ...job,
+      progressPfDays: job.targetPfDays - 0.01,
+      campaignMilestonesReached: [0.5],
+      pendingCampaignEvent: undefined,
+    }
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        trainingJob: ready,
+        trainingJobs: [ready],
+      },
+    }
+    const ticked = tickTraining(state)
+    expect(ticked.player.trainingJob?.pendingPostTrainPhase).toBeFalsy()
+    expect(ticked.player.trainingJob?.postTrainPhaseResolved).toBe(true)
   })
 })

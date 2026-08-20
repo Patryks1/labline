@@ -118,6 +118,23 @@ export const RENDER_CHUNK_SIZE = 32
 export const MAX_RETAINED_CHUNKS = 96
 export const MAX_RETAINED_CHUNK_LAYERS = MAX_RETAINED_CHUNKS * 3
 
+/** Lot coverage so neighbouring buildings leave alleys, yards, and plazas. */
+export const URBAN_PARCEL_FOOTPRINT_SCALE = {
+  small: 0.72,
+  normal: 0.78,
+  skyscraper: 0.86,
+} as const
+
+export function urbanParcelHeightScale(
+  parcel: Pick<UrbanParcel, 'class' | 'style'>,
+  random: number,
+): number {
+  if (parcel.class === 'skyscraper') return 0.98 + ((random >>> 8) & 0x1f) / 480
+  if (parcel.class === 'small') return 0.86 + ((random >>> 8) & 0x3f) / 320
+  if (parcel.style === 'core') return 1.02 + ((random >>> 8) & 0x7f) / 240
+  return 0.92 + ((random >>> 8) & 0x7f) / 360
+}
+
 const PLAYER_COLOR = 0x3dffc0
 const NEUTRAL_FACILITY_COLOR = 0x8f9aa2
 const DEFAULT_RIVAL_COLOR = 0xff6b4a
@@ -817,9 +834,9 @@ export class SimViewportRenderSource implements ViewportRenderSource {
       yaw: parcel.width === parcel.height
         ? (random & 3) * Math.PI * 0.5
         : (random & 1) * Math.PI,
-      scaleX: parcel.width * MAP_TILE_SIZE * 0.92,
-      scaleY: 0.94 + ((random >>> 8) & 0x3f) / 640,
-      scaleZ: parcel.height * MAP_TILE_SIZE * 0.92,
+      scaleX: parcel.width * MAP_TILE_SIZE * URBAN_PARCEL_FOOTPRINT_SCALE[parcel.class],
+      scaleY: urbanParcelHeightScale(parcel, random),
+      scaleZ: parcel.height * MAP_TILE_SIZE * URBAN_PARCEL_FOOTPRINT_SCALE[parcel.class],
       color: 0xffffff,
     }
   }

@@ -18,11 +18,11 @@ export const FLOPS_PER_PF_DAY = 8.64e19;
 
 /**
  * Simulation time compression. Training still scales from physical 6ND work,
- * but two real calendar days of cluster work resolve in one game day. This
- * keeps the physical model playable without making frontier runs a short
- * product-cycle decision.
+ * but 1.5 real calendar days of cluster work resolve in one game day. That
+ * keeps the physical model playable without turning a 1B pretrain into a
+ * two-day product decision.
  */
-export const TRAINING_CALENDAR_COMPRESSION = 2;
+export const TRAINING_CALENDAR_COMPRESSION = 1.5;
 
 /** Modern dense compute-optimal reference, not a minimum or a cost clamp. */
 export const COMPUTE_OPTIMAL_TOKENS_PER_PARAMETER = 20;
@@ -87,7 +87,7 @@ export function minimumTrainingCalendarDays(opts: {
     );
     return Math.round(100 + (50 * (scaleSignal + dataSignal)) / 2);
   }
-  const scaleDays = 18 + 12 * Math.log10(paramsB);
+  const scaleDays = 24 + 14 * Math.log10(paramsB);
   const familyMult =
     opts.family === "video"
       ? 1.3
@@ -101,7 +101,7 @@ export function minimumTrainingCalendarDays(opts: {
   const modeMult =
     opts.mode === "continue" ? 0.65 : opts.mode === "distill" ? 0.8 : 1;
   return Math.ceil(
-    Math.max(14, Math.min(100, scaleDays * familyMult * modeMult)),
+    Math.max(21, Math.min(110, scaleDays * familyMult * modeMult)),
   );
 }
 

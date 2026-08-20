@@ -3,7 +3,17 @@ import { formatParams, PARAM_PRESETS } from '../../../sim/balance/training'
 import { parseParamsBox, type SizeUnit } from './modelSize'
 import { HudInput, HudRange, HudSelect } from './HudPrimitives'
 
-const MAJOR_MODEL_MARKS = new Set(['7M', '400M', '1B', '7B', '70B', '405B', '1T', '7T', '30T'])
+const MAJOR_MODEL_MARKS = new Set([
+  '7M',
+  '400M',
+  '1B',
+  '7B',
+  '70B',
+  '405B',
+  '1T',
+  '7T',
+  '30T',
+])
 
 /** Log-shaped model-scale timeline with common checkpoints and an exact M/B/T editor. */
 export function SizeSlider({
@@ -61,12 +71,29 @@ export function SizeSlider({
 
   const logMin = Math.log10(marks[0]?.paramsB ?? min)
   const logMax = Math.log10(marks[marks.length - 1]?.paramsB ?? max)
+  const currentLog = Math.log10(marks[idx]?.paramsB ?? value)
+  const fillPct =
+    logMax === logMin ? 0 : ((currentLog - logMin) / (logMax - logMin)) * 100
 
   return (
-    <div className={`space-y-2 ${disabled ? 'opacity-70' : ''}`}>
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-[0.8125rem] text-muted">{label}</span>
-        <div className={`flex overflow-hidden rounded-md border bg-void ${invalid ? 'border-danger' : 'border-line focus-within:border-mint/50'}`}>
+    <div
+      className={`model-size-control ${disabled ? 'opacity-70' : ''}`}
+      data-model-size="true"
+    >
+      <div className="flex items-end justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[0.6875rem] text-muted">{label}</p>
+          <p className="mt-0.5 font-mono text-lg font-medium tabular-nums tracking-tight text-bone">
+            {formatParams(value)}
+          </p>
+        </div>
+        <div
+          className={`flex overflow-hidden rounded-md border bg-void ${
+            invalid
+              ? 'border-danger'
+              : 'border-line focus-within:border-mint/50'
+          }`}
+        >
           <HudInput
             type="text"
             inputMode="decimal"
@@ -112,13 +139,22 @@ export function SizeSlider({
         </div>
       </div>
 
-      <div className="relative overflow-x-hidden px-0.5 pb-5 pt-1">
+      <div className="relative min-w-0 overflow-x-hidden px-1 pt-1 pb-2">
+        <div
+          className="pointer-events-none absolute inset-x-2 top-[1.15rem] h-px bg-line/90"
+          aria-hidden
+        />
+        <div
+          className="pointer-events-none absolute left-2 top-[1.1rem] h-0.5 rounded-full bg-mint"
+          style={{ width: `calc((100% - 1rem) * ${fillPct / 100})` }}
+          aria-hidden
+        />
         <HudRange
           type="range"
           min={logMin}
           max={logMax}
           step={0.001}
-          value={Math.log10(marks[idx]?.paramsB ?? value)}
+          value={currentLog}
           disabled={disabled}
           onChange={(event) => {
             const target = 10 ** Number(event.target.value)
@@ -129,31 +165,44 @@ export function SizeSlider({
           aria-label={label}
           aria-valuetext={formatParams(value)}
         />
-        <div className="pointer-events-none absolute inset-x-0 top-6 h-4">
+        <div className="relative mt-1 h-7">
           {marks.map((mark, index) => {
-            const show = MAJOR_MODEL_MARKS.has(mark.label) || marks.length <= 8
-            const edgePosition = index === 0
-              ? 'translate-x-0'
-              : index === marks.length - 1
-                ? '-translate-x-full'
-                : '-translate-x-1/2'
-            const position = logMax === logMin
-              ? 0
-              : ((Math.log10(mark.paramsB) - logMin) / (logMax - logMin)) * 100
+            const major = MAJOR_MODEL_MARKS.has(mark.label) || marks.length <= 8
+            const selected = index === idx
+            if (!major && !selected) return null
+            const edgePosition =
+              index === 0
+                ? 'translate-x-0'
+                : index === marks.length - 1
+                  ? '-translate-x-full'
+                  : '-translate-x-1/2'
+            const position =
+              logMax === logMin
+                ? 0
+                : ((Math.log10(mark.paramsB) - logMin) / (logMax - logMin)) * 100
             return (
-              <span
+              <button
                 key={mark.label}
+                type="button"
                 title={mark.label}
-                className={`absolute z-10 ${edgePosition} whitespace-nowrap rounded bg-panel/95 px-0.5 py-0.5 font-mono text-[0.5rem] leading-none shadow-sm ${index === idx ? 'text-bone' : show ? 'text-muted' : 'text-transparent'}`}
+                disabled={disabled}
+                onClick={() => onChange(mark.paramsB)}
+                className={`absolute top-0 z-10 ${edgePosition} appearance-none border-0 bg-transparent p-0 font-mono text-[0.625rem] leading-7 whitespace-nowrap transition-colors disabled:cursor-not-allowed ${
+                  selected ? 'text-mint' : 'text-muted hover:text-bone'
+                }`}
                 style={{ left: `${position}%` }}
               >
-                {show || index === idx ? mark.label : '·'}
-              </span>
+                {mark.label}
+              </button>
             )
           })}
         </div>
       </div>
-      {invalid && <p className="text-[0.6875rem] text-danger">Enter a positive size using M, B, or T.</p>}
+      {invalid && (
+        <p className="text-[0.6875rem] text-danger">
+          Enter a positive size using M, B, or T.
+        </p>
+      )}
       {disabled && disabledReason ? (
         <p className="rounded-md border border-amber/30 bg-amber/8 px-2 py-1.5 text-[0.75rem] text-amber">
           {disabledReason}

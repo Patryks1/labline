@@ -13,6 +13,7 @@ const scores = (value = 90): BenchmarkScores => ({
   multilingual: value,
   agents: value,
   safety: value,
+  personality: value,
 })
 
 const quality: QualityAxes = {

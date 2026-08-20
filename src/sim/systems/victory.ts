@@ -1,6 +1,7 @@
 import { ECONOMY } from '../balance/economy'
 import { STAFF_HIRE_COST, STAFF_ROLES, STAFF_WAGE_PER_DAY } from '../balance/staff'
 import type { CashDistressStage, Model, SimState, TileKind } from '../types'
+import { isLivePublicModel } from '../modelRelease'
 import { isBuildableKind, isDcKind, isHqAnchor } from './map'
 import { playerStaff } from './staff'
 import { facilityAnchorTiles, usesCompactWorld } from './worldAccess'
@@ -37,7 +38,7 @@ export function playerSotaProximity(state: SimState): {
   sota: number
 } {
   const released = (ms: Model[]) =>
-    ms.filter((m) => m.release === 'released' || m.shipped)
+    ms.filter(isLivePublicModel)
   const bestCap = released(state.player.models).reduce(
     (m, x) => Math.max(m, x.capability),
     0,
@@ -59,9 +60,7 @@ export function playerSotaProximity(state: SimState): {
  * so banks lend more against a frontier lab even before profits scale.
  */
 export function modelIpValue(state: SimState): number {
-  const models = state.player.models.filter(
-    (m) => m.release === 'released' || m.shipped,
-  )
+  const models = state.player.models.filter(isLivePublicModel)
   if (models.length === 0) return 0
   const { bestCap, sota } = playerSotaProximity(state)
 

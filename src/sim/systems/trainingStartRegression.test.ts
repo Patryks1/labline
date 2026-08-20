@@ -4,6 +4,11 @@ import { analyzeTrainingData, ioForPreset } from '../balance/trainingV3'
 import { createGame } from '../createGame'
 import { ensureLabData } from './data'
 import {
+  DEFAULT_POST_TRAIN_SHARE,
+  foundationDataWeights,
+  splitTrainingTokens,
+} from '../balance/modelProduct'
+import {
   defaultTrainingDataWeights,
   startTraining,
   trainingArchitectureValidation,
@@ -14,7 +19,9 @@ const TOTAL_DATA_MTOK = 21_430
 function sparseRecipeState() {
   const state = createGame(13_070)
   const data = ensureLabData(state)
-  const weights = defaultTrainingDataWeights('moe', 'language')
+  const weights = foundationDataWeights(
+    defaultTrainingDataWeights('moe', 'language'),
+  )
   const stocks = Object.fromEntries(
     DATA_DOMAINS.map((domain) => {
       const volume = TOTAL_DATA_MTOK * weights[domain]
@@ -54,7 +61,9 @@ function sparseRecipeState() {
 
 describe('sparse MoE training start regression', () => {
   it('allows 13B total / 70M active and starts the selected 21.43B-token recipe', () => {
-    const weights = defaultTrainingDataWeights('moe', 'language')
+    const weights = foundationDataWeights(
+    defaultTrainingDataWeights('moe', 'language'),
+  )
     const next = startTraining(sparseRecipeState(), {
       name: 'Sparse 13B',
       family: 'moe',
@@ -81,8 +90,21 @@ describe('sparse MoE training start regression', () => {
       trainShare: 0.8,
       computePriority: 0,
     })
-    expect(next.player.trainingJob!.trainMTok).toBeCloseTo(17_144, 3)
-    expect(next.player.trainingJob!.verifyMTok).toBeCloseTo(4_286, 3)
+    const split = splitTrainingTokens(TOTAL_DATA_MTOK, DEFAULT_POST_TRAIN_SHARE)
+    expect(next.player.trainingJob!.dataPlan.postTrainShare).toBeCloseTo(
+      split.postTrainShare,
+    )
+    expect(next.player.trainingJob!.dataPlan.postTrainMTok).toBeCloseTo(
+      split.postTrainMTok,
+    )
+    expect(next.player.trainingJob!.dataPlan.totalMTok).toBeCloseTo(
+      split.baseMTok,
+    )
+    expect(next.player.trainingJob!.trainMTok).toBeCloseTo(split.baseMTok * 0.8, 3)
+    expect(next.player.trainingJob!.verifyMTok).toBeCloseTo(
+      split.baseMTok * 0.2,
+      3,
+    )
   })
 
   it('keeps only genuinely invalid active sizes as hard failures', () => {
@@ -103,7 +125,9 @@ describe('sparse MoE training start regression', () => {
   })
 
   it('explains the verifier-adjusted target and extreme-routing penalty as advisory', () => {
-    const weights = defaultTrainingDataWeights('moe', 'language')
+    const weights = foundationDataWeights(
+    defaultTrainingDataWeights('moe', 'language'),
+  )
     const analysis = analyzeTrainingData({
       paramsB: 13,
       activeParamsB: 0.07,
@@ -130,7 +154,9 @@ describe('sparse MoE training start regression', () => {
   })
 
   it('explains when raw volume passes but effective quality and diversity do not', () => {
-    const weights = defaultTrainingDataWeights('moe', 'language')
+    const weights = foundationDataWeights(
+    defaultTrainingDataWeights('moe', 'language'),
+  )
     const analysis = analyzeTrainingData({
       paramsB: 13,
       activeParamsB: 0.07,

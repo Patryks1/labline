@@ -1,6 +1,8 @@
 import { planAllowanceMTokPerMonth } from '../../../sim/systems/plans'
 import { splitBlendedApiPrice } from '../../../sim/balance/pricing'
 import type { Model, SimState, SubPlan } from '../../../sim/types'
+import { isLivePublicModel } from '../../../sim/modelRelease'
+import { planExposedModelIds } from '../../../sim/balance/modelRouter'
 
 export interface PlanReviewMetric {
   label: string
@@ -64,10 +66,14 @@ function average(models: Model[], score: (model: Model) => number): number {
 
 function planModels(state: SimState, plan: SubPlan): Model[] {
   const released = state.player.models.filter(
-    (model) => model.release === 'released' || model.shipped,
+    isLivePublicModel,
   )
   const byId = new Map(released.map((model) => [model.id, model]))
-  const assigned = [...new Set(plan.modelIds)]
+  const assigned = planExposedModelIds(
+    plan,
+    state.player.models,
+    state.player.modelRouters,
+  )
     .map((id) => byId.get(id))
     .filter((model): model is Model => model != null)
   if (assigned.length > 0) return assigned
@@ -265,7 +271,7 @@ export function buildPlanReviewGroups(state: SimState): PlanReviewGroup[] {
 export function buildApiReviewGroups(state: SimState): ApiReviewGroup[] {
   const serviceHealth = Math.max(0.25, 1 - state.player.servicePain * 0.55)
   return state.player.models
-    .filter((model) => model.release === 'released' || model.shipped)
+    .filter(isLivePublicModel)
     .map((model) => {
       const rates = modelApiRates(state, model)
       const blendedPrice = rates.input * 0.3 + rates.output * 0.7

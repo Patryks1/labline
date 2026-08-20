@@ -80,7 +80,7 @@ describe("training loss realism", () => {
     const strong = {
       ...baseJob,
       dataQualityUsed: 92,
-      dataPlan: { totalUnits: 1_000, weights: { code: 1, math: 1, chat: 1 } },
+      dataPlan: { totalUnits: 1_000, weights: { code: 1, math: 1, science: 1 } },
     };
     const weak = {
       ...baseJob,

@@ -153,7 +153,10 @@ export interface TrainingCampaignChoice {
   id: string;
   label: string;
   description: string;
+  /** AFK / duty-scientist recipe. Never shown as a live "recommended" badge. */
   recommended?: boolean;
+  /** True when the player authored or retuned the recipe via the mixer. */
+  playerAuthored?: boolean;
   effects: TrainingCampaignChoiceEffects;
 }
 
@@ -178,6 +181,133 @@ export interface TrainingCampaignEvent {
 export type Modality = "text" | "image" | "video" | "audio" | "tools";
 
 export type PostTrainStage = "none" | "sft" | "rlhf" | "process" | "tools";
+
+/** Product lifecycle after foundation pretrain. */
+export type ModelLifecycle =
+  | "foundation"
+  | "specialized"
+  | "aligned"
+  | "reasoning";
+
+export type FocusAxis =
+  | "coding"
+  | "science"
+  | "research"
+  | "personality"
+  | "chat";
+
+export interface SpecializationFocus {
+  coding: number;
+  science: number;
+  research: number;
+  personality: number;
+  chat: number;
+}
+
+/** @deprecated Use EffortRecipe.id. Kept for save migration. */
+export type ReasoningEffort = "low" | "medium" | "high";
+
+export type EffortKind = "instant" | "trained";
+
+/** @deprecated Use EffortRecipe. Kept for save migration. */
+export interface ReasoningEffortPolicy {
+  level: ReasoningEffort;
+  trained: boolean;
+  quality: number;
+  outputTokenMult: number;
+  hardTaskLift: number;
+}
+
+export interface EffortRecipe {
+  id: string;
+  name: string;
+  kind: EffortKind;
+  /** Serve-time thinking budget. Instant is 1. */
+  thinkingTokenMult: number;
+  trainPfDays: number;
+  trainCash: number;
+  trained: boolean;
+  /** 0–1: how much of the thinking budget is useful work. */
+  quality: number;
+  served: boolean;
+}
+
+export interface EffortBoard {
+  id: string;
+  name: string;
+  trained: boolean;
+  served: boolean;
+  capability: number;
+  tokenMult: number;
+  usdPerMTok: number | null;
+  math: number;
+  coding: number;
+  science: number;
+  agents: number;
+}
+
+export interface EffortTrainProgress {
+  recipeId: string;
+  name: string;
+  thinkingTokenMult: number;
+  progressPfDays: number;
+  targetPfDays: number;
+  cashSunk: number;
+}
+
+export interface ModelProductProfile {
+  lifecycle: ModelLifecycle;
+  focus: SpecializationFocus;
+  personality: number;
+  tokenEfficiency: number;
+  effortRecipes: EffortRecipe[];
+  defaultEffortId: string;
+  /** @deprecated Migrated into effortRecipes. */
+  effortPolicies?: ReasoningEffortPolicy[];
+  /** @deprecated Migrated into defaultEffortId. */
+  defaultEffort?: ReasoningEffort;
+  /** @deprecated Migrated into effortRecipes[].served. */
+  servedEfforts?: ReasoningEffort[];
+}
+
+/** Player-funded post-training gyms that grade SFT / RLHF / process / tools. */
+export type PostTrainGymKind = "code" | "math" | "research" | "chat";
+
+export interface PostTrainGym {
+  readonly id: string;
+  readonly kind: PostTrainGymKind;
+  name: string;
+  investedCash: number;
+  /** Compute rented as cash (cluster-time), not live PF. */
+  investedComputeCash: number;
+  quality: number;
+}
+
+export type ToolSkillId = "json" | "grep" | "python" | "shell" | "web";
+
+export interface ToolSkill {
+  id: ToolSkillId;
+  proficiency: number;
+  investedCash: number;
+  investedComputeCash?: number;
+}
+
+export type ModelRouterLane =
+  | "default"
+  | "chat"
+  | "code"
+  | "math"
+  | "science"
+  /** @deprecated Remapped to chat. */
+  | "fast"
+  /** @deprecated Remapped to default. */
+  | "frontier";
+
+export interface ModelRouter {
+  id: string;
+  name: string;
+  lanes: Partial<Record<ModelRouterLane, string>>;
+}
 
 export type Speed = 0 | 1 | 2 | 5;
 
@@ -263,7 +393,9 @@ export interface CloudProvider {
   name: string;
   regionId: string;
   baselinePf: number;
-  /** Long-run expansion ceiling, initialized from the first simulated baseline when absent. */
+  /** First-seen baseline used as the campaign expansion origin when absent. */
+  launchBaselinePf?: number;
+  /** Day-scaled expansion ceiling; raised each tick, never a permanent 1.5× lock. */
   maxBaselinePf?: number;
   availablePf: number;
   basePricePerPfDay: number;
@@ -472,9 +604,11 @@ export type BenchmarkId =
   | "science"
   | "multilingual"
   | "agents"
-  | "safety";
+  | "safety"
+  | "personality";
 
 export type BenchmarkScores = Record<BenchmarkId, number>;
+export type DomainHeat = Partial<Record<BenchmarkId, number>>;
 
 export type BenchmarkSuiteId =
   | "language"
@@ -1324,6 +1458,12 @@ export interface TrainingDataPlan {
   repeatedMTok?: number;
   /** Synthetic fill provenance for this recipe (teacher-generated in distill). */
   syntheticProvenance?: SyntheticFillRecord[];
+  /** Instruction mix reserved for alignment after the base run. */
+  postTrainWeights?: Partial<Record<DataDomain, number>>;
+  /** Extra MTok consumed when post-training starts. */
+  postTrainMTok?: number;
+  /** Share of the funded token budget reserved for post-train (0–1). */
+  postTrainShare?: number;
 }
 
 export interface Model {
@@ -1352,6 +1492,8 @@ export interface Model {
   verifiedRecursiveCapabilityBonus?: number;
   /** Authoritative domain vector for v4 models; legacy models derive it on read. */
   capabilities?: ModelCapabilities;
+  /** Grouped product axes: lifecycle, personality, effort, token efficiency. */
+  productProfile?: ModelProductProfile;
   modalities: Modality[];
   quality: QualityAxes;
   benchmarks: BenchmarkScores;
@@ -1385,6 +1527,11 @@ export interface Model {
   /** @deprecated use release === 'released' */
   shipped: boolean;
   release: ModelRelease;
+  /**
+   * Off the live serving fleet without deleting weights.
+   * Train / distill remain available; restore returns it to public serving.
+   */
+  archived?: boolean;
   tokPerSecMult: number;
   inferCostMult: number;
   serviceProfile?: ServiceProfile;
@@ -1406,9 +1553,15 @@ export interface Model {
   suggestedApiPrice: number;
   suggestedApiPriceIn: number;
   suggestedApiPriceOut: number;
-  /** At-cost floor for this model (compute-based) */
+  /** Hosting-cost floor ($/MTok in) from campus ops, size, and token mix. */
   costApiPriceIn: number;
+  /** Hosting-cost floor ($/MTok out); decode is more expensive than prefill. */
   costApiPriceOut: number;
+  /**
+   * Released models are public on evals. Demand only hits them when this is
+   * true (API listed and/or attached to a plan).
+   */
+  commerciallyOffered?: boolean;
   distilled: boolean;
   teacherId?: string;
   /** Distill mix used when this model was trained (teacher fraction 0–1) */
@@ -1725,6 +1878,14 @@ export type PrivateEvaluationJob =
       scheduledDay: number;
       readyDay: number;
       pending: import("./balance/checkpointEvaluation").PendingCheckpointEvaluation;
+    }
+  | {
+      id: string;
+      kind: "released_model_evaluation";
+      subjectId: string;
+      scheduledDay: number;
+      readyDay: number;
+      pending: import("./balance/checkpointEvaluation").PendingCheckpointEvaluation;
     };
 
 export interface PostTrainRiskPlan {
@@ -1831,6 +1992,13 @@ export interface TrainingJob {
   parentCheckpointId?: string;
   /** Product direction selected when this continuation branch was created. */
   branchDirection?: TrainingCheckpointBranchDirection;
+  /** Foundation / specialized / aligned / reasoning. Pretrain starts as foundation. */
+  lifecycle?: ModelLifecycle;
+  /** Player-authored specialize sliders for this run. */
+  specializationFocus?: SpecializationFocus;
+  productProfile?: ModelProductProfile;
+  /** In-flight named effort head (not Instant). */
+  effortTrain?: EffortTrainProgress;
   /** @deprecated */
   dataMix: DataMix;
   dataPlan: TrainingDataPlan;
@@ -1855,6 +2023,10 @@ export interface TrainingJob {
   campaignMilestonesReached?: number[];
   /** Current explainable incident/discovery awaiting a player decision. */
   pendingCampaignEvent?: TrainingCampaignEvent;
+  /** @deprecated Alignment now starts from the recipe; kept for old saves. */
+  pendingPostTrainPhase?: boolean;
+  /** Alignment mix/gyms have been applied after the base run. */
+  postTrainPhaseResolved?: boolean;
   /** Bounded resolved event history retained for the release review. */
   campaignEventHistory?: TrainingCampaignEvent[];
   /** Accumulated effects of player campaign decisions. */
@@ -1870,6 +2042,11 @@ export interface TrainingJob {
   integratedMethods?: string[];
   /** Player-selected model-specific research integrations. */
   modelStack?: string[];
+  /**
+   * Domain labs attached to this run. Research must unlock the lab kind;
+   * funded gym quality then lifts that domain while the model trains.
+   */
+  attachedGymKinds?: PostTrainGymKind[];
   dataQualityByDomain?: Partial<Record<DataDomain, number>>;
   lowQualityShareByDomain?: Partial<Record<DataDomain, number>>;
   syntheticProvenance?: SyntheticFillRecord[];
@@ -1957,6 +2134,9 @@ export interface TrainingBenchmarkSnapshot {
   suiteResults?: Partial<
     Record<BenchmarkSuiteId, TrainingBenchmarkSuiteResult>
   >;
+  /** Capability at each trained reasoning effort. */
+  effortCapabilities?: Partial<Record<string, number>>;
+  effortBoards?: EffortBoard[];
 }
 
 export interface ModelEconomics {
@@ -2054,12 +2234,16 @@ export interface StartTrainingOpts {
   continueFromCheckpointId?: string;
   /** Branch direction used to bias the continuation recipe. */
   branchDirection?: TrainingCheckpointBranchDirection;
+  lifecycle?: ModelLifecycle;
+  specializationFocus?: SpecializationFocus;
   /** @deprecated prefer dataPlan */
   dataMix?: DataMix;
   /** Domain mix + volume of processed data to use */
   dataPlan?: TrainingDataPlan;
   /** Research-backed runtime and architecture modules to integrate. */
   modelStack?: string[];
+  /** Domain labs to attach for this run (research-gated). */
+  attachedGymKinds?: PostTrainGymKind[];
   trainingNumerics?: TrainingNumerics;
   computePriority?: number;
   reservedPf?: number;
@@ -2117,6 +2301,11 @@ export interface SubPlan {
   usageRate: number | null;
   /** Models a subscriber on this plan may use */
   modelIds: string[];
+  /**
+   * Serving routers this plan exposes as a mix. Optional on old saves.
+   * Members do not need to be listed again in `modelIds`.
+   */
+  routerIds?: string[];
   /** Relative share of the subscription PF pool under load (10–100). */
   computePriority?: number;
   /**
@@ -2238,11 +2427,17 @@ export interface ProductPricing {
   /**
    * Overload policy: 'shed' rejects excess demand (queues/timeouts → churn),
    * 'throttle' serves everyone but slows streams (speed strain → demand cools
-   * tomorrow), 'balanced' throttles the first ~25% of overload then sheds.
+   * tomorrow), 'balanced' throttles the first ~25% of overload then sheds,
+   * 'surge' uses the balanced absorb curve and raises API prices under load.
    */
   serveThrottlePolicy?: ServeThrottlePolicy;
   /** Public models currently listed as simultaneous API endpoints. */
   apiModelIds?: string[];
+  /**
+   * Serving routers listed as API mixes. Optional on old saves.
+   * When set, those mixes are sold as one endpoint each; members stay hidden.
+   */
+  apiRouterIds?: string[];
   /** Per-endpoint API precision. Missing entries serve full precision. */
   apiServePrecisionByModel?: Record<string, PlanServePrecision>;
   activeModelId: string | null;
@@ -2255,7 +2450,7 @@ export interface ProductPricing {
   proIncludedMTok: number;
 }
 
-export type ServeThrottlePolicy = "shed" | "balanced" | "throttle";
+export type ServeThrottlePolicy = "shed" | "balanced" | "throttle" | "surge";
 
 export interface SegmentState {
   id: SegmentId;
@@ -2275,6 +2470,8 @@ export interface MarketOffer {
   capability: number;
   reliability: number;
   safety: number;
+  /** 0–100 personality / steerability. Missing offers treat as chat-quality proxy. */
+  personality?: number;
   brandTrust: number;
   apiPrice: number;
   subPrice: number;
@@ -2295,6 +2492,8 @@ export interface MarketOffer {
   apiListed?: boolean;
   /** False when this model is not exposed by any enabled subscription plan. */
   subscriptionListed?: boolean;
+  /** Set when this offer is a live serving router mix, not a single model. */
+  routerId?: string;
 }
 
 /** Public API product offer emitted for every released model. */
@@ -2697,7 +2896,7 @@ export interface FinanceMonthSnapshot {
   averageValuation: number;
 }
 
-/** Per-model income attribution for the stats panel. */
+/** Per-model income attribution for the public fleet. */
 export interface ModelFinanceRow {
   modelId: string;
   name: string;
@@ -3045,6 +3244,9 @@ export interface LabState {
   models: Model[];
   trainingJob: TrainingJob | RivalTrainJob | null;
   pricing: ProductPricing;
+  /** Player serving routers; rivals omit this. */
+  modelRouters?: ModelRouter[];
+  activeModelRouterId?: string | null;
   rackFleet: RackInstall[];
   rackDesigns: RackDesign[];
   fab: FabProject;
@@ -3277,6 +3479,10 @@ export interface RivalTrainJob {
   /** Fraction of train tokens that were LQ synth (regression risk) */
   synthLqShare: number;
   trainShare: number;
+  /** Align slice of the shared spider recipe (0.1–0.9). */
+  postTrainShare?: number;
+  /** Planned alignment tokens; consumed in a later pass for the player. */
+  postTrainMTok?: number;
   totalMTok: number;
   outcomeSeed?: number;
   outcomeRisk?: "low" | "medium" | "high";
@@ -3492,6 +3698,8 @@ export interface PlayerState {
   apiSpeedStrain?: number;
   /** 0–1 throttling EMA on the subscription channel (plan streams). */
   subSpeedStrain?: number;
+  /** 0–1 EMA of API unserved load used by the surge pricing policy. */
+  apiSurgeLevel?: number;
   researchUnlocked: string[];
   activeResearch: ResearchProgress | null;
   /** Ordered research queue (next starts when active completes) */
@@ -3507,6 +3715,13 @@ export interface PlayerState {
   trainingJobs?: TrainingJob[];
   trainingJob: TrainingJob | null;
   safetyCampaign: SafetyCampaign | null;
+  /** Code / math / research gyms that grade post-training. */
+  postTrainGyms?: PostTrainGym[];
+  /** Tool curricula taught into the tools post-train stage. */
+  toolSkills?: ToolSkill[];
+  /** Named serving routers over released (and internal) models. */
+  modelRouters?: ModelRouter[];
+  activeModelRouterId?: string | null;
   /** Negotiated recurring data suppliers (3-company system). */
   dataSupplierContracts?: DataSupplierContract[];
   dataSupplierOffers?: DataSupplierContract[];
@@ -3803,6 +4018,11 @@ export interface TransportRuntimeState {
   facilityAccess: Record<string, number>;
 }
 
+export interface CatchUpCampaign {
+  rivalId: LabId;
+  armedDay: number;
+}
+
 export interface SimState {
   seed: number;
   day: number;
@@ -3854,6 +4074,16 @@ export interface SimState {
   /** Open data market listings (refreshes over days) */
   dataMarket: DataMarketState;
   segments: SegmentState[];
+  /**
+   * Market-facing domain heat (coding/agents/science pulse). Absent on old
+   * saves; normalized to the 2026 baseline on load.
+   */
+  domainHeat?: DomainHeat;
+  /**
+   * Armed competitive-response campaign. Absent until a seeded daily roll
+   * fires; persists through the challenger's training job.
+   */
+  catchUpCampaign?: CatchUpCampaign;
   map: {
     width: number;
     height: number;
@@ -3907,6 +4137,10 @@ export interface SimState {
     apiSpeedStrain?: number;
     /** Subscription-channel throttle strain after today's settlement. */
     subSpeedStrain?: number;
+    /** Posted API surge EMA (0–1) after today's settlement. */
+    apiSurgeLevel?: number;
+    /** Effective API list-price multiplier from surge policy. */
+    apiSurgeMultiplier?: number;
     planStats: PlanDayStats[];
     /** Served subscription MTok today keyed by plan id. */
     servedMTokByPlanId?: Record<string, number>;

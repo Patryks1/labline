@@ -62,7 +62,7 @@ describe('HQ-first start', () => {
     if (world.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V7) {
       throw new Error('expected a V7 descriptor')
     }
-    expect(world.descriptor.settlementAlgorithmVersion).toBe(6)
+    expect(world.descriptor.settlementAlgorithmVersion).toBe(7)
     let urbanEmpty = 0
     let urbanBuilt = 0
     for (let id = 0; id < world.kind.length; id++) {

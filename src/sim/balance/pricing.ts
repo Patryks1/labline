@@ -5,6 +5,7 @@ import type {
   ProductPricing,
   SimState,
 } from "../types";
+import { isLivePublicModel } from "../modelRelease";
 import type { ComputeSnapshot } from "../systems/compute";
 import { ECONOMY } from "./economy";
 import { normalizeModelEvaluations, suiteComposite } from "./evaluationSuites";
@@ -33,10 +34,12 @@ export {
   API_COST_OUT_MULT,
   API_UNIT_COST_FLOOR,
   FALLBACK_COST_PER_MTOK,
+  apiHostingCostFloor,
   apiPriceMarkupPct,
   apiUnitCostPerMTok,
   boundedApiListCostPerMTok,
   birthApiUnitCostPerMTok,
+  clampApiListToHostingFloor,
   marginPct,
   markupPct,
   markupRatio,
@@ -44,6 +47,7 @@ export {
   servingOpsDayEstimate,
   splitInOutCost,
 } from "./unitEconomics";
+export type { ApiHostingCostFloor, ApiHostingCostSource } from "./unitEconomics";
 
 /** Canonical default text mix. Workload-specific ledgers may override it. */
 export const API_IN_SHARE = CANONICAL_TEXT_INPUT_SHARE;
@@ -935,11 +939,11 @@ export function serveInfraCost(
   const active = state.player.models.find(
     (m) =>
       m.id === state.player.pricing.activeModelId &&
-      (m.release === "released" || m.shipped),
+      isLivePublicModel(m),
   );
   const model =
     active ??
-    state.player.models.find((m) => m.release === "released" || m.shipped);
+    state.player.models.find((m) => isLivePublicModel(m));
   if (model) {
     const unit = apiUnitCostPerMTok(state, snap, model, {
       energyPricePerMWh,

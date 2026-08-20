@@ -42,6 +42,7 @@
   --hud-drawer: calc(30rem * var(--ui-scale));
   --hud-build-drawer: calc(34rem * var(--ui-scale));
   --hud-workbench: calc(73.75rem * var(--ui-scale));
+  --hud-models-workbench: calc(88rem * var(--ui-scale));
   --hud-intel: calc(18.75rem * var(--ui-scale));
   --hud-intel-rail: calc(3rem * var(--ui-scale));
   --hud-ops: calc(5.5rem * var(--ui-scale));
@@ -692,9 +693,8 @@ button:not(:disabled):active {
     0 0 18px color-mix(in srgb, var(--color-mint) 12%, transparent);
 }
 
-/* Models is opened as a narrow drawer at the reference desktop viewport.
-   Use the available container width, not the global viewport breakpoint, so
-   the queue never forces the work surface or its radar off-screen. */
+/* Models is a wide workbench. Size columns from the panel width, never the
+   window, or a narrow drawer still gets a 14rem rail and a crushed studio. */
 .models-workbench-layout {
   container-type: inline-size;
   grid-template-columns: minmax(0, 1fr);
@@ -715,15 +715,10 @@ button:not(:disabled):active {
   overflow-anchor: none;
 }
 
-@container (min-width: 52rem) {
+@container (min-width: 44rem) {
   .models-workbench-layout {
-    grid-template-columns: minmax(13.5rem, 16rem) minmax(0, 1fr);
-  }
-}
-
-@container (min-width: 68rem) {
-  .models-workbench-layout {
-    grid-template-columns: minmax(15rem, 18rem) minmax(0, 1fr);
+    grid-template-columns: minmax(12.5rem, 15rem) minmax(0, 1fr);
+    align-items: stretch;
   }
 }
 
@@ -759,9 +754,162 @@ button:not(:disabled):active {
   grid-template-columns: minmax(0, 1fr);
 }
 
-@container (min-width: 36rem) {
-  .training-data-radar-layout {
-    grid-template-columns: minmax(0, 1.15fr) minmax(12rem, 0.85fr);
+.training-data-radar-legend {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem 0.75rem;
+}
+
+.training-data-radar-chart {
+  position: relative;
+  width: 100%;
+  max-width: 34rem;
+  margin-inline: auto;
+  padding: 2.45rem 2.6rem 2.3rem;
+}
+
+.training-data-radar-label {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  justify-items: center;
+  gap: 0.05rem;
+  min-width: 2.75rem;
+  padding: 0.18rem 0.42rem 0.2rem;
+  border: 1px solid color-mix(in srgb, var(--color-line) 72%, transparent);
+  border-radius: 0.35rem;
+  background: color-mix(in srgb, var(--color-void) 92%, #02080c);
+  color: var(--color-bone);
+  font-size: 0.625rem;
+  line-height: 1.15;
+  white-space: nowrap;
+  pointer-events: auto;
+}
+
+.training-data-radar-label strong {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.training-data-radar-label.is-active {
+  border-color: color-mix(in srgb, #00e5c0 50%, var(--color-line));
+  color: #00e5c0;
+}
+
+.training-data-radar-pop {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  margin-top: 0.7rem;
+  padding: 0.5rem 0.6rem 0.45rem;
+  border: 1px solid color-mix(in srgb, var(--color-line) 82%, transparent);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--color-panel) 94%, #02080c);
+  color: var(--color-bone);
+}
+
+.training-data-radar-pop__rows {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: 0.2rem 0.55rem;
+}
+
+.training-data-radar-pop__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+  padding: 0 0.15rem 0.25rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-line) 70%, transparent);
+}
+
+.training-data-radar-pop__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.3rem;
+  width: 100%;
+  min-height: 1.7rem;
+  margin: 0;
+  padding: 0.12rem 0.15rem;
+  border: 0;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.training-data-radar-pop__edit {
+  display: grid;
+  grid-template-columns: 0.55rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.1rem 0.15rem;
+  border: 0;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.training-data-radar-pop__edit:hover,
+.training-data-radar-pop__row--edit:hover {
+  background: color-mix(in srgb, var(--color-panel-2) 78%, transparent);
+}
+
+.training-data-radar-pop__nudge {
+  display: flex;
+  gap: 0.15rem;
+}
+
+.training-data-radar-pop__nudge button {
+  width: 1.45rem;
+  height: 1.45rem;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--color-line) 80%, transparent);
+  border-radius: 0.25rem;
+  background: color-mix(in srgb, var(--color-void) 80%, transparent);
+  color: var(--color-bone);
+  font-size: 0.85rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.training-data-radar-pop__nudge button:hover {
+  border-color: color-mix(in srgb, #00e5c0 45%, var(--color-line));
+}
+
+.training-data-radar-pop__row[data-readonly='true'] {
+  cursor: default;
+  color: var(--color-muted);
+}
+
+.training-data-radar-pop__swatch {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 1px;
+}
+
+.training-data-radar-pop .hud-input {
+  min-height: 1.7rem;
+  width: 4.75rem;
+  padding: 0.12rem 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  text-align: right;
+}
+
+@media (min-width: 28rem) {
+  .training-data-radar-legend {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 
@@ -1016,6 +1164,13 @@ button:not(:disabled):active {
       calc(100vw - var(--hud-rail) - var(--hud-intel-rail) - max(24rem, 28vw))
     );
   }
+
+  .game-shell[data-workspace-open='true'][data-presentation='workbench'][data-active-panel='models'] {
+    --workspace-width: min(
+      var(--hud-models-workbench),
+      calc(100vw - var(--hud-rail) - var(--hud-intel-rail) - max(16rem, 18vw))
+    );
+  }
 }
 
 .game-shell[data-workspace-open='true'][data-presentation='immersive'] {
@@ -1089,7 +1244,8 @@ button:not(:disabled):active {
 .workspace-shell {
   grid-column: 1 / 3;
   grid-row: 2 / 4;
-  z-index: 20;
+  /* Above the compute strip, pool flyouts, and mini-map. */
+  z-index: 22;
   display: grid;
   min-height: 0;
   grid-template-columns: var(--hud-rail) minmax(0, 1fr);
@@ -1260,7 +1416,7 @@ button:not(:disabled):active {
 .intel-shell {
   grid-column: 4;
   grid-row: 2 / 4;
-  z-index: 20;
+  z-index: 22;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
@@ -1278,6 +1434,15 @@ button:not(:disabled):active {
   width: 100%;
   min-width: 0;
   padding-inline: 0;
+}
+
+.command-dock--expanded .seg-tabs__tab {
+  justify-content: center;
+  padding-inline: 0.25rem;
+}
+
+.command-dock--expanded .seg-tabs__tab > span {
+  display: none;
 }
 
 .desktop-rail-group-label {
@@ -1384,15 +1549,15 @@ button:not(:disabled):active {
 
 .training-activity-bar__surface {
   min-height: 2.75rem;
+  cursor: pointer;
   border-color: color-mix(in srgb, var(--color-train) 24%, var(--color-line));
   background: color-mix(in srgb, var(--color-panel) 92%, transparent);
   box-shadow: 0 10px 28px rgba(2, 12, 17, 0.34), inset 0 1px rgba(255, 255, 255, 0.035);
   pointer-events: auto;
 }
 
-/* Workspaces, inspectors, popovers, and editors own the foreground. The
-   persistent status strip remains visible but cannot cover or intercept any
-   control that belongs to the active context. */
+/* Keep the strip visible under workspaces, but still clickable so it can
+   switch the player to Models. */
 .game-shell[data-workspace-open='true'] .training-activity-bar,
 .game-shell:has(.tile-inspector) .training-activity-bar,
 .game-shell[data-intel-open='true'] .training-activity-bar,
@@ -1400,15 +1565,12 @@ button:not(:disabled):active {
   z-index: 10;
 }
 
-.game-shell[data-workspace-open='true'] .training-activity-bar__surface,
-.game-shell:has(.tile-inspector) .training-activity-bar__surface,
-.game-shell[data-intel-open='true'] .training-activity-bar__surface,
-.game-shell[data-hq-office-open='true'] .training-activity-bar__surface {
-  pointer-events: none;
-}
-
 .training-activity-bar__item {
   min-height: 2.25rem;
+}
+
+.training-activity-bar__list {
+  max-height: 7.25rem;
 }
 
 .training-activity-bar__meter .hud-meter {
@@ -1440,8 +1602,62 @@ button:not(:disabled):active {
   right: var(--hud-intel-rail);
   bottom: 0;
   height: var(--hud-ops);
-  /* Operational context stays visible over the map, but open workspaces own the foreground. */
-  z-index: 15;
+  overflow: visible;
+  /* Above the training strip so pool flyouts can paint over it. Mini-map and
+     left/right chrome sit higher so they keep pointer events and visibility. */
+  z-index: 17;
+}
+
+.operations-panel {
+  overflow: visible;
+}
+
+/* Glass lives on a sibling so backdrop-filter cannot clip the pool flyout. */
+.operations-panel__surface {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.operations-pool-flyout {
+  --operations-flyout-clearance: 0.5rem;
+  position: absolute;
+  bottom: calc(100% + var(--hud-training-height) + (var(--hud-bottom-operations-top) - var(--hud-ops)) + 0.85rem);
+  z-index: 2;
+  width: min(20rem, calc(100% - var(--operations-flyout-clearance) - 0.5rem));
+  padding: 0.65rem 0.75rem;
+  pointer-events: none;
+}
+
+.operations-pool-flyout[data-align='train'] {
+  left: var(--operations-flyout-clearance);
+}
+
+.operations-pool-flyout[data-align='serve'] {
+  left: max(50%, calc(var(--operations-flyout-clearance) + 10rem));
+  transform: translateX(-50%);
+}
+
+.operations-pool-flyout[data-align='research'] {
+  right: 0.5rem;
+}
+
+/* Desktop mini-map occupies the lower-left map band. Keep pool flyouts to its
+   right so they don't hide under it (mini-map stacks above the flyout). */
+@media (min-width: 1001px) and (min-height: 761px) {
+  .game-shell:not([data-workspace-open='true'][data-presentation='workbench']):not([data-workspace-open='true'][data-presentation='immersive']) .operations-pool-flyout {
+    --operations-flyout-clearance: calc(var(--workspace-width) + clamp(21.5rem, 23vw, 23rem) + 1.25rem);
+  }
+}
+
+.operations-telemetry__facts {
+  min-width: 0;
+}
+
+.map-navigator,
+.map-navigator-launcher {
+  z-index: 19;
 }
 
 .map-navigator {
@@ -1464,13 +1680,57 @@ button:not(:disabled):active {
 }
 
 .map-navigator-commandbar {
-  min-height: 2.6rem;
+  min-height: 2.15rem;
+  flex-wrap: nowrap;
 }
 
-.map-navigator-commandbar > div:last-child > button {
+/* Camera/cloud cluster: beat .hud-button padding/min-height so glyphs are not
+   clipped inside a 24px box (unicode arrows also missing from Space Grotesk). */
+.map-navigator-tools > .hud-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
   width: 1.5rem;
   min-width: 1.5rem;
   height: 1.5rem;
+  min-height: 1.5rem;
+  padding: 0;
+  overflow: visible;
+}
+
+.map-navigator-tools > .hud-button.map-navigator-tilt {
+  width: auto;
+  min-width: 1.5rem;
+  padding: 0;
+}
+
+.map-navigator-layers {
+  position: absolute;
+  top: 0.4rem;
+  left: 0.4rem;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  padding: 0.18rem;
+  border: 1px solid color-mix(in srgb, var(--color-line) 70%, transparent);
+  border-radius: 0.4rem;
+  background: color-mix(in srgb, var(--color-void) 88%, transparent);
+  box-shadow: 0 8px 18px rgba(2, 12, 17, 0.35);
+  backdrop-filter: blur(8px);
+}
+
+.map-navigator-layers .map-navigator-layers__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.4rem;
+  min-width: 1.4rem;
+  height: 1.4rem;
+  min-height: 1.4rem;
+  padding: 0;
+  border-color: transparent;
 }
 
 .map-navigator-legend {
@@ -1478,9 +1738,55 @@ button:not(:disabled):active {
   background: linear-gradient(180deg, rgba(6, 18, 25, 0.55), rgba(6, 18, 25, 0.9));
 }
 
+.map-navigator-zoombar {
+  height: 1.35rem;
+  gap: 0.05rem;
+  padding: 0.08rem;
+}
+
+.map-navigator-zoombar .hud-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 1.15rem;
+  height: 1.15rem;
+  min-width: 0;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: 0.5rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.map-navigator-zoombar__icon {
+  width: 1.15rem;
+  min-width: 1.15rem;
+  font-size: 0.7rem;
+}
+
+.map-navigator-zoombar__label {
+  padding: 0 0.35rem;
+}
+
+.map-navigator-zoombar__level {
+  min-width: 1.35rem;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.5rem;
+  line-height: 1;
+  color: var(--color-muted);
+}
+
 .map-navigator-launcher,
-.map-navigator-compact-close,
 .map-navigator-compact-heading {
+  display: none;
+}
+
+/* Beat .hud-close-button { display: inline-grid } so the collapse chevron
+   does not stack on top of the sitebar's next-building chevron. */
+.map-navigator > .hud-close-button.map-navigator-compact-close {
   display: none;
 }
 
@@ -1489,13 +1795,7 @@ button:not(:disabled):active {
     --hud-rail: calc(9.5rem * var(--ui-scale));
   }
 
-  /* Models owns a compact-desktop stack so the queue cannot squeeze the
-     selected work surface into an unusable sliver. Keep this range aligned
-     with panels/models/modelsResponsiveLayout.ts. */
-    .models-workbench-layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
+  /* Compact rail labels in this viewport. Models layout is container-sized. */
   .desktop-workspace-rail button {
     gap: 0.5rem;
     padding-inline: 0.55rem;
@@ -1514,14 +1814,6 @@ button:not(:disabled):active {
   .game-shell[data-active-panel='data'] .seg-tabs__tab {
     min-width: 0;
     padding-inline: 0.3rem;
-  }
-}
-
-@media (min-width: 1201px) and (max-width: 1360px) {
-  /* Keep the queue useful without taking the compact desktop workbench's
-     remaining Define/Data/Compute/Review width. */
-  .models-workbench-layout {
-    grid-template-columns: minmax(13rem, 14rem) minmax(0, 1fr);
   }
 }
 
@@ -1554,11 +1846,14 @@ button:not(:disabled):active {
   z-index: 45;
 }
 
-.game-shell[data-workspace-open='true'][data-presentation='workbench'] .map-navigator-compact-close,
-.game-shell[data-workspace-open='true'][data-presentation='immersive'] .map-navigator-compact-close,
 .game-shell[data-workspace-open='true'][data-presentation='workbench'] .map-navigator-compact-heading,
 .game-shell[data-workspace-open='true'][data-presentation='immersive'] .map-navigator-compact-heading {
   display: flex;
+}
+
+.game-shell[data-workspace-open='true'][data-presentation='workbench'] .map-navigator > .hud-close-button.map-navigator-compact-close,
+.game-shell[data-workspace-open='true'][data-presentation='immersive'] .map-navigator > .hud-close-button.map-navigator-compact-close {
+  display: inline-grid;
 }
 
 @media (max-width: 1000px), (max-height: 760px) {
@@ -1584,9 +1879,12 @@ button:not(:disabled):active {
     display: block;
   }
 
-  .map-navigator-compact-close,
   .map-navigator-compact-heading {
     display: flex;
+  }
+
+  .map-navigator > .hud-close-button.map-navigator-compact-close {
+    display: inline-grid;
   }
 
   .game-shell[data-workspace-open='true'] .map-navigator,
@@ -1816,41 +2114,80 @@ input[type='range'] {
   cursor: grab;
 }
 
+.model-size-control {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+  padding-bottom: 0.5rem;
+}
+
+.hud-range.model-size-timeline {
+  min-height: 2.5rem;
+  min-width: 0;
+}
+
 .model-size-timeline {
   -webkit-appearance: none;
   appearance: none;
-  height: 0.45rem;
-  border: 1px solid color-mix(in srgb, var(--color-line) 75%, transparent);
-  border-radius: 0.2rem;
-  background:
-    radial-gradient(circle at 22% 50%, color-mix(in srgb, var(--color-mint) 30%, transparent), transparent 18%),
-    linear-gradient(90deg, var(--color-mint) 0%, var(--color-serve) 58%, var(--color-amber) 80%, var(--color-danger) 100%);
-  box-shadow: inset 0 1px 1px color-mix(in srgb, var(--color-bone) 15%, transparent);
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: 2.5rem;
+  margin: 0;
+  background: transparent;
+  border: 0;
   outline: none;
   cursor: pointer;
 }
 
 .model-size-timeline:focus-visible {
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-mint) 45%, transparent);
+  box-shadow: none;
+}
+
+.model-size-timeline:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-mint) 35%, transparent);
+}
+
+.model-size-timeline:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-mint) 35%, transparent);
+}
+
+.model-size-timeline::-webkit-slider-runnable-track {
+  height: 2px;
+  border: 0;
+  border-radius: 9999px;
+  background: transparent;
 }
 
 .model-size-timeline::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 0.95rem;
-  height: 1.05rem;
-  border: 2px solid var(--color-bone);
-  border-radius: 0.2rem;
-  background: var(--color-panel);
-  box-shadow: 0 0 0 1px var(--color-void), 0 0 0.75rem color-mix(in srgb, var(--color-mint) 45%, transparent);
+  width: 14px;
+  height: 14px;
+  margin-top: -6px;
+  border: 2px solid var(--color-void);
+  border-radius: 9999px;
+  background: var(--color-mint);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-mint) 50%, transparent);
+}
+
+.model-size-timeline::-moz-range-track {
+  height: 2px;
+  border: 0;
+  background: transparent;
 }
 
 .model-size-timeline::-moz-range-thumb {
-  width: 0.95rem;
-  height: 1.05rem;
-  border: 2px solid var(--color-bone);
-  border-radius: 0.2rem;
-  background: var(--color-panel);
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--color-void);
+  border-radius: 9999px;
+  background: var(--color-mint);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-mint) 50%, transparent);
 }
 
 /* Compact panel titles (uniform density) */
@@ -1949,6 +2286,92 @@ input[type='range'] {
 .metric-tile--train .metric-tile__value { color: var(--color-train); }
 .metric-tile--gold .metric-tile__value { color: var(--color-gold); }
 
+/* Finances header: one instrument, not six orphan cards. The 1px gap is the
+   grid line; cells fill every track so 6 facts always make a complete 2×3 or 3×2. */
+.finance-readout {
+  container-type: inline-size;
+}
+
+.finance-readout__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-line) 72%, transparent);
+  border-radius: var(--hud-radius-card);
+  background: color-mix(in srgb, var(--color-line) 72%, transparent);
+}
+
+@container (min-width: 26rem) {
+  .finance-readout__grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.finance-readout__cell {
+  min-width: 0;
+  padding: 0.55rem 0.7rem 0.5rem;
+  background: color-mix(in srgb, var(--color-panel-2) 88%, transparent);
+  text-align: left;
+}
+
+.finance-readout__cell--hero {
+  padding: 0.7rem 0.75rem 0.65rem;
+}
+
+.finance-readout__cell--action {
+  cursor: pointer;
+  appearance: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+}
+
+.finance-readout__cell--action:hover {
+  background: color-mix(in srgb, var(--color-mint) 8%, var(--color-panel-2));
+}
+
+.finance-readout__cell--action:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--color-mint) 76%, transparent);
+}
+
+.finance-readout__label {
+  display: block;
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: 0.625rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.finance-readout__value {
+  display: block;
+  margin-top: 0.2rem;
+  overflow: hidden;
+  color: var(--color-bone);
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.finance-readout__cell--hero .finance-readout__value {
+  margin-top: 0.28rem;
+  font-size: 1.0625rem;
+}
+
+.finance-readout__value--positive { color: var(--color-mint); }
+.finance-readout__value--warning { color: var(--color-amber); }
+.finance-readout__value--danger { color: var(--color-danger); }
+
 .status-chip {
   display: inline-flex;
   min-height: 1.5rem;
@@ -2031,6 +2454,29 @@ input[type='range'] {
   box-shadow: 0 0 0 2px var(--color-void), 0 0 0 4px color-mix(in srgb, var(--color-danger) 78%, transparent);
 }
 .hud-button:disabled { cursor: not-allowed; opacity: 0.45; }
+
+.map-navigator-layers .hud-button.map-navigator-layers__btn {
+  width: 1.4rem;
+  min-width: 1.4rem;
+  height: 1.4rem;
+  min-height: 1.4rem;
+  padding: 0;
+  border-color: transparent;
+}
+
+.map-navigator-tools > .hud-button {
+  width: 1.5rem;
+  min-width: 1.5rem;
+  height: 1.5rem;
+  min-height: 1.5rem;
+  padding: 0;
+}
+
+.map-navigator-commandbar [aria-label='Building filter'] .hud-button {
+  min-height: 1.5rem;
+  height: 1.5rem;
+  padding: 0 0.5rem;
+}
 
 /* Shared dense filter/action row. The body remains a normal grid on desktop;
    narrow screens can collapse it behind one explicit disclosure control. */
@@ -2679,7 +3125,9 @@ input[type='range'] {
   }
 
   .training-activity-bar__item {
-    min-width: min(18rem, calc(100vw - 1.5rem));
+    min-width: min(11rem, calc(100vw - 1.5rem));
+    max-width: none;
+    flex: 1 1 min(11rem, calc(100vw - 1.5rem));
   }
 
   .training-activity-bar .hud-button {
@@ -2978,27 +3426,31 @@ input[type='range'] {
     border-radius: 0.7rem;
   }
 
-  .operations-panel > div:first-of-type {
+  .operations-pool-flyout {
+    display: none;
+  }
+
+  .operations-telemetry {
     margin-bottom: 0;
     min-height: max(2.75rem, 44px);
   }
 
-  .operations-panel > div:first-of-type > span,
-  .operations-panel > div:first-of-type > .status-chip {
+  .operations-telemetry__facts > .operations-stat:not(.operations-telemetry__served),
+  .operations-telemetry__facts > .operations-status-chip {
     display: none;
   }
 
-  .operations-panel > div:first-of-type > span:nth-of-type(3) {
+  .operations-telemetry__facts > .operations-telemetry__served {
     display: inline-flex;
     min-width: 0;
   }
 
-  .operations-panel > div:first-of-type > div:last-child {
+  .operations-telemetry__actions {
     flex: 1;
     justify-content: flex-end;
   }
 
-  .operations-panel > div:first-of-type button {
+  .operations-telemetry__actions button {
     min-width: max(2.75rem, 44px);
     min-height: max(2.75rem, 44px);
   }
@@ -3018,7 +3470,7 @@ input[type='range'] {
 
   .operations-allocation-grid,
   .operations-zero-note,
-  .operations-panel > div:last-child {
+  .operations-expanded-meta {
     display: none;
   }
 
@@ -3064,7 +3516,7 @@ input[type='range'] {
   }
 
   .operations-shell[data-expanded='true'] .operations-zero-note,
-  .operations-shell[data-expanded='true'] .operations-panel > div:last-child {
+  .operations-shell[data-expanded='true'] .operations-expanded-meta {
     display: flex;
   }
 
@@ -3101,8 +3553,7 @@ input[type='range'] {
   }
 
   .map-navigator-sitebar button,
-  .map-navigator-commandbar button,
-  .map-navigator-frame button {
+  .map-navigator-commandbar button {
     min-height: max(2.75rem, 44px);
     min-width: max(2.75rem, 44px);
   }
@@ -3112,8 +3563,42 @@ input[type='range'] {
     overscroll-behavior-x: contain;
   }
 
-  .map-navigator-commandbar > div:last-child {
+  .map-navigator-commandbar [aria-label='Building filter'] .hud-button {
+    min-height: max(2.75rem, 44px);
+    height: max(2.75rem, 44px);
+    min-width: 0;
+    padding: 0 0.55rem;
+  }
+
+  .map-navigator-tools {
     min-width: max-content;
+  }
+
+  .map-navigator-tools > button {
+    width: max(2.75rem, 44px);
+    min-width: max(2.75rem, 44px);
+    height: max(2.75rem, 44px);
+    min-height: max(2.75rem, 44px);
+    padding: 0;
+  }
+
+  .map-navigator-tools > button.map-navigator-tilt {
+    width: auto;
+    min-width: max(2.75rem, 44px);
+  }
+
+  .map-navigator-layers {
+    top: 0.5rem;
+    left: 0.5rem;
+    gap: 0.2rem;
+    padding: 0.2rem;
+  }
+
+  .map-navigator-layers .hud-button.map-navigator-layers__btn {
+    width: max(2.75rem, 44px);
+    min-width: max(2.75rem, 44px);
+    height: max(2.75rem, 44px);
+    min-height: max(2.75rem, 44px);
   }
 
   .map-navigator-frame {

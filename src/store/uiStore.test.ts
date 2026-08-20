@@ -62,6 +62,23 @@ describe('negotiation session persistence', () => {
     expect(partial).not.toHaveProperty('powerNegotiations')
   })
 
+  it('clears compute desk threads without touching power negotiations', () => {
+    useUiStore.getState().updateComputeNegotiation('provider-a', (current) => ({
+      ...current,
+      status: 'signed',
+      transcript: [{ side: 'provider', text: 'Contract active', day: 8, sequence: 0 }],
+    }))
+    useUiStore.getState().updatePowerNegotiation(powerNegotiationKey('metro-1', 'import'), (current) => ({
+      ...current,
+      failures: 2,
+    }))
+    useUiStore.getState().resetComputeNegotiations()
+    expect(useUiStore.getState().computeNegotiations).toEqual({})
+    expect(useUiStore.getState().powerNegotiations[powerNegotiationKey('metro-1', 'import')]).toMatchObject({
+      failures: 2,
+    })
+  })
+
   it('reopens an ended signed desk while retaining its transcript', () => {
     const signed = {
       status: 'signed' as const,

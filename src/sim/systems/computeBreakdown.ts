@@ -11,6 +11,7 @@ import {
 } from '../balance/serveCompute'
 import { formatParams } from '../balance/training'
 import type { SimState } from '../types'
+import { isLivePublicModel } from '../modelRelease'
 import { getResearchNode } from '../balance/research'
 import { computeSnapshot, normalizeAllocation, type ComputeSnapshot } from './compute'
 import { estimateResearchRate, researchPfTarget } from './research'
@@ -237,7 +238,7 @@ function buildServeBreakdown(
   const model = state.player.models.find(
     (m) =>
       m.id === state.player.pricing.activeModelId &&
-      (m.release === 'released' || m.shipped),
+      isLivePublicModel(m),
   )
   const liveCap =
     model != null

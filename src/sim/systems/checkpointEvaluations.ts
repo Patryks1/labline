@@ -13,6 +13,7 @@ import type {
   TrainingBenchmarkPending,
   TrainingJob,
 } from "../types";
+import { isLivePublicModel } from "../modelRelease";
 import { chargeExpense } from "./financeLedger";
 import {
   playerTrainingJobs,
@@ -55,6 +56,21 @@ function queuedCheckpointEvaluations(
       job.kind === "checkpoint_evaluation" &&
       job.subjectId === checkpointId,
   ).length;
+}
+
+function queuedReleasedModelEvaluations(
+  state: SimState,
+  modelId: string,
+): number {
+  return (state.player.privateEvaluationJobs ?? []).filter(
+    (job) =>
+      job.kind === "released_model_evaluation" &&
+      job.subjectId === modelId,
+  ).length;
+}
+
+function releasedModelEvidenceSeed(state: SimState, modelId: string): number {
+  return hashSeed(state.seed, modelId, "released-model-eval-v1");
 }
 
 /** Queue paid private work. Multiple studies may run concurrently. */
@@ -138,6 +154,66 @@ export function scheduleCheckpointEvaluation(
   );
 }
 
+/** Queue a paid measured study of a released (or internal) fleet model. */
+export function scheduleReleasedModelEvaluation(
+  state: SimState,
+  modelId: string,
+  request: CheckpointEvaluationRequest,
+): SimState {
+  const model = state.player.models.find((candidate) => candidate.id === modelId);
+  if (!model) return withAlert(state, "warn", "Model is not in the fleet.");
+  const completedReports = model.checkpointEvaluations?.length ?? 0;
+  const queuedReports = queuedReleasedModelEvaluations(state, model.id);
+  if (completedReports + queuedReports >= MAX_CHECKPOINT_EVALUATIONS) {
+    return withAlert(
+      state,
+      "warn",
+      `This model already has the maximum ${MAX_CHECKPOINT_EVALUATIONS} persisted or scheduled studies.`,
+    );
+  }
+  const errors = validateCheckpointEvaluationRequest(model, request);
+  if (errors.length) return withAlert(state, "warn", errors.join(" "));
+  const seed = releasedModelEvidenceSeed(state, model.id);
+  const sequence = completedReports + queuedReports;
+  const pending = createPendingCheckpointEvaluation(
+    model,
+    request,
+    seed,
+    state.day,
+    sequence,
+  );
+  if (state.player.cash + 1e-9 < pending.quote.totalCost) {
+    return withAlert(
+      state,
+      "warn",
+      `Need $${pending.quote.totalCost.toLocaleString("en-US")} for this evaluation.`,
+    );
+  }
+  const queueEntry: PrivateEvaluationJob = {
+    id: pending.id,
+    kind: "released_model_evaluation",
+    subjectId: model.id,
+    scheduledDay: pending.scheduledDay,
+    readyDay: pending.readyDay,
+    pending,
+  };
+  const charged = chargeExpense(state, pending.quote.totalCost, "training");
+  return withAlert(
+    {
+      ...charged,
+      player: {
+        ...charged.player,
+        privateEvaluationJobs: [
+          ...(charged.player.privateEvaluationJobs ?? []),
+          queueEntry,
+        ],
+      },
+    },
+    "info",
+    `${model.name} entered ${request.mode.replaceAll("_", " ")} evaluation: ${request.suiteIds.length} suite${request.suiteIds.length === 1 ? "" : "s"}, ${Math.round(pending.quote.accuracy * 100)}% measurement accuracy, results in ${pending.quote.durationDays} days.`,
+  );
+}
+
 function mirrorCheckpointPending(
   queue: readonly PrivateEvaluationJob[],
   checkpointId: string,
@@ -205,6 +281,7 @@ export function tickCheckpointEvaluations(state: SimState): SimState {
   let trainingJobs = playerTrainingJobs(state);
   let checkpoints = [...(state.player.trainingCheckpoints ?? [])];
   const completedByCheckpoint = new Map<string, CheckpointEvaluationReport[]>();
+  const completedByReleasedModel = new Map<string, CheckpointEvaluationReport[]>();
   const rumorNames: string[] = [];
   const identityNames: string[] = [];
   const completionAlerts: SimState["alerts"] = [];
@@ -239,6 +316,43 @@ export function tickCheckpointEvaluations(state: SimState): SimState {
       continue;
     }
 
+    if (queued.kind === "released_model_evaluation") {
+      const model = state.player.models.find(
+        (candidate) => candidate.id === queued.subjectId,
+      );
+      if (!model) continue;
+      const existingReports = [
+        ...(model.checkpointEvaluations ?? []),
+        ...(completedByReleasedModel.get(model.id) ?? []),
+      ];
+      if (existingReports.length >= MAX_CHECKPOINT_EVALUATIONS) continue;
+      const pending = queued.pending;
+      const report = resolveCheckpointEvaluation({
+        model,
+        rivals: state.rivals.flatMap((rival) =>
+          rival.models
+            .filter(isLivePublicModel)
+            .map((rivalModel) => ({ model: rivalModel, labName: rival.name })),
+        ),
+        request: pending.request,
+        reportSequence: pending.sequence,
+        seed: releasedModelEvidenceSeed(state, model.id),
+        scheduledDay: pending.scheduledDay,
+        completedDay: state.day,
+      });
+      completedByReleasedModel.set(model.id, [
+        ...(completedByReleasedModel.get(model.id) ?? []),
+        report,
+      ]);
+      completionAlerts.push({
+        id: `released-eval-${queued.id}-${state.day}`,
+        day: state.day,
+        severity: "info",
+        message: `${model.name} evaluation: ${pending.request.suiteIds.length} suite${pending.request.suiteIds.length === 1 ? "" : "s"} at ${Math.round(report.quote.accuracy * 100)}% measurement accuracy.`,
+      });
+      continue;
+    }
+
     const index = checkpoints.findIndex(
       (checkpoint) => checkpoint.id === queued.subjectId,
     );
@@ -251,7 +365,7 @@ export function tickCheckpointEvaluations(state: SimState): SimState {
       model: checkpoint.model,
       rivals: state.rivals.flatMap((rival) =>
         rival.models
-          .filter((model) => model.release === "released" || model.shipped)
+          .filter(isLivePublicModel)
           .map((model) => ({ model, labName: rival.name })),
       ),
       request: pending.request,
@@ -278,7 +392,7 @@ export function tickCheckpointEvaluations(state: SimState): SimState {
         )
       : undefined;
     const alreadyPublic =
-      promotedModel?.release === "released" || promotedModel?.shipped === true;
+      Boolean(promotedModel && isLivePublicModel(promotedModel));
     if (!alreadyPublic && report.leakOutcome === "rumor")
       rumorNames.push(checkpoint.model.name);
     if (!alreadyPublic && report.leakOutcome === "identity_leak")
@@ -305,10 +419,11 @@ export function tickCheckpointEvaluations(state: SimState): SimState {
           const candidate = checkpoints.find(
             (checkpoint) => checkpoint.promotedModelId === model.id,
           );
-          const reports = candidate
-            ? completedByCheckpoint.get(candidate.id)
-            : undefined;
-          return reports?.length
+          const reports = [
+            ...(candidate ? (completedByCheckpoint.get(candidate.id) ?? []) : []),
+            ...(completedByReleasedModel.get(model.id) ?? []),
+          ];
+          return reports.length
             ? {
                 ...model,
                 checkpointEvaluations: [

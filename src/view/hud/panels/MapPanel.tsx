@@ -100,7 +100,7 @@ export function MapPanel() {
     <PanelScaffold
       eyebrow="Infrastructure"
       title="Overview"
-      description="Fleet, facilities, construction, and the selected parcel."
+      description="Fleet capacity, construction, and the selected parcel. Sites live in intel."
     >
       <div className="space-y-3">
         <InfrastructureOverview />

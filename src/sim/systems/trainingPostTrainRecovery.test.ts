@@ -309,10 +309,10 @@ describe("checkpoint-backed post-training recovery", () => {
       ...initialJob,
       targetPfDays: target,
       recommendedPfDays: target,
-      progressPfDays: target * 0.12,
+      progressPfDays: target * 0.1,
       outcomeSeed,
       outcomeRisk: "high",
-      campaignMilestonesReached: [0.12],
+      campaignMilestonesReached: [],
       pendingCampaignEvent: undefined,
     };
     const next = tickTraining(replaceJob(initial, prepared));
@@ -321,6 +321,6 @@ describe("checkpoint-backed post-training recovery", () => {
     expect(failed.failed).toBe(true);
     expect(failed.progressPfDays).toBeCloseTo(target * plan.atFraction, 10);
     expect(failed.pendingCampaignEvent).toBeUndefined();
-    expect(failed.campaignMilestonesReached).toEqual([0.12]);
+    expect(failed.campaignMilestonesReached).toEqual([]);
   });
 });

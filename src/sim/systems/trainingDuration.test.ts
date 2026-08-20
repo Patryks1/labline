@@ -48,8 +48,8 @@ describe("minimum training duration", () => {
     expect(frontier).toBeGreaterThan(small);
     expect(video).toBeGreaterThan(frontier);
     expect(distill).toBeLessThan(frontier);
-    expect(small).toBeGreaterThanOrEqual(18);
-    expect(frontier).toBeGreaterThanOrEqual(49);
+    expect(small).toBeGreaterThanOrEqual(24);
+    expect(frontier).toBeGreaterThanOrEqual(58);
   });
 
   it("never compresses any training mode below ten calendar days", () => {
@@ -197,12 +197,18 @@ describe("minimum training duration", () => {
       },
     };
 
+    state = tickTraining(state);
+    expect(state.player.trainingJob!.pendingPostTrainPhase).toBeFalsy();
+    expect(state.player.trainingJob!.postTrainPhaseResolved).toBe(true);
     const allocatedPf =
       playerTrainingResourcePlan(state).jobs[job.id]!.effectivePf;
-    state = tickTraining(state);
-    expect(state.player.trainingJob!.daysElapsed).toBe(1);
     expect(state.player.trainingJob!.progressPfDays).toBeCloseTo(
       job.targetPfDays + allocatedPf,
+    );
+    state = tickTraining(state);
+    expect(state.player.trainingJob!.daysElapsed).toBe(2);
+    expect(state.player.trainingJob!.progressPfDays).toBeCloseTo(
+      job.targetPfDays + allocatedPf * 2,
     );
     expect(canReleaseTrainingJob(state.player.trainingJob!).ok).toBe(true);
     expect(

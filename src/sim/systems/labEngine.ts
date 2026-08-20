@@ -15,6 +15,7 @@ import type {
   StaffHeadcount,
   WorldMarkets,
 } from '../types'
+import { isLivePublicModel } from '../modelRelease'
 import { RACK_SKU_CATALOG } from '../balance/rackSkus'
 import { RESEARCH_NODES } from '../balance/research'
 import { labContractCapacityPf } from './computeContracts'
@@ -343,6 +344,8 @@ export function playerToLab(player: PlayerState, state: PlayerLabContext): LabSt
     models: player.models,
     trainingJob: player.trainingJob,
     pricing: player.pricing,
+    modelRouters: player.modelRouters,
+    activeModelRouterId: player.activeModelRouterId,
     rackFleet: player.rackFleet,
     rackDesigns: player.rackDesigns,
     fab: player.fab,
@@ -414,8 +417,8 @@ export function createWorldMarkets(): WorldMarkets {
         id: 'cloud-northstar',
         name: 'Northstar Compute',
         regionId: 'global-cloud',
-        baselinePf: 1_200,
-        availablePf: 1_176,
+        baselinePf: 3_600,
+        availablePf: 3_576,
         basePricePerPfDay: 120,
         reliability: 0.997,
         spotVolatility: 0.22,
@@ -427,8 +430,8 @@ export function createWorldMarkets(): WorldMarkets {
         id: 'cloud-meridian',
         name: 'Meridian Cloud',
         regionId: 'global-cloud',
-        baselinePf: 850,
-        availablePf: 850,
+        baselinePf: 2_400,
+        availablePf: 2_400,
         basePricePerPfDay: 445,
         reliability: 0.994,
         spotVolatility: 0.3,
@@ -440,8 +443,8 @@ export function createWorldMarkets(): WorldMarkets {
         id: 'cloud-atlas',
         name: 'Atlas Emergency',
         regionId: 'global-cloud',
-        baselinePf: 500,
-        availablePf: 500,
+        baselinePf: 1_200,
+        availablePf: 1_200,
         basePricePerPfDay: 780,
         reliability: 0.999,
         spotVolatility: 0.08,
@@ -894,7 +897,7 @@ export function computeLabSnapshot(state: SimState, labId: LabId): LabComputeSna
   const activeServeModel = lab.models.find(
     (model) =>
       model.id === lab.pricing.activeModelId &&
-      (model.release === 'released' || model.shipped),
+      isLivePublicModel(model),
   )
   const rivalDemandPf =
     labId === state.playerLabId
@@ -910,6 +913,8 @@ export function computeLabSnapshot(state: SimState, labId: LabId): LabComputeSna
   const placement = servingPlacementNeedForLab({
     models: lab.models,
     pricing: lab.pricing,
+    modelRouters: lab.modelRouters,
+    activeModelRouterId: lab.activeModelRouterId,
     demandMTok,
   })
   // Admission needs one live request per routed endpoint. Offered-load

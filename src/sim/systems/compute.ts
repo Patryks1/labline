@@ -20,6 +20,7 @@ import { playerHallPueMultiplier } from "./dataHallLayouts";
 import { fleetPowerDraw, powerDerateForSupply } from "./computePower";
 import { activeBalanceTuning, activeBalanceTuningRevision } from "../balance/tuning";
 import { servingPlacementNeed } from "./servingPlacement";
+import { isLivePublicModel } from "../modelRelease";
 
 export type ComputeStallReason =
   | "ok"
@@ -552,9 +553,7 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
   const fullResearchCapacity =
     localBase * (0.55 + 0.45 * cpuDerate) * (0.8 + 0.2 * systemRamDerate) +
     remoteWorkBase;
-  const hasServing = player.models.some(
-    (model) => model.release === "released" || model.shipped,
-  );
+  const hasServing = player.models.some(isLivePublicModel);
   const onlineHeadroom = state.industryDataPack.compute.onlineHeadroom ?? 0.25;
   const forecastServePf =
     Math.max(0, state.lastMarket.demandPf ?? 0) * (1 + onlineHeadroom);
@@ -735,8 +734,7 @@ export function inferenceTokensPerDay(
 ): number {
   const model = state.player.models.find(
     (m) =>
-      m.id === state.player.pricing.activeModelId &&
-      (m.release === "released" || m.shipped),
+      m.id === state.player.pricing.activeModelId && isLivePublicModel(m),
   );
   if (!model) return 0;
   return inferenceCapacityMTok(snap, model, state.player.servingEfficiency);

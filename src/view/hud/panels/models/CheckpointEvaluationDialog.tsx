@@ -24,7 +24,7 @@ const MODE_OPTIONS: ReadonlyArray<{
 }> = [
   {
     id: "internal",
-    label: "Internal lab",
+    label: "Internal red team",
     description: "Fastest, cheapest review using your own blind red-team panel.",
     risk: "No external leak surface",
   },

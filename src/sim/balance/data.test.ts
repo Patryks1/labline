@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { DataDomain } from '../types'
 import {
+  applySynthQualityTax,
   createEmptyLabData,
+  corpusSynthShare,
   DATA_DOMAINS,
   defaultDataWeights,
   DOMAIN_LISTING_WEIGHT,
@@ -13,6 +15,7 @@ import {
   recommendedTrainingDataMTok,
   trainingDataParameterBasisB,
 } from './data'
+import { consumeForLabData } from '../systems/data'
 
 describe('starter data foundation', () => {
   it('starts with 500 MTok rebalanced toward code/math/science', () => {
@@ -50,6 +53,65 @@ describe('starter data foundation', () => {
     expect(w.code).toBeGreaterThan(w.chat * 0.5)
     const sum = Object.values(w).reduce((a, b) => a + b, 0)
     expect(sum).toBeCloseTo(1, 10)
+  })
+})
+
+describe('unpurged synthetic pile', () => {
+  it('reports synthetic share of the processed corpus', () => {
+    const data = createEmptyLabData()
+    expect(corpusSynthShare(data).synth).toBe(0)
+    data.stocks.code.fromSynthHQ = 90
+    data.stocks.code.fromWeb = 90
+    expect(corpusSynthShare(data).synth).toBeGreaterThan(0.1)
+  })
+
+  it('taxes quality once synthetic share is material', () => {
+    expect(applySynthQualityTax(80, 0)).toBe(80)
+    expect(applySynthQualityTax(80, 0.5)).toBeLessThan(80)
+    expect(applySynthQualityTax(80, 0.5, 0.4)).toBeLessThan(
+      applySynthQualityTax(80, 0.5),
+    )
+  })
+
+  it('drops recipe quality when the pile is mostly unpurged synthetic', () => {
+    const clean = createEmptyLabData()
+    const dirty = createEmptyLabData()
+    for (const domain of DATA_DOMAINS) {
+      const pile = 400
+      clean.stocks[domain] = {
+        ...clean.stocks[domain],
+        processed: pile,
+        quality: 88,
+        fromWeb: pile,
+        fromSynthHQ: 0,
+        fromSynthLQ: 0,
+      }
+      dirty.stocks[domain] = {
+        ...dirty.stocks[domain],
+        processed: pile,
+        quality: 88,
+        fromWeb: pile * 0.25,
+        fromSynthHQ: pile * 0.4,
+        fromSynthLQ: pile * 0.35,
+      }
+    }
+    const plan = {
+      totalMTok: 400,
+      totalUnits: 400,
+      trainShare: 0.82,
+      weights: { code: 1 },
+      allowSynthetic: false,
+      includeSynthHQ: false,
+      includeSynthLQ: false,
+    }
+    const cleanRun = consumeForLabData(clean, plan, 1, 'dense', {
+      hasSynthResearch: false,
+    })
+    const dirtyRun = consumeForLabData(dirty, plan, 1, 'dense', {
+      hasSynthResearch: false,
+    })
+    expect(dirtyRun.syntheticUnits).toBeGreaterThan(cleanRun.syntheticUnits)
+    expect(dirtyRun.qualityUsed).toBeLessThan(cleanRun.qualityUsed * 0.95)
   })
 })
 

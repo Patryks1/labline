@@ -30,13 +30,32 @@ import {
   discardTrainingCheckpoint,
   releaseModel,
   deleteModel,
+  archiveModel,
+  restoreArchivedModel,
   setModelApiPrice,
+  setDefaultEffort,
+  setServedEffort,
+  startEffortTraining,
+  listReleasedModel,
   resolveTrainingCampaignEvent,
+  resolvePostTrainPhase,
   playerTrainingJobs,
   withTrainingJobs,
+  setTrainingLabs,
 } from "../sim/systems/training";
-import { scheduleCheckpointEvaluation } from "../sim/systems/checkpointEvaluations";
+import {
+  scheduleCheckpointEvaluation,
+  scheduleReleasedModelEvaluation,
+} from "../sim/systems/checkpointEvaluations";
 import type { CheckpointEvaluationRequest } from "../sim/balance/checkpointEvaluation";
+import {
+  createModelRouter,
+  deleteModelRouter,
+  investPostTrainGym,
+  setActiveModelRouter,
+  setRouterLane,
+  teachToolSkill,
+} from "../sim/systems/modelStudio";
 import { applyLabAction } from "../sim/systems/labActionKernel";
 import {
   setActiveBalanceTuning,
@@ -146,13 +165,16 @@ import type {
   Allocation,
   DataDomain,
   DataSupplierTerms,
+  ModelRouterLane,
   PanelId,
+  PostTrainGymKind,
   ProductPricing,
   SimState,
   Speed,
   StartTrainingOpts,
   SubPlan,
   TrainingBenchmarkRequest,
+  TrainingCampaignChoiceEffects,
   TrainingCheckpointBranchDirection,
   BuildableKind,
   ChipDesignFocus,
@@ -161,6 +183,7 @@ import type {
   CampaignRules,
   MapOverlayMode,
   MapToolMode,
+  ToolSkillId,
 } from "../sim/types";
 import type { CommandViewId } from "../view/hud/navConfig";
 
@@ -311,7 +334,19 @@ interface GameStore {
   ) => void;
   pauseTraining: (jobId: string, paused: boolean) => void;
   extendTraining: (jobId: string) => void;
-  resolveTrainingCampaignEvent: (jobId: string, choiceId: string) => void;
+  resolveTrainingCampaignEvent: (
+    jobId: string,
+    choiceId: string,
+    customEffects?: TrainingCampaignChoiceEffects,
+  ) => void;
+  resolvePostTrainPhase: (
+    jobId: string,
+    decision: {
+      kind: "start" | "skip";
+      postTrainWeights?: Partial<Record<DataDomain, number>>;
+      postTrainMTok?: number;
+    },
+  ) => void;
   /** Auto-extend at the recommendation milestone instead of pausing. */
   setTrainingAutoExtend: (jobId: string, on: boolean) => void;
   /** Auto-advance to the next post-training stage when one completes. */
@@ -325,6 +360,17 @@ interface GameStore {
     jobId: string,
     stage: Exclude<import("../sim/types").PostTrainStage, "none">,
   ) => void;
+  investPostTrainGym: (kind: PostTrainGymKind, packageId: string) => void;
+  setTrainingLabs: (jobId: string, kinds: PostTrainGymKind[]) => void;
+  teachToolSkill: (skillId: ToolSkillId, packageId: string) => void;
+  createModelRouter: (name?: string) => void;
+  setRouterLane: (
+    routerId: string,
+    lane: ModelRouterLane,
+    modelId: string | null,
+  ) => void;
+  setActiveModelRouter: (routerId: string | null) => void;
+  deleteModelRouter: (routerId: string) => void;
   benchmarkTrainingJob: (
     jobId: string,
     request?: TrainingBenchmarkRequest,
@@ -332,7 +378,7 @@ interface GameStore {
   advancePostTrain: (jobId?: string) => void;
   shipModel: () => void;
   keepInternal: (jobId?: string) => void;
-  releaseFromJob: (jobId?: string) => void;
+  releaseFromJob: (jobId?: string, opts?: { list?: boolean }) => void;
   releaseTrainingEarly: (jobId: string) => void;
   captureTrainingCheckpoint: (jobId: string) => void;
   createManualTrainingCheckpoint: (request: {
@@ -344,6 +390,8 @@ interface GameStore {
     checkpointId: string;
     direction: TrainingCheckpointBranchDirection;
     label?: string;
+    weights?: Partial<Record<DataDomain, number>>;
+    specializationFocus?: import("../sim/types").SpecializationFocus;
   }) => void;
   rollbackTrainingJobToCheckpoint: (request: {
     jobId: string;
@@ -359,9 +407,30 @@ interface GameStore {
     checkpointId: string,
     request: CheckpointEvaluationRequest,
   ) => void;
-  releaseModel: (id: string) => void;
+  scheduleReleasedModelEvaluation: (
+    modelId: string,
+    request: CheckpointEvaluationRequest,
+  ) => void;
+  releaseModel: (id: string, opts?: { list?: boolean }) => void;
+  archiveModel: (id: string) => void;
+  restoreArchivedModel: (id: string) => void;
   deleteModel: (id: string) => void;
   setModelApiPrice: (id: string, price: number | null) => void;
+  setDefaultEffort: (id: string, effort: string) => void;
+  setServedEffort: (id: string, effort: string, served: boolean) => void;
+  startEffortTraining: (request: {
+    id: string;
+    name: string;
+    thinkingTokenMult: number;
+    trainPfDays?: number;
+  }) => void;
+  listReleasedModel: (request: {
+    modelId: string;
+    sell: boolean;
+    apiIn?: number | null;
+    apiOut?: number | null;
+    planIds?: readonly string[];
+  }) => void;
   setModelApiInOut: (
     id: string,
     priceIn: number | null,
@@ -1025,9 +1094,18 @@ export const useGameStore = create<GameStore>((set, get) => ({
     })),
   extendTraining: (jobId) =>
     set((st) => ({ state: extendTraining(st.state, jobId) })),
-  resolveTrainingCampaignEvent: (jobId, choiceId) =>
+  resolveTrainingCampaignEvent: (jobId, choiceId, customEffects) =>
     set((st) => ({
-      state: resolveTrainingCampaignEvent(st.state, jobId, choiceId),
+      state: resolveTrainingCampaignEvent(
+        st.state,
+        jobId,
+        choiceId,
+        customEffects,
+      ),
+    })),
+  resolvePostTrainPhase: (jobId, decision) =>
+    set((st) => ({
+      state: resolvePostTrainPhase(st.state, jobId, decision),
     })),
   setTrainingAutoExtend: (jobId, on) =>
     set((st) => {
@@ -1075,6 +1153,22 @@ export const useGameStore = create<GameStore>((set, get) => ({
     set((st) => ({ state: cancelTraining(st.state, jobId) })),
   selectPostTrain: (jobId, stage) =>
     set((st) => ({ state: selectPostTrain(st.state, jobId, stage) })),
+  investPostTrainGym: (kind, packageId) =>
+    set((st) => ({ state: investPostTrainGym(st.state, kind, packageId) })),
+  setTrainingLabs: (jobId, kinds) =>
+    set((st) => ({ state: setTrainingLabs(st.state, jobId, kinds) })),
+  teachToolSkill: (skillId, packageId) =>
+    set((st) => ({ state: teachToolSkill(st.state, skillId, packageId) })),
+  createModelRouter: (name) =>
+    set((st) => ({ state: createModelRouter(st.state, name) })),
+  setRouterLane: (routerId, lane, modelId) =>
+    set((st) => ({
+      state: setRouterLane(st.state, routerId, lane, modelId),
+    })),
+  setActiveModelRouter: (routerId) =>
+    set((st) => ({ state: setActiveModelRouter(st.state, routerId) })),
+  deleteModelRouter: (routerId) =>
+    set((st) => ({ state: deleteModelRouter(st.state, routerId) })),
   benchmarkTrainingJob: (jobId, request) =>
     set((st) => ({
       state: benchmarkTrainingJob(st.state, jobId, request),
@@ -1084,8 +1178,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
   shipModel: () => set((st) => ({ state: shipModel(st.state) })),
   keepInternal: (jobId) =>
     set((st) => ({ state: keepInternal(st.state, jobId) })),
-  releaseFromJob: (jobId) =>
-    set((st) => ({ state: releaseFromJob(st.state, jobId) })),
+  releaseFromJob: (jobId, opts) =>
+    set((st) => ({ state: releaseFromJob(st.state, jobId, opts) })),
   releaseTrainingEarly: (jobId) =>
     set((st) => ({ state: releaseTrainingEarly(st.state, jobId) })),
   captureTrainingCheckpoint: (jobId) =>
@@ -1116,10 +1210,26 @@ export const useGameStore = create<GameStore>((set, get) => ({
     set((st) => ({
       state: scheduleCheckpointEvaluation(st.state, checkpointId, request),
     })),
-  releaseModel: (id) => set((st) => ({ state: releaseModel(st.state, id) })),
+  scheduleReleasedModelEvaluation: (modelId, request) =>
+    set((st) => ({
+      state: scheduleReleasedModelEvaluation(st.state, modelId, request),
+    })),
+  releaseModel: (id, opts) =>
+    set((st) => ({ state: releaseModel(st.state, id, opts) })),
+  archiveModel: (id) => set((st) => ({ state: archiveModel(st.state, id) })),
+  restoreArchivedModel: (id) =>
+    set((st) => ({ state: restoreArchivedModel(st.state, id) })),
   deleteModel: (id) => set((st) => ({ state: deleteModel(st.state, id) })),
   setModelApiPrice: (id, price) =>
     set((st) => ({ state: setModelApiPrice(st.state, id, price) })),
+  setDefaultEffort: (id, effort) =>
+    set((st) => ({ state: setDefaultEffort(st.state, id, effort) })),
+  setServedEffort: (id, effort, served) =>
+    set((st) => ({ state: setServedEffort(st.state, id, effort, served) })),
+  startEffortTraining: (request) =>
+    set((st) => ({ state: startEffortTraining(st.state, request) })),
+  listReleasedModel: (request) =>
+    set((st) => ({ state: listReleasedModel(st.state, request) })),
   setModelApiInOut: (id, priceIn, priceOut) =>
     set((st) => {
       const model = st.state.player.models.find(

@@ -14,12 +14,17 @@ import type {
   SimState,
   TrainingNumerics,
 } from '../types'
+import { isLivePublicModel } from '../modelRelease'
 import { createRng, hashSeed } from '../rng'
 import { minResearchersForNode, planResearchPath } from './research'
 import { resolveRackSku } from './racks'
 import { ECONOMY } from '../balance/economy'
 import { estimateTrainingEconomics } from '../balance/training'
-import { recommendedDataMTok } from '../balance/data'
+import {
+  expectedRivalTrainingRecipeKnobs,
+  recipeOutcomeSignals,
+  recipeVolumeTargetMTok,
+} from '../balance/trainingRecipe'
 import { scaleIntelligence } from '../balance/modelScaling'
 import {
   DEFAULT_TRAINING_NUMERICS,
@@ -75,7 +80,7 @@ export function rivalActionRng(
 function releasedPlayerCapability(state: SimState): number {
   return state.player.models.reduce(
     (best, model) =>
-      model.release === 'released' || model.shipped
+      isLivePublicModel(model)
         ? Math.max(best, model.capability)
         : best,
     0,
@@ -517,7 +522,7 @@ export function chooseRivalServePrecision(rival: RivalLab): PlanServePrecision {
 
 /** Parameter ladder evaluated for each new model generation. */
 export const RIVAL_SCALE_LADDER_PARAMS_B: readonly number[] = [
-  22, 34, 70, 110, 180, 235, 405,
+  22, 34, 70, 110, 180, 235, 405, 700, 1100, 1800, 2500, 3500, 5000,
 ]
 
 /** Campus plans are recomputed when older than this or the revision moved on. */
@@ -670,6 +675,8 @@ export interface RivalScalePlanningContext {
   mixWeights: Partial<Record<string, number>>
   modalityComputeMult: number
   isCatchUpChallenger: boolean
+  /** Era/frontier ceiling in billions of parameters. */
+  maxParamsB?: number
   /** Completed hall bays and rack bays already filled. */
   rackCapacityBays: number
   racksUsed: number
@@ -715,16 +722,23 @@ export interface RivalScaleCandidate {
 /** Candidate sizes: a data-matched step plus every ladder rung above current. */
 function rivalCandidateSizes(ctx: RivalScalePlanningContext): number[] {
   const comfortable = Math.max(0.05, ctx.corpusMTok / 1000)
+  const ceiling =
+    ctx.maxParamsB ?? RIVAL_SCALE_LADDER_PARAMS_B[RIVAL_SCALE_LADDER_PARAMS_B.length - 1]!
   const dataMatched = Math.min(
-    RIVAL_SCALE_LADDER_PARAMS_B[0]!,
+    Math.min(RIVAL_SCALE_LADDER_PARAMS_B[0]!, ceiling),
     Math.max(ctx.currentParamsB * 1.25, comfortable * 0.9),
   )
   const sizes = new Set<number>()
-  if (dataMatched > Math.max(0.05, ctx.currentParamsB) * 1.02) {
+  if (
+    dataMatched > Math.max(0.05, ctx.currentParamsB) * 1.02 &&
+    dataMatched <= ceiling * 1.001
+  ) {
     sizes.add(Math.round(dataMatched * 100) / 100)
   }
   for (const rung of RIVAL_SCALE_LADDER_PARAMS_B) {
-    if (rung > Math.max(0.05, ctx.currentParamsB) * 1.02) sizes.add(rung)
+    if (rung > Math.max(0.05, ctx.currentParamsB) * 1.02 && rung <= ceiling * 1.001) {
+      sizes.add(rung)
+    }
   }
   return [...sizes].sort((a, b) => a - b)
 }
@@ -739,8 +753,41 @@ function evaluateRivalCandidate(
   label: string,
 ): RivalScaleCandidate {
   const family = topology.family
-  const dataNeeded = recommendedDataMTok(paramsB, family)
-  const coverageEst = Math.max(0.05, Math.min(1.2, ctx.corpusMTok / dataNeeded))
+  const recipeKnobs = expectedRivalTrainingRecipeKnobs(ctx.archetype, {
+    isCatchUp: ctx.isCatchUpChallenger,
+  })
+  const recipeTarget = recipeVolumeTargetMTok({
+    paramsB,
+    family,
+    backbone,
+    activeParamsB,
+    trainShare: recipeKnobs.trainShare,
+    usableTotal: ctx.corpusMTok,
+    volumePolicy: recipeKnobs.volumePolicy,
+  })
+  const recipeAim = recipeVolumeTargetMTok({
+    paramsB,
+    family,
+    backbone,
+    activeParamsB,
+    trainShare: recipeKnobs.trainShare,
+    usableTotal: Number.POSITIVE_INFINITY,
+    volumePolicy:
+      recipeKnobs.volumePolicy === "all" ? "strong" : recipeKnobs.volumePolicy,
+  })
+  const recipeSignals = recipeOutcomeSignals({
+    totalMTok: recipeTarget,
+    paramsB,
+    family,
+    backbone,
+    activeParamsB,
+    postTrainShare: recipeKnobs.postTrainShare,
+    trainShare: recipeKnobs.trainShare,
+  })
+  const coverageEst = Math.max(
+    0.05,
+    Math.min(6, recipeSignals.capabilityVolumeRatio),
+  )
   // Same research-mult penalty buildScaledModel applies without moe_routing.
   const researchMult =
     ctx.researchMult *
@@ -749,7 +796,7 @@ function evaluateRivalCandidate(
       : 1)
   let overtrainCapBonus = 0
   for (const id of ctx.researchUnlocked) {
-    overtrainCapBonus += getResearchNode(id).effects.overtrainCapBonus ?? 0
+    overtrainCapBonus += RESEARCH_NODES.find((node) => node.id === id)?.effects.overtrainCapBonus ?? 0
   }
   // Same scaleIntelligence path the finalize step uses (postTrain 'none' → 0.1).
   const scale = scaleIntelligence({
@@ -778,15 +825,17 @@ function evaluateRivalCandidate(
         (ctx.isCatchUpChallenger ? 1.6 : 1)
       : expectedCapabilityGain * 0.1
 
-  const usableEst = Math.min(ctx.corpusMTok, dataNeeded)
+  const usableEst = recipeTarget
   const economics = estimateTrainingEconomics({
     paramsB,
     activeParamsB,
     family,
     backbone,
     trainEfficiency: ctx.trainEfficiency,
-    trainingTokensMTok: usableEst * 0.82,
-    verificationTokensMTok: usableEst * 0.18,
+    trainingTokensMTok:
+      usableEst * (1 - recipeKnobs.postTrainShare) * recipeKnobs.trainShare,
+    verificationTokensMTok:
+      usableEst * (1 - recipeKnobs.postTrainShare) * (1 - recipeKnobs.trainShare),
     modalityComputeMult: ctx.modalityComputeMult,
     dataCost: 0,
     numerics: ctx.numerics,
@@ -862,7 +911,7 @@ function evaluateRivalCandidate(
     economics.upfrontCash + economics.cashBurnPerDay * estimatedDurationDays
   const cashBasis = Math.max(1_000_000, ctx.cash)
   const dataShortfallRisk = Math.pow(
-    Math.max(0, 1 - Math.min(1, ctx.corpusMTok / dataNeeded)),
+    Math.max(0, 1 - Math.min(1, ctx.corpusMTok / Math.max(1, recipeAim))),
     1.5,
   )
   const timeToMarketPenalty =
@@ -1023,7 +1072,17 @@ export function projectRivalTrainingInfrastructure(
   candidate: RivalScaleCandidate,
 ): RivalInfrastructureProjection {
   const profile = rivalScaleStrategyProfile(ctx.archetype)
-  const dataRequiredMTok = recommendedDataMTok(candidate.paramsB, candidate.family)
+  const recipeKnobs = expectedRivalTrainingRecipeKnobs(ctx.archetype, {
+    isCatchUp: ctx.isCatchUpChallenger,
+  })
+  const dataRequiredMTok = recipeVolumeTargetMTok({
+    paramsB: candidate.paramsB,
+    family: candidate.family,
+    trainShare: recipeKnobs.trainShare,
+    usableTotal: Number.POSITIVE_INFINITY,
+    volumePolicy:
+      recipeKnobs.volumePolicy === "all" ? "strong" : recipeKnobs.volumePolicy,
+  })
   const dataRequiredByDomain: Partial<Record<DataDomain, number>> = {}
   let weightTotal = 0
   for (const value of Object.values(ctx.mixWeights)) weightTotal += Math.max(0, value ?? 0)
@@ -1085,7 +1144,10 @@ export function projectRivalTrainingInfrastructure(
 export function chooseRivalDcSize(
   rackDemandBays: number,
   archetype: RivalArchetype,
+  existingHalls = 0,
 ): 'dc' | 'dc_m' | 'dc_l' {
+  // First site is always a small edge hall so rivals climb the same ladder as the player.
+  if (existingHalls <= 0) return 'dc'
   // BUILD_DEFS bay counts: dc 96, dc_m 288, dc_l 960.
   let size: 'dc' | 'dc_m' | 'dc_l' =
     rackDemandBays <= 96 * 0.75 ? 'dc' : rackDemandBays <= 288 * 0.75 ? 'dc_m' : 'dc_l'
@@ -1094,6 +1156,7 @@ export function chooseRivalDcSize(
     const tierBays = size === 'dc' ? 96 : 288
     if (rackDemandBays > tierBays * 0.55) size = size === 'dc' ? 'dc_m' : 'dc_l'
   }
+  if (existingHalls < 2 && size === 'dc_l') size = 'dc_m'
   return size
 }
 
@@ -1258,7 +1321,15 @@ export function chooseRivalCampusProject(
   )
   const additionalPhysicalFootprint = Math.max(0, rackDemand - input.racksUsed)
   if (additionalPhysicalFootprint > 1e-9) {
-    const size = chooseRivalDcSize(additionalPhysicalFootprint, input.archetype)
+    const existingHalls = Math.max(
+      input.rackCapacityBays > 0 ? 1 : 0,
+      Math.round(input.rackCapacityBays / 96),
+    )
+    const size = chooseRivalDcSize(
+      additionalPhysicalFootprint,
+      input.archetype,
+      existingHalls,
+    )
     if (runwayOk(input.costs[size])) {
       return {
         kind: size,

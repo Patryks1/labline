@@ -154,6 +154,7 @@ interface UiPreferences extends AudioPreferences {
   cloudsVisible: boolean
   computeNegotiations: Record<string, PersistedNegotiation>
   powerNegotiations: Record<string, PersistedNegotiation>
+  campaignDecisionJobId: string | null
   setInterfaceScale: (scale: InterfaceScale) => void
   setRenderPreset: (preset: RenderPreset) => void
   setReducedMotion: (reduced: boolean) => void
@@ -175,7 +176,10 @@ interface UiPreferences extends AudioPreferences {
   setEffectsVolume: (volume: number) => void
   updateComputeNegotiation: (providerId: string, update: (current: PersistedNegotiation) => PersistedNegotiation) => void
   updatePowerNegotiation: (counterpartyKey: string, update: (current: PersistedNegotiation) => PersistedNegotiation) => void
+  resetComputeNegotiations: () => void
   clearNegotiations: () => void
+  openCampaignDecision: (jobId: string) => void
+  closeCampaignDecision: () => void
 }
 
 export function powerNegotiationKey(cityId: string, mode: 'import' | 'export'): string {
@@ -252,6 +256,7 @@ export const useUiStore = create<UiPreferences>()(
       cloudsVisible: true,
       computeNegotiations: {},
       powerNegotiations: {},
+      campaignDecisionJobId: null,
       ...DEFAULT_AUDIO_PREFERENCES,
       setInterfaceScale: (interfaceScale) => set({ interfaceScale }),
       setRenderPreset: (renderPreset) => set({ renderPreset }),
@@ -310,7 +315,10 @@ export const useUiStore = create<UiPreferences>()(
       updatePowerNegotiation: (counterpartyKey, update) => set((state) => ({
         powerNegotiations: { ...state.powerNegotiations, [counterpartyKey]: update(state.powerNegotiations[counterpartyKey] ?? createEmptyNegotiation()) },
       })),
+      resetComputeNegotiations: () => set({ computeNegotiations: {} }),
       clearNegotiations: () => set({ computeNegotiations: {}, powerNegotiations: {} }),
+      openCampaignDecision: (campaignDecisionJobId) => set({ campaignDecisionJobId }),
+      closeCampaignDecision: () => set({ campaignDecisionJobId: null }),
     }),
     {
       name: 'labline-ui-v1',

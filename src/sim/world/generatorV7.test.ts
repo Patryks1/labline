@@ -93,14 +93,11 @@ describe('world generator V7 rivers', () => {
     const legacyB = regenerateStaticWorld(legacyDescriptor)
     expect(legacyB.staticHash).toBe(legacyA.staticHash)
 
-    // Fresh games emit version 6, which carves strictly more in-city empty
-    // lots (same hash salt, so v6 is a superset of the v5 lots).
-    const current = generateStaticWorldV7(OPTIONS)
-    if (current.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V7) {
-      throw new Error('expected a V7 descriptor')
-    }
-    expect(current.descriptor.settlementAlgorithmVersion).toBe(6)
-    expect(current.staticHash).not.toBe(legacyA.staticHash)
+    // Version 6 remains a frozen superset of those v5 lots for in-progress saves.
+    const roomierDescriptor = { ...createWorldDescriptorV7(OPTIONS), settlementAlgorithmVersion: 6 as const }
+    const roomier = regenerateStaticWorld(roomierDescriptor)
+    expect(roomier.descriptor.settlementAlgorithmVersion).toBe(6)
+    expect(roomier.staticHash).not.toBe(legacyA.staticHash)
 
     const urbanEmptyCount = (world: StaticWorld): number => {
       let count = 0
@@ -110,12 +107,68 @@ describe('world generator V7 rivers', () => {
       }
       return count
     }
-    expect(urbanEmptyCount(current)).toBeGreaterThan(urbanEmptyCount(legacyA))
-    for (let id = 0; id < current.kind.length; id++) {
+    expect(urbanEmptyCount(roomier)).toBeGreaterThan(urbanEmptyCount(legacyA))
+    for (let id = 0; id < roomier.kind.length; id++) {
       if (legacyA.kind[id] === TERRAIN_KIND.empty &&
           cityIndexFromFeature(legacyA.feature[id]!) !== undefined) {
-        expect(current.kind[id]).toBe(TERRAIN_KIND.empty)
+        expect(roomier.kind[id]).toBe(TERRAIN_KIND.empty)
       }
     }
+
+    const current = generateStaticWorldV7(OPTIONS)
+    if (current.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V7) {
+      throw new Error('expected a V7 descriptor')
+    }
+    expect(current.descriptor.settlementAlgorithmVersion).toBe(7)
+    expect(current.staticHash).not.toBe(roomier.staticHash)
   })
+})
+
+describe('world generator V7 city fabric', () => {
+  it('breaks solid downtown fill with parks, street lots, and suburban gaps', () => {
+    for (const seed of [17, 73, 0x71a7]) {
+      const world = generateStaticWorldV7({ ...OPTIONS, seed })
+      const { width } = world.descriptor
+      let coreCity = 0
+      let corePark = 0
+      let coreRoadAdjacent = 0
+      let suburbHouse = 0
+      let suburbEmpty = 0
+      let suburbPark = 0
+      let urbanEmpty = 0
+      for (const city of world.cities.filter((candidate) => candidate.tier !== 'village')) {
+        const featureId = city.index + 1
+        for (let id = 0; id < world.kind.length; id++) {
+          if (world.feature[id] !== featureId) continue
+          const x = id % width
+          const y = Math.floor(id / width)
+          const inCore = world.district![id] === 3
+          const kind = world.kind[id]!
+          const roadNearby = [-width, 1, width, -1, -width - 1, -width + 1, width - 1, width + 1].some((delta) => {
+            const neighbor = id + delta
+            if (neighbor < 0 || neighbor >= world.kind.length) return false
+            if (Math.abs((neighbor % width) - x) > 1) return false
+            return (world.transport![neighbor] ?? 0) !== 0
+          })
+          if (kind === TERRAIN_KIND.empty) urbanEmpty++
+          if (inCore && kind === TERRAIN_KIND.city) {
+            coreCity++
+            if (roadNearby) coreRoadAdjacent++
+          }
+          if (inCore && kind === TERRAIN_KIND.park) corePark++
+          if (world.district![id] === 1 && kind === TERRAIN_KIND.house) suburbHouse++
+          if (world.district![id] === 1 && kind === TERRAIN_KIND.empty) suburbEmpty++
+          if (world.district![id] === 1 && kind === TERRAIN_KIND.park) suburbPark++
+        }
+      }
+      expect(corePark, `seed ${seed}: downtown parks`).toBeGreaterThanOrEqual(4)
+      expect(coreCity, `seed ${seed}: downtown fabric`).toBeGreaterThan(20)
+      expect(corePark / (coreCity + corePark), `seed ${seed}: downtown park share`).toBeGreaterThan(0.04)
+      expect(coreRoadAdjacent / coreCity, `seed ${seed}: street-served core`).toBeGreaterThan(0.72)
+      expect(suburbPark, `seed ${seed}: neighborhood parks`).toBeGreaterThan(4)
+      expect(suburbEmpty, `seed ${seed}: suburban yards`).toBeGreaterThan(4)
+      expect(suburbHouse, `seed ${seed}: suburban homes`).toBeGreaterThan(suburbEmpty)
+      expect(urbanEmpty, `seed ${seed}: in-city lots`).toBeGreaterThan(20)
+    }
+  }, 20_000)
 })

@@ -121,7 +121,9 @@ export function reconcileCheckpointOwnership(input: {
   const cancelledEvaluationJobIds: string[] = [];
   const privateEvaluationJobs = input.privateEvaluationJobs.filter((job) => {
     const cancel =
-      job.kind === "checkpoint_evaluation" && removed.has(job.subjectId);
+      (job.kind === "checkpoint_evaluation" && removed.has(job.subjectId)) ||
+      (job.kind === "released_model_evaluation" &&
+        !input.models.some((model) => model.id === job.subjectId));
     if (cancel) cancelledEvaluationJobIds.push(job.id);
     return !cancel;
   });

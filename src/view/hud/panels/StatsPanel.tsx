@@ -1,18 +1,15 @@
 import { useMemo, useState } from 'react'
 import { buildLabStats, type StatsSectionId } from '../../../sim/systems/stats'
-import type { Model, PanelId } from '../../../sim/types'
+import type { PanelId } from '../../../sim/types'
 import { useGameStore } from '../../../store/gameStore'
 import { money, num, pct } from '../format'
 import { GameCard, MeterBar, SegmentedTabs, StatRow } from '../ui/kit'
 import {
-  EmptyState,
   HudButton,
   MetricTile,
   PanelScaffold,
-  StatusChip,
+  type HudTone,
 } from '../ui/HudPrimitives'
-import { RadarChart } from '../ui/RadarChart'
-import { buildBenchmarkViewModel } from '../data/benchmarkViewModel'
 import { buildFinanceDashboardModel, type FinanceDashboardModel } from '../data/financeDashboardModel'
 import { capitalSnapshot } from '../../../sim/systems/capital'
 import { SparkTrendCard } from './command/SparkTrendCard'
@@ -20,9 +17,51 @@ import { OrgPanel } from './OrgPanel'
 
 const SECTIONS: { id: StatsSectionId; label: string }[] = [
   { id: 'pnl', label: 'P&L' },
-  { id: 'models', label: 'Models' },
+  { id: 'capital', label: 'Capital' },
   { id: 'compute', label: 'Compute' },
 ]
+
+function FinanceReadoutCell({
+  label,
+  value,
+  tone = 'neutral',
+  emphasis = false,
+  onActivate,
+  actionLabel,
+}: {
+  label: string
+  value: string
+  tone?: Extract<HudTone, 'neutral' | 'positive' | 'warning' | 'danger'>
+  emphasis?: boolean
+  onActivate?: () => void
+  actionLabel?: string
+}) {
+  const className = `finance-readout__cell${emphasis ? ' finance-readout__cell--hero' : ''}${
+    onActivate ? ' finance-readout__cell--action' : ''
+  }`
+  const body = (
+    <>
+      <span className="finance-readout__label">{label}</span>
+      <strong className={`finance-readout__value finance-readout__value--${tone}`}>{value}</strong>
+    </>
+  )
+
+  if (onActivate) {
+    return (
+      <button
+        type="button"
+        className={className}
+        onClick={onActivate}
+        title={actionLabel}
+        aria-label={actionLabel ? `${label}: ${value}. ${actionLabel}` : undefined}
+      >
+        {body}
+      </button>
+    )
+  }
+
+  return <div className={className}>{body}</div>
+}
 
 export function StatsPanel() {
   const state = useGameStore((s) => s.state)
@@ -41,7 +80,7 @@ export function StatsPanel() {
     <PanelScaffold
       eyebrow={`Day ${stats.day}`}
       title="Finances"
-      description="P&L, capital, models, and compute."
+      description="P&L, capital, and compute."
       actions={
         <HudButton
           variant="ghost"
@@ -53,29 +92,48 @@ export function StatsPanel() {
         </HudButton>
       }
     >
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
-        <MetricTile
-          label="Cash"
-          value={money(dashboard.current.cash)}
-          tone={dashboard.current.cash < 2e6 ? 'danger' : 'neutral'}
-        />
-        <MetricTile
-          label="Net / day"
-          value={money(dashboard.current.net)}
-          tone={dashboard.current.net < 0 ? 'danger' : dashboard.current.net > 0 ? 'positive' : 'neutral'}
-        />
-        <MetricTile label="Market share" value={pct(dashboard.current.share, 1)} tone="serve" />
-        <MetricTile label="Valuation" value={money(dashboard.current.valuation)} />
-        <MetricTile
-          label="Ownership"
-          value={pct(capital.founderOwnership, 1)}
-          tone={capital.founderOwnership < 0.1 ? 'danger' : 'positive'}
-        />
-        <MetricTile
-          label="Runway"
-          value={runwayLabel}
-          tone={dashboard.current.runwayDays < 30 ? 'danger' : dashboard.current.runwayDays < 90 ? 'warning' : 'neutral'}
-        />
+      <div className="finance-readout" role="group" aria-label="Company position">
+        <div className="finance-readout__grid">
+          <FinanceReadoutCell
+            label="Cash"
+            value={money(dashboard.current.cash)}
+            tone={dashboard.current.cash < 2e6 ? 'danger' : 'neutral'}
+            emphasis
+          />
+          <FinanceReadoutCell
+            label="Net / day"
+            value={money(dashboard.current.net)}
+            tone={
+              dashboard.current.net < 0
+                ? 'danger'
+                : dashboard.current.net > 0
+                  ? 'positive'
+                  : 'neutral'
+            }
+            emphasis
+          />
+          <FinanceReadoutCell
+            label="Runway"
+            value={runwayLabel}
+            tone={
+              dashboard.current.runwayDays < 30
+                ? 'danger'
+                : dashboard.current.runwayDays < 90
+                  ? 'warning'
+                  : 'neutral'
+            }
+            emphasis
+          />
+          <FinanceReadoutCell label="Share" value={pct(dashboard.current.share, 1)} />
+          <FinanceReadoutCell label="Valuation" value={money(dashboard.current.valuation)} />
+          <FinanceReadoutCell
+            label="Ownership"
+            value={pct(capital.founderOwnership, 1)}
+            tone={capital.founderOwnership < 0.1 ? 'danger' : 'neutral'}
+            onActivate={() => setSection('capital')}
+            actionLabel="Open Capital"
+          />
+        </div>
       </div>
 
       <div className="mt-3">
@@ -89,7 +147,7 @@ export function StatsPanel() {
 
       <div key={section} className="panel-swap mt-3">
         {section === 'pnl' && <PnlSection stats={stats} financeModel={dashboard} setPanel={setPanel} />}
-        {section === 'models' && <ModelsSection stats={stats} setPanel={setPanel} />}
+        {section === 'capital' && <OrgPanel workspace="capital" embedded />}
         {section === 'compute' && <ComputeSection stats={stats} financeModel={dashboard} setPanel={setPanel} />}
       </div>
     </PanelScaffold>
@@ -247,129 +305,6 @@ function PnlSection({
           </div>
         </GameCard>
       ) : null}
-
-      <div className="border-t border-line/70 pt-3">
-        <OrgPanel workspace="capital" />
-      </div>
-    </div>
-  )
-}
-
-function ModelsSection({
-  stats,
-  setPanel,
-}: {
-  stats: ReturnType<typeof buildLabStats>
-  setPanel: (p: PanelId) => void
-}) {
-  if (stats.models.length === 0) {
-    return (
-      <EmptyState
-        title="No models yet"
-        description="Train and ship to see income attribution."
-        action={
-          <HudButton variant="primary" onClick={() => setPanel('models')}>
-            Open models
-          </HudButton>
-        }
-      />
-    )
-  }
-
-  const earning = stats.models.filter((m) => m.dayNet !== 0 || m.isActive)
-  const idle = stats.models.filter((m) => m.dayNet === 0 && !m.isActive)
-
-  return (
-    <div className="space-y-3">
-      <p className="text-[0.8125rem] text-muted">
-        Production traffic attributes to the <strong className="text-bone">active</strong> public model.
-      </p>
-
-      <div className="anim-stagger space-y-2.5">
-        {earning.map((m) => (
-          <ModelCard key={m.modelId} m={m} />
-        ))}
-      </div>
-
-      {idle.length > 0 ? (
-        <GameCard eyebrow="Fleet" title={`Idle / non-serving (${idle.length})`}>
-          <div className="anim-stagger space-y-2">
-            {idle.map((m) => (
-              <div
-                key={m.modelId}
-                className="flex items-start justify-between gap-2 rounded-md border border-line/60 px-2.5 py-2"
-              >
-                <div className="min-w-0">
-                  <div className="truncate text-[0.8125rem] text-bone">{m.name}</div>
-                  <div className="mt-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
-                    {m.family} · cap {m.capability.toFixed(0)} · {m.release}
-                  </div>
-                  <div className="mt-0.5 text-[0.8125rem] text-muted">{m.note}</div>
-                </div>
-                <span className="shrink-0 font-mono text-[0.8125rem] tabular-nums text-muted">{money(0)}</span>
-              </div>
-            ))}
-          </div>
-        </GameCard>
-      ) : null}
-
-      <HudButton variant="ghost" className="!px-0 text-[0.8125rem]" onClick={() => setPanel('models')}>
-        Manage models →
-      </HudButton>
-    </div>
-  )
-}
-
-function ModelCard({ m }: { m: ReturnType<typeof buildLabStats>['models'][0] }) {
-  const model = useGameStore((store) => store.state.player.models.find((candidate) => candidate.id === m.modelId))
-  return (
-    <GameCard
-      eyebrow={m.family}
-      title={
-        <span className="inline-flex items-center gap-2">
-          <span className="truncate">{m.name}</span>
-          {m.isActive ? <StatusChip tone="positive">ACTIVE</StatusChip> : null}
-        </span>
-      }
-      tone={m.isActive ? 'mint' : undefined}
-      actions={
-        <span
-          className={`font-mono text-sm font-semibold tabular-nums ${
-            m.dayNet < 0 ? 'text-danger' : m.dayNet > 0 ? 'text-mint' : 'text-muted'
-          }`}
-        >
-          {money(m.dayNet)}
-        </span>
-      }
-    >
-      <div className="font-mono text-[0.6875rem] tabular-nums text-muted">
-        cap {m.capability.toFixed(0)} · ${m.apiPricePerMTok.toFixed(2)}/MTok
-      </div>
-      <div className="mt-2 space-y-0.5">
-        <StatRow label="API rev" value={money(m.dayApiRevenue)} />
-        <StatRow label="API COGS" value={money(-m.dayApiCogs)} tone="danger" />
-        <StatRow label="API MTok" value={num(m.dayApiMTok, 2)} />
-        <StatRow label="Sub rev" value={money(m.daySubRevenue)} />
-        <StatRow label="Sub COGS" value={money(-m.daySubCogs)} tone="danger" />
-        <StatRow label="Enterprise" value={money(m.dayEnterpriseShare)} />
-      </div>
-      {model ? <MiniCapabilityRadar model={model} /> : null}
-      <p className="mt-2 text-[0.8125rem] leading-snug text-muted">{m.note}</p>
-    </GameCard>
-  )
-}
-
-function MiniCapabilityRadar({ model }: { model: Model }) {
-  const benchmark = buildBenchmarkViewModel(model, 'language', { kind: 'public' })
-  return (
-    <div className="mt-2">
-      <RadarChart
-        suiteId={benchmark.suiteId}
-        scores={benchmark.scores}
-        profile={benchmark.profile}
-        ariaLabel={`${model.name} public evaluation radar`}
-        compact
-      />
     </div>
   )
 }

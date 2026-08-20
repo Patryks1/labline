@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { createGame } from './createGame'
 import { computeSnapshot } from './systems/compute'
 import { tickMany } from './tick'
-import { startTraining, shipModel, tickTraining } from './systems/training'
+import {
+  startTraining,
+  shipModel,
+  tickTraining,
+  resolveTrainingCampaignEvent,
+  resolvePostTrainPhase,
+} from './systems/training'
 import { labResearchDayProgress, startResearch, tickResearch } from './systems/research'
 import { orderRacksIntoDc, tickRackDeliveries } from './systems/dcRacks'
 import { createRivals } from './systems/rivals'
@@ -269,10 +275,22 @@ describe('training and ship', () => {
 
     for (let i = 0; i < 200; i++) {
       s = { ...s, day: s.day + 1 }
+      const pending = s.player.trainingJob?.pendingCampaignEvent
+      if (pending) {
+        const choice = pending.choices[0]
+        if (choice) {
+          s = resolveTrainingCampaignEvent(s, s.player.trainingJob!.id, choice.id)
+        }
+      }
+      if (s.player.trainingJob?.pendingPostTrainPhase) {
+        s = resolvePostTrainPhase(s, s.player.trainingJob.id, { kind: "skip" })
+      }
       s = tickTraining(s)
       if (
         s.player.trainingJob &&
-        s.player.trainingJob.awaitingDecision
+        s.player.trainingJob.progressPfDays >= s.player.trainingJob.targetPfDays &&
+        !s.player.trainingJob.pendingPostTrainPhase &&
+        !s.player.trainingJob.pendingCampaignEvent
       )
         break
     }
@@ -396,6 +414,22 @@ describe('economy smoke', () => {
       paused: false,
     }
     for (let i = 0; i < 80; i++) {
+      const pending = s.player.trainingJob?.pendingCampaignEvent
+      if (pending) {
+        const choice =
+          pending.choices.find((item) => item.playerAuthored) ??
+          pending.choices[0]
+        if (choice) {
+          s = resolveTrainingCampaignEvent(
+            s,
+            s.player.trainingJob!.id,
+            choice.id,
+          )
+        }
+      }
+      if (s.player.trainingJob?.pendingPostTrainPhase) {
+        s = resolvePostTrainPhase(s, s.player.trainingJob.id, { kind: "skip" })
+      }
       s = tickMany(s, 1)
       if (
         s.player.trainingJob &&
@@ -411,7 +445,7 @@ describe('economy smoke', () => {
     const sum = Object.values(s.lastMarket.sharesByLab).reduce((a, b) => a + b, 0)
     expect(sum).toBeGreaterThan(0.9)
     expect(sum).toBeLessThan(1.1)
-  })
+  }, 15_000)
 
   it('order racks into a hall spends cash', () => {
     let g = withCompute(createGame(5), 0)

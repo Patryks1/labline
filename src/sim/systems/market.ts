@@ -8,7 +8,7 @@ import {
   demandGrowthAtProgress,
   frontierEquivalentMarketPrice,
 } from "../balance/demandGrowth";
-import { emptyBenchmarks, segmentBenchmarkFit } from "../balance/benchmarks";
+import { segmentBenchmarkFit } from "../balance/benchmarks";
 import type {
   FinanceDaySnapshot,
   MarketOffer,
@@ -24,6 +24,12 @@ import type {
   ComputeLedger as SimComputeLedger,
   ComputeWorkItem as SimComputeWorkItem,
 } from "../types";
+import { isCommerciallyOffered, isLivePublicModel } from "../modelRelease";
+import { agedMarketView } from "../balance/modelAging";
+import {
+  peakServedCapability,
+  personalityEngagement,
+} from "../balance/modelProduct";
 import {
   analyzeApiPricing,
   apiDemandElasticityMultiplier,
@@ -48,14 +54,22 @@ import {
 } from "../balance/serveCompute";
 import {
   nextSpeedStrain,
+  nextSurgeLevel,
   planSlownessDissatisfaction,
   strainLatencyFactor,
   strainSpeedFactor,
+  surgeBrandPressure,
+  surgePriceMultiplier,
   throttleAbsorbShare,
   throttleChurnScale,
   throttlePainScale,
   throttleSpillScale,
 } from "../balance/serveThrottle";
+import {
+  TOKEN_SPEED_BRAND_THRESHOLD,
+  TOKEN_SPEED_KNEE,
+  tokenSpeedBrandPressure,
+} from "../balance/tokenSpeed";
 import { normalizeAllocation } from "./compute";
 import { computeSnapshot } from "./compute";
 import {
@@ -129,14 +143,43 @@ import {
   sotaUsageMultiplier,
   softmaxShares,
 } from "./marketScore";
+import {
+  segmentDomainHeatMultiplier,
+} from "../balance/domainHeat";
 import { deriveDemandSegments } from "./productPortfolio";
 import {
   isGenerationOnlyModel,
   marketOfferCanCompeteForSegment,
 } from "./modelEligibility";
+import { normalizeModelRouters } from "../balance/modelStudio";
+import {
+  apiRouterParts,
+  composeRouterModel,
+  collapseRouterShares,
+  planExposedModelIds,
+  releasedRouterMemberIds,
+  soldApiRouterMemberIds,
+  soldApiRouters,
+} from "../balance/modelRouter";
 
 /** Fraction of a provider's reachable audience that converts into an active seat. */
-export const PLAN_SEAT_CONVERSION = 0.0125;
+export const PLAN_SEAT_CONVERSION = 0.034;
+
+function playerOfferModel(state: SimState, offer: MarketOffer): Model | undefined {
+  if (offer.routerId) {
+    const router = normalizeModelRouters(state.player.modelRouters).find(
+      (entry) => entry.id === offer.routerId,
+    );
+    if (!router) return undefined;
+    return (
+      composeRouterModel(
+        router,
+        apiRouterParts(router, state.player.models, offer.apiPrice),
+      ) ?? undefined
+    );
+  }
+  return state.player.models.find((model) => model.id === offer.modelId);
+}
 
 export { offerUtility, scoreOfferFactors, segmentShares } from "./marketScore";
 
@@ -349,8 +392,13 @@ function headlineSubPrice(state: SimState): number {
     : Math.min(...paid.map((p) => p.pricePerMonth));
 }
 
-function isPublic(m: { shipped: boolean; release?: string }) {
-  return m.release === "released" || m.shipped;
+function isPublic(m: {
+  shipped: boolean;
+  release?: string;
+  archived?: boolean;
+  commerciallyOffered?: boolean;
+}) {
+  return isCommerciallyOffered(m);
 }
 
 function hasServingModel(state: SimState): boolean {
@@ -370,6 +418,13 @@ function bestPlayerModel(state: SimState) {
   );
   if (active) return active;
   return [...shipped].sort((a, b) => b.capability - a.capability)[0]!;
+}
+
+function postedApiSurgeMultiplier(state: SimState): number {
+  if ((state.player.pricing.serveThrottlePolicy ?? "balanced") !== "surge") {
+    return 1;
+  }
+  return surgePriceMultiplier(state.player.apiSurgeLevel ?? 0);
 }
 
 /** Blended list price for market scoring (in/out weighted). Per-model first. */
@@ -549,14 +604,32 @@ export function collectOffers(state: SimState): MarketOffer[] {
   const subscriptionIds = new Set(
     state.player.pricing.plans
       .filter((plan) => plan.enabled)
-      .flatMap((plan) => plan.modelIds)
+      .flatMap((plan) =>
+        planExposedModelIds(
+          plan,
+          state.player.models,
+          state.player.modelRouters,
+        ),
+      )
       .filter((id) => publicIds.has(id)),
   );
   if (subscriptionIds.size === 0 && fallbackApiId)
     subscriptionIds.add(fallbackApiId);
 
+  const soldRouters = soldApiRouters({
+    apiRouterIds: state.player.pricing.apiRouterIds,
+    apiModelIds: state.player.pricing.apiModelIds,
+    activeModelRouterId: state.player.activeModelRouterId,
+    routers: state.player.modelRouters,
+    models: playerModels,
+  });
+  const soldRouterMemberIds = new Set(
+    soldApiRouterMemberIds(soldRouters, playerModels),
+  );
+
   for (const playerModel of playerModels) {
-    const apiListed = apiIds.has(playerModel.id);
+    const apiListed =
+      apiIds.has(playerModel.id) && !soldRouterMemberIds.has(playerModel.id);
     const subscriptionListed = subscriptionIds.has(playerModel.id);
     if (!apiListed && !subscriptionListed) continue;
     const apiPrecision =
@@ -590,30 +663,99 @@ export function collectOffers(state: SimState): MarketOffer[] {
       playerModel.quality.reliability,
       pain,
     );
+    const aged = agedMarketView(playerModel, state.day);
+    const agedApi = agedMarketView(apiModel, state.day);
     offers.push({
       labId: "player",
       modelId: playerModel.id,
-      capability: playerModel.capability,
+      capability: aged.capability,
       reliability,
       safety: playerModel.quality.safety,
+      personality:
+        playerModel.productProfile?.personality ??
+        playerModel.benchmarks.personality ??
+        playerModel.quality.chat,
       brandTrust: state.player.brandTrust,
-      apiPrice: modelApiPrice(state, playerModel.id),
+      apiPrice:
+        modelApiPrice(state, playerModel.id) * postedApiSurgeMultiplier(state),
       subPrice: headlineSubPrice(state),
       latencyScore: latency,
       tokPerSec,
       modalities: playerModel.modalities,
       isOpenWeights: false,
-      benchmarks: playerModel.benchmarks,
-      apiCapability: apiModel.capability,
+      benchmarks: aged.benchmarks,
+      apiCapability: agedApi.capability,
       apiReliability: perceivedServiceReliability(
         apiModel.quality.reliability,
         pain,
       ),
       apiTokPerSec,
-      apiBenchmarks: apiModel.benchmarks,
+      apiBenchmarks: agedApi.benchmarks,
       generationOnly: isGenerationOnlyModel(playerModel),
       apiListed,
       subscriptionListed,
+    });
+  }
+
+  for (const soldRouter of soldRouters) {
+    const members = playerModels.filter((model) =>
+      releasedRouterMemberIds(soldRouter, playerModels).includes(model.id),
+    );
+    if (members.length === 0) continue;
+    const seedPrice =
+      members.reduce((sum, model) => sum + modelApiPrice(state, model.id), 0) /
+      members.length;
+    const parts = apiRouterParts(soldRouter, playerModels, seedPrice);
+    const composed = composeRouterModel(soldRouter, parts);
+    if (!composed || parts.length === 0) continue;
+    const apiPrice =
+      parts.reduce(
+        (sum, part) => sum + part.share * modelApiPrice(state, part.model.id),
+        0,
+      ) * postedApiSurgeMultiplier(state);
+    const apiTokPerSec =
+      parts.reduce((sum, part) => {
+        const speed =
+          part.model.serviceProfile?.interactiveTokPerSec ??
+          Math.max(
+            2,
+            52 * part.model.tokPerSecMult * state.player.servingEfficiency,
+          );
+        return sum + part.share * speed;
+      }, 0) *
+      Math.max(0.25, 1 - pain * 0.55) *
+      strainSpeedFactor(apiStrain);
+    const reliability = perceivedServiceReliability(
+      composed.quality.reliability,
+      pain,
+    );
+    const agedRouter = agedMarketView(composed, state.day);
+    offers.push({
+      labId: "player",
+      modelId: soldRouter.id,
+      routerId: soldRouter.id,
+      capability: agedRouter.capability,
+      reliability,
+      safety: composed.quality.safety,
+      personality:
+        composed.productProfile?.personality ??
+        composed.benchmarks.personality ??
+        composed.quality.chat,
+      brandTrust: state.player.brandTrust,
+      apiPrice,
+      subPrice: headlineSubPrice(state),
+      latencyScore: latency,
+      tokPerSec: apiTokPerSec,
+      modalities: composed.modalities,
+      isOpenWeights: false,
+      benchmarks: agedRouter.benchmarks,
+      apiCapability: agedRouter.capability,
+      apiReliability: reliability,
+      apiTokPerSec,
+      apiBenchmarks: agedRouter.benchmarks,
+      generationOnly: parts.every((part) => isGenerationOnlyModel(part.model)),
+      apiListed: true,
+      subscriptionListed: false,
     });
   }
 
@@ -631,15 +773,20 @@ export function collectOffers(state: SimState): MarketOffer[] {
           Math.max(2, 52 * m.tokPerSecMult * r.servingEfficiency)) *
         Math.max(0.25, 1 - rivalPain * 0.55) *
         strainSpeedFactor(rivalStrain);
+      const agedRival = agedMarketView(m, state.day);
       offers.push({
         labId: r.id,
         modelId: m.id,
-        capability: m.capability,
+        capability: agedRival.capability,
         reliability: perceivedServiceReliability(
           m.quality.reliability,
           rivalPain,
         ),
         safety: m.quality.safety,
+        personality:
+          m.productProfile?.personality ??
+          m.benchmarks.personality ??
+          m.quality.chat,
         brandTrust: r.brandTrust,
         apiPrice: rivalModelApiPrice(r, m),
         subPrice: r.pricing.subPlusPrice,
@@ -647,7 +794,7 @@ export function collectOffers(state: SimState): MarketOffer[] {
         tokPerSec: rivalTok,
         modalities: m.modalities,
         isOpenWeights: m.openWeights ?? r.archetype === "open_weights",
-        benchmarks: m.benchmarks ?? emptyBenchmarks(),
+        benchmarks: agedRival.benchmarks,
         generationOnly: isGenerationOnlyModel(m),
         apiListed: true,
         subscriptionListed: true,
@@ -656,6 +803,39 @@ export function collectOffers(state: SimState): MarketOffer[] {
   }
 
   return offers;
+}
+
+function playerOfferTokPerSec(
+  offers: MarketOffer[],
+  modelId: string,
+  channel: "api" | "subscription",
+): number | undefined {
+  const offer = offers.find(
+    (candidate) => candidate.labId === "player" && candidate.modelId === modelId,
+  );
+  if (!offer) return undefined;
+  return channel === "api"
+    ? (offer.apiTokPerSec ?? offer.tokPerSec)
+    : offer.tokPerSec;
+}
+
+function weightedPlayerOfferTokPerSec(
+  offers: MarketOffer[],
+  modelUsage: { modelId: string; share?: number; dayMTok?: number }[] | undefined,
+  channel: "api" | "subscription",
+): number | undefined {
+  if (!modelUsage || modelUsage.length === 0) return undefined;
+  let weighted = 0;
+  let weight = 0;
+  for (const usage of modelUsage) {
+    const tok = playerOfferTokPerSec(offers, usage.modelId, channel);
+    if (tok == null) continue;
+    const w = (usage.share ?? 0) > 1e-12 ? usage.share! : (usage.dayMTok ?? 0);
+    if (w <= 0) continue;
+    weighted += tok * w;
+    weight += w;
+  }
+  return weight > 1e-12 ? weighted / weight : undefined;
 }
 
 /**
@@ -897,17 +1077,24 @@ export function rivalPlanDemandPerUser(
     );
   });
   const weightTotal = rawWeights.reduce((sum, weight) => sum + weight, 0);
-  const sota = sotaProximity(model.capability, frontierCapability);
+  const servedCapability = peakServedCapability(model);
+  const sota = sotaProximity(servedCapability, frontierCapability);
   return plans.reduce((sum, plan, index) => {
     const allowance = rivalPlanAllowanceMTokPerMonth(rival, plan, model);
     const shock = planDemandShockMultiplier(plan, day);
     const utilization = planUsageUtilization(plan, plans, {
-      modelCapability: model.capability,
+      modelCapability: servedCapability,
       frontierCapability,
       demandShockMultiplier: shock,
       allowanceMTokPerMonth: allowance,
     });
-    const qualityEngagement = 0.85 + Math.pow(sota, 1.35) * 0.15;
+    const qualityEngagement =
+      (0.85 + Math.pow(sota, 1.35) * 0.15) *
+      personalityEngagement(
+        model.productProfile?.personality ??
+          model.benchmarks.personality ??
+          model.quality.chat,
+      );
     const launchEngagement = 1 + Math.max(0, shock - 1) * 0.15;
     const perUser = Math.min(
       allowance / ECONOMY.daysPerMonth,
@@ -1338,6 +1525,7 @@ export function tickMarket(state: SimState): SimState {
         frontier: segmentFrontier,
         qualityFrontier: segmentQualityFrontier,
         priceBandPeers: bandPeers,
+        domainHeat: state.domainHeat,
       });
       const segmentPeers = segmentOffers
         .filter(
@@ -1346,7 +1534,7 @@ export function tickMarket(state: SimState): SimState {
         .map((peer) => effectiveOffer(peer));
       const scoredModel =
         o.labId === state.playerLabId
-          ? state.player.models.find((model) => model.id === o.modelId)
+          ? playerOfferModel(state, o)
           : state.rivals
               .find((rival) => rival.id === o.labId)
               ?.models.find((model) => model.id === o.modelId);
@@ -1501,14 +1689,15 @@ export function tickMarket(state: SimState): SimState {
     const boost = segBoost(segState.id);
     const segSize = segState.size * boost * metroDemand;
     const taskGrowthExponent = segDef.prefersSub
-      ? 0.58
+      ? 0.72
       : segState.id === "science"
-        ? 0.82
-        : 1;
+        ? 0.7
+        : 0.68;
     const usage =
       segState.usageIntensity *
       Math.pow(taskIntensityMultiple, taskGrowthExponent) *
-      frontierTaskBoost;
+      frontierTaskBoost *
+      segmentDomainHeatMultiplier(segDef.benchmarkWeights, state.domainHeat);
 
     sharesByLab[OUTSIDE_OPTION_PROVIDER_ID] =
       (sharesByLab[OUTSIDE_OPTION_PROVIDER_ID] ?? 0) +
@@ -1710,8 +1899,8 @@ export function tickMarket(state: SimState): SimState {
   // Segment sizes are total category audience; only a small fraction converts
   // into an active paid/free seat in one lab's current acquisition window.
   // Absolute users = segment population × provider share × an explicit seat
-  // conversion. 1.25% keeps billion-person audiences legible as tens of
-  // millions of seats without making subscriptions consume the whole economy.
+  // conversion. 3.4% keeps billion-person audiences as tens of millions of
+  // seats so subscriptions can rival API revenue without eating the TAM.
   //
   // Each subscription segment splits its OWN audience across the enabled paid
   // plans, with willingness-to-pay anchored at the segment's ARPU (log-normal
@@ -1845,12 +2034,13 @@ export function tickMarket(state: SimState): SimState {
     const price = Math.max(1, plan.pricePerMonth);
     const model = bestModelOnPlan(state, plan);
     if (!model) return 0;
+    const facingCap = agedMarketView(model, state.day).capability;
     const readiness = planPremiumReadiness({
       pricePerMonth: plan.pricePerMonth,
       brandTrust: state.player.brandTrust,
-      modelCapability: model?.capability ?? 40,
+      modelCapability: facingCap,
       frontierCapability: frontierCap,
-      modelReliability: model?.quality.reliability ?? 50,
+      modelReliability: model.quality.reliability,
     });
     const allowance = planEffectiveAllowanceMTokPerMonth(state, plan);
     const valueRatio = planAdvertisedValueRatio(
@@ -1866,21 +2056,24 @@ export function tickMarket(state: SimState): SimState {
     const satisfactionSignal =
       0.08 +
       0.92 * Math.pow(Math.max(0, 1 - Math.min(1, priorDissatisfaction)), 1.2);
-    const priceReach = 1 / (1 + Math.pow(price / 20, 1.15));
+    const priceReachExp = 1.15 - 0.45 * readiness;
+    const priceReach = 1 / (1 + Math.pow(price / 20, priceReachExp));
     const demandSignal =
       valueSignal * (0.3 + readiness * 0.7) * satisfactionSignal;
-    // Price reach creates Plus > Pro > Max without zeroing expensive niches.
     return Math.max(1e-6, demandSignal * priceReach);
   });
   const paidUpgradeWeightSum = paidUpgradeWeights.reduce((s, w) => s + w, 0);
-  const bestPaidUpgradeSignal = enabledPlans.reduce((best, plan) => {
-    if (isFreePlan(plan)) return best;
+  let bestPaidUpgradeSignal = 0;
+  let bestPaidReadiness = 0;
+  for (const plan of enabledPlans) {
+    if (isFreePlan(plan)) continue;
     const model = bestModelOnPlan(state, plan);
-    if (!model) return best;
+    if (!model) continue;
+    const facingCap = agedMarketView(model, state.day).capability;
     const readiness = planPremiumReadiness({
       pricePerMonth: plan.pricePerMonth,
       brandTrust: state.player.brandTrust,
-      modelCapability: model.capability,
+      modelCapability: facingCap,
       frontierCapability: frontierCap,
       modelReliability: model.quality.reliability,
     });
@@ -1897,12 +2090,17 @@ export function tickMarket(state: SimState): SimState {
     const satisfactionSignal =
       0.08 +
       0.92 * Math.pow(Math.max(0, 1 - Math.min(1, priorDissatisfaction)), 1.2);
-    return Math.max(
-      best,
+    bestPaidUpgradeSignal = Math.max(
+      bestPaidUpgradeSignal,
       valueSignal * (0.3 + readiness * 0.7) * satisfactionSignal,
     );
-  }, 0);
-  const paidUpgradeRate = Math.min(0.18, 0.0015 + bestPaidUpgradeSignal * 0.16);
+    bestPaidReadiness = Math.max(bestPaidReadiness, readiness);
+  }
+  const paidUpgradeCap = 0.18 + 0.12 * bestPaidReadiness;
+  const paidUpgradeRate = Math.min(
+    paidUpgradeCap,
+    0.0015 + bestPaidUpgradeSignal * 0.22,
+  );
 
   const rawBuckets = enabledPlans.map((plan, i) => {
     let subscribers = seatsByPlan.get(plan.id) ?? 0;
@@ -1926,8 +2124,14 @@ export function tickMarket(state: SimState): SimState {
     const modelMix = planModelTrafficMix(state, plan);
     const planModel =
       [...modelMix].sort((a, b) => b.model.capability - a.model.capability)[0]
-        ?.model ?? null;
-    const cap = planModel?.capability ?? activeModel?.capability ?? 45;
+        ?.model ?? activeModel ?? null;
+    const cap =
+      modelMix.length > 0
+        ? modelMix.reduce(
+            (sum, lane) => sum + lane.share * lane.model.capability,
+            0,
+          )
+        : (planModel?.capability ?? 45);
     // Subsidy plans derive their effective allowance from per-model
     // entitlements; legacy token plans resolve to their stored allowance.
     const effectiveAllowanceMTok = planEffectiveAllowanceMTokPerMonth(
@@ -1951,9 +2155,16 @@ export function tickMarket(state: SimState): SimState {
     const free = isFreePlan(plan);
     // Capability moves use within the tier's steady-state band. It must never
     // multiply actual consumption beyond the configured entitlement.
-    const qualityEngagement = free
-      ? 0.7 + Math.pow(sota, 1.35) * 0.3
-      : 0.85 + Math.pow(sota, 1.35) * 0.15;
+    const personalityScore =
+      planModel?.productProfile?.personality ??
+      planModel?.benchmarks.personality ??
+      planModel?.quality.chat ??
+      50;
+    const qualityEngagement =
+      (free
+        ? 0.7 + Math.pow(sota, 1.35) * 0.3
+        : 0.85 + Math.pow(sota, 1.35) * 0.15) *
+      personalityEngagement(personalityScore, free);
     // Subscriber price rejection is judged at the market reference rate, not
     // the lab's own (possibly gouged) API list price.
     const priceTooHigh = planPriceTooHighScore(plan, {
@@ -2003,6 +2214,13 @@ export function tickMarket(state: SimState): SimState {
         allowanceMTokPerMonth: effectiveAllowanceMTok,
       },
     );
+    const readiness = planPremiumReadiness({
+      pricePerMonth: plan.pricePerMonth,
+      brandTrust: state.player.brandTrust,
+      modelCapability: cap,
+      frontierCapability: frontierCap,
+      modelReliability: planModel?.quality.reliability ?? 50,
+    });
     return {
       plan,
       subscribers,
@@ -2010,6 +2228,8 @@ export function tickMarket(state: SimState): SimState {
       rawMTok,
       usageRate,
       valueRatio,
+      readiness,
+      frontierProximity: sota,
       model: planModel,
       modelMix,
       demandPf,
@@ -2091,6 +2311,36 @@ export function tickMarket(state: SimState): SimState {
 
   const playerApiBucketsRaw = [...demandByOffer.values()].flatMap((demand) => {
     if (demand.offer.labId !== "player" || demand.apiMTok <= 0) return [];
+    if (demand.offer.routerId) {
+      const router = normalizeModelRouters(state.player.modelRouters).find(
+        (entry) => entry.id === demand.offer.routerId,
+      );
+      if (!router) return [];
+      const parts = collapseRouterShares(
+        apiRouterParts(router, state.player.models, demand.offer.apiPrice),
+      );
+      return parts.flatMap((part) => {
+        const model = state.player.models.find(
+          (candidate) => candidate.id === part.model.id && isPublic(candidate),
+        );
+        if (!model) return [];
+        const precision =
+          state.player.pricing.apiServePrecisionByModel?.[model.id];
+        const serveModel = modelForServePrecision(
+          model,
+          precision,
+          state.player.researchUnlocked,
+        );
+        return [
+          {
+            model,
+            serveModel,
+            precision,
+            demandMTok: demand.apiMTok * part.share,
+          },
+        ];
+      });
+    }
     const model = state.player.models.find(
       (candidate) => candidate.id === demand.offer.modelId,
     );
@@ -2283,6 +2533,14 @@ export function tickMarket(state: SimState): SimState {
     absorbShare,
   );
   const speedStrain = Math.max(apiSpeedStrain, subSpeedStrain);
+  const apiSurgeLevel = nextSurgeLevel(
+    state.player.apiSurgeLevel ?? 0,
+    1 - serveFracApi,
+    throttlePolicy,
+  );
+  const apiSurgeMultiplier = surgePriceMultiplier(
+    throttlePolicy === "surge" ? apiSurgeLevel : 0,
+  );
   const servicePain = nextServicePain(
     priorPain,
     unservedRatio * throttlePainScale(absorbShare),
@@ -2358,6 +2616,7 @@ export function tickMarket(state: SimState): SimState {
         ?.servedUnits ?? 0;
     const dayInferPf = inferencePfDemand(dayMTok, bucket.serveModel, serveEff);
     const { priceIn, priceOut } = modelApiInOut(state, bucket.model.id);
+    const surge = postedApiSurgeMultiplier(state);
     const productKind = commercialModelKind(bucket.model);
     return {
       model: bucket.model,
@@ -2367,8 +2626,8 @@ export function tickMarket(state: SimState): SimState {
       dayRevenue: apiRevenueForCommercialWork(
         productKind,
         dayMTok,
-        priceIn,
-        priceOut,
+        priceIn * surge,
+        priceOut * surge,
         {
           perImage: bucket.model.apiPricePerImage,
           perAudioMinute: bucket.model.apiPricePerAudioMinute,
@@ -2530,6 +2789,7 @@ export function tickMarket(state: SimState): SimState {
     const slownessDissatisfaction = planSlownessDissatisfaction(
       subSpeedStrain,
       plan.isFree,
+      weightedPlayerOfferTokPerSec(offers, plan.modelUsage, "subscription"),
     );
     const dissatisfaction = Math.min(
       1,
@@ -2720,6 +2980,28 @@ export function tickMarket(state: SimState): SimState {
   if (playerPricingComplaintPressure > 0.2) {
     brand = Math.max(8, brand - (playerPricingComplaintPressure - 0.2) * 0.35);
   }
+  // Interactive streams below ~15 tok/s feel broken even when tokens arrive.
+  // Small, traffic-weighted brand pressure — never a speed-only death spiral.
+  for (const demand of demandByOffer.values()) {
+    if (demand.offer.labId !== "player") continue;
+    const traffic = demand.apiMTok + demand.subscriptionMTok;
+    if (traffic < 0.05) continue;
+    const tok =
+      demand.apiMTok >= demand.subscriptionMTok
+        ? (demand.offer.apiTokPerSec ?? demand.offer.tokPerSec)
+        : demand.offer.tokPerSec;
+    if (tok < TOKEN_SPEED_BRAND_THRESHOLD) {
+      const weight = Math.min(1, traffic / Math.max(0.05, playerDemandMTok));
+      brand = Math.max(
+        8,
+        brand - tokenSpeedBrandPressure(tok) * (0.35 + 0.65 * weight),
+      );
+    }
+  }
+  brand = Math.max(
+    8,
+    brand - surgeBrandPressure(postedApiSurgeMultiplier(state)),
+  );
   // Quantized traffic exposes the lower eval profile to real customers. INT8
   // is usually tolerable; sustained INT4 on a material product creates a
   // visible trust cost proportional to that plan's share of served traffic.
@@ -3053,7 +3335,7 @@ export function tickMarket(state: SimState): SimState {
     }
   }
   const modelFinance: ModelFinanceRow[] = state.player.models.map((m) => {
-    const publicModel = m.release === "released" || m.shipped;
+    const publicModel = isLivePublicModel(m);
     const apiUsage = apiModelUsage.find((usage) => usage.modelId === m.id);
     const apiSettlement = apiModelSettlement.find(
       (item) => item.model.id === m.id,
@@ -3182,6 +3464,49 @@ export function tickMarket(state: SimState): SimState {
       },
       ...state.alerts.filter((a) => !a.id.startsWith("cap-")),
     ].slice(0, 40);
+  }
+
+  // Token-speed complaints: listed endpoints with real traffic below 30 tok/s.
+  // Demand is already softened by the speed knee; this is the flavor surface.
+  const slowBusyOffers = [...demandByOffer.values()].filter((demand) => {
+    if (demand.offer.labId !== "player") return false;
+    const traffic = demand.apiMTok + demand.subscriptionMTok;
+    if (traffic < 0.05) return false;
+    const tok = Math.min(
+      demand.offer.tokPerSec,
+      demand.offer.apiTokPerSec ?? demand.offer.tokPerSec,
+    );
+    return tok < TOKEN_SPEED_KNEE;
+  });
+  if (slowBusyOffers.length > 0) {
+    const slowest = slowBusyOffers.reduce(
+      (best, demand) =>
+        Math.min(
+          best,
+          demand.offer.tokPerSec,
+          demand.offer.apiTokPerSec ?? demand.offer.tokPerSec,
+        ),
+      Infinity,
+    );
+    alerts = [
+      {
+        id: `tokspeed-${state.day}`,
+        day: state.day,
+        severity:
+          slowest < TOKEN_SPEED_BRAND_THRESHOLD
+            ? ("danger" as const)
+            : ("warn" as const),
+        message:
+          slowest < TOKEN_SPEED_BRAND_THRESHOLD
+            ? `Users complain about token speed: replies crawl at ~${slowest.toFixed(0)} tok/s. Serve a smaller active set (MoE) or a snappier checkpoint — demand is holding, patience is not.`
+            : `Users complain about token speed (~${slowest.toFixed(0)} tok/s). Streams below ${TOKEN_SPEED_KNEE} tok/s feel sluggish; MoE or a lighter active set would help.`,
+      },
+      ...alerts.filter((a) => !a.id.startsWith("tokspeed-")),
+    ].slice(0, 40);
+    news = [
+      `Day ${state.day}: Users complain about ${state.player.name} token speed.`,
+      ...news,
+    ].slice(0, 20);
   }
 
   alerts = alerts.filter((alert) => !alert.id.startsWith("sales-cap-"));
@@ -3337,6 +3662,7 @@ export function tickMarket(state: SimState): SimState {
       speedStrain,
       apiSpeedStrain,
       subSpeedStrain,
+      apiSurgeLevel,
       enterpriseContracts,
       finance,
     },
@@ -3353,6 +3679,8 @@ export function tickMarket(state: SimState): SimState {
       speedStrain,
       apiSpeedStrain,
       subSpeedStrain,
+      apiSurgeLevel,
+      apiSurgeMultiplier,
       apiLoad,
       subLoad,
       overflowMTok,
