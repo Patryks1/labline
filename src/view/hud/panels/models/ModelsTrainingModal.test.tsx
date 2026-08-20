@@ -34,7 +34,7 @@ describe("ModelsTrainingModal", () => {
     const markup = renderToStaticMarkup(
       createElement(ModelsTrainingModal, {
         open: false,
-        activeStep: "define",
+        activeStep: "product",
         onStepChange: () => undefined,
         onCancel: () => undefined,
       }),
