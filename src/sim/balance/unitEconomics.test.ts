@@ -58,7 +58,9 @@ function withServeCampus(state: SimState, racks = 32): SimState {
         rackCapacity: 512,
         racksUsed: 0,
         mwCapacity: 80,
-        opexPerDay: 72_000,
+        // Keep hall opex modest so a 70B listing still clears the campus
+        // vs cloud switch (ops scale with tiles on legacy fixtures).
+        opexPerDay: 12_000,
       };
     }
     if (t.x === 3 && t.y === 2) {
@@ -69,8 +71,17 @@ function withServeCampus(state: SimState, racks = 32): SimState {
         buildingProgress: 1,
         buildingTarget: 1,
         mwCapacity: 80,
-        opexPerDay: 15_000,
+        opexPerDay: 2_000,
       };
+    }
+    // Legacy maps ship with large starter-campus opex; clamp other player
+    // buildings so hosting-floor tests measure rack/model scale, not HQ rent.
+    if (
+      t.owner === "player" &&
+      typeof t.opexPerDay === "number" &&
+      t.opexPerDay > 2_000
+    ) {
+      return { ...t, opexPerDay: 2_000 };
     }
     return t;
   });
@@ -514,7 +525,10 @@ describe("unitEconomics canonical helpers", () => {
 
 describe("API hosting cost floor", () => {
   it("charges more per token for a larger model on the same campus", () => {
-    const state = withServeCampus(createGame({ seed: 4415 }), 32);
+    const state = withServeCampus(
+      createGame({ seed: 4415, legacyMapFixture: true }),
+      32,
+    );
     const snap = computeSnapshot(state);
     const small = buildScaledModel({
       id: "floor-7b",
