@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  issue_comment:
+    types:
+      - created
 
 permissions:
   contents: write
@@ -14,7 +17,9 @@ concurrency:
 
 jobs:
   publish-pr-branch:
-    if: contains(github.event.head_commit.message, '[run-model-economy-bootstrap]')
+    if: >-
+      (github.event_name == 'push' && contains(github.event.head_commit.message, '[run-model-economy-bootstrap]')) ||
+      (github.event_name == 'issue_comment' && github.event.issue.number == 3 && github.event.comment.body == '/publish-model-economy')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
