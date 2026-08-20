@@ -91,6 +91,13 @@ import {
   trainingDataModalityRequirements,
 } from "../balance/trainingV3";
 import {
+  freezeTrainingPlan,
+  frozenResearchIds,
+  inferComputeSource,
+  trainingOutcomeSeed,
+} from "../balance/trainingPlan";
+import { trainingFitsPlacementDomain } from "../balance/placementDomains";
+import {
   DEFAULT_RECIPE_ALIGN_SHARE,
   applyRecipeOutcome,
   recipeOutcomeSignals,
@@ -285,7 +292,6 @@ import {
   branchFocusPreset,
   buildModelProductProfile,
   capBaseChatWeights,
-  defaultAlignmentMTok,
   DEFAULT_POST_TRAIN_SHARE,
   postTrainStagesFromResearch,
   splitTrainingTokens,
@@ -2369,6 +2375,21 @@ export function startTraining(
       `Training RAM is a hard limit (${ramFit.blockerResource ?? "memory"}): ${ramFit.blockerName ?? "New run"} needs ${(ramFit.blockerRequiredGb ?? needVram).toFixed(0)} GB after splitting the ${Math.round(trainingAllocationShare(state) * 100)}% Training allocation. Add memory, raise Training allocation, pause another run, or change priorities.`,
     );
   }
+  if (computePriority > 0) {
+    const domainGate = trainingFitsPlacementDomain({
+      requiredHbmGb: needVram,
+      requiredHostRamGb: requiredSystemRam,
+      snapshot: placement,
+    });
+    if (!domainGate.ok) {
+      return withAlert(
+        state,
+        "warn",
+        domainGate.reason ??
+          "Training must fit in one local or cloud placement domain; memory cannot be pooled.",
+      );
+    }
+  }
 
   const reservedPf = Math.max(0, opts.reservedPf ?? 0);
   const initialEffectivePf = estimateJobDailyThroughput(state, {
@@ -2403,9 +2424,53 @@ export function startTraining(
     pacedTrainingPfPerDay(target, minCalendarDays),
   );
 
+  const integratedMethods =
+    mode === "continue"
+      ? [
+          ...new Set([
+            ...(continuationBase?.integratedMethods ?? []),
+            ...state.player.researchUnlocked,
+          ]),
+        ].sort()
+      : [...state.player.researchUnlocked].sort();
+  const outcomeSeed = trainingOutcomeSeed({
+    worldSeed: state.seed,
+    companyId: state.playerLabId,
+    planId: jobId,
+    backbone,
+    productPreset,
+    createdDay: state.day,
+  });
+  const plan = freezeTrainingPlan({
+    id: `plan-${jobId}`,
+    companyId: state.playerLabId,
+    name: opts.name,
+    productPreset,
+    backbone,
+    totalParamsB: paramsB,
+    activeParamsB,
+    trainingNumerics: numerics,
+    dataRecipe: consume.plan,
+    computePlan: {
+      source: inferComputeSource({
+        localPf: placement.localFleetPf,
+        remotePf: placement.remoteFlopsPf,
+      }),
+      reservedPf,
+      computePriority,
+      activationCheckpointing: integratedMethods.includes("opt_checkpoint"),
+    },
+    teacherModelId: teacherId,
+    distillationShare: mode === "distill" ? distillTeacherShare : 0,
+    integratedResearchIds: integratedMethods,
+    outcomeSeed,
+    createdDay: state.day,
+  });
+
   const job: TrainingJob = {
     id: jobId,
     name: opts.name,
+    plan,
     family,
     backbone,
     productPreset,
@@ -2496,14 +2561,7 @@ export function startTraining(
     },
     benchmarkSnapshots: [],
     lastBenchmarkDay: undefined,
-    outcomeSeed: hashSeed(
-      state.seed,
-      state.day,
-      opts.name,
-      paramsB,
-      family,
-      "train-outcome",
-    ),
+    outcomeSeed,
     outcomeRisk: dataAnalysis.risk,
     campaignMilestonesReached: [],
     campaignEventHistory: [],
@@ -2524,15 +2582,7 @@ export function startTraining(
     modalityComputeMult: dataAnalysis.modalityComputeMult,
     dataManifestId: manifestSnapshot.manifest.id,
     dataEvidence: trainingDataEvidenceFromManifest(manifestSnapshot.manifest),
-    integratedMethods:
-      mode === "continue"
-        ? [
-            ...new Set([
-              ...(continuationBase?.integratedMethods ?? []),
-              ...state.player.researchUnlocked,
-            ]),
-          ].sort()
-        : [...state.player.researchUnlocked].sort(),
+    integratedMethods,
     modelStack,
     attachedGymKinds: (opts.attachedGymKinds ?? []).filter((kind) =>
       gymUnlocked(kind, state.player.researchUnlocked),
@@ -5114,8 +5164,7 @@ function buildModelFromJob(
   release: "internal" | "released",
   list = release === "released",
 ): Model {
-  const modelResearchUnlocked =
-    job.integratedMethods ?? state.player.researchUnlocked;
+  const modelResearchUnlocked = frozenResearchIds(job);
   const effects = aggregateEffects(modelResearchUnlocked);
   const family = job.family;
   const backbone = job.backbone ?? backboneFromFamily(family);
@@ -5702,7 +5751,7 @@ function buildModelFromJob(
       (job.campaignModifiers?.dataQualityDelta ?? 0),
     verifyShare: 1 - (job.trainShare ?? 0.82),
     engineers: state.player.staff?.engineer ?? 0,
-    researchCount: state.player.researchUnlocked.length,
+    researchCount: frozenResearchIds(job).length,
     day: state.day,
     breakthroughBias:
       (effects.trainingBreakthroughBias ?? 0) +
@@ -5712,11 +5761,20 @@ function buildModelFromJob(
       (job.campaignModifiers?.stumbleRisk ?? 0) +
       Math.max(0, precision.lossVolatilityMultiplier - 1) * 0.08,
   });
-  capability = clamp(
-    capability +
-      outcome.capabilityDelta +
-      (job.campaignModifiers?.capabilityDelta ?? 0),
-  );
+  // Serious failures destroy most of the run, but the checkpoint still retains
+  // a residual floor so the model remains a usable (bad) artifact.
+  if (outcome.kind === "failure") {
+    capability = Math.max(
+      3,
+      capability * Math.max(0.35, outcome.yieldMultiplier),
+    );
+  } else {
+    capability = clamp(
+      capability +
+        outcome.capabilityDelta +
+        (job.campaignModifiers?.capabilityDelta ?? 0),
+    );
+  }
   capability = Math.min(
     capability,
     bentCapabilityCeiling(scale.capabilityCeiling) *
