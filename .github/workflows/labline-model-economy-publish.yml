@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - balance/model-economy-recalibration
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -11,7 +14,7 @@ permissions:
 
 concurrency:
   group: labline-model-economy-recalibration
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   apply-test-publish:
