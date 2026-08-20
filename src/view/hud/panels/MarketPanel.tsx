@@ -6,6 +6,7 @@ import {
 } from '../../../sim/systems/productPortfolio'
 import type { ProductChannel, ProductOffer } from '../../../sim/types'
 import { useGameStore } from '../../../store/gameStore'
+import { selectCompanyModels, selectPlayerCompany } from '../../../sim/company'
 import { audience, money, num, pct, people } from '../format'
 import {
   EmptyState,
@@ -46,6 +47,8 @@ function formatProductOfferPrice(offer: ProductOffer): string {
 
 export function MarketPanel() {
   const state = useGameStore((s) => s.state)
+  const playerCompany = selectPlayerCompany(state)
+  const playerModels = selectCompanyModels(state, playerCompany.id)
   const setPanel = useGameStore((s) => s.setPanel)
   const portfolio = deriveProductPortfolio(state)
   const financeModel = useMemo(() => buildFinanceDashboardModel(state), [state])
@@ -149,11 +152,11 @@ export function MarketPanel() {
             aiUsers={aiUsers}
             peopleToConvert={peopleToConvert}
             dayNet={financeModel.current.net}
-            marginPerMTok={state.player.finance.marginPerMTok}
-            marginPerSub={state.player.finance.marginPerSub}
+            marginPerMTok={playerCompany.finance.marginPerMTok}
+            marginPerSub={playerCompany.finance.marginPerSub}
             latencyScore={state.lastMarket.latencyScore}
             effectiveLatency={state.lastMarket.effectiveLatencyScore ?? state.lastMarket.latencyScore}
-            servicePain={state.lastMarket.servicePain ?? state.player.servicePain ?? 0}
+            servicePain={state.lastMarket.servicePain ?? playerCompany.ops.servicePain ?? 0}
             industryDemand={state.lastMarket.industryDemandMTok ?? state.lastMarket.demandMTok}
             industryServed={state.lastMarket.industryServedMTok ?? state.lastMarket.servedMTok}
             capacityMTok={state.lastMarket.capacityMTok ?? 0}
@@ -164,7 +167,7 @@ export function MarketPanel() {
         {tab === 'products' && (
           <ProductsView
             portfolio={portfolio}
-            models={state.player.models}
+            models={playerModels}
           />
         )}
       </div>

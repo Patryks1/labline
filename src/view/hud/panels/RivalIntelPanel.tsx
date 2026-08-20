@@ -3,6 +3,10 @@ import { blendApiPrice } from "../../../sim/balance/pricing";
 import { planAllowanceMTokPerMonth } from "../../../sim/systems/plans";
 import { competitiveCatchUpSnapshot } from "../../../sim/systems/sharedMarkets";
 import { useGameStore } from "../../../store/gameStore";
+import {
+  selectCompanyModels,
+  selectPlayerCompany,
+} from "../../../sim/company";
 import { isLivePublicModel } from "../../../sim/modelRelease";
 import { useUiStore } from "../../../store/uiStore";
 import { money, num, pct } from "../format";
@@ -67,6 +71,8 @@ function RangeBar({
 /** Public-only rival intelligence. Exact private bids, cash, recipes, and research stay hidden. */
 export function RivalIntelPanel() {
   const state = useGameStore((store) => store.state);
+  const playerCompany = selectPlayerCompany(state);
+  const playerModels = selectCompanyModels(state, playerCompany.id);
   const financeModel = useMemo(() => buildFinanceDashboardModel(state), [state]);
   const trainingJobs = useMemo(() => normalizeTrainingJobs(state), [state]);
   const selectedRivalId = useUiStore((store) => store.selectedRivalId);
@@ -137,7 +143,7 @@ export function RivalIntelPanel() {
       .slice(0, 3)
       .map((line, index) => ({
         id: `${rival?.id ?? "player"}-news-${index}`,
-        source: rival?.name ?? state.player.name,
+        source: rival?.name ?? playerCompany.identity.name,
         dayLabel: `D${Math.max(0, state.day - index)}`,
         body: line,
         tone: "serve" as const,
@@ -213,7 +219,7 @@ export function RivalIntelPanel() {
         {isPlayerSelected ? (
           <>
             <GameCard
-              eyebrow={state.player.name || "Your company"}
+              eyebrow={playerCompany.identity.name || "Your company"}
               title="Company performance"
               tone="mint"
               actions={<StatusChip tone="positive">Exact</StatusChip>}
@@ -272,13 +278,13 @@ export function RivalIntelPanel() {
                 {[
                   [
                     "Released",
-                    state.player.models.filter(
+                    playerModels.filter(
                       isLivePublicModel,
                     ).length,
                   ],
                   [
                     "Internal",
-                    state.player.models.filter(
+                    playerModels.filter(
                       (model) => model.release !== "released" && !model.shipped,
                     ).length,
                   ],
@@ -327,20 +333,20 @@ export function RivalIntelPanel() {
                 />
                 <StatRow
                   label="Brand trust"
-                  value={num(state.player.brandTrust, 0)}
+                  value={num(playerCompany.ops.brandTrust, 0)}
                 />
               </div>
             </GameCard>
 
             <GameCard eyebrow="Fleet" title="Your released models" tone="mint">
-              {state.player.models.filter(isLivePublicModel).length === 0 ? (
+              {playerModels.filter(isLivePublicModel).length === 0 ? (
                 <EmptyState
                   title="No public release"
                   description="Release a trained model to begin competing for demand."
                 />
               ) : (
                 <div className="anim-stagger space-y-2">
-                  {state.player.models
+                  {playerModels
                     .filter(
                       isLivePublicModel,
                     )

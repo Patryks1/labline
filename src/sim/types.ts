@@ -46,6 +46,38 @@ export interface TrainingNumerics {
   recipeVersion: number;
 }
 
+export type TrainingComputeSource = "local" | "cloud" | "mixed";
+
+export interface TrainingComputePlan {
+  source: TrainingComputeSource;
+  reservedPf: number;
+  computePriority: number;
+  activationCheckpointing: boolean;
+  targetDurationDays?: number;
+}
+
+/**
+ * Immutable copy of every training decision at the moment a run begins.
+ * Later research, hardware, data, or teacher changes must not rewrite it.
+ */
+export interface TrainingPlan {
+  id: string;
+  companyId: LabId;
+  name: string;
+  productPreset: ModelProductPreset;
+  backbone: ModelBackbone;
+  totalParamsB: number;
+  activeParamsB?: number;
+  trainingNumerics: TrainingNumerics;
+  dataRecipe: TrainingDataPlan;
+  computePlan: TrainingComputePlan;
+  teacherModelId?: string;
+  distillationShare: number;
+  integratedResearchIds: string[];
+  outcomeSeed: number;
+  createdDay: number;
+}
+
 export interface DeploymentArtifact {
   id: string;
   modelId: string;
@@ -95,7 +127,11 @@ export interface ServiceProfile {
   videoSecondsPerSecond: number | null;
 }
 
-export type TrainingOutcomeKind = "stumble" | "normal" | "breakthrough";
+export type TrainingOutcomeKind =
+  | "stumble"
+  | "normal"
+  | "breakthrough"
+  | "failure";
 
 export interface TrainingOutcome {
   kind: TrainingOutcomeKind;
@@ -1934,6 +1970,8 @@ export interface TrainingFailureRecord {
 export interface TrainingJob {
   id: string;
   name: string;
+  /** Frozen copy of the start-time specification; never reconstructed from live state. */
+  plan?: TrainingPlan;
   family: ModelFamily;
   backbone?: ModelBackbone;
   productPreset?: ModelProductPreset;
@@ -4050,6 +4088,12 @@ export interface SimState {
   automation: AutomationPolicies;
   /** Canonical v4 lab index; compatibility player/rivals views are synchronized daily. */
   playerLabId: LabId;
+  /**
+   * Stage A canonical company records. `player` / `rivals` / `labs` remain
+   * read-only compatibility projections rebuilt from this map after writes.
+   */
+  playerCompanyId?: LabId;
+  companies?: Record<LabId, import("./company/types").CompanyState>;
   labs: Record<LabId, LabState>;
   /** Last agreed canonical/compatibility values used for lossless merging. */
   labSync?: LabSyncState;

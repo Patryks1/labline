@@ -42,6 +42,7 @@ import {
 } from '../balance/tokenServe'
 import { servingPlacementNeedForLab } from './servingPlacement'
 import { activeBalanceTuning } from '../balance/tuning'
+import { withCanonicalCompanies } from '../company'
 
 const EMPTY_STAFF: StaffHeadcount = {
   researcher: 0,
@@ -591,14 +592,14 @@ export function syncLabIndex(state: SimState): SimState {
     ),
   }
   runtimeLabBaselines.set(labSync, runtimeBaselineForLabs(labs))
-  return {
+  return withCanonicalCompanies({
     ...state,
     player,
     rivals,
     labs,
     computeContracts,
     labSync,
-  }
+  })
 }
 
 /** Reconcile and refresh persisted fingerprints at the save boundary. */
@@ -702,7 +703,7 @@ export function updateLab(state: SimState, labId: LabId, updater: (lab: LabState
     }
     const result = { ...state, player, labs, computeContracts }
     advanceRuntimeBaselineAfterUpdate(result, labId, contractsChanged)
-    return result
+    return withCanonicalCompanies(result)
   }
   const rivals = state.rivals.map((rival) =>
     rival.id === labId
@@ -753,7 +754,7 @@ export function updateLab(state: SimState, labId: LabId, updater: (lab: LabState
   )
   const result = { ...state, rivals, labs, computeContracts }
   advanceRuntimeBaselineAfterUpdate(result, labId, contractsChanged)
-  return result
+  return withCanonicalCompanies(result)
 }
 
 export interface LabComputeSnapshot {

@@ -16,6 +16,7 @@ import { formatCampaignDate } from '../../sim/campaign'
 import { KpiHistoryPopover, type KpiHistoryMetric } from './KpiHistoryPopover'
 import { selectFinanceDashboardView } from './data/financeDashboardModel'
 import { CompanyMark } from './NewGameMenu'
+import { selectPlayerCompany } from '../../sim/company'
 
 /** Play speeds only — pause is a separate control (not crammed as "0"). */
 const PLAY_SPEEDS: Speed[] = [1, 2, 5]
@@ -29,6 +30,7 @@ const PLAY_SPEEDS: Speed[] = [1, 2, 5]
 export function TopBar() {
   const [activeMetric, setActiveMetric] = useState<KpiHistoryMetric | null>(null)
   const state = useGameStore((s) => s.state)
+  const playerCompany = selectPlayerCompany(state)
   const setSpeed = useGameStore((s) => s.setSpeed)
   const setPaused = useGameStore((s) => s.setPaused)
   const togglePause = useGameStore((s) => s.togglePause)
@@ -124,8 +126,8 @@ export function TopBar() {
         <div className="top-command-kpis flex min-w-0 flex-1 items-center justify-center gap-3 overflow-hidden px-1 xl:gap-4">
           <Metric
             label="Cash"
-            value={money(state.player.cash)}
-            danger={state.player.cash < 1e6}
+            value={money(playerCompany.finance.cash)}
+            danger={playerCompany.finance.cash < 1e6}
             active={activeMetric === 'cash'}
             onClick={() => setActiveMetric((current) => current === 'cash' ? null : 'cash')}
           />
