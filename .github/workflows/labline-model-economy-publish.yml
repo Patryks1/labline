@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - balance/model-economy-recalibration
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -69,6 +72,7 @@ jobs:
           git rm .github/workflows/labline-model-economy-publish.yml
 
       - name: Commit validated implementation
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         env:
           BRANCH_NAME: balance/model-economy-recalibration
         run: |
