@@ -693,6 +693,14 @@ export function ModelsPanel({
       effectiveSyntheticMultiplier,
     ],
   );
+  const researchEffects = useMemo(
+    () => aggregateEffects(unlocked),
+    [unlocked],
+  );
+  const trainingResearchMult =
+    1 +
+    Math.min(0.12, (researchEffects.capabilityBonus ?? 0) * 0.015) +
+    (backbone === "moe" && unlocked.includes("moe_hier") ? 0.04 : 0);
   const trainingForecast = useMemo(
     () =>
       forecastTrainingV3({
@@ -719,8 +727,10 @@ export function ModelsPanel({
         trainEfficiency: state.player.trainEfficiency,
         trainPoolPf: snap.pools.training,
         trainPowerMw: snap.mwForecast.training,
-        teacherParamsB: teachers.find((model) => model.id === teacherId)
-          ?.paramsB,
+        teacherParamsB: distillTeacher?.paramsB,
+        teacherCapability: distillTeacher?.capability,
+        researchMult: trainingResearchMult,
+        overtrainCapBonus: researchEffects.overtrainCapBonus,
       }),
     [
       modelIteration.name,
@@ -736,6 +746,8 @@ export function ModelsPanel({
       selectedStack,
       trainingFormat,
       nativeWeightFormat,
+      researchEffects.overtrainCapBonus,
+      trainingResearchMult,
       labData,
       state.player.dataQuality,
       state.player.trainEfficiency,
@@ -756,14 +768,9 @@ export function ModelsPanel({
       })
     : null;
   const capabilityLimit = useMemo(() => {
-    const effects = aggregateEffects(unlocked);
-    const researchMult =
-      1 +
-      Math.min(0.12, (effects.capabilityBonus ?? 0) * 0.015) +
-      (backbone === "moe" && unlocked.includes("moe_hier") ? 0.04 : 0);
-    const teacherCapability =
+    const teacher =
       mode === "distill"
-        ? teachers.find((model) => model.id === teacherId)?.capability
+        ? teachers.find((model) => model.id === teacherId)
         : undefined;
     return capabilityCeiling({
       paramsB: trainParamsB,
@@ -776,11 +783,16 @@ export function ModelsPanel({
       }),
       mixWeights: weights,
       researchMult,
+      researchMult: trainingResearchMult,
       reasoningEnabled: stackModifiers.reasoningEnabled,
-      teacherCapability,
+      overtrainCapBonus: researchEffects.overtrainCapBonus,
+      teacherCapability: teacher?.capability,
+      teacherParamsB: teacher?.paramsB,
     });
   }, [
     unlocked,
+    researchEffects.overtrainCapBonus,
+    trainingResearchMult,
     family,
     backbone,
     mode,

@@ -23,7 +23,7 @@ export function CampaignSpine({
       data-campaign-spine="true"
       className="rounded-lg border border-mint/35 bg-mint/5 px-2 py-2"
     >
-      <ol className="grid grid-cols-3 gap-1">
+      <ol className="grid grid-cols-2 gap-1 sm:grid-cols-4">
         {CAMPAIGN_SPINE_STEPS.map((step, index) => {
           const active = focus === step.id;
           const reached = index <= currentIndex;

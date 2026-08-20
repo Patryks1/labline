@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
+import type { TrainingJob } from "../../../../sim/types";
 import type { TrainingResourceAllocation } from "../../../../sim/systems/training";
 import {
+  CAMPAIGN_SPINE_STEPS,
+  campaignStageLabel,
   classifyTrainingStatus,
   hardwareDiagnostic,
   lossStageMarkers,
+  resolveCampaignSpineStep,
   trainingEnergyLabel,
   trainingReleaseDisabledReason,
   trainingRemainingTime,
@@ -29,6 +33,33 @@ const baseStatus = {
 };
 
 describe("training presentation", () => {
+  it("presents train, evaluation, alignment, and launch as one campaign", () => {
+    expect(CAMPAIGN_SPINE_STEPS.map((step) => step.id)).toEqual([
+      "base",
+      "eval",
+      "align",
+      "ship",
+    ]);
+    const job = {
+      failed: false,
+      pendingCampaignEvent: undefined,
+      pendingBenchmark: {
+        id: "bench-1",
+        startedDay: 3,
+        readyDay: 5,
+        progress: 0.4,
+        stage: "base" as const,
+      },
+      postTrain: "none" as const,
+      postTrainProgress: 0,
+      postTrainTarget: 0,
+      progressPfDays: 40,
+      targetPfDays: 100,
+    };
+    expect(resolveCampaignSpineStep(job)).toBe("eval");
+    expect(campaignStageLabel(job as TrainingJob)).toBe("Evaluate · running");
+  });
+
   it("uses allocated compute only for the live countdown", () => {
     expect(
       trainingRemainingTime({
