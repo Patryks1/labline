@@ -12,6 +12,7 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:source": "bun scripts/assert-no-staging-payloads.mjs",
     "test:watch": "vitest",
     "test:e2e": "vitest run src/sim/play/e2e.play.test.ts",
     "test:all": "vitest run"
