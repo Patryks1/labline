@@ -9,6 +9,11 @@ on:
   issue_comment:
     types:
       - created
+  pull_request_target:
+    types:
+      - synchronize
+      - reopened
+      - ready_for_review
 
 permissions:
   contents: write
@@ -22,7 +27,8 @@ jobs:
     if: >-
       github.event_name == 'schedule' ||
       (github.event_name == 'push' && contains(github.event.head_commit.message, '[run-model-economy-bootstrap]')) ||
-      (github.event_name == 'issue_comment' && github.event.issue.number == 3 && github.event.comment.body == '/publish-model-economy')
+      (github.event_name == 'issue_comment' && github.event.issue.number == 3 && github.event.comment.body == '/publish-model-economy') ||
+      (github.event_name == 'pull_request_target' && github.event.pull_request.number == 3 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'balance/model-economy-recalibration')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
