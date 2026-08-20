@@ -360,6 +360,21 @@ export function playerToLab(player: PlayerState, state: PlayerLabContext): LabSt
   }
 }
 
+/**
+ * UI/store migration boundary: PlayerState is the player-company write source
+ * until the remaining legacy systems move into LabState. Refresh its indexed
+ * lab projection immediately so renderers and lab-id systems see one value.
+ */
+export function projectPlayerCompanyState(state: SimState): SimState {
+  return {
+    ...state,
+    labs: {
+      ...state.labs,
+      [state.playerLabId]: playerToLab(state.player, state),
+    },
+  }
+}
+
 export function rivalToLab(rival: RivalLab, contracts?: ComputeContract[]): LabState {
   return {
     id: rival.id,

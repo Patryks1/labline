@@ -58,6 +58,10 @@ import {
 } from "../sim/systems/modelStudio";
 import { applyLabAction } from "../sim/systems/labActionKernel";
 import {
+  projectPlayerCompanyState,
+  syncLabIndex,
+} from "../sim/systems/labEngine";
+import {
   setActiveBalanceTuning,
   resolveBalanceTuning,
   type BalanceTuning,
@@ -700,7 +704,61 @@ function applyLoadedState(state: SimState) {
   };
 }
 
-export const useGameStore = create<GameStore>((set, get) => ({
+type GameStoreMutation =
+  | GameStore
+  | Partial<GameStore>
+  | ((state: GameStore) => GameStore | Partial<GameStore>);
+
+function reconcileCompanyMutation(
+  previous: SimState,
+  next: SimState,
+): SimState {
+  if (next === previous) return next;
+  const playerSourceChanged =
+    next.player !== previous.player ||
+    next.computeContracts !== previous.computeContracts ||
+    next.playerLabId !== previous.playerLabId ||
+    next.map.activeRegionId !== previous.map.activeRegionId;
+  const companyRootsChanged =
+    playerSourceChanged ||
+    next.rivals !== previous.rivals ||
+    next.labs !== previous.labs;
+  if (!companyRootsChanged) return next;
+  const projected = playerSourceChanged
+    ? projectPlayerCompanyState(next)
+    : next;
+  return syncLabIndex(projected);
+}
+
+function reconcileStoreCandidate(
+  previous: GameStore,
+  candidate: GameStore | Partial<GameStore>,
+): GameStore | Partial<GameStore> {
+  if (!("state" in candidate) || !candidate.state) return candidate;
+  return {
+    ...candidate,
+    state: reconcileCompanyMutation(previous.state, candidate.state),
+  };
+}
+
+export const useGameStore = create<GameStore>((rawSet, get) => {
+  // One write barrier for every UI action. PlayerState is the player-company
+  // write source in this migration step; LabState is its immediate indexed
+  // projection for shared simulation systems and UI selectors.
+  const set = ((mutation: GameStoreMutation, replace?: boolean) => {
+    const resolve = (previous: GameStore) => {
+      const candidate =
+        typeof mutation === "function" ? mutation(previous) : mutation;
+      return reconcileStoreCandidate(previous, candidate);
+    };
+    if (replace === true) {
+      rawSet(resolve(get()) as GameStore, true);
+      return;
+    }
+    rawSet(resolve);
+  }) as typeof rawSet;
+
+  return ({
   phase: "menu",
   loading: null,
   lifecycleError: null,
@@ -1720,7 +1778,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
   clearLifecycleError: () => set({ lifecycleError: null }),
 
   snapshot: () => computeSnapshot(get().state),
-}));
+  });
+});
 
 /** Flush pending world/simulation changes when the tab moves to the background. */
 export function installGameSaveLifecycle(): () => void {
