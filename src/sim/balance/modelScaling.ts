@@ -35,6 +35,7 @@ import {
   architecturePretrainingCapabilityCap,
   type ArchitectureBlueprintId,
 } from "./architectureFrontiers";
+import { generalCapabilityHardMax } from "./capabilityCeilings";
 
 function emptyBenchmarks(): BenchmarkScores {
   return {
@@ -251,10 +252,21 @@ export function capabilityCeiling(input: ScaleInputs): CapabilityCeilingResult {
     97,
     sizeBase + dataBonus + technologyBonus,
   );
+  // Size band is the early-game hard max; late research / reasoning / unlocked
+  // overtrain may raise the effective band (tiny late models → mid-30s) up to
+  // the architecture blueprint wall. BASE_CAP is always in technologyBonus, so
+  // subtract it — early recipes with no late tech stay on the raw band.
+  const bandMax = generalCapabilityHardMax(input.paramsB);
+  const techAllowance = Math.max(0, technologyBonus - OVERTRAIN.BASE_CAP);
+  const effectiveBandMax = Math.min(blueprintCap, bandMax + techAllowance);
   // Gameplay architecture wall: ordinary scale, data, and research can reach
   // this cap but cannot cross it. Teacher transfer is intentionally evaluated
   // after this line, so distillation remains a distinct way past the wall.
-  const pretrainedCeiling = Math.min(blueprintCap, uncappedPretrainedCeiling);
+  const pretrainedCeiling = Math.min(
+    blueprintCap,
+    uncappedPretrainedCeiling,
+    effectiveBandMax,
+  );
   // Size-gap-aware retention when the teacher size is known (a slightly
   // generous +0.1 planning estimate, capped); flat 0.88 fallback otherwise.
   const teacherRetention =
@@ -272,6 +284,8 @@ export function capabilityCeiling(input: ScaleInputs): CapabilityCeilingResult {
   const teacherTarget =
     Math.max(0, input.teacherCapability ?? 0) * teacherRetention;
   const distillationBonus = Math.max(0, teacherTarget - pretrainedCeiling);
+  // Distillation may exceed the size band toward (and past) the blueprint wall;
+  // without a teacher, capability stays at pretrainedCeiling within the band.
   const capability = Math.min(97, pretrainedCeiling + distillationBonus);
   const limitingFactor =
     distillationBonus > 0
