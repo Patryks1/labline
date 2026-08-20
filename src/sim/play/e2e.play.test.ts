@@ -196,13 +196,13 @@ describe('e2e training depth', () => {
       family: 'dense',
       paramsB: 0.4,
       dataPlan: {
-        totalUnits: 1.5,
+        totalUnits: 400,
         weights: { code: 0.55, chat: 0.45 },
         allowSynthetic: true,
       },
     })
     expect(s.player.trainingJob?.dataPlan.totalUnits).toBeGreaterThan(0)
-    expect(s.player.trainingJob?.dataPlan.totalUnits).toBeLessThanOrEqual(1.5)
+    expect(s.player.trainingJob?.dataPlan.totalUnits).toBeLessThanOrEqual(400)
     expect(s.player.trainingJob?.dataConsumed).toBeDefined()
     expect(s.player.trainingJob?.cashSunk).toBeGreaterThan(0)
 
@@ -259,7 +259,7 @@ describe('e2e training depth', () => {
     s = releaseFromJob(s)
     const m = s.player.models[0]!
     expect(m.dataPlan?.totalUnits).toBeGreaterThan(0)
-    expect(m.dataPlan?.totalUnits).toBeLessThanOrEqual(1.5)
+    expect(m.dataPlan?.totalUnits).toBeLessThanOrEqual(400)
     expect(m.capability).toBeGreaterThan(5)
 
     // Continue train

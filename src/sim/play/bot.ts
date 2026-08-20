@@ -12,6 +12,8 @@ import {
   cancelTraining,
   releaseFromJob,
   keepInternal,
+  resolveTrainingCampaignEvent,
+  playerTrainingJobs,
 } from '../systems/training'
 import { enqueueResearch, availableResearch } from '../systems/research'
 import { setModelApiInOut } from '../systems/training'
@@ -192,6 +194,20 @@ function tryPlace(state: SimState, kind: BuildableKind, region = 'west'): SimSta
 export function botAct(state: SimState): SimState {
   let s = state
   if (s.victory.outcome !== 'playing') return s
+
+  // Campaign interventions pause training until resolved. Auto-play must not
+  // stall forever on a mid-run decision the human UI would answer.
+  for (const job of playerTrainingJobs(s)) {
+    const event = job.pendingCampaignEvent
+    if (!event?.choices?.length) continue
+    const affordable = [...event.choices].sort(
+      (a, b) => (a.effects?.cashCost ?? 0) - (b.effects?.cashCost ?? 0),
+    )
+    const pick =
+      affordable.find((choice) => (choice.effects?.cashCost ?? 0) <= s.player.cash) ??
+      affordable[0]
+    if (pick) s = resolveTrainingCampaignEvent(s, job.id, pick.id)
+  }
 
   // HQ-first: place the free starter HQ, then hire researchers before training.
   const hqKinds = () =>
@@ -770,6 +786,9 @@ export function runSmokeBootstrap(seed = 7): PlayReport {
     builtDc: false,
     builtPower: false,
     boughtChips: false,
+    firstRevenueDay: s.player.finance.dayRevenue > 0 ? s.day : null,
+    firstProfitableDay: s.player.finance.dayNet > 0 ? s.day : null,
+    profitableDays: s.player.finance.dayNet > 0 ? 1 : 0,
     peakCash: s.player.finance.peakCash,
     minCash: s.player.finance.lowestCash,
   }
