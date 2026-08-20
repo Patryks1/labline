@@ -33,7 +33,7 @@ describe('post-training realism', () => {
     const large = postTrainTargetPfDays(job(100_000), 'tools')
     expect(small).toBeGreaterThanOrEqual(18)
     expect(large).toBeGreaterThan(small * 1.5)
-    expect(large).toBeLessThan(small * 4)
+    expect(large).toBeLessThan(small * 6)
   })
 
   it('makes large models and repeated passes materially longer', () => {

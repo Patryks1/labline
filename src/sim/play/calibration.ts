@@ -41,7 +41,8 @@ function percentile(values: readonly number[], fraction: number): number {
   const high = Math.ceil(position)
   if (low === high) return sorted[low]!
   const mix = position - low
-  return sorted[low]! * (1 - mix) + sorted[high]! * mix
+  // Prefer delta form so equal endpoints stay exact (avoids 0.9x+0.1x float drift).
+  return sorted[low]! + (sorted[high]! - sorted[low]!) * mix
 }
 
 function distribution(values: readonly number[]): CalibrationDistribution {
@@ -106,7 +107,7 @@ export function runCalibration(opts: {
     ranks.push(rank)
     playerCapabilities.push(playerCapability)
     leaderCapabilities.push(leader)
-    endCashValues.push(state.player.cash)
+    endCashValues.push(Math.round(state.player.cash))
     unservedRatios.push(Math.max(0, state.lastMarket.unservedRatio ?? 0))
     playerShares.push(Math.max(0, state.player.finance.totalShare ?? 0))
     if (report.firstRevenueDay != null) firstRevenueDays.push(report.firstRevenueDay)
