@@ -1,1 +1,1 @@
-Trigger trusted model-economy validation and publication on 2026-08-20.
+Trigger trusted model-economy validation and publication from PR synchronize on 2026-08-20.
