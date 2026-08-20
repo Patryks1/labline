@@ -271,7 +271,12 @@ export interface ModelProductProfile {
 }
 
 /** Player-funded post-training gyms that grade SFT / RLHF / process / tools. */
-export type PostTrainGymKind = "code" | "math" | "research" | "chat";
+export type PostTrainGymKind =
+  | "code"
+  | "cyber"
+  | "math"
+  | "research"
+  | "chat";
 
 export interface PostTrainGym {
   readonly id: string;
@@ -2144,10 +2149,13 @@ export interface ModelEconomics {
   lifetimeSubRevenue: number;
   lifetimeEnterpriseRevenue: number;
   lifetimeServingCost: number;
+  /** Commercial contribution after the model's own training bill. */
   lifetimeNet: number;
   trainingInitialCost: number;
   trainingDataCost: number;
   trainingDailyCost: number;
+  /** First day cumulative commercial contribution repaid attributable training. */
+  paybackDay?: number;
 }
 
 /**

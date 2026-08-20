@@ -32,6 +32,7 @@ import {
   type RecipeOutcomeSignals,
 } from './trainingRecipe'
 import {
+  blendDistilledCapability,
   estimateTrainingEconomics,
   modalityComputeMultiplier,
 } from './training'
@@ -456,6 +457,12 @@ export function forecastTrainingV3(opts: {
   trainPoolPf: number
   trainPowerMw?: number
   teacherParamsB?: number
+  /** Actual teacher score used by the shared distillation projection. */
+  teacherCapability?: number
+  /** Frozen research/process multiplier used by the final scale path. */
+  researchMult?: number
+  /** Research-earned headroom for deliberate compute-intensity. */
+  overtrainCapBonus?: number
 }): TrainingForecast {
   const family = familyFromSpec(opts.spec.backbone, opts.spec.productPreset)
   const stack = modelStackModifiers(opts.spec.modelStack ?? [], family)
@@ -501,14 +508,49 @@ export function forecastTrainingV3(opts: {
     dataCoverage: analysis.effectiveDataRatio,
     dataQuality: analysis.qualityWeight,
     mixWeights: opts.spec.dataPlan.weights,
+    reasoningEnabled: stack.reasoningEnabled,
+    researchMult: opts.researchMult,
+    overtrainCapBonus: opts.overtrainCapBonus,
+    teacherCapability:
+      opts.spec.mode === 'distill' ? opts.teacherCapability : undefined,
+    teacherParamsB:
+      opts.spec.mode === 'distill' ? opts.teacherParamsB : undefined,
   })
+  const precisionCeiling =
+    bentCapabilityCeiling(scale.capabilityCeiling) *
+    economics.precision.qualityCeilingMultiplier
+  const studentExpectedCapability = Math.min(
+    scale.capability + stack.capabilityBonus,
+    precisionCeiling,
+  )
+  const expectedCapability =
+    opts.spec.mode === 'distill' &&
+    opts.teacherCapability != null &&
+    opts.teacherParamsB != null
+      ? Math.min(
+          blendDistilledCapability({
+            studentCapability: studentExpectedCapability,
+            studentScaleCap: Math.max(
+              scale.capability,
+              opts.teacherCapability * 0.75,
+            ),
+            studentParamsB: opts.spec.paramsB,
+            teacherCapability: opts.teacherCapability,
+            teacherParamsB: opts.teacherParamsB,
+            teacherShare: opts.spec.distillTeacherShare,
+            dataFactor: analysis.qualityWeight,
+            rng01: 0.5,
+          }).capability,
+          precisionCeiling,
+        )
+      : studentExpectedCapability
   const modelLike = {
     paramsB: opts.spec.paramsB,
     activeParamsB: opts.spec.activeParamsB,
     family,
     backbone: opts.spec.backbone,
     tokPerSecMult: family === 'moe' ? 0.85 : family === 'omni' ? 0.35 : 0.75,
-    capability: scale.capability + stack.capabilityBonus,
+    capability: expectedCapability,
   }
   return {
     targetPfDays,
@@ -533,11 +575,7 @@ export function forecastTrainingV3(opts: {
     },
     repeatedDataEpochs: analysis.repeatedEpochs,
     modalityComputeMult: analysis.modalityComputeMult,
-    expectedCapability: Math.min(
-      scale.capability + stack.capabilityBonus,
-      bentCapabilityCeiling(scale.capabilityCeiling) *
-        economics.precision.qualityCeilingMultiplier,
-    ),
+    expectedCapability,
     interactiveTokPerSec:
       serviceProfileForModel(modelLike).interactiveTokPerSec * stack.speedMult,
     risk: analysis.risk,

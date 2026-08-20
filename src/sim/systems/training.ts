@@ -58,9 +58,9 @@ import {
 } from "../balance/modelCapabilities";
 import {
   DATA_MIX_DEFS,
+  blendDistilledCapability,
   clampDistillTeacherShare,
   distillFromTeacher,
-  distillRetentionFor,
   DISTILL_RETENTION,
   estimateTrainingEconomics,
   formatParams,
@@ -2987,6 +2987,12 @@ export function selectPostTrain(
     postTrainProgress: 0,
     postTrainTarget: quote.pfDays,
     postTrainDaysElapsed: 0,
+    economics: {
+      setupCost: job.economics?.setupCost ?? 0,
+      dataCost: job.economics?.dataCost ?? 0,
+      trainingCostAccrued:
+        (job.economics?.trainingCostAccrued ?? 0) + quote.cash,
+    },
     awaitingDecision: false,
     paused: false,
     stallReason: null,
@@ -5367,47 +5373,44 @@ function buildModelFromJob(
       ? clampDistillTeacherShare(job.distillTeacherShare)
       : 0;
   const distillSelfShare = 1 - distillTeacherShare;
-  const distillRetention =
+  const distillDataFactor = Math.max(
+    0,
+    Math.min(
+      1,
+      ((job.dataQualityUsed ?? 60) / 100) *
+        (1 - (job.synthLqShare ?? 0) * 0.5),
+    ),
+  );
+  const distillRng01 =
     job.mode === "distill" && teacher
-      ? distillRetentionFor({
-          teacherParamsB: teacher.paramsB,
-          studentParamsB: paramsB,
-          dataFactor: Math.max(
-            0,
-            Math.min(
-              1,
-              ((job.dataQualityUsed ?? 60) / 100) *
-                (1 - (job.synthLqShare ?? 0) * 0.5),
-            ),
+      ? createRng(
+          hashSeed(
+            job.outcomeSeed ?? 0,
+            job.id,
+            teacher.id,
+            "distill-retention-v2",
           ),
-          rng01: createRng(
-            hashSeed(
-              job.outcomeSeed ?? 0,
-              job.id,
-              teacher.id,
-              "distill-retention-v2",
-            ),
-          ).next(),
-        })
-      : DISTILL_RETENTION;
+        ).next()
+      : 0.5;
+  let distillRetention = DISTILL_RETENTION;
   if (job.mode === "distill" && teacher) {
-    const retention = distillRetention;
-    const d = distillFromTeacher({
-      teacherCapability: teacher.capability,
-      teacherBenchmarks: teacher.benchmarks,
-      studentScaleCap: Math.max(scale.capability, teacher.capability * 0.75),
-      targetRetention: retention,
-    });
-    // Self branch: size × your processed data only
+    // Self branch: size × your processed data only.
     const selfCap = scale.capability + mix.capability * 0.35;
-    // Teacher branch: size-gap retention (soft-capped under teacher)
-    const teacherCap = Math.min(
-      teacher.capability * (retention + 0.1),
-      d.capability,
-    );
-    capability = clamp(
-      selfCap * distillSelfShare + teacherCap * distillTeacherShare,
-    );
+    const transfer = blendDistilledCapability({
+      studentCapability: selfCap,
+      studentScaleCap: Math.max(
+        scale.capability,
+        teacher.capability * 0.75,
+      ),
+      studentParamsB: paramsB,
+      teacherCapability: teacher.capability,
+      teacherParamsB: teacher.paramsB,
+      teacherShare: distillTeacherShare,
+      dataFactor: distillDataFactor,
+      rng01: distillRng01,
+    });
+    distillRetention = transfer.retention;
+    capability = clamp(transfer.capability);
     quality.safety = clamp(
       teacher.quality.safety * 0.75 * distillTeacherShare +
         quality.safety * distillSelfShare +
@@ -6121,6 +6124,29 @@ function buildModelFromJob(
     trainingBenchmarkSnapshots: [...(job.benchmarkSnapshots ?? [])],
     trainComputeSpent:
       (continueBase?.trainComputeSpent ?? 0) + job.progressPfDays,
+    economics: (() => {
+      const trainingInitialCost = Math.max(
+        0,
+        job.economics?.setupCost ?? 0,
+      );
+      const trainingDataCost = Math.max(0, job.economics?.dataCost ?? 0);
+      const trainingDailyCost = Math.max(
+        0,
+        job.economics?.trainingCostAccrued ?? 0,
+      );
+      return {
+        lifetimeApiRevenue: 0,
+        lifetimeSubRevenue: 0,
+        lifetimeEnterpriseRevenue: 0,
+        lifetimeServingCost: 0,
+        lifetimeNet: -(
+          trainingInitialCost + trainingDataCost + trainingDailyCost
+        ),
+        trainingInitialCost,
+        trainingDataCost,
+        trainingDailyCost,
+      };
+    })(),
     releaseDay: state.day,
     shipped: release === "released",
     release,

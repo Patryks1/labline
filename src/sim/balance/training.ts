@@ -628,6 +628,60 @@ export function distillFromTeacher(opts: {
   return { capability, retention: actualRetention, benchmarks };
 }
 
+/**
+ * Shared capability projection for distillation quotes and finalization.
+ * The student keeps its self-trained branch while teacher signal is bounded by
+ * the size-gap retention curve and the player's teacher-share decision.
+ */
+export function blendDistilledCapability(input: {
+  studentCapability: number;
+  studentScaleCap?: number;
+  studentParamsB: number;
+  teacherCapability: number;
+  teacherParamsB: number;
+  teacherShare?: number;
+  dataFactor: number;
+  rng01: number;
+}): {
+  capability: number;
+  retention: number;
+  teacherTarget: number;
+  teacherShare: number;
+} {
+  const teacherShare = clampDistillTeacherShare(input.teacherShare);
+  const retention = distillRetentionFor({
+    teacherParamsB: input.teacherParamsB,
+    studentParamsB: input.studentParamsB,
+    dataFactor: input.dataFactor,
+    rng01: input.rng01,
+  });
+  const projected = distillFromTeacher({
+    teacherCapability: input.teacherCapability,
+    teacherBenchmarks: {},
+    studentScaleCap:
+      input.studentScaleCap ??
+      Math.max(input.studentCapability, input.teacherCapability * 0.75),
+    targetRetention: retention,
+  });
+  const teacherTarget = Math.min(
+    input.teacherCapability * (retention + 0.1),
+    projected.capability,
+  );
+  return {
+    capability: Math.max(
+      1,
+      Math.min(
+        100,
+        input.studentCapability * (1 - teacherShare) +
+          teacherTarget * teacherShare,
+      ),
+    ),
+    retention,
+    teacherTarget,
+    teacherShare,
+  };
+}
+
 /** Data mix modifiers applied at model finalize. */
 export const DATA_MIX_DEFS: Record<
   DataMix,

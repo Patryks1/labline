@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   GYM_PACKAGES,
+  POST_TRAIN_GYM_KINDS,
   defaultPostTrainGyms,
   gymQualityForStage,
   gymQualityFromInvestment,
@@ -8,6 +9,7 @@ import {
   packageTotalCash,
   postTrainGymWorkMult,
   postTrainStageCashCost,
+  trainingGymDomainExtras,
 } from './modelStudio'
 import { postTrainStageEffectiveness, postTrainStageQuote } from './postTraining'
 import type { TrainingJob } from '../types'
@@ -58,6 +60,25 @@ describe('model studio gyms and tools', () => {
     expect(foundry).toBeGreaterThan(0.1)
     expect(campus).toBeGreaterThan(foundry * 2)
     expect(campus).toBeLessThan(1)
+  })
+
+  it('adds a narrow cyber range without granting free general intelligence', () => {
+    expect(POST_TRAIN_GYM_KINDS).toContain('cyber')
+    const funded = defaultPostTrainGyms().map((gym) =>
+      gym.kind === 'cyber'
+        ? {
+            ...gym,
+            investedCash: 120_000_000,
+            investedComputeCash: 90_000_000,
+          }
+        : gym,
+    )
+    const extras = trainingGymDomainExtras(funded, ['cyber'])
+    expect(extras.agents).toBeGreaterThan(extras.coding ?? 0)
+    expect(extras.safety).toBeGreaterThan(0)
+    expect(extras.law).toBeGreaterThan(0)
+    expect(extras.math ?? 0).toBe(0)
+    expect(extras.mmlu ?? 0).toBe(0)
   })
 
   it('makes unfunded gyms waste post-train PF-days', () => {
