@@ -1,75 +1,13 @@
 name: Publish model economy recalibration
 
 on:
-  push:
-    branches:
-      - balance/model-economy-recalibration
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
   contents: write
 
-concurrency:
-  group: labline-model-economy-recalibration
-  cancel-in-progress: true
-
 jobs:
-  apply-test-publish:
-    if: github.actor != 'github-actions[bot]'
+  parked:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
     steps:
-      - name: Check out prepared branch
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: balance/model-economy-recalibration
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Reconstruct reviewed patch payload
-        run: |
-          cat .github/labline-balance/script.b64.* | base64 --decode > /tmp/apply_labline_balance_patch.py
-          cat .github/labline-balance/plan.b64.* | base64 --decode > /tmp/IMPLEMENTATION_PLAN.md
-          chmod +x /tmp/apply_labline_balance_patch.py
-
-      - name: Verify exact patch anchors
-        run: python /tmp/apply_labline_balance_patch.py . --check --allow-newer
-
-      - name: Apply model economy patch
-        run: python /tmp/apply_labline_balance_patch.py . --allow-newer
-
-      - name: Check patch whitespace
-        run: git diff --check
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Run test suite
-        run: bun run test
-
-      - name: Run lint
-        run: bun run lint
-
-      - name: Build production bundle
-        run: bun run build
-
-      - name: Commit validated implementation
-        env:
-          BRANCH_NAME: balance/model-economy-recalibration
-        run: |
-          git config user.name "Labline Balance Bot"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No implementation changes to commit."
-            exit 0
-          fi
-          git commit -m "feat: unify company state and rebalance model economy"
-          git push origin "HEAD:${BRANCH_NAME}"
+      - run: echo "Publication workflow parked while the reviewed economy pass is staged."
