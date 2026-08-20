@@ -59,6 +59,9 @@ export interface PlayReport {
   builtDc: boolean
   builtPower: boolean
   boughtChips: boolean
+  firstRevenueDay: number | null
+  firstProfitableDay: number | null
+  profitableDays: number
   peakCash: number
   minCash: number
 }
@@ -533,6 +536,9 @@ export function runPlayBot(opts: {
   let builtDc = false
   let builtPower = false
   let boughtChips = false
+  let firstRevenueDay: number | null = null
+  let firstProfitableDay: number | null = null
+  let profitableDays = 0
 
   for (let i = 0; i < maxDays; i++) {
     s = botAct(s)
@@ -561,10 +567,15 @@ export function runPlayBot(opts: {
     }
     if (s.player.finance.dayRevenue > 1000) {
       hadRevenue = true
+      firstRevenueDay ??= s.day
       note('revenue', `Day revenue $${s.player.finance.dayRevenue.toFixed(0)}`)
     }
-    if (s.player.finance.dayNet > 0) profitStreak++
-    else profitStreak = 0
+    if (s.player.finance.dayNet > 0) {
+      profitStreak++
+      profitableDays++
+      firstProfitableDay ??= s.day
+      note('profit', `First profitable day: $${s.player.finance.dayNet.toFixed(0)}`)
+    } else profitStreak = 0
 
     if (s.victory.outcome === 'lost') {
       note('bankrupt', s.victory.reason)
@@ -590,6 +601,9 @@ export function runPlayBot(opts: {
     builtDc,
     builtPower,
     boughtChips,
+    firstRevenueDay,
+    firstProfitableDay,
+    profitableDays,
     peakCash,
     minCash,
   }

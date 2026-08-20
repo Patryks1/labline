@@ -28,8 +28,10 @@ import {
   suggestCompetitiveApiInOut,
 } from "./pricing";
 import {
+  API_CAMPUS_CLOUD_SWITCH_MULT,
   API_COST_IN_MULT,
   API_COST_OUT_MULT,
+  API_FLOOR_TARGET_UTILIZATION,
   FALLBACK_COST_PER_MTOK,
   apiHostingCostFloor,
   apiUnitCostPerMTok,
@@ -41,6 +43,7 @@ import {
   markupRatio,
   servingOpsDayEstimate,
   splitInOutCost,
+  targetUtilizedApiCostPerMTok,
 } from "./unitEconomics";
 
 function withServeCampus(state: SimState, racks = 32): SimState {
@@ -115,6 +118,39 @@ function withServeCampus(state: SimState, racks = 32): SimState {
 }
 
 describe("unitEconomics canonical helpers", () => {
+  it("protects the listing floor at healthy rather than perfect utilization", () => {
+    const quote = targetUtilizedApiCostPerMTok({
+      opsDay: 620,
+      capacityMTok: 1_000,
+      referenceCostPerMTok: 5,
+      bandwidthPerMTok: 0.025,
+    })
+    expect(API_FLOOR_TARGET_UTILIZATION).toBe(0.62)
+    expect(quote.useCloudReference).toBe(false)
+    expect(quote.blended).toBeCloseTo(1.025, 10)
+
+    const realizedCostAtTarget =
+      620 / (1_000 * API_FLOOR_TARGET_UTILIZATION) + 0.025
+    const realizedCostAtLowUse = 620 / (1_000 * 0.35) + 0.025
+    const realizedCostAtHighUse = 620 / (1_000 * 0.85) + 0.025
+    expect(realizedCostAtTarget).toBeCloseTo(quote.blended, 10)
+    expect(realizedCostAtLowUse).toBeGreaterThan(quote.blended)
+    expect(realizedCostAtHighUse).toBeLessThan(quote.blended)
+  })
+
+  it("switches an absurd local quote to the bounded cloud reference", () => {
+    const quote = targetUtilizedApiCostPerMTok({
+      opsDay: 100_000,
+      capacityMTok: 1,
+      referenceCostPerMTok: 4,
+    })
+    expect(quote.campusBlended).toBeGreaterThan(
+      4 * API_CAMPUS_CLOUD_SWITCH_MULT,
+    )
+    expect(quote.useCloudReference).toBe(true)
+    expect(quote.blended).toBe(4)
+  })
+
   it("bounds a launch quote when the local endpoint is severely under-provisioned", () => {
     const base = createGame({ seed: 4_411 });
     const state: SimState = {

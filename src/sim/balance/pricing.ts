@@ -30,8 +30,10 @@ import {
 } from "./workload";
 
 export {
+  API_CAMPUS_CLOUD_SWITCH_MULT,
   API_COST_IN_MULT,
   API_COST_OUT_MULT,
+  API_FLOOR_TARGET_UTILIZATION,
   API_UNIT_COST_FLOOR,
   FALLBACK_COST_PER_MTOK,
   apiHostingCostFloor,
@@ -46,6 +48,7 @@ export {
   planMarginPerSubMonth,
   servingOpsDayEstimate,
   splitInOutCost,
+  targetUtilizedApiCostPerMTok,
 } from "./unitEconomics";
 export type { ApiHostingCostFloor, ApiHostingCostSource } from "./unitEconomics";
 
