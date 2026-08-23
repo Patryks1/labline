@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { buildLabStats, type StatsSectionId } from '../../../sim/systems/stats'
 import type { PanelId } from '../../../sim/types'
 import { useGameStore } from '../../../store/gameStore'
+import { selectPlayerCompany } from '../../../sim/company'
 import { money, num, pct } from '../format'
 import { GameCard, MeterBar, SegmentedTabs, StatRow } from '../ui/kit'
 import {
@@ -65,6 +66,7 @@ function FinanceReadoutCell({
 
 export function StatsPanel() {
   const state = useGameStore((s) => s.state)
+  const playerCompany = selectPlayerCompany(state)
   const setPanel = useGameStore((s) => s.setPanel)
   const setCommandView = useGameStore((s) => s.setCommandView)
   const [section, setSection] = useState<StatsSectionId>('pnl')
@@ -96,8 +98,8 @@ export function StatsPanel() {
         <div className="finance-readout__grid">
           <FinanceReadoutCell
             label="Cash"
-            value={money(dashboard.current.cash)}
-            tone={dashboard.current.cash < 2e6 ? 'danger' : 'neutral'}
+            value={money(playerCompany.finance.cash)}
+            tone={playerCompany.finance.cash < 2e6 ? 'danger' : 'neutral'}
             emphasis
           />
           <FinanceReadoutCell

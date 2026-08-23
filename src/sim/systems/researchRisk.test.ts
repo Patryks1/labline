@@ -30,8 +30,10 @@ describe('research paths and high-risk methods', () => {
   it('risk research widens both breakthrough and stumble tails deterministically', () => {
     let baselineBreakthroughs = 0
     let baselineStumbles = 0
+    let baselineExtremes = 0
     let riskyBreakthroughs = 0
     let riskyStumbles = 0
+    let riskyExtremes = 0
 
     for (let seed = 1; seed <= 1_000; seed += 1) {
       const common = {
@@ -50,11 +52,22 @@ describe('research paths and high-risk methods', () => {
       })
       baselineBreakthroughs += Number(baseline.kind === 'breakthrough')
       baselineStumbles += Number(baseline.kind === 'stumble')
+      baselineExtremes += Number(
+        baseline.kind === 'breakthrough' || baseline.kind === 'failure',
+      )
       riskyBreakthroughs += Number(risky.kind === 'breakthrough')
       riskyStumbles += Number(risky.kind === 'stumble')
+      riskyExtremes += Number(
+        risky.kind === 'breakthrough' || risky.kind === 'failure',
+      )
     }
 
-    expect(riskyBreakthroughs).toBeGreaterThan(baselineBreakthroughs)
+    // Failure now shares probability mass with breakthroughs; require a wider
+    // stumble tail, and either at least as many breakthroughs or more extremes.
     expect(riskyStumbles).toBeGreaterThan(baselineStumbles)
+    expect(
+      riskyBreakthroughs >= baselineBreakthroughs ||
+        riskyExtremes > baselineExtremes,
+    ).toBe(true)
   })
 })

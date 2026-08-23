@@ -1,1 +1,0 @@
-Trigger the trusted model-economy publisher after GitHub App permissions were granted.

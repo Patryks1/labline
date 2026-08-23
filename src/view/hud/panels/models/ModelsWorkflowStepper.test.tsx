@@ -15,7 +15,8 @@ describe("ModelsWorkflowStepper", () => {
 
     expect(markup).toContain('data-model-workflow="true"');
     expect(markup).toContain('aria-label="Model workflow"');
-    expect(markup).toContain('data-step="define"');
+    expect(markup).toContain('data-step="product"');
+    expect(markup).toContain('data-step="architecture"');
     expect(markup).toContain('data-step="data"');
     expect(markup).toContain('data-step="compute"');
     expect(markup).toContain('data-step="review"');

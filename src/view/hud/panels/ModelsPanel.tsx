@@ -2,12 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { DiceFive } from "@phosphor-icons/react";
 import { useGameStore } from "../../../store/gameStore";
 import { useUiStore } from "../../../store/uiStore";
+import {
+  selectCompanyModels,
+  selectPlayerCompany,
+} from "../../../sim/company";
 import type {
   BenchmarkSuiteId,
   DataDomain,
   Model,
   ModelBackbone,
-  ModelFamily,
   ModelProductPreset,
   NativeWeightFormat,
   PostTrainGymKind,
@@ -239,6 +242,8 @@ export function ModelsPanel({
   onFocusHandled,
 }: ModelsPanelProps = {}) {
   const state = useGameStore((s) => s.state);
+  const playerCompany = selectPlayerCompany(state);
+  const playerModels = selectCompanyModels(state, playerCompany.id);
   const startTraining = useGameStore((s) => s.startTraining);
   const setTrainingPriority = useGameStore((s) => s.setTrainingPriority);
   const pauseTraining = useGameStore((s) => s.pauseTraining);
@@ -291,7 +296,7 @@ export function ModelsPanel({
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [showNewModel, setShowNewModel] = useState(false);
   const [newModelStep, setNewModelStep] =
-    useState<ModelsWorkflowStep>("define");
+    useState<ModelsWorkflowStep>("product");
   const [name, setName] = useState("Spark");
   const [backbone, setBackbone] = useState<ModelBackbone>("dense");
   const [productPreset, setProductPreset] =
@@ -343,7 +348,7 @@ export function ModelsPanel({
   const [planLibraryOpen, setPlanLibraryOpen] = useState(false);
   const [allowSynthetic, setAllowSynthetic] = useState(true);
   const [includeSynthHQ, setIncludeSynthHQ] = useState(true);
-  const [includeSynthLQ, setIncludeSynthLQ] = useState(false);
+  const [includeSynthLQ] = useState(false);
   const [syntheticTeacherIds, setSyntheticTeacherIds] = useState<
     Partial<Record<DataDomain, string>>
   >({});
@@ -378,7 +383,7 @@ export function ModelsPanel({
     backbone === "moe" ? parseSizeInput(activeVal, activeUnit) : undefined;
   const modelIo = useMemo(() => ioForPreset(productPreset), [productPreset]);
 
-  const unlocked = state.player.researchUnlocked;
+  const unlocked = playerCompany.research.unlocked;
   const stackModules = useMemo(
     () => modelStackModulesForFamily(family),
     [family],
@@ -438,7 +443,7 @@ export function ModelsPanel({
     const records = new Map<string, CheckpointUiRecord>();
     for (const candidate of checkpointCandidates) {
       const retained = candidate.promotedModelId
-        ? state.player.models.find(
+        ? playerModels.find(
             (model) => model.id === candidate.promotedModelId,
           )
         : undefined;
@@ -478,7 +483,7 @@ export function ModelsPanel({
     const byJob = new Map<string, TrainingLossCheckpointMarker[]>();
     for (const candidate of checkpointCandidates) {
       const retained = candidate.promotedModelId
-        ? state.player.models.find(
+        ? playerModels.find(
             (model) => model.id === candidate.promotedModelId,
           )
         : undefined;
@@ -516,8 +521,8 @@ export function ModelsPanel({
       byJob.set(candidate.sourceJobId, markers);
     }
     return byJob;
-  }, [checkpointCandidates, state.player.models]);
-  const teachers = state.player.models;
+  }, [checkpointCandidates, playerModels]);
+  const teachers = playerModels;
   const distillTeacher =
     mode === "distill"
       ? teachers.find((model) => model.id === teacherId)
@@ -608,14 +613,14 @@ export function ModelsPanel({
   const nameTaken = useMemo(
     () =>
       isModelNameTaken(modelIteration.name, {
-        playerModels: state.player.models,
+        playerModels: playerModels,
         rivalModels,
         jobs,
       }),
-    [modelIteration.name, state.player.models, rivalModels, jobs],
+    [modelIteration.name, playerModels, rivalModels, jobs],
   );
   const pricing = state.player.pricing;
-  const active = state.player.models.find(
+  const active = playerModels.find(
     (m) => m.id === pricing.activeModelId,
   );
   const labData = ensureLabData(state);
@@ -629,18 +634,6 @@ export function ModelsPanel({
     mode === "continue"
       ? (teachers.find((t) => t.id === continueFromId)?.family ?? family)
       : family;
-  const trainProductPreset =
-    mode === "continue"
-      ? (() => {
-          const continuing = teachers.find((t) => t.id === continueFromId);
-          return continuing
-            ? migrateLegacyProductPreset(
-                continuing.productPreset ?? productPreset,
-                continuing.io,
-              )
-            : productPreset;
-        })()
-      : productPreset;
   const trainingDataTargetSpec = {
     paramsB: trainParamsB,
     activeParamsB,
@@ -656,8 +649,8 @@ export function ModelsPanel({
   );
   const continueModel = teachers.find((t) => t.id === continueFromId);
   const recipePlans = useMemo(
-    () => listRecipePlans(state.player.models),
-    [state.player.models],
+    () => listRecipePlans(playerModels),
+    [playerModels],
   );
 
   const priorTokens = continueModel?.dataTokensUsedMTok ?? 0;
@@ -693,6 +686,14 @@ export function ModelsPanel({
       effectiveSyntheticMultiplier,
     ],
   );
+  const researchEffects = useMemo(
+    () => aggregateEffects(unlocked),
+    [unlocked],
+  );
+  const trainingResearchMult =
+    1 +
+    Math.min(0.12, (researchEffects.capabilityBonus ?? 0) * 0.015) +
+    (backbone === "moe" && unlocked.includes("moe_hier") ? 0.04 : 0);
   const trainingForecast = useMemo(
     () =>
       forecastTrainingV3({
@@ -719,8 +720,10 @@ export function ModelsPanel({
         trainEfficiency: state.player.trainEfficiency,
         trainPoolPf: snap.pools.training,
         trainPowerMw: snap.mwForecast.training,
-        teacherParamsB: teachers.find((model) => model.id === teacherId)
-          ?.paramsB,
+        teacherParamsB: distillTeacher?.paramsB,
+        teacherCapability: distillTeacher?.capability,
+        researchMult: trainingResearchMult,
+        overtrainCapBonus: researchEffects.overtrainCapBonus,
       }),
     [
       modelIteration.name,
@@ -736,6 +739,8 @@ export function ModelsPanel({
       selectedStack,
       trainingFormat,
       nativeWeightFormat,
+      researchEffects.overtrainCapBonus,
+      trainingResearchMult,
       labData,
       state.player.dataQuality,
       state.player.trainEfficiency,
@@ -756,14 +761,9 @@ export function ModelsPanel({
       })
     : null;
   const capabilityLimit = useMemo(() => {
-    const effects = aggregateEffects(unlocked);
-    const researchMult =
-      1 +
-      Math.min(0.12, (effects.capabilityBonus ?? 0) * 0.015) +
-      (backbone === "moe" && unlocked.includes("moe_hier") ? 0.04 : 0);
-    const teacherCapability =
+    const teacher =
       mode === "distill"
-        ? teachers.find((model) => model.id === teacherId)?.capability
+        ? teachers.find((model) => model.id === teacherId)
         : undefined;
     return capabilityCeiling({
       paramsB: trainParamsB,
@@ -775,12 +775,16 @@ export function ModelsPanel({
         labDataQuality: state.player.dataQuality,
       }),
       mixWeights: weights,
-      researchMult,
+      researchMult: trainingResearchMult,
       reasoningEnabled: stackModifiers.reasoningEnabled,
-      teacherCapability,
+      overtrainCapBonus: researchEffects.overtrainCapBonus,
+      teacherCapability: teacher?.capability,
+      teacherParamsB: teacher?.paramsB,
     });
   }, [
     unlocked,
+    researchEffects.overtrainCapBonus,
+    trainingResearchMult,
     family,
     backbone,
     mode,
@@ -854,10 +858,9 @@ export function ModelsPanel({
           ),
         ),
         ...continueModel.dataPlan.weights,
-      };
-      const nextPost =
-        continueModel.dataPlan.postTrainWeights ??
-        alignmentDataWeights(nextWeights);
+      } as Record<DataDomain, number>;
+      const nextPost = (continueModel.dataPlan.postTrainWeights ??
+        alignmentDataWeights(nextWeights)) as Record<DataDomain, number>;
       const seeded = seedRecipeVolumes({
         weights: nextWeights,
         postTrainWeights: nextPost,
@@ -996,15 +999,15 @@ export function ModelsPanel({
     snap.chipCount > 0 && snap.chipCount < recChips * 0.35;
   const publicFrontier = Math.max(
     0,
-    ...state.player.models.filter(isLivePublicModel).map((model) => model.capability),
+    ...playerModels.filter(isLivePublicModel).map((model) => model.capability),
     ...state.rivals.flatMap((rival) =>
       rival.models.filter(isLivePublicModel).map((model) => model.capability),
     ),
   );
 
-  const internal = state.player.models.filter(isInternalFleetModel);
-  const released = state.player.models.filter(isLivePublicModel);
-  const archived = state.player.models.filter(isArchivedModel);
+  const internal = playerModels.filter(isInternalFleetModel);
+  const released = playerModels.filter(isLivePublicModel);
+  const archived = playerModels.filter(isArchivedModel);
 
   const strongestTeacher = teachers.reduce<Model | null>(
     (best, candidate) =>
@@ -1013,7 +1016,7 @@ export function ModelsPanel({
   );
   const syntheticFrontierCapability = Math.max(
     strongestTeacher?.capability ?? 0,
-    ...state.player.models.filter(isLivePublicModel).map((model) => model.capability),
+    ...playerModels.filter(isLivePublicModel).map((model) => model.capability),
     ...state.rivals.flatMap((rival) =>
       rival.models.filter(isLivePublicModel).map((model) => model.capability),
     ),
@@ -1033,13 +1036,13 @@ export function ModelsPanel({
   const safetyTarget = useMemo(() => {
     const campaign = state.player.safetyCampaign;
     if (campaign) {
-      const match = state.player.models.find((m) => m.id === campaign.modelId);
+      const match = playerModels.find((m) => m.id === campaign.modelId);
       if (match) return normalizeModelEvaluations(match);
     }
     if (active) return normalizeModelEvaluations(active);
     if (internal[0]) return normalizeModelEvaluations(internal[0]);
     return null;
-  }, [state.player.safetyCampaign, state.player.models, active, internal]);
+  }, [state.player.safetyCampaign, playerModels, active, internal]);
   const checkpointEvaluationCandidate = checkpointEvaluationId
     ? checkpointCandidates.find(
         (candidate) => candidate.id === checkpointEvaluationId,
@@ -1301,7 +1304,7 @@ export function ModelsPanel({
     ? trainingMinimumStatus(selectedJob)
     : null;
   const selectedJobWorkflowStep: ModelsWorkflowStep = (() => {
-    if (!selectedJob) return "define";
+    if (!selectedJob) return "product";
     if (
       selectedJob.failed ||
       selectedJob.pendingCampaignEvent ||
@@ -1316,19 +1319,21 @@ export function ModelsPanel({
   })();
   const workflowStep = showNewModel ? newModelStep : selectedJobWorkflowStep;
   const workflowCompletedThrough: ModelsWorkflowStep | undefined =
-    workflowStep === "data"
-      ? "define"
-      : workflowStep === "compute"
-        ? "data"
-        : workflowStep === "review"
-          ? "compute"
-          : undefined;
+    workflowStep === "architecture"
+      ? "product"
+      : workflowStep === "data"
+        ? "architecture"
+        : workflowStep === "compute"
+          ? "data"
+          : workflowStep === "review"
+            ? "compute"
+            : undefined;
 
   const openNewModel = () => {
     recipeTouchedRef.current = false;
     setPanelTab("runs");
     setShowNewModel(true);
-    setNewModelStep("define");
+    setNewModelStep("product");
     const seeded = seedRecipeVolumes({
       weights,
       postTrainWeights,
@@ -1428,12 +1433,12 @@ export function ModelsPanel({
   };
 
   const handleReleaseModel = (id: string) => {
-    const model = state.player.models.find((m) => m.id === id);
+    const model = playerModels.find((m) => m.id === id);
     releaseModel(id, { list: false });
     const released =
       useGameStore
         .getState()
-        .state.player.models.find((candidate) => candidate.id === id) ?? model;
+        .playerModels.find((candidate) => candidate.id === id) ?? model;
     if (released) {
       announceRelease({
         modelId: released.id,
@@ -1452,7 +1457,7 @@ export function ModelsPanel({
 
   const handleReleaseFromJob = (jobId: string) => {
     const job = jobs.find((j) => j.id === jobId);
-    const existingIds = new Set(state.player.models.map((model) => model.id));
+    const existingIds = new Set(playerModels.map((model) => model.id));
     // Copy this before releaseFromJob finalizes and removes the training job.
     const telemetry = job
       ? {
@@ -1588,7 +1593,7 @@ export function ModelsPanel({
             viewCounts={{
               runs: jobs.length,
               checkpoints: checkpointCandidates.length,
-              labs: state.player.postTrainGyms?.length ?? 3,
+              labs: playerCompany.ops.postTrainGyms?.length ?? 3,
               routers: state.player.modelRouters?.length ?? 0,
               fleet: internal.length + released.length,
             }}
@@ -1657,7 +1662,7 @@ export function ModelsPanel({
                         selectPostTrain(jobId, stage)
                       }
                       onSetLabs={setTrainingLabs}
-                      gyms={state.player.postTrainGyms}
+                      gyms={playerCompany.ops.postTrainGyms}
                     />
                   ) : null}
                 </div>
@@ -1701,14 +1706,18 @@ export function ModelsPanel({
                 >
                   <div data-model-new-workflow="true" className="space-y-3">
                     <div
-                      hidden={newModelStep !== "define"}
-                      data-model-step="define"
+                      hidden={
+                        newModelStep !== "product" &&
+                        newModelStep !== "architecture"
+                      }
+                      data-model-step={newModelStep === "architecture" ? "architecture" : "product"}
                       className="space-y-3"
                     >
                       <GameCard
                         eyebrow="Define"
                         title="How do you want to train?"
                         tone="train"
+                        className={newModelStep === "architecture" ? "hidden" : undefined}
                       >
                         <div className="grid gap-2 sm:grid-cols-3">
                           {(
@@ -1914,7 +1923,7 @@ export function ModelsPanel({
                                     onClick={() =>
                                       setName(
                                         generateUniqueModelName({
-                                          playerModels: state.player.models,
+                                          playerModels: playerModels,
                                           rivalModels: state.rivals.flatMap(
                                             (rival) => rival.models,
                                           ),
@@ -2725,7 +2734,7 @@ export function ModelsPanel({
                             ) : null}
                             <div className="mt-1.5">
                               <TrainingLabsPicker
-                                gyms={state.player.postTrainGyms}
+                                gyms={playerCompany.ops.postTrainGyms}
                                 researchUnlocked={unlocked}
                                 selected={attachedGymKinds}
                                 onChange={setAttachedGymKinds}
@@ -2922,7 +2931,7 @@ export function ModelsPanel({
             ) : panelTab === "labs" ? (
               <LabsTab
                 cash={state.player.cash}
-                gyms={state.player.postTrainGyms}
+                gyms={playerCompany.ops.postTrainGyms}
                 tools={state.player.toolSkills}
                 researchUnlocked={unlocked}
                 onInvestGym={investPostTrainGym}
@@ -2932,7 +2941,7 @@ export function ModelsPanel({
               <RoutersTab
                 routers={state.player.modelRouters}
                 activeRouterId={state.player.activeModelRouterId}
-                models={state.player.models}
+                models={playerModels}
                 researchUnlocked={unlocked}
                 onCreate={createModelRouter}
                 onSetLane={setRouterLane}

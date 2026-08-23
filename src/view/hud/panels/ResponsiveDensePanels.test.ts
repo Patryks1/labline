@@ -1,4 +1,6 @@
 import { createElement } from 'react'
+import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../../../sim/createGame'
@@ -97,7 +99,10 @@ describe('dense workspace mobile presentation', () => {
   })
 
   it('uses no more than two plan values per row on phones', async () => {
-    const source = await Bun.file(new URL('./StatsPanel.tsx', import.meta.url)).text()
+    const source = await readFile(
+      fileURLToPath(new URL('./StatsPanel.tsx', import.meta.url)),
+      'utf8',
+    )
     expect(source).toContain(
       'mt-1 grid grid-cols-2 gap-2 font-mono text-[0.8125rem] tabular-nums sm:grid-cols-3',
     )

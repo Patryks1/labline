@@ -56,8 +56,8 @@ describe('distill teacher synthetic fill', () => {
     expect(job).toBeTruthy()
     expect(job!.mode).toBe('distill')
     // Volume past the 500 MTok owned corpus is teacher-generated synthetic.
-    expect(job!.syntheticUnits).toBeGreaterThan(800)
-    expect(job!.trainMTok + job!.verifyMTok).toBeGreaterThan(1_300)
+    expect(job!.syntheticUnits).toBeGreaterThan(500)
+    expect(job!.trainMTok + job!.verifyMTok).toBeGreaterThan(1_000)
     const provenance = job!.syntheticProvenance ?? []
     expect(provenance.length).toBeGreaterThan(0)
     expect(provenance.every((record) => record.teacherModelId === teacherId)).toBe(

@@ -202,6 +202,62 @@ export function attributedServingFixedCost(input: {
   );
 }
 
+/**
+ * Advance one model's commercial contribution ledger. Training starts the
+ * ledger below zero; direct API/subscription/enterprise contribution repays it.
+ */
+export function advanceModelEconomics(
+  model: Pick<Model, "economics">,
+  row:
+    | Pick<
+        ModelFinanceRow,
+        | "dayApiRevenue"
+        | "daySubRevenue"
+        | "dayEnterpriseShare"
+        | "dayApiCogs"
+        | "daySubCogs"
+      >
+    | undefined,
+  day: number,
+): NonNullable<Model["economics"]> {
+  const prior = model.economics ?? {
+    lifetimeApiRevenue: 0,
+    lifetimeSubRevenue: 0,
+    lifetimeEnterpriseRevenue: 0,
+    lifetimeServingCost: 0,
+    lifetimeNet: 0,
+    trainingInitialCost: 0,
+    trainingDataCost: 0,
+    trainingDailyCost: 0,
+  };
+  const dayApiRevenue = row?.dayApiRevenue ?? 0;
+  const daySubRevenue = row?.daySubRevenue ?? 0;
+  const dayEnterpriseRevenue = row?.dayEnterpriseShare ?? 0;
+  const dayServingCost = (row?.dayApiCogs ?? 0) + (row?.daySubCogs ?? 0);
+  const lifetimeNet =
+    prior.lifetimeNet +
+    dayApiRevenue +
+    daySubRevenue +
+    dayEnterpriseRevenue -
+    dayServingCost;
+  const attributableTrainingCost =
+    prior.trainingInitialCost +
+    prior.trainingDataCost +
+    prior.trainingDailyCost;
+  return {
+    ...prior,
+    lifetimeApiRevenue: prior.lifetimeApiRevenue + dayApiRevenue,
+    lifetimeSubRevenue: prior.lifetimeSubRevenue + daySubRevenue,
+    lifetimeEnterpriseRevenue:
+      prior.lifetimeEnterpriseRevenue + dayEnterpriseRevenue,
+    lifetimeServingCost: prior.lifetimeServingCost + dayServingCost,
+    lifetimeNet,
+    paybackDay:
+      prior.paybackDay ??
+      (attributableTrainingCost > 0 && lifetimeNet >= 0 ? day : undefined),
+  };
+}
+
 export const DOMINANT_MARKET_SHARE = 0.5;
 
 /**
@@ -3422,6 +3478,22 @@ export function tickMarket(state: SimState): SimState {
     };
   });
 
+  // Persist model-level contribution and payback. This intentionally tracks
+  // direct product revenue minus attributed serving COGS and the model's own
+  // training bill; shared company marketing, debt and campus capex remain in
+  // the company ledger rather than being arbitrarily assigned to one model.
+  const financeByModelId = new Map(
+    modelFinance.map((row) => [row.modelId, row]),
+  );
+  const modelsWithEconomics = state.player.models.map((modelEntry) => ({
+    ...modelEntry,
+    economics: advanceModelEconomics(
+      modelEntry,
+      financeByModelId.get(modelEntry.id),
+      state.day,
+    ),
+  }));
+
   let alerts = state.alerts;
   let news = state.news;
   // Only complain when demand actually exceeds inference PF (not residual pain with headroom)
@@ -3656,6 +3728,7 @@ export function tickMarket(state: SimState): SimState {
     news,
     player: {
       ...state.player,
+      models: modelsWithEconomics,
       cash,
       brandTrust: brand,
       servicePain,

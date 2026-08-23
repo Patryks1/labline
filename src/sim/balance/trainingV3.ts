@@ -32,10 +32,12 @@ import {
   type RecipeOutcomeSignals,
 } from './trainingRecipe'
 import {
+  blendDistilledCapability,
   estimateTrainingEconomics,
   modalityComputeMultiplier,
 } from './training'
 import { modelStackModifiers } from './modelStack'
+import { repeatEpochMultiplier } from './effectiveData'
 
 const DOMAIN_COUNT = 9
 
@@ -203,11 +205,6 @@ export function analyzeTrainingData(opts: {
     requested - uniqueMTok,
   )
   const repeatedEpochs = uniqueMTok > 0 ? requested / uniqueMTok : requested > 0 ? 99 : 0
-  const repeatUseful =
-    repeatedMTok <= 0
-      ? 0
-      : Math.min(repeatedMTok, uniqueMTok * 3) * 0.5 +
-        Math.max(0, repeatedMTok - uniqueMTok * 3) * 0.1
   const manifestQuality = opts.manifest?.effectiveQuality
   const normalizedManifestQuality =
     manifestQuality == null
@@ -224,7 +221,8 @@ export function analyzeTrainingData(opts: {
       ? 1
       : Math.max(0, Math.min(1.05, manifestValue / Math.max(0.01, qWeight)))
   const effectiveMTok =
-    (uniqueMTok + repeatUseful) *
+    uniqueMTok *
+    repeatEpochMultiplier(Math.max(1, repeatedEpochs)) *
     qWeight *
     diversity *
     lqPenalty *
@@ -407,21 +405,34 @@ export function rollTrainingOutcome(opts: {
 }): TrainingOutcome {
   const rng = createRng(opts.seed)
   const competence = Math.max(
-    -0.1,
-    Math.min(0.1, (opts.quality - 60) / 400 + opts.verifyShare * 0.08 + opts.engineers * 0.004 + opts.researchCount * 0.001),
+    -0.08,
+    Math.min(
+      0.08,
+      (opts.quality - 60) / 500 +
+        opts.verifyShare * 0.06 +
+        opts.engineers * 0.003 +
+        opts.researchCount * 0.0008,
+    ),
   )
   const stumbleP = Math.min(
-    0.42,
-    Math.max(0.1, 0.2 - competence + Math.max(0, opts.stumbleRisk ?? 0)),
+    0.09,
+    Math.max(0.05, 0.07 - competence * 0.4 + Math.max(0, opts.stumbleRisk ?? 0) * 0.35),
+  )
+  const failureP = Math.min(
+    0.04,
+    Math.max(0.01, 0.02 + Math.max(0, opts.stumbleRisk ?? 0) * 0.12 - competence * 0.15),
   )
   const breakthroughP = Math.min(
-    0.38,
-    Math.max(0.04, 0.1 + competence * 0.55 + Math.max(0, opts.breakthroughBias ?? 0)),
+    0.09,
+    Math.max(0.05, 0.07 + competence * 0.45 + Math.max(0, opts.breakthroughBias ?? 0) * 0.28),
   )
   const roll = rng.next()
   let kind: TrainingOutcomeKind
   let yieldMultiplier: number
-  if (roll < stumbleP) {
+  if (roll < failureP) {
+    kind = 'failure'
+    yieldMultiplier = rng.range(0.55, 0.78)
+  } else if (roll < failureP + stumbleP) {
     kind = 'stumble'
     yieldMultiplier = rng.range(0.84, 0.96)
   } else if (roll > 1 - breakthroughP) {
@@ -431,8 +442,16 @@ export function rollTrainingOutcome(opts: {
     kind = 'normal'
     yieldMultiplier = rng.range(0.96, 1.04)
   }
-  const capabilityDelta = (yieldMultiplier - 1) * 18
-  const reliabilityDelta = kind === 'stumble' ? -rng.range(2, 8) : kind === 'breakthrough' ? rng.range(1, 5) : rng.range(-1, 2)
+  const capabilityDelta =
+    kind === 'failure' ? (yieldMultiplier - 1) * 28 : (yieldMultiplier - 1) * 18
+  const reliabilityDelta =
+    kind === 'failure'
+      ? -rng.range(8, 18)
+      : kind === 'stumble'
+        ? -rng.range(2, 8)
+        : kind === 'breakthrough'
+          ? rng.range(1, 5)
+          : rng.range(-1, 2)
   return {
     kind,
     yieldMultiplier,
@@ -440,7 +459,9 @@ export function rollTrainingOutcome(opts: {
     reliabilityDelta,
     revealedDay: opts.day,
     explanation:
-      kind === 'stumble'
+      kind === 'failure'
+        ? 'The run collapsed: unsupported numerics, data coverage, or routing instability destroyed most of the useful yield.'
+        : kind === 'stumble'
         ? 'Optimization instability and weak generalization reduced the usable yield.'
         : kind === 'breakthrough'
           ? 'A stable run and unusually strong representation learning beat the baseline forecast.'
@@ -456,6 +477,12 @@ export function forecastTrainingV3(opts: {
   trainPoolPf: number
   trainPowerMw?: number
   teacherParamsB?: number
+  /** Actual teacher score used by the shared distillation projection. */
+  teacherCapability?: number
+  /** Frozen research/process multiplier used by the final scale path. */
+  researchMult?: number
+  /** Research-earned headroom for deliberate compute-intensity. */
+  overtrainCapBonus?: number
 }): TrainingForecast {
   const family = familyFromSpec(opts.spec.backbone, opts.spec.productPreset)
   const stack = modelStackModifiers(opts.spec.modelStack ?? [], family)
@@ -501,14 +528,49 @@ export function forecastTrainingV3(opts: {
     dataCoverage: analysis.effectiveDataRatio,
     dataQuality: analysis.qualityWeight,
     mixWeights: opts.spec.dataPlan.weights,
+    reasoningEnabled: stack.reasoningEnabled,
+    researchMult: opts.researchMult,
+    overtrainCapBonus: opts.overtrainCapBonus,
+    teacherCapability:
+      opts.spec.mode === 'distill' ? opts.teacherCapability : undefined,
+    teacherParamsB:
+      opts.spec.mode === 'distill' ? opts.teacherParamsB : undefined,
   })
+  const precisionCeiling =
+    bentCapabilityCeiling(scale.capabilityCeiling) *
+    economics.precision.qualityCeilingMultiplier
+  const studentExpectedCapability = Math.min(
+    scale.capability + stack.capabilityBonus,
+    precisionCeiling,
+  )
+  const expectedCapability =
+    opts.spec.mode === 'distill' &&
+    opts.teacherCapability != null &&
+    opts.teacherParamsB != null
+      ? Math.min(
+          blendDistilledCapability({
+            studentCapability: studentExpectedCapability,
+            studentScaleCap: Math.max(
+              scale.capability,
+              opts.teacherCapability * 0.75,
+            ),
+            studentParamsB: opts.spec.paramsB,
+            teacherCapability: opts.teacherCapability,
+            teacherParamsB: opts.teacherParamsB,
+            teacherShare: opts.spec.distillTeacherShare,
+            dataFactor: analysis.qualityWeight,
+            rng01: 0.5,
+          }).capability,
+          precisionCeiling,
+        )
+      : studentExpectedCapability
   const modelLike = {
     paramsB: opts.spec.paramsB,
     activeParamsB: opts.spec.activeParamsB,
     family,
     backbone: opts.spec.backbone,
     tokPerSecMult: family === 'moe' ? 0.85 : family === 'omni' ? 0.35 : 0.75,
-    capability: scale.capability + stack.capabilityBonus,
+    capability: expectedCapability,
   }
   return {
     targetPfDays,
@@ -533,11 +595,7 @@ export function forecastTrainingV3(opts: {
     },
     repeatedDataEpochs: analysis.repeatedEpochs,
     modalityComputeMult: analysis.modalityComputeMult,
-    expectedCapability: Math.min(
-      scale.capability + stack.capabilityBonus,
-      bentCapabilityCeiling(scale.capabilityCeiling) *
-        economics.precision.qualityCeilingMultiplier,
-    ),
+    expectedCapability,
     interactiveTokPerSec:
       serviceProfileForModel(modelLike).interactiveTokPerSec * stack.speedMult,
     risk: analysis.risk,

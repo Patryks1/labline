@@ -1,5 +1,9 @@
 /**
- * Async save format v13.
+ * Async save format v14.
+ *
+ * v13 player/rival records become `companies[id]`. Compatibility player, rivals
+ * and labs remain projections during Stage A. Compact worlds persist only their
+ * deterministic descriptor and sparse dynamic snapshot.
  *
  * Compact worlds persist only their deterministic descriptor and sparse
  * dynamic snapshot. Static typed layers, indexes, metrics, journals, and any
@@ -45,6 +49,7 @@ import {
   presetFromFamily,
 } from "./balance/trainingV3";
 import { nativeWeightPrecisionForNumerics } from "./balance/trainingPrecision";
+import { hydrateFrozenTrainingPlan } from "./balance/trainingPlan";
 import { minimumTrainingCalendarDays } from "./balance/training";
 import { scoreDesign } from "./balance/racks";
 import {
@@ -83,7 +88,7 @@ import {
 } from "./world";
 
 export const SAVE_FORMAT = "labline-save" as const;
-export const SAVE_VERSION = 13 as const;
+export const SAVE_VERSION = 14 as const;
 export const V1_INCOMPATIBILITY_REASON =
   "Save format v1 is incompatible with the compact-world renderer. This campaign cannot be migrated; start a new operation.";
 export const V2_INCOMPATIBILITY_REASON =
@@ -646,7 +651,7 @@ function normalizeTrainingJob(job: TrainingJob): TrainingJob {
         >(job.dataPlan.syntheticProvenance),
       }
     : job.dataPlan;
-  return {
+  const normalized: TrainingJob = {
     ...job,
     backbone,
     productPreset,
@@ -791,6 +796,13 @@ function normalizeTrainingJob(job: TrainingJob): TrainingJob {
       job.benchmarkSequence ?? job.benchmarkSnapshots?.length ?? 0,
     ),
     lineageId: job.lineageId ?? job.continueLineageId ?? job.id,
+  };
+  return {
+    ...normalized,
+    plan: hydrateFrozenTrainingPlan(
+      normalized,
+      job.plan?.companyId ?? "player",
+    ),
   };
 }
 
@@ -1876,6 +1888,7 @@ function validateSaveEnvelope(data: unknown): SaveFile {
   }
   if (
     candidate.version !== SAVE_VERSION &&
+    candidate.version !== 13 &&
     candidate.version !== 12 &&
     candidate.version !== 11 &&
     candidate.version !== 10 &&

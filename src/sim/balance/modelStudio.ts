@@ -15,6 +15,7 @@ const clamp01 = (value: number) =>
 
 export const POST_TRAIN_GYM_KINDS: readonly PostTrainGymKind[] = [
   'code',
+  'cyber',
   'math',
   'research',
   'chat',
@@ -22,6 +23,7 @@ export const POST_TRAIN_GYM_KINDS: readonly PostTrainGymKind[] = [
 
 export const GYM_UNLOCK_RESEARCH: Record<PostTrainGymKind, string> = {
   code: 'domain_coding',
+  cyber: 'domain_agents',
   math: 'domain_math',
   research: 'domain_science',
   chat: 'align_sft',
@@ -36,6 +38,12 @@ export const POST_TRAIN_GYM_META: Record<
     blurb: 'Repo tests and SWE traces. Attach while training to raise code.',
     grades: 'Train · SFT · tools',
     unlock: GYM_UNLOCK_RESEARCH.code,
+  },
+  cyber: {
+    name: 'Cyber range',
+    blurb: 'Adversarial sandboxes, exploit repair, secure tool use, and red-team traces.',
+    grades: 'Train · RLHF · tools',
+    unlock: GYM_UNLOCK_RESEARCH.cyber,
   },
   math: {
     name: 'Math lab',
@@ -84,6 +92,13 @@ export function trainingGymDomainExtras(
     if (gym.kind === 'code') {
       extras.coding = (extras.coding ?? 0) + Math.min(5.5, q * 5.8)
       extras.agents = (extras.agents ?? 0) + Math.min(3, q * 3.2)
+    } else if (gym.kind === 'cyber') {
+      // Cyber is deliberately narrow: it can create an excellent security or
+      // agent endpoint, but it does not raise headline general capability.
+      extras.coding = (extras.coding ?? 0) + Math.min(4.5, q * 4.8)
+      extras.agents = (extras.agents ?? 0) + Math.min(6, q * 6.4)
+      extras.safety = (extras.safety ?? 0) + Math.min(4, q * 4.2)
+      extras.law = (extras.law ?? 0) + Math.min(2.5, q * 2.8)
     } else if (gym.kind === 'math') {
       extras.math = (extras.math ?? 0) + Math.min(5.5, q * 5.8)
       extras.science = (extras.science ?? 0) + Math.min(2.4, q * 2.6)

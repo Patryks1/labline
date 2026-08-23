@@ -15,6 +15,7 @@
     "test:source": "bun scripts/assert-no-staging-payloads.mjs",
     "test:watch": "vitest",
     "test:e2e": "vitest run src/sim/play/e2e.play.test.ts",
+    "test:balance:model-economy": "LABLINE_CALIBRATE=1 vitest run src/sim/balance/modelEconomy.integration.test.ts src/sim/systems/modelEconomics.test.ts src/sim/play/calibration.test.ts",
     "test:all": "vitest run"
   },
   "dependencies": {

@@ -51,6 +51,10 @@ import {
 } from "../../../sim/systems/plans";
 import type { PlanOfferingBreadth } from "../../../sim/systems/plans";
 import { useGameStore } from "../../../store/gameStore";
+import {
+  selectCompanyModels,
+  selectPlayerCompany,
+} from "../../../sim/company";
 import { money, num, pct, people } from "../format";
 import type {
   Model,
@@ -228,6 +232,8 @@ function DraftNumberInput({
 
 export function PlansPanel() {
   const state = useGameStore((s) => s.state);
+  const playerCompany = selectPlayerCompany(state);
+  const playerModels = selectCompanyModels(state, playerCompany.id);
   const createPlan = useGameStore((s) => s.createPlan);
   const updatePlan = useGameStore((s) => s.updatePlan);
   const deletePlan = useGameStore((s) => s.deletePlan);
@@ -235,9 +241,9 @@ export function PlansPanel() {
   const setPricing = useGameStore((s) => s.setPricing);
   const financeModel = useMemo(() => buildFinanceDashboardModel(state), [state]);
   const stats = financeModel.stats.plans;
-  const models = state.player.models.filter(isLivePublicModel);
-  const routers = normalizeModelRouters(state.player.modelRouters);
-  const pricing = state.player.pricing;
+  const models = playerModels.filter(isLivePublicModel);
+  const routers = normalizeModelRouters(playerCompany.ops.modelRouters);
+  const pricing = playerCompany.ops.pricing;
   const snap = computeSnapshot(state);
   const energyPrice = energyPriceForState(state);
   const infra = serveInfraCost(state, snap, energyPrice);
@@ -308,7 +314,7 @@ export function PlansPanel() {
   const listedRouters = soldApiRouters({
     apiRouterIds: pricing.apiRouterIds,
     apiModelIds,
-    activeModelRouterId: state.player.activeModelRouterId,
+    activeModelRouterId: playerCompany.ops.activeModelRouterId,
     routers,
     models,
   });
@@ -326,13 +332,13 @@ export function PlansPanel() {
     ECONOMY.basePlanUsageMTokPerDay * ECONOMY.daysPerMonth * 5,
   );
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(
-    () => state.player.pricing.plans[0]?.id ?? null,
+    () => playerCompany.ops.pricing.plans[0]?.id ?? null,
   );
   const [creatingPlan, setCreatingPlan] = useState(false);
   const [plansTab, setPlansTab] = useState<PlansTabId>("tiers");
-  const planCount = state.player.pricing.plans.length;
+  const planCount = playerCompany.ops.pricing.plans.length;
   const canCreatePlan = planCount < MAX_PLANS;
-  const planSelectorIds = planSelectorOrder(state.player.pricing.plans);
+  const planSelectorIds = planSelectorOrder(playerCompany.ops.pricing.plans);
 
   const blendedList = blendApiPrice(
     active?.apiPriceInPerMTok ??
@@ -349,7 +355,7 @@ export function PlansPanel() {
     const servedModel = modelForServePrecision(
       model,
       precision,
-      state.player.researchUnlocked,
+      playerCompany.research.unlocked,
     );
     const finance = modelFinance.find((entry) => entry.modelId === model.id);
     return apiUnitCostPerMTok(state, snap, servedModel, {
@@ -474,7 +480,7 @@ export function PlansPanel() {
             { id: PLANS_TAB_IDS[0], label: "Demand" },
             {
               id: PLANS_TAB_IDS[1],
-              label: `Tiers (${state.player.pricing.plans.length})`,
+              label: `Tiers (${playerCompany.ops.pricing.plans.length})`,
             },
             { id: PLANS_TAB_IDS[2], label: `API (${models.length + sellableRouters.length})` },
           ]}
@@ -530,7 +536,7 @@ export function PlansPanel() {
                   );
                 }
 
-                const plan = state.player.pricing.plans.find(
+                const plan = playerCompany.ops.pricing.plans.find(
                   (candidate) => candidate.id === entryId,
                 );
                 if (!plan) return null;
@@ -559,7 +565,7 @@ export function PlansPanel() {
             </div>
 
             <div className="anim-stagger space-y-2.5">
-              {state.player.pricing.plans
+              {playerCompany.ops.pricing.plans
                 .filter((plan) => plan.id === selectedPlanId && !creatingPlan)
                 .map((plan) => {
                   const st = stats.find((s) => s.planId === plan.id);
@@ -585,7 +591,7 @@ export function PlansPanel() {
                       stats={st}
                       models={models}
                       routers={routers}
-                      allPlans={state.player.pricing.plans}
+                      allPlans={playerCompany.ops.pricing.plans}
                       unitCogs={
                         state.lastMarket.marginalPerMTok || infra.costPerMTok
                       }
@@ -605,7 +611,7 @@ export function PlansPanel() {
                       onDelete={() => {
                         deletePlan(plan.id);
                         setSelectedPlanId(
-                          state.player.pricing.plans.find(
+                          playerCompany.ops.pricing.plans.find(
                             (candidate) => candidate.id !== plan.id,
                           )?.id ?? null,
                         );
@@ -757,7 +763,7 @@ export function PlansPanel() {
                     const served = modelForServePrecision(
                       part.model,
                       precision,
-                      state.player.researchUnlocked,
+                      playerCompany.research.unlocked,
                     );
                     return (
                       sum +
@@ -901,16 +907,16 @@ export function PlansPanel() {
                   const apiPrecision =
                     pricing.apiServePrecisionByModel?.[m.id] ?? "fp16";
                   const apiPrecisionOptions = unlockedPlanPrecisions(
-                    state.player.researchUnlocked,
+                    playerCompany.research.unlocked,
                   );
                   const apiServeMods = planServeModifiers(
                     apiPrecision,
-                    state.player.researchUnlocked,
+                    playerCompany.research.unlocked,
                   );
                   const apiServedModel = modelForServePrecision(
                     m,
                     apiPrecision,
-                    state.player.researchUnlocked,
+                    playerCompany.research.unlocked,
                   );
                   const pin =
                     m.apiPriceInPerMTok ??
@@ -3066,7 +3072,7 @@ function PlanCard({
   onChange: (p: Partial<SubPlan>) => void;
   onDelete: () => void;
 }) {
-  const unlocked = useGameStore((s) => s.state.player.researchUnlocked);
+  const unlocked = useGameStore((s) => selectPlayerCompany(s.state).research.unlocked);
   const free = isFreePlan(plan);
   const subs = stats?.subscribers ?? 0;
   const allowanceDay = planAllowanceMTokPerDay(plan);

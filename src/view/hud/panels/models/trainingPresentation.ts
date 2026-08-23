@@ -36,16 +36,17 @@ export function trainingRemainingTime({
   };
 }
 
-export type CampaignSpineId = "base" | "align" | "ship";
+export type CampaignSpineId = "base" | "eval" | "align" | "ship";
 
 export const CAMPAIGN_SPINE_STEPS: ReadonlyArray<{
   id: CampaignSpineId;
   label: string;
   hint: string;
 }> = [
-  { id: "base", label: "Base", hint: "Raw corpus, one incident" },
+  { id: "base", label: "Train", hint: "Parameters, corpus, compute" },
+  { id: "eval", label: "Evaluate", hint: "Optional benchmark or checkpoint" },
   { id: "align", label: "Align", hint: "Chat data and post-train" },
-  { id: "ship", label: "Ship", hint: "Keep internal or release" },
+  { id: "ship", label: "Launch", hint: "Keep internal, price, or release" },
 ];
 
 export function resolveCampaignSpineStep(
@@ -53,6 +54,7 @@ export function resolveCampaignSpineStep(
     TrainingJob,
     | "failed"
     | "pendingCampaignEvent"
+    | "pendingBenchmark"
     | "postTrain"
     | "postTrainProgress"
     | "postTrainTarget"
@@ -63,6 +65,7 @@ export function resolveCampaignSpineStep(
 ): CampaignSpineId {
   if (job.failed) return "base";
   if (job.pendingCampaignEvent) return "base";
+  if (job.pendingBenchmark) return "eval";
   if (job.postTrain !== "none" && job.postTrainProgress < job.postTrainTarget) {
     return "align";
   }
@@ -75,6 +78,7 @@ export function resolveCampaignSpineStep(
 export function campaignStageLabel(job: TrainingJob): string {
   if (job.failed) return "Failed";
   if (job.pendingCampaignEvent) return "Base incident";
+  if (job.pendingBenchmark) return "Evaluate · running";
   if (job.postTrain !== "none" && job.postTrainProgress < job.postTrainTarget)
     return `Align · ${job.postTrain.toUpperCase()}`;
   const funded = Math.max(1e-9, job.recommendedPfDays ?? job.targetPfDays);

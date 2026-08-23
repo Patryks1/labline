@@ -12,6 +12,8 @@ import {
   cancelTraining,
   releaseFromJob,
   keepInternal,
+  resolveTrainingCampaignEvent,
+  playerTrainingJobs,
 } from '../systems/training'
 import { enqueueResearch, availableResearch } from '../systems/research'
 import { setModelApiInOut } from '../systems/training'
@@ -59,6 +61,9 @@ export interface PlayReport {
   builtDc: boolean
   builtPower: boolean
   boughtChips: boolean
+  firstRevenueDay: number | null
+  firstProfitableDay: number | null
+  profitableDays: number
   peakCash: number
   minCash: number
 }
@@ -189,6 +194,20 @@ function tryPlace(state: SimState, kind: BuildableKind, region = 'west'): SimSta
 export function botAct(state: SimState): SimState {
   let s = state
   if (s.victory.outcome !== 'playing') return s
+
+  // Campaign interventions pause training until resolved. Auto-play must not
+  // stall forever on a mid-run decision the human UI would answer.
+  for (const job of playerTrainingJobs(s)) {
+    const event = job.pendingCampaignEvent
+    if (!event?.choices?.length) continue
+    const affordable = [...event.choices].sort(
+      (a, b) => (a.effects?.cashCost ?? 0) - (b.effects?.cashCost ?? 0),
+    )
+    const pick =
+      affordable.find((choice) => (choice.effects?.cashCost ?? 0) <= s.player.cash) ??
+      affordable[0]
+    if (pick) s = resolveTrainingCampaignEvent(s, job.id, pick.id)
+  }
 
   // HQ-first: place the free starter HQ, then hire researchers before training.
   const hqKinds = () =>
@@ -533,6 +552,9 @@ export function runPlayBot(opts: {
   let builtDc = false
   let builtPower = false
   let boughtChips = false
+  let firstRevenueDay: number | null = null
+  let firstProfitableDay: number | null = null
+  let profitableDays = 0
 
   for (let i = 0; i < maxDays; i++) {
     s = botAct(s)
@@ -561,10 +583,15 @@ export function runPlayBot(opts: {
     }
     if (s.player.finance.dayRevenue > 1000) {
       hadRevenue = true
+      firstRevenueDay ??= s.day
       note('revenue', `Day revenue $${s.player.finance.dayRevenue.toFixed(0)}`)
     }
-    if (s.player.finance.dayNet > 0) profitStreak++
-    else profitStreak = 0
+    if (s.player.finance.dayNet > 0) {
+      profitStreak++
+      profitableDays++
+      firstProfitableDay ??= s.day
+      note('profit', `First profitable day: $${s.player.finance.dayNet.toFixed(0)}`)
+    } else profitStreak = 0
 
     if (s.victory.outcome === 'lost') {
       note('bankrupt', s.victory.reason)
@@ -590,6 +617,9 @@ export function runPlayBot(opts: {
     builtDc,
     builtPower,
     boughtChips,
+    firstRevenueDay,
+    firstProfitableDay,
+    profitableDays,
     peakCash,
     minCash,
   }
@@ -756,6 +786,9 @@ export function runSmokeBootstrap(seed = 7): PlayReport {
     builtDc: false,
     builtPower: false,
     boughtChips: false,
+    firstRevenueDay: s.player.finance.dayRevenue > 0 ? s.day : null,
+    firstProfitableDay: s.player.finance.dayNet > 0 ? s.day : null,
+    profitableDays: s.player.finance.dayNet > 0 ? 1 : 0,
     peakCash: s.player.finance.peakCash,
     minCash: s.player.finance.lowestCash,
   }

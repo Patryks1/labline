@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { runCalibration } from './calibration'
+import { runCalibration, type CalibrationDistribution } from './calibration'
 
 const calibrationEnv = (
   globalThis as typeof globalThis & {
@@ -7,19 +7,39 @@ const calibrationEnv = (
   }
 ).process?.env ?? {}
 
+function expectDistribution(distribution: CalibrationDistribution) {
+  expect(Number.isFinite(distribution.p10)).toBe(true)
+  expect(distribution.p10).toBeLessThanOrEqual(distribution.p50)
+  expect(distribution.p50).toBeLessThanOrEqual(distribution.p90)
+}
+
 describe('calibration harness', () => {
   it(
-    'is deterministic over a small smoke cohort',
+    'is deterministic and reports economy distributions over a smoke cohort',
     () => {
-      expect(runCalibration({ seeds: 2, days: 25 })).toEqual(
-        runCalibration({ seeds: 2, days: 25 }),
-      )
+      const first = runCalibration({ seeds: 2, days: 25 })
+      const again = runCalibration({ seeds: 2, days: 25 })
+      expect(first).toEqual(again)
+      expectDistribution(first.endCash)
+      expectDistribution(first.unservedRatio)
+      expectDistribution(first.playerMarketShare)
+      for (const rate of [
+        first.bankruptRate,
+        first.hadRevenueRate,
+        first.profitableAtEndRate,
+        first.profitableDayRate,
+        first.rivalNegativeCashRate,
+        first.modelPaybackRate,
+      ]) {
+        expect(rate).toBeGreaterThanOrEqual(0)
+        expect(rate).toBeLessThanOrEqual(1)
+      }
     },
     15_000,
   )
 
   it.runIf(calibrationEnv.LABLINE_CALIBRATE === '1')(
-    'meets the 200-seed normal-difficulty acceptance band',
+    'meets the 200-seed normal-difficulty capability and economy bands',
     () => {
       const result = runCalibration({
         seeds: Number(calibrationEnv.LABLINE_CALIBRATION_SEEDS ?? 200),
@@ -32,6 +52,19 @@ describe('calibration harness', () => {
       expect(result.withinTenRate).toBeGreaterThanOrEqual(0.75)
       expect(result.firstPlaceRate).toBeGreaterThanOrEqual(0.2)
       expect(result.firstPlaceRate).toBeLessThanOrEqual(0.45)
+      expect(result.bankruptRate).toBeLessThanOrEqual(0.5)
+      expect(result.hadRevenueRate).toBeGreaterThanOrEqual(0.6)
+      expect(result.profitableAtEndRate).toBeGreaterThanOrEqual(0.1)
+      expect(result.profitableAtEndRate).toBeLessThanOrEqual(0.9)
+      expect(result.rivalNegativeCashRate).toBeLessThanOrEqual(0.35)
+      expect(result.modelPaybackRate).toBeGreaterThanOrEqual(0.03)
+      expect(result.modelPaybackRate).toBeLessThanOrEqual(0.8)
+      expect(result.firstRevenueDay?.p50 ?? Infinity).toBeLessThanOrEqual(165)
+      if (result.apiContributionMargin) {
+        expect(result.apiContributionMargin.p50).toBeGreaterThanOrEqual(-0.35)
+        expect(result.apiContributionMargin.p50).toBeLessThanOrEqual(0.8)
+      }
+      expect(result.unservedRatio.p50).toBeLessThanOrEqual(0.4)
       expect(result.unexplainedAssetViolations).toBe(0)
     },
     // This is an opt-in balance sweep, not part of the fast default suite. Leave

@@ -46,12 +46,12 @@ describe('construction fast-track', () => {
     const cashBefore = state.player.cash
     const quote = constructionFastTrackQuote(state, open.x, open.y)
 
-    expect(quote).toMatchObject({ eligible: true, remainingDays: 45, acceleratedDays: 23 })
+    expect(quote).toMatchObject({ eligible: true, remainingDays: 42, acceleratedDays: 21 })
     expect(quote.cost).toBe(Math.floor(before.capex * 0.5))
 
     state = fastTrackConstruction(state, open.x, open.y)
     const accelerated = state.map.tiles.find((tile) => tile.x === open.x && tile.y === open.y)!
-    expect(accelerated.buildingTarget).toBe(23)
+    expect(accelerated.buildingTarget).toBe(21)
     expect(accelerated.constructionExpedited).toBe(true)
     expect(accelerated.capex).toBe(before.capex + quote.cost)
     expect(state.player.cash).toBe(cashBefore - quote.cost)
@@ -83,7 +83,7 @@ describe('construction fast-track', () => {
     }
 
     const quote = constructionFastTrackQuote(state, open.x, open.y)
-    expect(quote).toMatchObject({ eligible: true, remainingDays: 20, acceleratedDays: 15 })
+    expect(quote).toMatchObject({ eligible: true, remainingDays: 17, acceleratedDays: 15 })
     state = fastTrackConstruction(state, open.x, open.y)
     const accelerated = state.map.tiles.find((tile) => tile.x === open.x && tile.y === open.y)!
     expect(accelerated.buildingTarget).toBe(40)
@@ -107,7 +107,7 @@ describe('construction fast-track', () => {
 
     state = fastTrackConstruction(state, x, y)
     const accelerated = state.map.world!.getFacilityAt(pad)!
-    expect(accelerated.constructionTarget).toBe(23)
+    expect(accelerated.constructionTarget).toBe(21)
     expect(accelerated.data?.constructionExpedited).toBe(true)
     const premium = Math.floor((before.stats?.capex ?? 0) * 0.5)
     expect(accelerated.stats?.capex).toBe((before.stats?.capex ?? 0) + premium)

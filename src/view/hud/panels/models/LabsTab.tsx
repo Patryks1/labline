@@ -39,7 +39,10 @@ export function TrainingLabsPicker({
   const normalized = normalizePostTrainGyms(gyms);
   const selectedSet = new Set(selected);
   return (
-    <div className="grid gap-1.5 sm:grid-cols-3" data-training-labs-picker="true">
+    <div
+      className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3"
+      data-training-labs-picker="true"
+    >
       {normalized.map((gym) => {
         const meta = POST_TRAIN_GYM_META[gym.kind];
         const unlocked = gymUnlocked(gym.kind, researchUnlocked);

@@ -54,6 +54,21 @@ export const API_UNIT_COST_FLOOR = 0.05
 export const FALLBACK_COST_PER_MTOK = 1.4
 
 /**
+ * Public API prices are protected at the cost of a healthy, but not perfect,
+ * endpoint utilization. At 62% utilization a default 120% markup still leaves
+ * only a moderate contribution margin; below roughly one-third utilization a
+ * launch can remain loss-making even when it respects the floor.
+ */
+export const API_FLOOR_TARGET_UTILIZATION = 0.62
+
+/**
+ * A severely under-provisioned local endpoint may be far more expensive than
+ * renting equivalent capacity. Beyond this ratio the commercial floor uses the
+ * cloud reference while realized campus COGS remains fully charged by market.ts.
+ */
+export const API_CAMPUS_CLOUD_SWITCH_MULT = 2.5
+
+/**
  * Cloud-market launch basis when the current campus is absent, cannot fit the
  * model, or is too under-provisioned to produce a meaningful marginal quote.
  * Providers get sub-linear scale economies instead of charging the full
@@ -70,6 +85,53 @@ export function launchReferenceApiCostPerMTok(
     API_UNIT_COST_FLOOR,
     FALLBACK_COST_PER_MTOK * Math.pow(relativeWork, 0.65),
   )
+}
+
+export interface TargetUtilizedApiCost {
+  blended: number
+  campusBlended: number
+  targetUtilization: number
+  useCloudReference: boolean
+}
+
+/**
+ * Break-even cost at a commercially healthy utilization target. This is the
+ * listing guard, not realized COGS: market settlement still divides the exact
+ * serving bill by work actually served, so idle capacity can lose money.
+ */
+export function targetUtilizedApiCostPerMTok(input: {
+  opsDay: number
+  capacityMTok: number
+  referenceCostPerMTok: number
+  targetUtilization?: number
+  bandwidthPerMTok?: number
+}): TargetUtilizedApiCost {
+  const targetUtilization = Math.max(
+    0.25,
+    Math.min(0.9, input.targetUtilization ?? API_FLOOR_TARGET_UTILIZATION),
+  )
+  const bandwidthPerMTok = Math.max(
+    0,
+    input.bandwidthPerMTok ?? ECONOMY.bandwidthPerMTok,
+  )
+  const campusBlended = Math.max(
+    API_UNIT_COST_FLOOR,
+    Math.max(0, input.opsDay) /
+      Math.max(1e-6, input.capacityMTok * targetUtilization) +
+      bandwidthPerMTok,
+  )
+  const cloudReference = Math.max(
+    API_UNIT_COST_FLOOR,
+    input.referenceCostPerMTok,
+  )
+  const useCloudReference =
+    campusBlended > cloudReference * API_CAMPUS_CLOUD_SWITCH_MULT
+  return {
+    blended: useCloudReference ? cloudReference : campusBlended,
+    campusBlended,
+    targetUtilization,
+    useCloudReference,
+  }
 }
 
 /**
@@ -194,11 +256,11 @@ export function apiHostingCostFloor(
     model,
     state.player.servingEfficiency,
   )
+  const cloudReference = launchReferenceApiCostPerMTok(model)
   if (deployableCapacityMTok <= 1e-6) {
-    const blended = launchReferenceApiCostPerMTok(model)
-    const split = splitInOutCost(blended)
+    const split = splitInOutCost(cloudReference)
     return {
-      blended,
+      blended: cloudReference,
       costIn: split.costIn,
       costOut: split.costOut,
       source: 'cloud_reference',
@@ -209,15 +271,24 @@ export function apiHostingCostFloor(
       bandwidthPerMTok: ECONOMY.bandwidthPerMTok,
     }
   }
-  return {
-    blended: unit.blended,
-    costIn: unit.costIn,
-    costOut: unit.costOut,
-    source: 'campus',
+  const commercial = targetUtilizedApiCostPerMTok({
     opsDay: unit.opsDay,
-    capacityMTok: unit.capacityMTok,
+    capacityMTok: deployableCapacityMTok,
+    referenceCostPerMTok: cloudReference,
+  })
+  const split = splitInOutCost(commercial.blended)
+  return {
+    blended: commercial.blended,
+    costIn: split.costIn,
+    costOut: split.costOut,
+    source: commercial.useCloudReference ? 'cloud_reference' : 'campus',
+    opsDay: unit.opsDay,
+    capacityMTok: deployableCapacityMTok,
     components: unit.components,
-    campusPerMTok: unit.opsDay / unit.capacityMTok,
+    campusPerMTok: Math.max(
+      0,
+      commercial.campusBlended - ECONOMY.bandwidthPerMTok,
+    ),
     bandwidthPerMTok: ECONOMY.bandwidthPerMTok,
   }
 }

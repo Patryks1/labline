@@ -342,9 +342,9 @@ export function ActiveTrainingCard({
           onFocus={setSpineFocus}
         />
         <p className="font-mono text-[0.6875rem] leading-5 text-muted">
-          You are here: {campaignStageLabel(job)}. One mid-base incident.
-          Alignment uses the recipe mix and attached gyms after the base run.
-          Snapshots are opt-in.
+          You are here: {campaignStageLabel(job)}. Train, evaluate, align, and
+          launch from one run. Benchmarks and snapshots are optional; alignment
+          uses the reserved recipe mix and attached gyms.
         </p>
 
         {job.pendingCampaignEvent ? (

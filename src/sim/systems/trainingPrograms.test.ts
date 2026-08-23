@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
 import type { SimState } from '../types'
+import { syncLabIndex } from './labEngine'
 import {
   finalizeModel,
   resolveCheckpoint,
@@ -69,43 +70,44 @@ describe('authoritative training programs', () => {
   it('uses the asset-attributed mix for the live job instead of stock-only recipe weights', () => {
     const initial = createGame(713)
     const foundation = initial.player.data.assets[0]!
-    const state = startTrainingProgram(
-      {
-        ...initial,
-        player: {
-          ...initial.player,
-          data: {
-            ...initial.player.data,
-            stocks: Object.fromEntries(
-              Object.entries(initial.player.data.stocks).map(([domain, stock]) => [
-                domain,
-                domain === 'chat'
-                  ? stock
-                  : {
-                      ...stock,
-                      processed: 0,
-                      fromWeb: 0,
-                      fromUser: 0,
-                      fromBought: 0,
-                      fromSynth: 0,
-                      fromSynthHQ: 0,
-                      fromSynthLQ: 0,
-                    },
-              ]),
-            ) as typeof initial.player.data.stocks,
-            assets: [
-              {
-                ...foundation,
-                id: 'chat-only-provenance',
-                volumeMTok: 80,
-                domainWeights: { chat: 1 },
-              },
-            ],
-          },
+    // data_mix so PROGRAM weights (incl. chat) are used; foundation recipes
+    // fold chat away and would consume nothing from a chat-only corpus.
+    const mutated = syncLabIndex({
+      ...initial,
+      player: {
+        ...initial.player,
+        researchUnlocked: [...initial.player.researchUnlocked, 'data_mix'],
+        data: {
+          ...initial.player.data,
+          stocks: Object.fromEntries(
+            Object.entries(initial.player.data.stocks).map(([domain, stock]) => [
+              domain,
+              domain === 'chat'
+                ? stock
+                : {
+                    ...stock,
+                    processed: 0,
+                    fromWeb: 0,
+                    fromUser: 0,
+                    fromBought: 0,
+                    fromSynth: 0,
+                    fromSynthHQ: 0,
+                    fromSynthLQ: 0,
+                  },
+            ]),
+          ) as typeof initial.player.data.stocks,
+          assets: [
+            {
+              ...foundation,
+              id: 'chat-only-provenance',
+              volumeMTok: 80,
+              domainWeights: { chat: 1 },
+            },
+          ],
         },
       },
-      PROGRAM,
-    )
+    })
+    const state = startTrainingProgram(mutated, PROGRAM)
     const job = state.player.trainingJob!
     const manifest = state.player.data.manifests.find(
       (candidate) => candidate.id === job.dataManifestId,

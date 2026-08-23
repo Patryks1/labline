@@ -3,10 +3,16 @@ import { createGame } from '../createGame'
 import { roundTripState } from '../save'
 import { runTickSystem } from '../tick'
 import { constructionCrewBonus, canPlaceBuilding, placeBuilding } from '../systems/map'
-import { facilityAnchorTiles } from '../systems/worldAccess'
+import {
+  commitWorldBatch,
+  facilityAnchorTiles,
+  usesCompactWorld,
+} from '../systems/worldAccess'
 import { tickDay } from '../tick'
 import type { RackInstall, SimState } from '../types'
 import type { DataSupplierContract } from '../types'
+import { cheatFastForwardBuild } from '../play/bot'
+import { tileId } from '../world/ids'
 
 /** Fresh game where the player has built and completed `count` solar fields. */
 function gameWithCompletedFacilities(count: number): {
@@ -29,8 +35,24 @@ function gameWithCompletedFacilities(count: number): {
     }
   }
   if (placed.length < count) throw new Error(`only placed ${placed.length}/${count}`)
-  // Solar takes 11 days at the base rate; crews only speed this up.
-  for (let d = 0; d < 12 && count > 0; d++) state = tickDay(state)
+  // Transport access can stall solar builds; force-complete placed shells.
+  if (usesCompactWorld(state) && state.map.world) {
+    const world = state.map.world
+    let batch = world.beginBatch()
+    for (const { x, y } of placed) {
+      const facility = world.getFacilityAt(
+        tileId(x, y, world.descriptor.width, world.descriptor.height),
+      )
+      if (!facility) continue
+      if (facility.constructionProgress >= facility.constructionTarget) continue
+      batch = batch.updateFacility(facility.id, {
+        constructionProgress: facility.constructionTarget,
+      })
+    }
+    state = commitWorldBatch(state, batch)
+  } else {
+    state = cheatFastForwardBuild(state)
+  }
   return { state, placed }
 }
 

@@ -22,6 +22,24 @@ describe('game store cheat money adjustment', () => {
     expect(state.labs[state.playerLabId]?.finance.cash).toBe(state.player.cash)
   })
 
+  it('reconciles ordinary player actions before the next render', () => {
+    useGameStore.getState().setAllocation({
+      training: 0.5,
+      inference: 0.25,
+      research: 0.25,
+    })
+
+    const state = useGameStore.getState().state
+    expect(state.labs[state.playerLabId]?.allocation).toEqual(
+      state.player.allocation,
+    )
+    expect(state.player.allocation).toEqual({
+      training: 0.5,
+      inference: 0.25,
+      research: 0.25,
+    })
+  })
+
   it('removes money and clamps the balance at zero', () => {
     expect(useGameStore.getState().adjustCheatMoney(-Number.MAX_SAFE_INTEGER)).toBe(true)
 

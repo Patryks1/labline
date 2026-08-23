@@ -319,7 +319,7 @@ export function normalizeModelEvaluations(model: Model): Model {
     scores: {
       ...model.benchmarks,
       personality:
-        model.benchmarks.personality ||
+        model.benchmarks?.personality ||
         model.productProfile?.personality ||
         0,
     },

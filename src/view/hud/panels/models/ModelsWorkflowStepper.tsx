@@ -1,9 +1,19 @@
 import { HudButton } from "../../ui/HudPrimitives";
 
-export type ModelsWorkflowStep = "define" | "data" | "compute" | "review";
+export type ModelsWorkflowStep =
+  | "product"
+  | "architecture"
+  | "data"
+  | "compute"
+  | "review";
 
-const STEPS: ReadonlyArray<{ id: ModelsWorkflowStep; label: string; compactLabel: string }> = [
-  { id: "define", label: "Define", compactLabel: "Def" },
+const STEPS: ReadonlyArray<{
+  id: ModelsWorkflowStep;
+  label: string;
+  compactLabel: string;
+}> = [
+  { id: "product", label: "Product", compactLabel: "Goal" },
+  { id: "architecture", label: "Architecture", compactLabel: "Arch" },
   { id: "data", label: "Data", compactLabel: "Data" },
   { id: "compute", label: "Compute", compactLabel: "Recipe" },
   { id: "review", label: "Review", compactLabel: "Rev" },
@@ -35,7 +45,7 @@ export function ModelsWorkflowStepper({
       data-model-workflow="true"
       className="rounded-lg border border-line/60 bg-void/25 px-2.5 py-2"
     >
-      <ol className="grid grid-cols-4 gap-1">
+      <ol className="grid grid-cols-5 gap-1">
         {STEPS.map((step, index) => {
           const complete = index <= completedIndex;
           const active = index === activeIndex;
@@ -74,8 +84,13 @@ export function ModelsWorkflowStepper({
                 >
                   {complete && !active ? "✓" : index + 1}
                 </span>
-                <span className="min-w-0 whitespace-nowrap max-[360px]:hidden">{step.label}</span>
-                <span aria-hidden className="hidden min-w-0 whitespace-nowrap max-[360px]:inline">
+                <span className="min-w-0 whitespace-nowrap max-[360px]:hidden">
+                  {step.label}
+                </span>
+                <span
+                  aria-hidden
+                  className="hidden min-w-0 whitespace-nowrap max-[360px]:inline"
+                >
                   {step.compactLabel}
                 </span>
               </HudButton>
@@ -99,8 +114,8 @@ export function ModelsWorkflowStepper({
           </span>
           <HudButton
             type="button"
-            variant="primary"
-            className="!min-h-11 !rounded-md !px-2.5 !text-[0.6875rem] !font-semibold !text-void transition hover:!bg-bone disabled:!opacity-40"
+            variant="ghost"
+            className="!min-h-11 !rounded-md !border-0 !bg-transparent !px-2.5 !text-[0.6875rem] !font-semibold !text-muted transition hover:!bg-panel-2 hover:!text-bone focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/45 disabled:cursor-not-allowed disabled:opacity-40"
             disabled={activeIndex >= STEPS.length - 1}
             onClick={() => onStepChange(STEPS[activeIndex + 1]!.id)}
           >

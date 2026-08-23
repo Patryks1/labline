@@ -339,14 +339,16 @@ export function priceBandCompetitionBonus(
     seg.prefersSub ? 0.01 : API_PRICE_EPSILON,
     seg.prefersSub ? offer.subPrice : offer.apiPrice,
   );
-  const ownValue =
-    (offer.capability * 0.7 + offer.reliability * 0.3) / ownPrice;
+  // Price-band value must use the segment's benchmark-aware task
+  // quality. Otherwise a smaller coding/security specialist is undervalued by
+  // headline capability even when it solves more target tasks per dollar.
+  const ownValue = segmentOfferQuality(offer, segmentId) / ownPrice;
   const peerValues = peers.map((peer) => {
     const peerPrice = Math.max(
       seg.prefersSub ? 0.01 : API_PRICE_EPSILON,
       seg.prefersSub ? peer.subPrice : peer.apiPrice,
     );
-    return (peer.capability * 0.7 + peer.reliability * 0.3) / peerPrice;
+    return segmentOfferQuality(peer, segmentId) / peerPrice;
   });
   const medianPeer =
     [...peerValues].sort((a, b) => a - b)[Math.floor(peerValues.length / 2)] ??
