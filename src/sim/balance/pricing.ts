@@ -126,9 +126,60 @@ export interface ApiCompetitivePeerPrice {
 }
 
 /**
+ * Capability window for "similar public APIs" — close enough that buyers
+ * actually compare list prices, not every toy checkpoint in the world.
+ * A 8–12 point gap is "a bit worse"; ~14 points is the edge of the band.
+ */
+export const SIMILAR_API_CAPABILITY_DELTA = 14;
+export const SIMILAR_API_QUALITY_RATIO = { lo: 0.78, hi: 1.28 } as const;
+
+export type ApiListPricePosition = "cheaper" | "similar" | "premium";
+
+/** Player list vs one rival: cheaper / similar / premium. */
+export function apiListPricePosition(
+  playerPrice: number,
+  rivalPrice: number,
+): ApiListPricePosition {
+  const rival = Math.max(0, rivalPrice);
+  if (rival <= 0) return playerPrice <= 0 ? "similar" : "premium";
+  const ratio = Math.max(0, playerPrice) / rival;
+  if (ratio < 0.92) return "cheaper";
+  if (ratio > 1.08) return "premium";
+  return "similar";
+}
+
+export function isSimilarCapabilityApiPeer(
+  own: { capability: number; featureScore: number; tokPerSec?: number },
+  peer: { capability: number; featureScore: number; tokPerSec?: number },
+): boolean {
+  if (
+    Math.abs(peer.capability - own.capability) <= SIMILAR_API_CAPABILITY_DELTA
+  ) {
+    return true;
+  }
+  const ownQuality = apiDemandQuality(own);
+  const peerQuality = apiDemandQuality(peer);
+  const ratio = peerQuality / Math.max(1e-6, ownQuality);
+  return (
+    ratio >= SIMILAR_API_QUALITY_RATIO.lo &&
+    ratio <= SIMILAR_API_QUALITY_RATIO.hi
+  );
+}
+
+export function similarCapabilityApiPeers<
+  T extends { capability: number; featureScore: number; tokPerSec?: number },
+>(
+  own: { capability: number; featureScore: number; tokPerSec?: number },
+  peers: T[],
+): T[] {
+  return peers.filter((peer) => isSimilarCapabilityApiPeer(own, peer));
+}
+
+/**
  * Recommend separate API list prices from quality-adjusted rival rates.
- * The target is a 12.5% undercut of comparable peers, bounded by the
- * model's marginal input/output cost floors.
+ * The target is a 12.5% undercut of similar-capability peers so the
+ * suggestion sits inside the demand-producing band. Cost is a warning,
+ * not a floor that can push the quote above what buyers will pay.
  */
 export function suggestCompetitiveApiInOut(input: {
   costIn: number;
@@ -141,43 +192,32 @@ export function suggestCompetitiveApiInOut(input: {
   fallbackPriceOut?: number;
 }): { priceIn: number; priceOut: number; hasComparablePeers: boolean } {
   const ownQuality = apiDemandQuality(input);
-  const validPeers = input.peers
-    .map((peer) => ({ peer, quality: apiDemandQuality(peer) }))
-    .filter(({ peer }) => peer.priceIn >= 0 && peer.priceOut >= 0);
-  const comparable = validPeers.filter(
-    ({ quality }) =>
-      quality >= ownQuality * 0.55 && quality <= ownQuality * 1.8,
+  const validPeers = input.peers.filter(
+    (peer) => peer.priceIn >= 0 && peer.priceOut >= 0,
   );
-  const peers = comparable.length > 0 ? comparable : validPeers;
-  const normalizedIn = peers.map(
-    ({ peer, quality }) => peer.priceIn * (ownQuality / quality),
+  const comparable = similarCapabilityApiPeers(input, validPeers);
+  const normalizedIn = comparable.map(
+    (peer) => peer.priceIn * (ownQuality / apiDemandQuality(peer)),
   );
-  const normalizedOut = peers.map(
-    ({ peer, quality }) => peer.priceOut * (ownQuality / quality),
+  const normalizedOut = comparable.map(
+    (peer) => peer.priceOut * (ownQuality / apiDemandQuality(peer)),
   );
   const targetIn = median(normalizedIn);
   const targetOut = median(normalizedOut);
   const floorIn = Math.max(0, input.costIn);
   const floorOut = Math.max(0, input.costOut);
   const roundUpCents = (value: number) => Math.ceil(value * 100 - 1e-9) / 100;
+  if (targetIn == null || targetOut == null) {
+    return {
+      priceIn: roundUpCents(Math.max(0, input.fallbackPriceIn ?? floorIn)),
+      priceOut: roundUpCents(Math.max(0, input.fallbackPriceOut ?? floorOut)),
+      hasComparablePeers: false,
+    };
+  }
   return {
-    priceIn: roundUpCents(
-      Math.max(
-        floorIn,
-        targetIn == null
-          ? (input.fallbackPriceIn ?? floorIn)
-          : targetIn * 0.875,
-      ),
-    ),
-    priceOut: roundUpCents(
-      Math.max(
-        floorOut,
-        targetOut == null
-          ? (input.fallbackPriceOut ?? floorOut)
-          : targetOut * 0.875,
-      ),
-    ),
-    hasComparablePeers: comparable.length > 0,
+    priceIn: roundUpCents(Math.max(0, targetIn * 0.875)),
+    priceOut: roundUpCents(Math.max(0, targetOut * 0.875)),
+    hasComparablePeers: true,
   };
 }
 
@@ -640,6 +680,34 @@ function median(values: number[]): number | null {
  * Shared API pricing status used by demand and UI. Peer prices are normalized
  * by capability and useful feature coverage before comparison.
  */
+export interface ApiComparablePeerRow {
+  name: string;
+  capability: number;
+  price: number;
+  position: ApiListPricePosition;
+}
+
+/** Similar-capability rivals for the price control (name, cap, $/M, cheaper/similar/premium). */
+export function apiComparablePeerRows(
+  playerPrice: number,
+  own: { capability: number; featureScore: number; tokPerSec?: number },
+  peers: Array<ApiPeerPrice & { name: string }>,
+  limit = 5,
+): ApiComparablePeerRow[] {
+  const valid = peers.filter((peer) => peer.price >= 0);
+  const similar = similarCapabilityApiPeers(own, valid);
+  const pool = similar.length > 0 ? similar : valid;
+  return pool
+    .map((peer) => ({
+      name: peer.name,
+      capability: peer.capability,
+      price: peer.price,
+      position: apiListPricePosition(playerPrice, peer.price),
+    }))
+    .sort((a, b) => b.capability - a.capability || a.price - b.price)
+    .slice(0, limit);
+}
+
 export function analyzeApiPricing(input: {
   price: number;
   marginalCost: number;
@@ -650,12 +718,14 @@ export function analyzeApiPricing(input: {
   peers: ApiPeerPrice[];
 }): PricingDiagnostic {
   const ownQuality = apiDemandQuality(input);
-  const normalizedPeers = input.peers
-    .filter((peer) => peer.price >= 0)
-    .map((peer) => {
-      const peerQuality = apiDemandQuality(peer);
-      return peer.price * (ownQuality / peerQuality);
-    });
+  const validPeers = input.peers.filter((peer) => peer.price >= 0);
+  const comparablePeers = similarCapabilityApiPeers(input, validPeers);
+  const peersForMedian =
+    comparablePeers.length > 0 ? comparablePeers : validPeers;
+  const normalizedPeers = peersForMedian.map((peer) => {
+    const peerQuality = apiDemandQuality(peer);
+    return peer.price * (ownQuality / peerQuality);
+  });
   const peerMedian = median(normalizedPeers);
   const ratioToPeer =
     peerMedian != null

@@ -6,6 +6,7 @@ import { researchPoolForTech } from "./data";
 import { chargeExpense } from "./financeLedger";
 import { playerStaff, researchTalentMultFromCount } from "./staff";
 import { facilityAnchorTiles } from "./worldAccess";
+import { appendFeedEvents } from "./feed";
 
 /** Longest prereq chain length (0 = root). */
 export function nodePrereqDepth(
@@ -819,7 +820,22 @@ function completeResearchNode(
     ].slice(0, 40),
   };
   if (newlyUnlocked) s = applyResearchEffectsToPlayer(s, node.effects);
-  return tryStartFromQueue(s);
+  s = tryStartFromQueue(s);
+  return appendFeedEvents(s, [
+    {
+      id: `feed-research-complete-${node.id}-${state.day}`,
+      day: state.day,
+      category: "models",
+      title: `Research unlocked: ${node.name}`,
+      body: newlyUnlocked
+        ? "The method is now available to training, serving, or data workflows."
+        : "The research cycle completed; existing effects remain active.",
+      source: state.player.name,
+      tone: "research",
+      entityId: node.id,
+      kind: "research_unlocked",
+    },
+  ]);
 }
 
 /** Cheat surface: finish the active project through the normal unlock/effects path. */

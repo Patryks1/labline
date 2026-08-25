@@ -594,7 +594,7 @@ export function effortPolicy(
   profile: ModelProductProfile | undefined,
   level: ReasoningEffort,
 ): ReasoningEffortPolicy | undefined {
-  return profile?.effortPolicies.find((policy) => policy.level === level);
+  return profile?.effortPolicies?.find((policy) => policy.level === level);
 }
 
 export function effortViewForRecipe(

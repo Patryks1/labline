@@ -1,16 +1,64 @@
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
+import { emptyBenchmarks } from '../balance/benchmarks'
+import type { Model } from '../types'
 import {
+  acceptInvestorPitch,
   acceptEquityOffer,
   applyForDebt,
   applyForLabDebt,
+  bankingProducts,
   capitalSnapshot,
+  investorPitchPreview,
   fundRivalForCampus,
   repayDebt,
   requestEquityOffers,
   tickCapital,
 } from './capital'
 import { updateLab } from './labEngine'
+
+function pitchModel(
+  id: string,
+  capability: number,
+  repeatedDataEpochs = 1,
+): Model {
+  return {
+    id,
+    name: id,
+    family: 'dense',
+    paramsB: 7,
+    capability,
+    modalities: ['text'],
+    quality: {
+      reasoning: capability,
+      coding: capability,
+      chat: capability,
+      image: 0,
+      video: 0,
+      safety: capability,
+      reliability: capability,
+    },
+    benchmarks: emptyBenchmarks(),
+    postTrain: 'rlhf',
+    trainComputeSpent: 20,
+    releaseDay: 1,
+    shipped: false,
+    release: 'internal',
+    tokPerSecMult: 1,
+    inferCostMult: 1,
+    apiPricePerMTok: null,
+    apiPriceInPerMTok: null,
+    apiPriceOutPerMTok: null,
+    suggestedApiPrice: 2,
+    suggestedApiPriceIn: 0.7,
+    suggestedApiPriceOut: 3,
+    costApiPriceIn: 0.2,
+    costApiPriceOut: 0.8,
+    distilled: false,
+    trainMode: 'pretrain',
+    repeatedDataEpochs,
+  }
+}
 
 describe('capital stack', () => {
   it('calculates exact post-money ownership', () => {
@@ -34,12 +82,105 @@ describe('capital stack', () => {
     expect(next.player.cash).toBe(state.player.cash + 10_000_000)
   })
 
+  it('compounds founder voting dilution across repeated funding rounds', () => {
+    const state = createGame(311)
+    const initialControl = state.player.capital!.founderControl
+    const first = acceptEquityOffer(state, {
+      id: 'round-one',
+      investorName: 'First Capital',
+      cashRaised: 20_000_000,
+      preMoneyValuation: 80_000_000,
+      postMoneyValuation: 100_000_000,
+      investorOwnership: 0.2,
+      optionPoolTopUp: 0,
+      confidenceRequired: 0,
+      expiresDay: 30,
+    })
+    const second = acceptEquityOffer(first, {
+      id: 'round-two',
+      investorName: 'Second Capital',
+      cashRaised: 20_000_000,
+      preMoneyValuation: 80_000_000,
+      postMoneyValuation: 100_000_000,
+      investorOwnership: 0.2,
+      optionPoolTopUp: 0,
+      confidenceRequired: 0,
+      expiresDay: 30,
+    })
+
+    expect(second.player.capital!.founderControl).toBeCloseTo(
+      initialControl * 0.8 * 0.8,
+      12,
+    )
+    expect(
+      second.player.capital!.capTable
+        .filter((stake) => stake.kind === 'founder')
+        .reduce((sum, stake) => sum + stake.votingPower, 0),
+    ).toBeCloseTo(initialControl * 0.8 * 0.8, 12)
+  })
+
   it('keeps seed ownership normalized', () => {
     const state = createGame(32)
     const snapshot = capitalSnapshot(state)
     expect(snapshot.founderOwnership).toBeCloseTo(0.675)
     expect(snapshot.investorOwnership).toBeCloseTo(0.25)
     expect(snapshot.optionPool).toBeCloseTo(0.075)
+  })
+
+  it('previews model-backed terms and penalizes weak, overused weights', () => {
+    const state = createGame(3201)
+    const strong = pitchModel('frontier-internal', 92)
+    const weak = pitchModel('overused-small', 24, 7)
+    const prepared = updateLab(state, state.playerLabId, (lab) => ({
+      ...lab,
+      models: [strong, weak],
+    }))
+    const strongPreview = investorPitchPreview(prepared, strong.id)
+    const weakPreview = investorPitchPreview(prepared, weak.id)
+    expect(strongPreview.eligible).toBe(true)
+    expect(strongPreview.successChance).toBeGreaterThan(weakPreview.successChance)
+    expect(strongPreview.cashRaised).toBeGreaterThan(weakPreview.cashRaised)
+    expect(strongPreview.investorOwnership).toBeLessThan(weakPreview.investorOwnership)
+    expect(weakPreview.overusePenalty).toBeGreaterThan(0.5)
+  })
+
+  it('resolves a seeded pitch into cash, cap-table dilution, and a cooldown', () => {
+    const model = pitchModel('pitchable', 88)
+    let funded: ReturnType<typeof createGame> | undefined
+    for (let seed = 3_210; seed < 3_260 && !funded; seed += 1) {
+      const state = createGame(seed)
+      const prepared = updateLab(state, state.playerLabId, (lab) => ({
+        ...lab,
+        models: [model],
+      }))
+      const preview = investorPitchPreview(prepared, model.id)
+      const resolved = acceptInvestorPitch(prepared, model.id)
+      if (
+        resolved.player.capital?.pitchHistory?.[0]?.outcome === 'funded'
+      ) {
+        funded = resolved
+        expect(resolved.player.cash).toBe(prepared.player.cash + preview.cashRaised)
+        expect(resolved.player.capital?.fundingRounds.at(-1)?.id).toBe(
+          `pitch-${model.id}-1`,
+        )
+        expect(resolved.player.capital?.pitchCooldownUntilDay).toBe(31)
+        expect(resolved.player.capital?.capTable.some((stake) => stake.holderId === `pitch-${model.id}-1`)).toBe(true)
+      }
+    }
+    expect(funded).toBeDefined()
+  })
+
+  it('does not allow a second pitch during the desk cooldown', () => {
+    const model = pitchModel('cooldown-model', 82)
+    const state = createGame(3_270)
+    const prepared = updateLab(state, state.playerLabId, (lab) => ({
+      ...lab,
+      models: [model],
+    }))
+    const first = acceptInvestorPitch(prepared, model.id)
+    const second = acceptInvestorPitch(first, model.id)
+    expect(second.player.capital?.pitchHistory).toHaveLength(1)
+    expect(second.alerts[0]?.message).toContain('cooling down')
   })
 
   it('venture debt adds cash but never revenue', () => {
@@ -102,6 +243,20 @@ describe('capital stack', () => {
     const next = applyForDebt(state, 'equipment', 3_000_000)
     expect(next.player.cash).toBe(state.player.cash)
     expect(next.player.capital?.debt).toHaveLength(0)
+  })
+
+  it('recognizes compact-world data centers as project-finance collateral', () => {
+    const state = createGame(351)
+    const rivalHall = state.map.world!.queryFacilities({ kind: 'dc' })[0]!
+    state.map.world!.beginBatch().updateFacility(rivalHall.id, {
+      ownerId: state.playerLabId,
+    }).commit()
+
+    const projectFinance = bankingProducts(state).find(
+      (product) => product.kind === 'project_finance',
+    )!
+    expect(projectFinance.max).toBeGreaterThan(0)
+    expect(projectFinance.collateral).toBeGreaterThan(0)
   })
 
   it('advances the recovery ladder before bankruptcy and clears it when stabilized', () => {

@@ -4,6 +4,7 @@ import { ECONOMY } from "../../../sim/balance/economy";
 import {
   analyzeApiPricing,
   analyzePlanPricing,
+  apiComparablePeerRows,
   apiHostingCostFloor,
   apiUnitCostPerMTok,
   blendApiPrice,
@@ -68,6 +69,10 @@ import type {
   ServeThrottlePolicy,
   SubPlan,
 } from "../../../sim/types";
+import {
+  legacyServeControls,
+  serveControls,
+} from "../../../sim/balance/serveThrottle";
 import { isLivePublicModel } from "../../../sim/modelRelease";
 import {
   composeRouterModel,
@@ -263,6 +268,8 @@ export function PlansPanel() {
       .map((model) => {
         const effective = effectiveApiPeerPricing(rival.pricing, model);
         return {
+          name: model.name,
+          rivalName: rival.name,
           price: effective.price,
           capability: model.capability,
           featureScore: model.modalities.length * 18,
@@ -351,7 +358,7 @@ export function PlansPanel() {
 
   const modelFinance = state.lastMarket.modelFinance ?? [];
   const apiCostEstimates = models.map((model) => {
-    const precision = pricing.apiServePrecisionByModel?.[model.id] ?? "fp16";
+    const precision = pricing.apiServePrecisionByModel?.[model.id] ?? "fp32";
     const servedModel = modelForServePrecision(
       model,
       precision,
@@ -461,9 +468,13 @@ export function PlansPanel() {
         onPriorityChange={(apiVsSubPriority) =>
           setPricing({ apiVsSubPriority })
         }
-        throttlePolicy={pricing.serveThrottlePolicy ?? "balanced"}
-        onThrottlePolicyChange={(serveThrottlePolicy) =>
-          setPricing({ serveThrottlePolicy })
+        slowdownLimit={serveControls(pricing).slowdownLimit}
+        peakPricingPct={serveControls(pricing).peakPricingPct}
+        onSlowdownLimitChange={(serveSlowdownLimit) =>
+          setPricing({ serveSlowdownLimit, serveThrottlePolicy: undefined })
+        }
+        onPeakPricingPctChange={(peakPricingPct) =>
+          setPricing({ peakPricingPct, serveThrottlePolicy: undefined })
         }
         apiLoad={state.lastMarket.apiLoad ?? 0}
         subLoad={state.lastMarket.subLoad ?? 0}
@@ -759,7 +770,7 @@ export function PlansPanel() {
                   const hostingFloorBlended = parts.reduce((sum, part) => {
                     const precision =
                       pricing.apiServePrecisionByModel?.[part.model.id] ??
-                      "fp16";
+                      "fp32";
                     const served = modelForServePrecision(
                       part.model,
                       precision,
@@ -905,7 +916,7 @@ export function PlansPanel() {
                   const isApiLive = apiModelIds.includes(m.id);
                   const viaRouter = routedApiMemberIds.has(m.id);
                   const apiPrecision =
-                    pricing.apiServePrecisionByModel?.[m.id] ?? "fp16";
+                    pricing.apiServePrecisionByModel?.[m.id] ?? "fp32";
                   const apiPrecisionOptions = unlockedPlanPrecisions(
                     playerCompany.research.unlocked,
                   );
@@ -983,6 +994,26 @@ export function PlansPanel() {
                     fallbackPriceIn: m.suggestedApiPriceIn,
                     fallbackPriceOut: m.suggestedApiPriceOut,
                   });
+                  const comparablePeers = apiComparablePeerRows(
+                    blend,
+                    {
+                      capability: apiServedModel.capability,
+                      featureScore: m.modalities.length * 18,
+                      tokPerSec:
+                        apiServedModel.serviceProfile?.interactiveTokPerSec ??
+                        52 * apiServedModel.tokPerSecMult,
+                    },
+                    rivalApiPeers
+                      .filter((peer) => peer.kind === productKind)
+                      .map((peer) => ({
+                        name: peer.name,
+                        price: peer.price,
+                        capability: peer.capability,
+                        featureScore: peer.featureScore,
+                        tokPerSec: peer.tokPerSec,
+                        kind: peer.kind,
+                      })),
+                  );
                   const dayNet =
                     (fin?.dayApiRevenue ?? 0) - (fin?.dayApiCogs ?? 0);
                   const currentListRevenueAtPriorTraffic = dayMTok * blend;
@@ -1152,7 +1183,7 @@ export function PlansPanel() {
                                 key={precision}
                                 type="button"
                                 variant="ghost"
-                                aria-label={`${m.name} API ${precision === "fp16" ? "Full" : precision.toUpperCase()}`}
+                                aria-label={`${m.name} API ${precision.toUpperCase()}`}
                                 onClick={() =>
                                   setPricing({
                                     apiServePrecisionByModel: {
@@ -1168,19 +1199,11 @@ export function PlansPanel() {
                                     : "bg-void text-muted hover:text-bone"
                                 }`}
                               >
-                                {precision === "fp16"
-                                  ? "Full"
-                                  : precision.toUpperCase()}
+                                {precision.toUpperCase()}
                               </HudButton>
                             ))}
                           </div>
-                          {apiPrecisionOptions.length === 1 ? (
-                            <ResearchUnlockLink
-                              className="mt-1.5"
-                              nodeId="sys_quant"
-                              label="Unlock API quantization"
-                            />
-                          ) : null}
+                          <ServingPrecisionResearchLinks unlocked={playerCompany.research.unlocked} />
                           <div className="mt-2 grid grid-cols-2 gap-1 font-mono text-[0.6875rem] sm:grid-cols-4">
                             {(
                               ["mmlu", "coding", "math", "agents"] as const
@@ -1294,6 +1317,50 @@ export function PlansPanel() {
                             />
                           </label>
                         </div>
+                        {comparablePeers.length > 0 ? (
+                          <div
+                            className="mt-2 rounded-md border border-line/50 bg-void/30 px-2 py-1.5"
+                            data-testid={`api-comparable-peers-${m.id}`}
+                          >
+                            <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+                              Similar capability on market
+                            </div>
+                            <ul className="mt-1 space-y-0.5">
+                              {comparablePeers.map((peer) => (
+                                <li
+                                  key={`${peer.name}-${peer.capability}`}
+                                  className="flex items-center justify-between gap-2 font-mono text-[0.6875rem] tabular-nums"
+                                >
+                                  <span className="min-w-0 truncate text-bone">
+                                    {peer.name}
+                                  </span>
+                                  <span className="shrink-0 text-muted">
+                                    cap {peer.capability.toFixed(0)}
+                                  </span>
+                                  <span className="shrink-0 text-bone">
+                                    ${formatApiListPrice(peer.price)}/M
+                                  </span>
+                                  <span
+                                    className={`shrink-0 uppercase tracking-[0.08em] ${
+                                      peer.position === "cheaper"
+                                        ? "text-mint"
+                                        : peer.position === "premium"
+                                          ? "text-amber"
+                                          : "text-muted"
+                                    }`}
+                                  >
+                                    {peer.position}
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : suggestedApi.hasComparablePeers ? null : (
+                          <p className="mt-2 text-[0.75rem] leading-5 text-muted">
+                            No similar-capability rivals yet — suggested price
+                            uses launch economics.
+                          </p>
+                        )}
                         <p className="mt-2 text-[0.75rem] leading-5 text-muted">
                           Hosting floor {money(hosting.blended)} per 1M tokens
                           {hosting.source === "cloud_reference"
@@ -1339,6 +1406,10 @@ export function PlansCapacitySummary({
   subscriptionBacklogMTok,
   unservedRatio,
   onPriorityChange,
+  slowdownLimit,
+  peakPricingPct,
+  onSlowdownLimitChange,
+  onPeakPricingPctChange,
   throttlePolicy,
   onThrottlePolicyChange,
   apiLoad,
@@ -1363,8 +1434,13 @@ export function PlansCapacitySummary({
   subscriptionBacklogMTok: number;
   unservedRatio: number;
   onPriorityChange: (value: number) => void;
-  throttlePolicy: ServeThrottlePolicy;
-  onThrottlePolicyChange: (value: ServeThrottlePolicy) => void;
+  slowdownLimit?: number;
+  peakPricingPct?: number;
+  onSlowdownLimitChange?: (value: number) => void;
+  onPeakPricingPctChange?: (value: number) => void;
+  /** Compatibility props for pre-control callers. */
+  throttlePolicy?: ServeThrottlePolicy;
+  onThrottlePolicyChange?: (value: ServeThrottlePolicy) => void;
   apiLoad: number;
   subLoad: number;
   apiStrain: number;
@@ -1376,6 +1452,21 @@ export function PlansCapacitySummary({
   const serveRatio = totalRequested
     ? (totalRequested - totalBacklog) / totalRequested
     : 1;
+  const legacy = legacyServeControls(throttlePolicy);
+  const resolvedSlowdownLimit = slowdownLimit ?? legacy.slowdownLimit;
+  const resolvedPeakPricingPct = peakPricingPct ?? legacy.peakPricingPct;
+  const setSlowdownLimit =
+    onSlowdownLimitChange ??
+    ((value: number) => {
+      if (!onThrottlePolicyChange) return;
+      onThrottlePolicyChange(value <= 0.01 ? "shed" : value >= 0.99 ? "throttle" : "balanced");
+    });
+  const setPeakPricingPct =
+    onPeakPricingPctChange ??
+    ((value: number) => {
+      if (!onThrottlePolicyChange) return;
+      onThrottlePolicyChange(value > 0 ? "surge" : "balanced");
+    });
 
   return (
     <section
@@ -1448,8 +1539,10 @@ export function PlansCapacitySummary({
             subscriptionBacklogMTok={subscriptionBacklogMTok}
             unservedRatio={unservedRatio}
             onChange={onPriorityChange}
-            throttlePolicy={throttlePolicy}
-            onThrottlePolicyChange={onThrottlePolicyChange}
+            slowdownLimit={resolvedSlowdownLimit}
+            peakPricingPct={resolvedPeakPricingPct}
+            onSlowdownLimitChange={setSlowdownLimit}
+            onPeakPricingPctChange={setPeakPricingPct}
             apiLoad={apiLoad}
             subLoad={subLoad}
             apiStrain={apiStrain}
@@ -1790,57 +1883,74 @@ function PlanDemandSection({
   );
 }
 
-/** Overload policy options for the contextual button group; hint shows for the active one. */
-const THROTTLE_POLICY_OPTIONS: {
-  id: ServeThrottlePolicy;
-  label: string;
-  hint: string;
-}[] = [
-  {
-    id: "shed",
-    label: "Shed excess",
-    hint: "Reject overflow — queues & errors churn users and spill demand to rivals.",
-  },
-  {
-    id: "balanced",
-    label: "Balanced",
-    hint: "Slow streams for the first ~25% of overload, shed the rest.",
-  },
-  {
-    id: "throttle",
-    label: "Slow streams",
-    hint: "Serve everyone; streams slow down and demand cools tomorrow.",
-  },
-  {
-    id: "surge",
-    label: "Peak pricing",
-    hint: "Raise API prices under load to shed demand profitably.",
-  },
-];
-
 export function OverloadPolicyControl({
+  slowdownLimit,
+  peakPricingPct,
+  onSlowdownLimitChange,
+  onPeakPricingPctChange,
+  // Kept optional for old embedders/tests; normalized saves use the two
+  // continuous controls above.
   throttlePolicy,
   onChange,
 }: {
-  throttlePolicy: ServeThrottlePolicy;
-  onChange: (policy: ServeThrottlePolicy) => void;
+  slowdownLimit?: number;
+  peakPricingPct?: number;
+  onSlowdownLimitChange?: (value: number) => void;
+  onPeakPricingPctChange?: (value: number) => void;
+  throttlePolicy?: ServeThrottlePolicy;
+  onChange?: (policy: ServeThrottlePolicy) => void;
 }) {
+  const legacy = legacyServeControls(throttlePolicy);
+  const resolvedSlowdownLimit = slowdownLimit ?? legacy.slowdownLimit;
+  const resolvedPeakPricingPct = peakPricingPct ?? legacy.peakPricingPct;
+  const presets = [
+    { id: "shed", label: "Shed now", slowdown: 0, peak: 0 },
+    { id: "balanced", label: "Balanced", slowdown: 0.25, peak: 0 },
+    { id: "slow", label: "Slow first", slowdown: 0.6, peak: 0 },
+    { id: "peak", label: "Peak price", slowdown: 0.25, peak: 80 },
+  ] as const;
+  const activePreset = presets.find(
+    (preset) =>
+      Math.abs(preset.slowdown - resolvedSlowdownLimit) < 0.01 &&
+      Math.abs(preset.peak - resolvedPeakPricingPct) < 1,
+  )?.id;
+  const slowdownPct = Math.round(
+    Math.max(0, Math.min(1, resolvedSlowdownLimit)) * 100,
+  );
+  const peakPct = Math.round(
+    Math.max(0, Math.min(100, resolvedPeakPricingPct)),
+  );
   return (
     <div
-      className="mt-1.5 grid gap-1 sm:grid-cols-3"
+      className="mt-1.5 space-y-2"
       role="group"
       aria-label="Overload policy"
     >
-      {THROTTLE_POLICY_OPTIONS.map((option) => {
-        const active = throttlePolicy === option.id;
+      <div className="grid gap-1 sm:grid-cols-4">
+      {presets.map((option) => {
+        const active = activePreset === option.id;
         return (
           <HudButton
             key={option.id}
             type="button"
             variant="ghost"
             aria-pressed={active}
-            title={option.hint}
-            onClick={() => onChange(option.id)}
+            title={`Slow ${Math.round(option.slowdown * 100)}% of capacity before shedding${option.peak ? ` · peak API price +${option.peak}%` : ""}`}
+            onClick={() => {
+              onSlowdownLimitChange?.(option.slowdown);
+              onPeakPricingPctChange?.(option.peak);
+              if (onChange) {
+                const policy: ServeThrottlePolicy =
+                  option.id === "shed"
+                    ? "shed"
+                    : option.id === "slow"
+                      ? "throttle"
+                      : option.id === "peak"
+                        ? "surge"
+                        : "balanced";
+                onChange(policy);
+              }
+            }}
             className={`min-h-11 rounded-md border px-2 py-1.5 text-left text-[0.6875rem] transition sm:min-h-0 ${
               active
                 ? "border-mint/50 bg-mint/10 text-mint"
@@ -1851,6 +1961,45 @@ export function OverloadPolicyControl({
           </HudButton>
         );
       })}
+      </div>
+      <label className="block text-[0.6875rem] text-muted">
+        Slowdown headroom
+        <span className="ml-1 font-mono text-bone">{slowdownPct}%</span>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={5}
+          value={slowdownPct}
+          onChange={(event) =>
+            onSlowdownLimitChange?.(Number(event.target.value) / 100)
+          }
+          className="slider-track mt-1 w-full"
+          aria-label="Slowdown headroom before shedding overload"
+        />
+        <span className="mt-0.5 block text-[0.625rem] leading-snug">
+          Slow streams absorb this much extra capacity; excess above it is shed.
+        </span>
+      </label>
+      <label className="block text-[0.6875rem] text-muted">
+        Peak API pricing
+        <span className="ml-1 font-mono text-bone">+{peakPct}%</span>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={5}
+          value={peakPct}
+          onChange={(event) =>
+            onPeakPricingPctChange?.(Number(event.target.value))
+          }
+          className="slider-track mt-1 w-full"
+          aria-label="Peak API pricing percentage"
+        />
+        <span className="mt-0.5 block text-[0.625rem] leading-snug">
+          Price-sensitive API demand collapses as the posted peak gets steep.
+        </span>
+      </label>
     </div>
   );
 }
@@ -1874,8 +2023,10 @@ function CapacityRoutingControl({
   subscriptionBacklogMTok,
   unservedRatio,
   onChange,
-  throttlePolicy,
-  onThrottlePolicyChange,
+  slowdownLimit,
+  peakPricingPct,
+  onSlowdownLimitChange,
+  onPeakPricingPctChange,
   apiLoad,
   subLoad,
   apiStrain,
@@ -1889,8 +2040,10 @@ function CapacityRoutingControl({
   subscriptionBacklogMTok: number;
   unservedRatio: number;
   onChange: (value: number) => void;
-  throttlePolicy: ServeThrottlePolicy;
-  onThrottlePolicyChange: (policy: ServeThrottlePolicy) => void;
+  slowdownLimit: number;
+  peakPricingPct: number;
+  onSlowdownLimitChange: (value: number) => void;
+  onPeakPricingPctChange: (value: number) => void;
   apiLoad: number;
   subLoad: number;
   apiStrain: number;
@@ -2060,21 +2213,26 @@ function CapacityRoutingControl({
 
         <div className="mt-2 border-t border-line/50 pt-2">
           <p className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
-            Overload policy
+            Overload controls
           </p>
           <OverloadPolicyControl
-            throttlePolicy={throttlePolicy}
-            onChange={onThrottlePolicyChange}
+            slowdownLimit={slowdownLimit}
+            peakPricingPct={peakPricingPct}
+            onSlowdownLimitChange={onSlowdownLimitChange}
+            onPeakPricingPctChange={onPeakPricingPctChange}
           />
           <p
             aria-live="polite"
             className="mt-1.5 text-[0.6875rem] leading-snug text-muted"
           >
-            {
-              THROTTLE_POLICY_OPTIONS.find(
-                (option) => option.id === throttlePolicy,
-              )?.hint
-            }
+            {slowdownLimit <= 0.01
+              ? "Excess is shed immediately."
+              : slowdownLimit >= 0.99
+                ? "Streams slow through the full overload before any shedding."
+                : `Streams slow through +${Math.round(slowdownLimit * 100)}% capacity, then excess is shed.`}
+            {peakPricingPct > 0
+              ? ` Peak API price can rise +${Math.round(peakPricingPct)}%; steep peaks collapse demand.`
+              : " Peak pricing is off."}
           </p>
         </div>
       </div>
@@ -2512,6 +2670,7 @@ function WorkloadLedger({
 }
 
 const PLAN_PRECISION_LABELS: Record<PlanServePrecision, string> = {
+  fp32: "FP32",
   fp16: "FP16",
   bf16: "BF16",
   fp8: "FP8",
@@ -2520,6 +2679,22 @@ const PLAN_PRECISION_LABELS: Record<PlanServePrecision, string> = {
   nvfp4: "NVFP4",
   ternary_1_58: "1.58-bit",
 };
+
+function ServingPrecisionResearchLinks({ unlocked }: { unlocked: string[] }) {
+  return (
+    <div className="mt-1.5 grid gap-1">
+      {!unlocked.includes("opt_fp16") ? (
+        <ResearchUnlockLink nodeId="opt_fp16" label="Unlock FP16 serving" />
+      ) : null}
+      {!unlocked.includes("opt_mixed") ? (
+        <ResearchUnlockLink nodeId="opt_mixed" label="Unlock BF16 serving" />
+      ) : null}
+      {unlocked.includes("opt_fp16") && unlocked.includes("opt_mixed") && !unlocked.includes("sys_quant") ? (
+        <ResearchUnlockLink nodeId="sys_quant" label="Unlock integer serving formats" />
+      ) : null}
+    </div>
+  );
+}
 
 function PlanPrecisionPills({
   model,
@@ -2546,7 +2721,7 @@ function PlanPrecisionPills({
               key={option}
               type="button"
               variant="ghost"
-              title={`${preview.label} · ${(preview.computeMult * 100).toFixed(2)}% serving compute`}
+              title={`${preview.label} · ${preview.computeMult.toFixed(2)}× baseline serving compute`}
               onClick={() => onSelect(option)}
               className={`rounded-full px-2 py-1 font-mono text-[0.6875rem] ${
                 active
@@ -2560,20 +2735,14 @@ function PlanPrecisionPills({
         })}
       </div>
       <p className="mt-1.5 text-[0.625rem] leading-snug text-muted">
-        {modifiers.label} uses {(modifiers.computeMult * 100).toFixed(2)}% of
-        full-precision serve compute
+        {modifiers.label} uses {modifiers.computeMult.toFixed(2)}× baseline
+        serving compute
         {modifiers.capabilityDelta
           ? ` · capability ${modifiers.capabilityDelta}`
           : " · no fixed capability penalty"}
         .
       </p>
-      {precisionOptions.length <= 2 ? (
-        <ResearchUnlockLink
-          className="mt-1.5"
-          nodeId="sys_quant"
-          label="Research serving quantization for more formats"
-        />
-      ) : null}
+      <ServingPrecisionResearchLinks unlocked={unlocked} />
     </div>
   );
 }
@@ -3123,6 +3292,11 @@ function PlanCard({
     });
   const marginBad = marginPerUserMo < 0;
   const seatCap = stats?.maxSeats;
+  const configuredSubscriberCap =
+    Number.isFinite(plan.subscriberCap) && (plan.subscriberCap ?? 0) > 0
+      ? Math.max(1, Math.floor(plan.subscriberCap!))
+      : undefined;
+  const demandSubscribers = stats?.demandSubscribers;
   const seatFill =
     seatCap != null && seatCap > 0 && seatCap < 1e8
       ? Math.min(1, subs / seatCap)
@@ -3222,25 +3396,40 @@ function PlanCard({
             </span>
           </StatusChip>
         ) : null}
-        <label className="flex min-h-11 shrink-0 items-center gap-2 px-1 text-[0.75rem] text-muted">
-          <HudInput
-            type="checkbox"
-            checked={plan.enabled}
-            onChange={(e) => onChange({ enabled: e.target.checked })}
-          />
-          Live
-        </label>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={plan.enabled}
+          aria-label={`${plan.name} plan ${plan.enabled ? "live" : "paused"}`}
+          data-testid={`plan-live-switch-${plan.id}`}
+          onClick={() => onChange({ enabled: !plan.enabled })}
+          className={`plan-live-switch flex min-h-11 shrink-0 items-center gap-2 rounded-md border px-2.5 text-[0.75rem] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/70 ${
+            plan.enabled
+              ? "border-mint/45 bg-mint/10 text-mint hover:bg-mint/15"
+              : "border-line/70 bg-void/40 text-muted hover:border-amber/45 hover:text-amber"
+          }`}
+        >
+          <span className="plan-live-switch__indicator" aria-hidden="true" />
+          <span>{plan.enabled ? "Live" : "Paused"}</span>
+        </button>
       </div>
 
       {/* Live KPIs — the things you glance at */}
+      <section className="plan-card-section plan-card-section--results" aria-labelledby={`plan-results-${plan.id}`}>
+        <div className="plan-card-section__header">
+          <h3 id={`plan-results-${plan.id}`}>Live results</h3>
+          <span>today · per-seat economics</span>
+        </div>
       <div className="grid grid-cols-2 gap-px bg-line/40 sm:grid-cols-4">
         <KpiCell
           label="Plan subscribers"
           value={people(subs)}
           sub={
-            seatCap != null && seatCap < 1e8
-              ? `cap ${people(seatCap)}`
-              : "open seats"
+            configuredSubscriberCap != null
+              ? `limit ${people(configuredSubscriberCap)}${demandSubscribers != null ? ` · demand ${people(demandSubscribers)}` : ""}`
+              : seatCap != null && seatCap < 1e8
+                ? `compute cap ${people(seatCap)}`
+                : "open enrollment"
           }
           bar={seatFill}
         />
@@ -3272,12 +3461,10 @@ function PlanCard({
           barWarn={fill > 1}
         />
       </div>
+      </section>
 
       {/* Token include + pricing controls */}
       <div className="space-y-2.5 px-3 py-2.5">
-        {marginBad && !free ? (
-          <StatusChip tone="danger">Negative margin / sub</StatusChip>
-        ) : null}
         {impossibleServing ? (
           <StatusChip tone="danger">
             Impossible serving — expected COGS exceed ~90% of price
@@ -3296,21 +3483,31 @@ function PlanCard({
           </StatusChip>
         ) : null}
 
-        <label className="block text-[0.75rem] text-muted">
-          Price $/mo
-          <DraftNumberInput
-            ariaLabel={`${plan.name} monthly price`}
-            min={0}
-            step={1}
-            value={plan.pricePerMonth}
-            decimals={2}
-            onCommit={(next) => onChange({ pricePerMonth: next })}
-            className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 font-mono text-sm text-bone outline-none sm:max-w-[12rem]"
-          />
-        </label>
+        <section className="plan-card-section" aria-labelledby={`plan-commercial-${plan.id}`}>
+          <div className="plan-card-section__header">
+            <h3 id={`plan-commercial-${plan.id}`}>Commercial offer</h3>
+            <span>price, value and margin</span>
+          </div>
+          <label className="block text-[0.75rem] text-muted">
+            Price $/mo
+            <DraftNumberInput
+              ariaLabel={`${plan.name} monthly price`}
+              min={0}
+              step={1}
+              value={plan.pricePerMonth}
+              decimals={2}
+              onCommit={(next) => onChange({ pricePerMonth: next })}
+              className="mt-0.5 w-full rounded-md border border-line bg-void px-2 py-1.5 font-mono text-sm text-bone outline-none sm:max-w-[12rem]"
+            />
+          </label>
+        </section>
 
         {/* comment 14: Capacity & value — subsidy, seats, compute priority */}
-        <div className="rounded-lg border border-line/60 bg-void/45 px-2.5 py-2">
+        <section className="plan-card-section rounded-lg border border-line/60 bg-void/45 px-2.5 py-2" aria-labelledby={`plan-capacity-${plan.id}`}>
+          <div className="plan-card-section__header">
+            <h3 id={`plan-capacity-${plan.id}`}>Capacity & enrollment</h3>
+            <span>admission, allowance and priority</span>
+          </div>
           <div className="flex items-start justify-between gap-3">
             <div>
               <div className="text-[0.75rem] font-medium text-bone">
@@ -3384,9 +3581,13 @@ function PlanCard({
               </div>
             </div>
           </div>
-        </div>
+        </section>
 
-        <div className="rounded-lg border border-line/60 bg-void/45 px-2.5 py-2">
+        <section className="plan-card-section rounded-lg border border-line/60 bg-void/45 px-2.5 py-2" aria-labelledby={`plan-models-${plan.id}`}>
+          <div className="plan-card-section__header">
+            <h3 id={`plan-models-${plan.id}`}>Model entitlement</h3>
+            <span>routing and included usage</span>
+          </div>
           <div className="flex items-center justify-between gap-2">
             <span className="text-[0.75rem] font-medium text-bone">
               Per-model entitlements
@@ -3418,7 +3619,7 @@ function PlanCard({
               </div>
             </div>
           ) : null}
-        </div>
+        </section>
 
         {(() => {
           const collectCap = maxPlanDataCollectionShare(plan.pricePerMonth);
@@ -3432,50 +3633,65 @@ function PlanCard({
             plan.pricePerMonth,
             collectSetting,
           );
+          const collectEnabled = !collectLocked && collectEffective > 0;
           return (
-            <label className="block text-[0.75rem] text-muted">
-              <span className="flex items-center justify-between gap-2">
-                <span>Chat data collection</span>
-                <strong className="font-mono tabular-nums text-bone">
-                  {collectLocked
-                    ? "Locked"
-                    : `${(collectEffective * 100).toFixed(2)}% eff.`}
+            <section className="plan-card-section rounded-lg border border-line/60 bg-void/45 px-2.5 py-2" aria-labelledby={`plan-privacy-${plan.id}`}>
+              <div className="plan-card-section__header">
+                <h3 id={`plan-privacy-${plan.id}`}>Privacy & data</h3>
+                <span>one clear collection choice</span>
+              </div>
+              <label className={`flex min-h-11 items-center justify-between gap-3 text-[0.75rem] ${collectLocked ? "text-muted/60" : "text-muted"}`}>
+                <span className="flex min-w-0 items-center gap-2">
+                  <HudInput
+                    type="checkbox"
+                    checked={collectEnabled}
+                    disabled={collectLocked}
+                    onChange={(event) =>
+                      onChange({
+                        dataCollectionRate: event.target.checked
+                          ? Math.max(collectSetting, defaultPlanDataCollectionRate(plan.pricePerMonth))
+                          : 0,
+                      })
+                    }
+                    aria-label={`${plan.name} chat data collection`}
+                  />
+                  <span>Allow chat data collection</span>
+                </span>
+                <strong className="shrink-0 font-mono tabular-nums text-bone">
+                  {collectLocked ? "Locked" : collectEnabled ? `${(collectEffective * 100).toFixed(2)}% eff.` : "Off"}
                 </strong>
-              </span>
-              <HudRange
-                min={0}
-                max={100}
-                step={5}
-                disabled={collectLocked}
-                value={Math.round(collectSetting * 100)}
-                onChange={(e) =>
-                  onChange({
-                    dataCollectionRate: Number(e.target.value) / 100,
-                  })
-                }
-                className="mt-1.5 w-full disabled:opacity-40"
-                aria-label={`${plan.name} chat data collection rate`}
-              />
-              <span className="mt-0.5 block text-[0.6875rem] leading-snug">
+              </label>
+              <span className="mt-0.5 block text-[0.6875rem] leading-snug text-muted">
                 {collectLocked
                   ? `Plans above $${PAID_DATA_COLLECTION_PRICE_CAP}/mo cannot retain traffic.`
                   : free
                     ? "Free traffic may be collected up to 100%."
-                    : `Paid cap ${(collectCap * 100).toFixed(2)}% at $${plan.pricePerMonth.toFixed(2)}/mo (lerp 20%→10% through $${PAID_DATA_COLLECTION_PRICE_CAP.toFixed(2)}).`}
+                    : `Paid cap ${(collectCap * 100).toFixed(2)}% at $${plan.pricePerMonth.toFixed(2)}/mo.`}
               </span>
-            </label>
+            </section>
           );
         })()}
 
         {/* Day totals */}
-        <PlanModelRoster
-          plan={plan}
-          models={models}
-          routers={routers}
-          unlocked={unlocked}
-          onChange={onChange}
-        />
+        <section className="plan-card-section" aria-labelledby={`plan-routing-${plan.id}`}>
+          <div className="plan-card-section__header">
+            <h3 id={`plan-routing-${plan.id}`}>Models & routing</h3>
+            <span>what this plan can serve</span>
+          </div>
+          <PlanModelRoster
+            plan={plan}
+            models={models}
+            routers={routers}
+            unlocked={unlocked}
+            onChange={onChange}
+          />
+        </section>
 
+        <section className="plan-card-section" aria-labelledby={`plan-today-${plan.id}`}>
+          <div className="plan-card-section__header">
+            <h3 id={`plan-today-${plan.id}`}>Today</h3>
+            <span>settled performance</span>
+          </div>
         <div className="grid grid-cols-2 gap-1.5 font-mono text-[0.75rem] sm:grid-cols-4">
           <Mini label="Day rev" value={money(stats?.dayRevenue ?? 0)} />
           <Mini
@@ -3517,6 +3733,7 @@ function PlanCard({
             </div>
           </div>
         ) : null}
+        </section>
 
         {premiumScrutiny.applies ? (
           <div

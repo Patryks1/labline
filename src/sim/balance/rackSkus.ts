@@ -12,6 +12,7 @@ function accelerator(
     'bf16_mixed',
   ]
   const serving: AcceleratorProfile['supportedServePrecisions'] = [
+    'fp32',
     'fp16',
     'bf16',
     'int8',

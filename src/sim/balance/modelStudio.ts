@@ -132,26 +132,51 @@ export interface StudioSpendPackage {
   hint: string
 }
 
-export const GYM_PACKAGES: readonly StudioSpendPackage[] = [
+export interface GymUpgradePackage extends StudioSpendPackage {
+  /** Sequential facility tier unlocked when the project completes. */
+  tier: 1 | 2 | 3
+  /** Shared research compute required to commission this tier. */
+  researchPfDays: number
+  minResearchers: number
+  operatingCostPerDay: number
+  targetQuality: number
+}
+
+export const GYM_PACKAGES: readonly GymUpgradePackage[] = [
   {
     id: 'foundry',
     label: 'Foundry',
-    cash: 6_000_000,
-    computeCash: 2_000_000,
-    hint: 'Stand up graders. Cheap, noisy, still better than nothing.',
+    tier: 1,
+    cash: 12_000_000,
+    computeCash: 8_000_000,
+    researchPfDays: 4,
+    minResearchers: 2,
+    operatingCostPerDay: 40_000,
+    targetQuality: 0.3,
+    hint: 'Stand up graders and a small eval team. Costly, noisy, but finally useful.',
   },
   {
     id: 'cluster',
     label: 'Eval cluster',
-    cash: 28_000_000,
-    computeCash: 18_000_000,
+    tier: 2,
+    cash: 55_000_000,
+    computeCash: 35_000_000,
+    researchPfDays: 22,
+    minResearchers: 6,
+    operatingCostPerDay: 180_000,
+    targetQuality: 0.64,
     hint: 'Rent a serious eval fleet. SFT/RLHF start to land.',
   },
   {
     id: 'campus',
     label: 'Full campus',
-    cash: 120_000_000,
-    computeCash: 90_000_000,
+    tier: 3,
+    cash: 240_000_000,
+    computeCash: 180_000_000,
+    researchPfDays: 90,
+    minResearchers: 16,
+    operatingCostPerDay: 650_000,
+    targetQuality: 0.92,
     hint: 'Dedicated post-train campus. The expensive way to buy reliability.',
   },
 ]
@@ -214,6 +239,13 @@ export function defaultPostTrainGyms(): PostTrainGym[] {
     investedCash: 0,
     investedComputeCash: 0,
     quality: 0,
+    tier: 0,
+    activePackageId: null,
+    progressPfDays: 0,
+    targetPfDays: 0,
+    researchShare: 0,
+    assignedResearchers: 0,
+    operatingCostPerDay: 0,
   }))
 }
 
@@ -228,19 +260,86 @@ export function defaultToolSkills(): ToolSkill[] {
 
 export function normalizePostTrainGyms(gyms: readonly PostTrainGym[] | undefined): PostTrainGym[] {
   const byKind = new Map((gyms ?? []).map((gym) => [gym.kind, gym]))
-  return defaultPostTrainGyms().map((seed) => {
+  const normalized = defaultPostTrainGyms().map((seed) => {
     const existing = byKind.get(seed.kind)
     if (!existing) return seed
     const investedCash = Math.max(0, existing.investedCash ?? 0)
     const investedComputeCash = Math.max(0, existing.investedComputeCash ?? 0)
+    const legacyQuality = gymQualityFromInvestment(investedCash, investedComputeCash)
+    const hasStoredTier = Number.isFinite(existing.tier)
+    const storedQuality = clamp01(existing.quality ?? legacyQuality)
+    const migrationQuality = hasStoredTier
+      ? storedQuality
+      : Math.max(storedQuality, Math.min(0.995, legacyQuality))
+    const inferredTier =
+      migrationQuality >= 0.78
+        ? 3
+        : migrationQuality >= 0.42
+          ? 2
+          : migrationQuality > 0.001
+            ? 1
+            : 0
+    const tier = Math.max(0, Math.min(3, Math.round(existing.tier ?? inferredTier)))
+    const activePack = GYM_PACKAGES.find(
+      (pack) => pack.id === existing.activePackageId && pack.tier === tier + 1,
+    )
+    const targetPfDays = activePack
+      ? Math.max(0.001, existing.targetPfDays ?? activePack.researchPfDays)
+      : 0
     return {
       ...seed,
       ...existing,
       investedCash,
       investedComputeCash,
-      quality: gymQualityFromInvestment(investedCash, investedComputeCash),
+      quality: migrationQuality,
+      tier,
+      activePackageId: activePack?.id ?? null,
+      progressPfDays: activePack
+        ? Math.max(0, Math.min(targetPfDays, existing.progressPfDays ?? 0))
+        : 0,
+      targetPfDays,
+      researchShare: Math.max(0, Math.min(0.75, existing.researchShare ?? 0)),
+      assignedResearchers: Math.max(0, Math.round(existing.assignedResearchers ?? 0)),
+      operatingCostPerDay: Math.max(
+        0,
+        existing.operatingCostPerDay ??
+          activePack?.operatingCostPerDay ??
+          GYM_PACKAGES.find((pack) => pack.tier === tier)?.operatingCostPerDay ??
+          0,
+      ),
     }
   })
+  // Legacy and hand-edited saves may contain several individually valid
+  // shares whose sum exceeds the one shared research pool. Preserve the
+  // canonical gym order while enforcing the same aggregate cap used by the
+  // research ledger, so gym ticks can never spend more PF than was reserved.
+  let remainingResearchShare = 0.75
+  return normalized.map((gym) => {
+    const researchShare = Math.min(gym.researchShare ?? 0, remainingResearchShare)
+    remainingResearchShare = Math.max(0, remainingResearchShare - researchShare)
+    return researchShare === gym.researchShare ? gym : { ...gym, researchShare }
+  })
+}
+
+/** Research-pool share reserved by staffed gyms, active projects first. */
+export function gymResearchReservationShare(
+  gyms: readonly PostTrainGym[] | undefined,
+): number {
+  const share = normalizePostTrainGyms(gyms).reduce((sum, gym) => {
+    const hasWork = Boolean(gym.activePackageId) || (gym.tier ?? 0) > 0
+    return sum + (hasWork && (gym.assignedResearchers ?? 0) > 0 ? (gym.researchShare ?? 0) : 0)
+  }, 0)
+  return Math.max(0, Math.min(0.75, share))
+}
+
+export function assignedGymResearchers(
+  gyms: readonly PostTrainGym[] | undefined,
+  exceptKind?: PostTrainGymKind,
+): number {
+  return normalizePostTrainGyms(gyms).reduce(
+    (sum, gym) => sum + (gym.kind === exceptKind ? 0 : Math.max(0, gym.assignedResearchers ?? 0)),
+    0,
+  )
 }
 
 export function normalizeToolSkills(skills: readonly ToolSkill[] | undefined): ToolSkill[] {
@@ -378,7 +477,7 @@ export function releasedOrInternalModel(
   return models.find((model) => model.id === id)
 }
 
-export function gymPackageById(id: string): StudioSpendPackage | undefined {
+export function gymPackageById(id: string): GymUpgradePackage | undefined {
   return GYM_PACKAGES.find((pack) => pack.id === id)
 }
 

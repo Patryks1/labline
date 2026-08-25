@@ -42,6 +42,8 @@ describe('dense workspace mobile presentation', () => {
     expect(markup).toContain('overflow-x-auto overscroll-x-contain')
     expect(markup).toContain('sticky left-0')
     expect(markup).toContain('min-h-11')
+    expect(markup).not.toContain('Benchmark</span>')
+    expect(markup).not.toContain('Foundations 2026')
   })
 
   it('keeps narrow market and strategy summaries from clipping their values', () => {
@@ -96,6 +98,16 @@ describe('dense workspace mobile presentation', () => {
     expect(markup).toContain('Team management lives on the floor')
     expect(markup).not.toContain('Poach rival talent')
     expect(markup).not.toContain('team seats')
+  })
+
+  it('exposes project finance alongside the other capital products', () => {
+    useGameStore.setState({ state: createGame(64_2121) })
+    const markup = renderToStaticMarkup(
+      createElement(OrgPanel, { workspace: 'capital' }),
+    )
+
+    expect(markup).toContain('Atlas Infrastructure')
+    expect(markup).toContain('Campus finance')
   })
 
   it('uses no more than two plan values per row on phones', async () => {

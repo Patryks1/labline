@@ -2139,14 +2139,14 @@ function constructionScale(progress: number, target: number): number {
  */
 function facilityHeightHint(kind: string, level: number): number {
   const base =
-    kind === 'hq_l' ? 4.0 :
-    kind === 'hq_m' ? 2.2 :
-    kind === 'hq' || kind === 'office' ? 0.9 :
-    kind === 'dc_l' ? 1.35 :
-    kind === 'dc_m' ? 1.1 :
-    kind === 'dc' ? 0.9 :
-    kind === 'nuclear' || kind === 'fab' ? 0.62 :
-    kind === 'lab' ? 0.5 :
+    kind === 'hq_l' ? 1.18 :
+    kind === 'hq_m' ? 0.82 :
+    kind === 'hq' || kind === 'office' ? 0.46 :
+    kind === 'dc_l' ? 1.05 :
+    kind === 'dc_m' ? 0.85 :
+    kind === 'dc' ? 0.7 :
+    kind === 'nuclear' || kind === 'fab' ? 0.72 :
+    kind === 'lab' ? 0.62 :
     0.55
   return base * (1 + Math.max(0, level) * 0.1)
 }

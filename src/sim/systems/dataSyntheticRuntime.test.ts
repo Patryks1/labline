@@ -600,6 +600,24 @@ describe("targeted synthetic generation jobs", () => {
     ).toBe(true);
   });
 
+  it("charges targeted generation for its research-compute runtime", () => {
+    const model = teacher();
+    let state = labWith(model, 7091);
+    state = startSynthGen(state, {
+      domain: "chat",
+      modelId: model.id,
+      targetMTok: 5,
+      researchShare: 0.5,
+      qualityTier: "hq",
+    });
+    const cashBefore = state.player.cash;
+
+    state = tickData(state);
+
+    expect(state.player.data.stocks.chat.processed).toBeGreaterThan(0);
+    expect(state.player.cash).toBeLessThan(cashBefore);
+  });
+
   it("persists teacher, corpus, volume, tier, filtering, and budget across saves", () => {
     const model = teacher();
     let state = labWith(model, 710);

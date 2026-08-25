@@ -10,6 +10,7 @@ import type {
   ModelIOModality,
   ModelProductPreset,
   ProductPricing,
+  MarketingChannels,
   ResearchDisclosure,
   ResearchProgram,
   RivalLab,
@@ -110,7 +111,10 @@ import {
 } from "./dataRuntime";
 import { fundRivalForCampus } from "./capital";
 import { competitiveCatchUpSnapshot } from "./sharedMarkets";
-import { defaultMarketingChannels } from "./org";
+import {
+  applyRivalDailyMarketing,
+} from "./marketing";
+import { appendFeedEvents } from "./feed";
 import { applyLabActionToTarget } from "./labActionKernel";
 import {
   advanceRivalStrategy,
@@ -158,12 +162,183 @@ export function rivalMarketingBudgetTarget(
     rival.finance?.dayRevenue ?? 0,
   );
   const revenueBasis = Math.max(100_000, revenue);
-  const affordable = Math.max(35_000, revenueBasis * 0.1);
+  const archetypeFactor =
+    rival.archetype === "hyperscale"
+      ? 1.2
+      : rival.archetype === "open_weights"
+        ? 0.86
+        : rival.archetype === "efficiency"
+          ? 0.92
+          : rival.archetype === "multimodal"
+            ? 1.08
+            : 1;
+  const affordable = Math.max(35_000, revenueBasis * 0.1 * archetypeFactor);
   const competitive = Math.min(
-    Math.max(0, playerSpendPerDay) * 0.7,
+    Math.max(0, playerSpendPerDay) * 0.7 * archetypeFactor,
     revenueBasis * 2,
   );
   return Math.min(cash * 0.02, Math.max(affordable, competitive));
+}
+
+/** Archetype-specific campaign mix, adjusted deterministically for competition. */
+export function rivalMarketingChannels(
+  rival: Pick<RivalLab, "archetype" | "marketShare">,
+  spend: number,
+  playerSpendPerDay: number,
+): MarketingChannels {
+  const mixes: Record<RivalLab["archetype"], MarketingChannels> = {
+    hyperscale: { web: 0.24, billboards: 0.32, restaurants: 0.08, enterprise: 0.36 },
+    open_weights: { web: 0.5, billboards: 0.08, restaurants: 0.16, enterprise: 0.26 },
+    efficiency: { web: 0.46, billboards: 0.1, restaurants: 0.12, enterprise: 0.32 },
+    multimodal: { web: 0.3, billboards: 0.2, restaurants: 0.25, enterprise: 0.25 },
+    safety: { web: 0.34, billboards: 0.2, restaurants: 0.1, enterprise: 0.36 },
+  };
+  const base = mixes[rival.archetype];
+  const pressure = Math.max(
+    -0.12,
+    Math.min(0.18, (Math.max(0, playerSpendPerDay) - Math.max(1, spend)) / Math.max(100_000, spend)),
+  );
+  const sharePressure = rival.marketShare < 0.08 ? 0.06 : 0;
+  const weights = {
+    web: Math.max(0.02, base.web + pressure * 0.35 + sharePressure),
+    billboards: Math.max(0.02, base.billboards + pressure * 0.25),
+    restaurants: Math.max(0.02, base.restaurants - pressure * 0.15),
+    enterprise: Math.max(0.02, base.enterprise + pressure * 0.55 - sharePressure * 0.2),
+  };
+  const total = Object.values(weights).reduce((sum, value) => sum + value, 0);
+  return {
+    web: spend * weights.web / total,
+    billboards: spend * weights.billboards / total,
+    restaurants: spend * weights.restaurants / total,
+    enterprise: spend * weights.enterprise / total,
+  };
+}
+
+function relativeChange(next: number, prior: number): number {
+  return Math.abs(next - prior) / Math.max(0.01, Math.abs(prior), 1);
+}
+
+function channelMixDistance(
+  next: MarketingChannels | undefined,
+  prior: MarketingChannels | undefined,
+): number {
+  if (!next || !prior) return next || prior ? 1 : 0;
+  const totalNext = Object.values(next).reduce((sum, value) => sum + Math.max(0, value), 0) || 1;
+  const totalPrior = Object.values(prior).reduce((sum, value) => sum + Math.max(0, value), 0) || 1;
+  return (['web', 'billboards', 'restaurants', 'enterprise'] as const).reduce(
+    (distance, channel) =>
+      distance +
+      Math.abs(
+        Math.max(0, next[channel]) / totalNext -
+          Math.max(0, prior[channel]) / totalPrior,
+      ),
+    0,
+  );
+}
+
+function rivalFeedEventsForDay(
+  state: SimState,
+  priorRivals: readonly RivalLab[],
+  nextRivals: readonly RivalLab[],
+) {
+  return nextRivals.flatMap((rival) => {
+    const prior = priorRivals.find((candidate) => candidate.id === rival.id);
+    if (!prior) return [];
+    const events: Array<{
+      id: string;
+      day: number;
+      category: "rivals";
+      title: string;
+      body: string;
+      source: string;
+      tone: "neutral" | "positive" | "warning" | "danger" | "research";
+      entityId: string;
+      kind: string;
+    }> = [];
+    const priorModels = new Map(prior.models.map((model) => [model.id, model]));
+    const released = rival.models.filter(
+      (model) =>
+        model.release === "released" &&
+        model.shipped &&
+        !priorModels.has(model.id),
+    );
+    for (const model of released.slice(0, 2)) {
+      events.push({
+        id: `feed-rival-release-${rival.id}-${model.id}-${state.day}`,
+        day: state.day,
+        category: "rivals",
+        title: `${rival.name} ships ${model.name}`,
+        body: `A ${model.paramsB.toFixed(1)}B ${model.family} model entered the public market at capability ${model.capability.toFixed(0)}.`,
+        source: rival.name,
+        tone: "positive",
+        entityId: rival.id,
+        kind: "rival_model_release",
+      });
+    }
+    if (!prior.trainingJob && rival.trainingJob) {
+      events.push({
+        id: `feed-rival-training-start-${rival.id}-${state.day}`,
+        day: state.day,
+        category: "rivals",
+        title: `${rival.name} starts ${rival.trainingJob.name}`,
+        body: `${rival.archetype.replace('_', ' ')} controller committed ${rival.trainingJob.paramsB.toFixed(1)}B / ~${rival.trainingJob.targetPfDays.toFixed(0)} PF-days to a new run.`,
+        source: rival.name,
+        tone: "research",
+        entityId: rival.id,
+        kind: "rival_training_started",
+      });
+    }
+    if (prior.trainingJob && !rival.trainingJob && released.length === 0) {
+      events.push({
+        id: `feed-rival-training-finished-${rival.id}-${state.day}`,
+        day: state.day,
+        category: "rivals",
+        title: `${rival.name} completes a training run`,
+        body: "Its controller closed the run and is now free to redirect compute, pricing, or the next research bet.",
+        source: rival.name,
+        tone: "research",
+        entityId: rival.id,
+        kind: "rival_training_completed",
+      });
+    }
+    const priorPrice = prior.pricing.apiPricePerMTok;
+    const nextPrice = rival.pricing.apiPricePerMTok;
+    if (relativeChange(nextPrice, priorPrice) >= 0.025) {
+      const direction = nextPrice < priorPrice ? "cuts" : "raises";
+      events.push({
+        id: `feed-rival-price-${rival.id}-${state.day}`,
+        day: state.day,
+        category: "rivals",
+        title: `${rival.name} ${direction} API pricing`,
+        body: `API list moved from $${priorPrice.toFixed(2)} to $${nextPrice.toFixed(2)} per MTok as its ${rival.archetype.replace('_', ' ')} strategy responds to competition.`,
+        source: rival.name,
+        tone: nextPrice < priorPrice ? "warning" : "neutral",
+        entityId: rival.id,
+        kind: "rival_price_change",
+      });
+    }
+    const priorSpend = prior.marketingSpendPerDay ?? 0;
+    const nextSpend = rival.marketingSpendPerDay ?? 0;
+    if (
+      relativeChange(nextSpend, priorSpend) >= 0.12 ||
+      channelMixDistance(rival.marketingChannels, prior.marketingChannels) >= 0.12
+    ) {
+      const direction = nextSpend >= priorSpend ? "expands" : "pulls back";
+      const outcome = rival.marketingOutcome;
+      events.push({
+        id: `feed-rival-campaign-${rival.id}-${state.day}`,
+        day: state.day,
+        category: "rivals",
+        title: `${rival.name} ${direction} its campaign`,
+        body: `${Math.round(nextSpend / 1000)}k/day across an archetype-led channel mix; expected reach is ${Math.round(outcome?.acquiredCustomers ?? 0).toLocaleString()} acquired customers with ${Math.round(outcome?.enterpriseLeads ?? 0).toLocaleString()} enterprise leads.`,
+        source: rival.name,
+        tone: "neutral",
+        entityId: rival.id,
+        kind: "rival_campaign_change",
+      });
+    }
+    return events;
+  });
 }
 
 function initialRivalCapital(name: string): CapitalStack {
@@ -196,6 +371,9 @@ function initialRivalCapital(name: string): CapitalStack {
     investorConfidence: 0.62,
     boardPressure: 0.14,
     founderControl: 0.82,
+    pitchCooldownUntilDay: 0,
+    pitchModelCooldowns: {},
+    pitchHistory: [],
     restructuring: { active: false, daysLeft: 0, stage: "none" },
   };
 }
@@ -901,7 +1079,7 @@ function rivalPricing(api: number): ProductPricing {
         includedMTokPerMonth: plusIncluded,
         usageRate: null,
         modelIds: [],
-        servePrecision: "fp16",
+        servePrecision: "fp32",
         enabled: true,
       },
       {
@@ -912,7 +1090,7 @@ function rivalPricing(api: number): ProductPricing {
         includedMTokPerMonth: proIncluded,
         usageRate: null,
         modelIds: [],
-        servePrecision: "fp16",
+        servePrecision: "fp32",
         enabled: true,
       },
     ],
@@ -2892,7 +3070,14 @@ export function tickRivals(state: SimState): SimState {
       next.finance?.dayRevenue ?? 0,
     );
     next.marketingRevenueMultiple = marketingSpendPerDay / rivalRevenueBasis;
-    next.marketingChannels = defaultMarketingChannels(marketingSpendPerDay);
+    next.marketingChannels = rivalMarketingChannels(
+      next,
+      marketingSpendPerDay,
+      state.player.marketingSpendPerDay,
+    );
+    // Rival campaigns settle before market offers are scored. Cash remains
+    // charged exactly once by tickMarket's operating settlement.
+    next = applyRivalDailyMarketing(state, next);
 
     return {
       ...next,
@@ -2913,6 +3098,10 @@ export function tickRivals(state: SimState): SimState {
     rivals,
     news: [...news, ...state.news].slice(0, 48),
   };
+  s = appendFeedEvents(
+    s,
+    rivalFeedEventsForDay(state, state.rivals, rivals),
+  );
   s = expandRivalCampuses(s);
   s = releaseDueRivalComebacks(s);
   const priorModels = new Set(

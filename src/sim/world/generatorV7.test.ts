@@ -96,6 +96,9 @@ describe('world generator V7 rivers', () => {
     // Version 6 remains a frozen superset of those v5 lots for in-progress saves.
     const roomierDescriptor = { ...createWorldDescriptorV7(OPTIONS), settlementAlgorithmVersion: 6 as const }
     const roomier = regenerateStaticWorld(roomierDescriptor)
+    if (roomier.descriptor.generatorVersion !== WORLD_GENERATOR_VERSION_V7) {
+      throw new Error('expected a V7 descriptor')
+    }
     expect(roomier.descriptor.settlementAlgorithmVersion).toBe(6)
     expect(roomier.staticHash).not.toBe(legacyA.staticHash)
 
@@ -141,7 +144,6 @@ describe('world generator V7 city fabric', () => {
         for (let id = 0; id < world.kind.length; id++) {
           if (world.feature[id] !== featureId) continue
           const x = id % width
-          const y = Math.floor(id / width)
           const inCore = world.district![id] === 3
           const kind = world.kind[id]!
           const roadNearby = [-width, 1, width, -1, -width - 1, -width + 1, width - 1, width + 1].some((delta) => {

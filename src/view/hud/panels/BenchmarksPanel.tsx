@@ -36,7 +36,6 @@ import {
   publicBenchmarkScore,
 } from '../data/benchmarkViewModel'
 import { BenchmarkCompareTab } from './BenchmarkCompareTab'
-import { BenchmarkEntryPoint } from './models/BenchmarkEntryPoint'
 import { GameCard, MeterBar, SegmentedTabs, StatRow } from '../ui/kit'
 import { HudFilterBar } from '../ui/HudFilterBar'
 import {
@@ -197,12 +196,6 @@ export function BenchmarksPanel() {
     )
   }, [state.evaluations])
 
-  const activeSeason = useMemo(
-    () =>
-      (state.benchmarkSeasons ?? []).find((season) => season.active) ?? null,
-    [state.benchmarkSeasons],
-  )
-
   const gapTone =
     frontierGap > 0
       ? ('positive' as const)
@@ -221,19 +214,6 @@ export function BenchmarksPanel() {
       eyebrow="Evals"
       title="Benchmarks"
       description="Public field scores. Training snapshots stay on Internal. Voice is personality, not capability."
-      actions={
-        <div className="flex items-center gap-1.5">
-          <BenchmarkEntryPoint
-            context={{ kind: 'public' }}
-            variant="ghost"
-            title="Browse public benchmark evidence. Private checkpoint evidence stays in Models."
-            onOpen={() => setTab('leaderboard')}
-          />
-          {activeSeason ? (
-            <StatusChip tone="research">{activeSeason.name}</StatusChip>
-          ) : null}
-        </div>
-      }
     >
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <MetricTile

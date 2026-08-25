@@ -10,9 +10,26 @@ import { createRng, seededId } from '../rng'
 import { energyPriceForState } from './map'
 import { fleetStats } from './racks'
 import { computeLabSnapshot, getLab, updateLab } from './labEngine'
+import { appendFeedEvents, type FeedEventInput } from './feed'
 
 const MIN_PF = 2
 const MAX_PF = 400
+export const RIVAL_COMPUTE_OFFER_TTL_DAYS = 8
+
+function computeOfferStartDay(lease: ComputeLease): number | undefined {
+  if (Number.isFinite(lease.dayStarted)) return Math.max(0, lease.dayStarted!)
+  const parsed = /^(?:offer|want)-(\d+)-/.exec(lease.id)
+  return parsed ? Number(parsed[1]) : undefined
+}
+
+function computeOfferExpired(lease: ComputeLease, day: number): boolean {
+  if (lease.status !== 'offer' || lease.from !== 'rival') return false
+  const started = computeOfferStartDay(lease)
+  // An imported quote with neither a start day nor a canonical day-bearing ID
+  // has no trustworthy validity window. Retire it instead of allowing an
+  // unknowably old offer to become permanent inventory.
+  return started == null || day - started >= RIVAL_COMPUTE_OFFER_TTL_DAYS
+}
 
 /** Proxy MW draw for one PF of wholesale compute (≈ H-class rack density). */
 export function mwPerPf(): number {
@@ -201,7 +218,23 @@ export function setComputeListing(
   listing: ComputeListing | null,
 ): SimState {
   if (!listing) {
-    return { ...state, computeListing: null }
+    if (!state.computeListing) return { ...state, computeListing: null }
+    return appendFeedEvents(
+      { ...state, computeListing: null },
+      [
+        {
+          id: `feed-compute-listing-cleared-${state.day}`,
+          day: state.day,
+          category: 'market',
+          title: `${state.player.name} clears its compute quote`,
+          body: 'The wholesale compute desk no longer has an active player listing or request.',
+          source: 'Compute Desk',
+          tone: 'neutral',
+          entityId: state.playerLabId,
+          kind: 'compute_listing_cleared',
+        },
+      ],
+    )
   }
   const pf = Math.max(MIN_PF, Math.min(MAX_PF, listing.pf))
   if (listing.side === 'sell' && pf > playerSparePf(state) + 1) {
@@ -213,7 +246,7 @@ export function setComputeListing(
   }
   const pricePerPfDay = clampLeasePricePerPfDay(state, listing.pricePerPfDay)
   const floor = minComputeLeasePricePerPfDay(state)
-  return {
+  const next = {
     ...state,
     computeListing: {
       side: listing.side,
@@ -234,6 +267,19 @@ export function setComputeListing(
       ...state.alerts,
     ].slice(0, 40),
   }
+  return appendFeedEvents(next, [
+    {
+      id: `feed-compute-listing-${state.day}-${listing.side}-${pf}-${Math.round(pricePerPfDay * 100)}`,
+      day: state.day,
+      category: 'market',
+      title: `${state.player.name} ${listing.side === 'sell' ? 'lists' : 'requests'} compute`,
+      body: `${formatComputeMw(pf)} ${listing.side === 'sell' ? 'offered' : 'requested'} at $${pricePerMwDayFromPfDay(pricePerPfDay).toFixed(0)}/MW-day for ${Math.max(7, Math.min(120, listing.termDays))} days.`,
+      source: 'Compute Desk',
+      tone: 'neutral',
+      entityId: state.playerLabId,
+      kind: 'compute_listing_changed',
+    },
+  ])
 }
 
 export function acceptComputeOffer(state: SimState, leaseId: string): SimState {
@@ -241,6 +287,13 @@ export function acceptComputeOffer(state: SimState, leaseId: string): SimState {
   const i = leases.findIndex((c) => c.id === leaseId && c.status === 'offer')
   if (i < 0) return alert(state, 'warn', 'Offer not found.')
   let c = leases[i]!
+  if (computeOfferExpired(c, state.day)) {
+    return alert(
+      { ...state, computeLeases: leases.filter((lease) => lease.id !== leaseId) },
+      'warn',
+      'That compute offer has expired.',
+    )
+  }
   const floor = minComputeLeasePricePerPfDay(state)
   if (c.pricePerPfDay < floor - 0.5) {
     // Renegotiate up to energy floor so neither side sells below cost×1.5
@@ -269,7 +322,7 @@ export function acceptComputeOffer(state: SimState, leaseId: string): SimState {
     dayStarted: state.day,
   }
   const rival = state.rivals.find((r) => r.id === c.rivalId)
-  return {
+  const accepted = {
     ...state,
     computeLeases: leases,
     computeListing: null,
@@ -291,6 +344,19 @@ export function acceptComputeOffer(state: SimState, leaseId: string): SimState {
       ...state.alerts,
     ].slice(0, 40),
   }
+  return appendFeedEvents(accepted, [
+    {
+      id: `feed-compute-lease-accepted-${c.id}`,
+      day: state.day,
+      category: 'market',
+      title: `Compute deal live with ${rival?.name ?? c.rivalId}`,
+      body: `${formatComputeMw(c.pf)} ${c.playerSells ? 'sold' : 'bought'} at $${pricePerMwDayFromPfDay(c.pricePerPfDay).toFixed(0)}/MW-day for ${c.daysTotal} days.`,
+      source: 'Compute Desk',
+      tone: 'positive',
+      entityId: state.playerLabId,
+      kind: 'compute_lease_accepted',
+    },
+  ])
 }
 
 export function rejectComputeOffer(state: SimState, leaseId: string): SimState {
@@ -367,7 +433,7 @@ export function signPlayerComputeSale(
     note: input.note,
   }
 
-  return {
+  const signed = {
     ...state,
     computeLeases: [...(state.computeLeases ?? []), lease],
     computeListing: null,
@@ -385,6 +451,19 @@ export function signPlayerComputeSale(
       ...state.alerts,
     ].slice(0, 40),
   }
+  return appendFeedEvents(signed, [
+    {
+      id: `feed-compute-sale-signed-${lease.id}`,
+      day: state.day,
+      category: 'market',
+      title: `${rival.name} signs a compute lease`,
+      body: `${formatComputeMw(pf)} sold from ${state.player.name} at $${pricePerMwDayFromPfDay(pricePerPfDay).toFixed(0)}/MW-day for ${termDays} days.`,
+      source: 'Compute Desk',
+      tone: 'positive',
+      entityId: rival.id,
+      kind: 'compute_sale_signed',
+    },
+  ])
 }
 
 /** Player cancels active lease (small break fee). */
@@ -399,7 +478,7 @@ export function cancelComputeLease(state: SimState, leaseId: string): SimState {
   }
   leases.splice(i, 1)
   const rival = state.rivals.find((r) => r.id === c.rivalId)
-  return {
+  const cancelled = {
     ...state,
     computeLeases: leases,
     player: {
@@ -422,6 +501,19 @@ export function cancelComputeLease(state: SimState, leaseId: string): SimState {
       ...state.alerts,
     ].slice(0, 40),
   }
+  return appendFeedEvents(cancelled, [
+    {
+      id: `feed-compute-lease-cancelled-${c.id}-${state.day}`,
+      day: state.day,
+      category: 'market',
+      title: `${state.player.name} cancels a compute lease`,
+      body: `${formatComputeMw(c.pf)} returned from ${rival?.name ?? 'the rival desk'} after a $${(fee / 1e3).toFixed(0)}k break fee.`,
+      source: 'Compute Desk',
+      tone: 'warning',
+      entityId: state.playerLabId,
+      kind: 'compute_lease_cancelled',
+    },
+  ])
 }
 
 /** Rivals monetize spare compute only when their operating cash is under pressure. */
@@ -456,6 +548,7 @@ export function tickComputeMarket(state: SimState): SimState {
   let dayLeaseIncome = 0
   let dayLeaseCost = 0
   const news: string[] = []
+  const feedEvents: FeedEventInput[] = []
 
   // ── Bill / age active leases (cash settled in tickMarket via day fields) ──
   const nextLeases: ComputeLease[] = []
@@ -472,6 +565,17 @@ export function tickComputeMarket(state: SimState): SimState {
       news.push(
         `Day ${s.day}: Compute lease (${formatComputeMw(c.pf)}) lapsed — buyer could not settle.`,
       )
+      feedEvents.push({
+        id: `feed-compute-lease-lapsed-${c.id}-${s.day}`,
+        day: s.day,
+        category: 'market',
+        title: 'Compute lease lapsed',
+        body: `${formatComputeMw(c.pf)} of bilateral capacity was released because the buyer could not settle the daily invoice.`,
+        source: 'Compute Desk',
+        tone: 'danger',
+        entityId: buyerLabId,
+        kind: 'compute_lease_lapsed',
+      })
       continue
     }
     if (sellerLabId === s.playerLabId) {
@@ -491,6 +595,17 @@ export function tickComputeMarket(state: SimState): SimState {
           s.rivals.find((r) => r.id === c.rivalId)?.name ?? 'rival'
         } expired.`,
       )
+      feedEvents.push({
+        id: `feed-compute-lease-expired-${c.id}-${s.day}`,
+        day: s.day,
+        category: 'market',
+        title: 'Compute lease expired',
+        body: `${formatComputeMw(c.pf)} of bilateral capacity returned after the ${c.daysTotal}-day term.`,
+        source: 'Compute Desk',
+        tone: 'neutral',
+        entityId: buyerLabId,
+        kind: 'compute_lease_expired',
+      })
       continue
     }
     nextLeases.push({ ...c, daysLeft })
@@ -570,6 +685,17 @@ export function tickComputeMarket(state: SimState): SimState {
           ...s.alerts,
         ].slice(0, 40),
       }
+      feedEvents.push({
+        id: `feed-compute-offer-${offer.id}`,
+        day: s.day,
+        category: 'market',
+        title: `${r.name} offers spare compute`,
+        body: `${formatComputeMw(pf)} available at $${pricePerMwDayFromPfDay(price).toFixed(0)}/MW-day for ${term} days while it raises operating cash.`,
+        source: r.name,
+        tone: 'neutral',
+        entityId: r.id,
+        kind: 'rival_compute_offer',
+      })
     }
 
     // Rival wants to buy if overloaded and player is listing sell
@@ -611,20 +737,29 @@ export function tickComputeMarket(state: SimState): SimState {
             ...s.alerts,
           ].slice(0, 40),
         }
+        feedEvents.push({
+          id: `feed-compute-bid-${offer.id}`,
+          day: s.day,
+          category: 'market',
+          title: `${r.name} bids for player compute`,
+          body: `${formatComputeMw(pf)} requested at $${pricePerMwDayFromPfDay(bid).toFixed(0)}/MW-day to cover hosting demand.`,
+          source: r.name,
+          tone: 'neutral',
+          entityId: r.id,
+          kind: 'rival_compute_bid',
+        })
       }
     }
 
   }
 
-  // Expire old rival offers after ~8 days
+  // Rival proposals are short-lived market quotes, not permanent inventory.
   s = {
     ...s,
-    computeLeases: (s.computeLeases ?? []).filter((c) => {
-      if (c.status !== 'offer') return true
-      // offers use daysLeft as term; count age via id day parse soft
-      return true
-    }),
+    computeLeases: (s.computeLeases ?? []).filter(
+      (lease) => !computeOfferExpired(lease, s.day),
+    ),
   }
 
-  return s
+  return appendFeedEvents(s, feedEvents)
 }

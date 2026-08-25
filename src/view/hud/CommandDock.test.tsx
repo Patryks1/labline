@@ -2,7 +2,8 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { useGameStore } from '../../store/gameStore'
-import { CommandDock, sumChannelRows } from './CommandDock'
+import { createGame } from '../../sim/createGame'
+import { CommandDock, FeedView, sumChannelRows } from './CommandDock'
 import { FacilitiesIntelView } from './panels/command/FacilitiesIntelView'
 
 describe('CommandDock disclosure semantics', () => {
@@ -27,6 +28,57 @@ describe('CommandDock disclosure semantics', () => {
     } finally {
       useGameStore.setState(previous)
     }
+  })
+})
+
+describe('World feed filters and ordering', () => {
+  it('renders category filters, sorts typed cards by day, and hides duplicate legacy fallbacks', () => {
+    const base = createGame(921)
+    const markup = renderToStaticMarkup(createElement(FeedView, {
+      stateOverride: {
+        ...base,
+        day: 7,
+        feedEvents: [
+          {
+            id: 'feed-newer',
+            day: 7,
+            category: 'models',
+            title: 'Model checkpoint reached',
+            body: 'Training crossed a deterministic milestone.',
+            source: 'Model Desk',
+            kind: 'training_milestone',
+          },
+          {
+            id: 'feed-older',
+            day: 5,
+            category: 'market',
+            title: 'Compute quote moved',
+            body: 'The provider repriced finite capacity.',
+            source: 'Compute Desk',
+            kind: 'compute_quote_changed',
+          },
+        ],
+        news: [
+          'Day 7: Model checkpoint reached — Training crossed a deterministic milestone.',
+          'Day 4: Legacy wire story remains visible.',
+        ],
+        alerts: [
+          {
+            id: 'feed-alert',
+            day: 7,
+            severity: 'info' as const,
+            message: 'A separate market alert.',
+          },
+        ],
+      },
+    }))
+    expect(markup).toContain('Models / Research')
+    expect(markup).toContain('Market / Pricing')
+    expect(markup).toContain('Rivals / Company')
+    expect(markup).toContain('role="checkbox"')
+    expect(markup.indexOf('Model checkpoint reached')).toBeLessThan(markup.indexOf('Compute quote moved'))
+    expect(markup.match(/Model checkpoint reached/g)).toHaveLength(1)
+    expect(markup).toContain('Legacy wire story remains visible.')
   })
 })
 

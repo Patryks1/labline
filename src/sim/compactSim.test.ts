@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { GameConfig } from './balance/gameConfig'
 import { createGame } from './createGame'
 import { canPlaceBuilding, labFacilityEnergyTotals, placeBuilding } from './systems/map'
-import { tickDay, tickMany } from './tick'
+import { completedProjectCount, tickDay, tickMany } from './tick'
 import { staticWorldByteLength, type TileId } from './world'
 import {
   compactCompletedFacilitiesForOwner,
@@ -76,7 +76,7 @@ describe('compact million-tile simulation', () => {
       }
     }
     const world = state.map.world!
-    let pad: number | undefined
+    let pad: TileId | undefined
     let x = 0
     let y = 0
     for (const id of world.staticWorld.starterPads) {
@@ -95,6 +95,21 @@ describe('compact million-tile simulation', () => {
     expect(facilities).toHaveLength(1)
     expect(next.map.world!.getFacilityAt(pad!)?.id).toBe(facilities[0]!.id)
     expect(next.map.worldRevision).toBeGreaterThan(state.map.worldRevision ?? 0)
+  })
+
+  it('counts compact facility completions for project auto-pause', () => {
+    const created = createGame({ config: largeConfig(5_6021) })
+    const rivalFacility = created.map.world!.queryFacilities({
+      ownerId: created.rivals[0]!.id,
+    })[0]!
+    const before = completedProjectCount(created)
+    created.map.world!.beginBatch().updateFacility(rivalFacility.id, {
+      ownerId: created.playerLabId,
+      constructionProgress: Math.max(1, rivalFacility.constructionTarget),
+      constructionTarget: Math.max(1, rivalFacility.constructionTarget),
+    }).commit()
+
+    expect(completedProjectCount(created)).toBe(before + 1)
   })
 
   it('allows a fab shell to be placed before accelerator research', () => {

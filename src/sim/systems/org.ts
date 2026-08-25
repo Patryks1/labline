@@ -247,9 +247,11 @@ export function tickOrg(state: SimState): SimState {
     enterpriseContracts += 1
   }
 
-  // Campaign outcome + brand gain settle last, so the marketing system sees
-  // the final org state of the day.
-  return applyDailyMarketing({
+  // The normal daily pipeline settles marketing before tickMarket. Keep this
+  // compatibility fallback for direct callers and older integrations, while
+  // never applying the same day's campaign twice.
+  const settled = state.player.marketingOutcome?.day === state.day
+  const nextOrgState = {
     ...state,
     player: {
       ...state.player,
@@ -257,7 +259,8 @@ export function tickOrg(state: SimState): SimState {
       brandTrust,
       enterpriseContracts,
     },
-  })
+  }
+  return settled ? nextOrgState : applyDailyMarketing(nextOrgState)
 }
 
 function formatM(n: number) {

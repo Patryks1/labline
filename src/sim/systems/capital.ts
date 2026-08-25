@@ -4,14 +4,19 @@ import type {
   DebtInstrumentKind,
   EquityOffer,
   LabId,
+  Model,
+  InvestorPitchRecord,
   SimState,
 } from '../types'
-import { hashSeed } from '../rng'
+import { createRng, hashSeed } from '../rng'
 import { getLab, updateLab } from './labEngine'
 import {
   maybeStartRivalFinancialComeback,
   normalizeRivalFinancialComeback,
 } from './rivalComeback'
+import { isLivePublicModel } from '../modelRelease'
+import { isDcKind } from './map'
+import { facilityAnchorTiles } from './worldAccess'
 
 const DAY_COUNT = 365
 
@@ -73,6 +78,9 @@ function defaultCapital(): CapitalStack {
     investorConfidence: 0.55,
     boardPressure: 0.1,
     founderControl: 0.95,
+    pitchCooldownUntilDay: 0,
+    pitchModelCooldowns: {},
+    pitchHistory: [],
     restructuring: { active: false, daysLeft: 0, stage: 'none' },
   }
 }
@@ -149,6 +157,343 @@ export function capitalSnapshot(
   }
 }
 
+const INVESTOR_PITCH_COOLDOWN_DAYS = 30
+const INVESTOR_PITCH_HISTORY_LIMIT = 16
+
+/** A non-mutating model-backed term sheet shown in Finances → Capital. */
+export interface InvestorPitchPreview {
+  modelId: string
+  modelName: string
+  eligible: boolean
+  reason?: string
+  investorName: string
+  capability: number
+  frontierCapability: number
+  capabilityScore: number
+  qualityScore: number
+  overusePenalty: number
+  successChance: number
+  cashRaised: number
+  preMoneyValuation: number
+  postMoneyValuation: number
+  investorOwnership: number
+  optionPoolTopUp: number
+  confidenceRequired: number
+  cooldownUntilDay: number
+  expiresDay: number
+}
+
+function modelsForLab(state: SimState, labId: LabId): Model[] {
+  if (labId === state.playerLabId) return state.player.models
+  return state.rivals.find((rival) => rival.id === labId)?.models ?? []
+}
+
+/** Internal checkpoints and live public models can both be disclosed to investors. */
+export function investorPitchModels(
+  state: SimState,
+  labId: LabId = state.playerLabId,
+): Model[] {
+  return modelsForLab(state, labId)
+    .filter(
+      (model) =>
+        model.archived !== true &&
+        (model.release === 'internal' || isLivePublicModel(model)),
+    )
+    .toSorted(
+      (a, b) =>
+        b.capability - a.capability ||
+        a.releaseDay - b.releaseDay ||
+        a.id.localeCompare(b.id),
+    )
+}
+
+/** Models currently available to pitch, excluding model and desk cooldowns. */
+export function eligibleInvestorPitchModels(
+  state: SimState,
+  labId: LabId = state.playerLabId,
+): Model[] {
+  const capital = capitalFor(state, labId)
+  const deskCooldown = Math.max(0, Math.floor(capital.pitchCooldownUntilDay ?? 0))
+  const cooldowns = capital.pitchModelCooldowns ?? {}
+  return investorPitchModels(state, labId).filter(
+    (model) =>
+      state.day >= deskCooldown &&
+      state.day >= Math.max(0, Math.floor(cooldowns[model.id] ?? 0)),
+  )
+}
+
+function pitchModelOverusePenalty(model: Model): number {
+  const repeatedEpochs = Math.max(0, (model.repeatedDataEpochs ?? 1) - 1)
+  const benchmarkOverfit = Math.max(0, model.benchmarkOverfit ?? 0)
+  const thinData = Math.max(0, 0.85 - (model.effectiveDataRatio ?? model.dataCoverage ?? 1))
+  const listedSaturation = model.commerciallyOffered === true ? 0.08 : 0
+  return clamp(
+    repeatedEpochs / 4 * 0.62 +
+      benchmarkOverfit * 0.28 +
+      thinData * 0.3 +
+      listedSaturation,
+    0,
+    1,
+  )
+}
+
+function pitchFrontierCapability(state: SimState): number {
+  const capabilities = [
+    ...state.player.models
+      .filter((model) => isLivePublicModel(model))
+      .map((model) => model.capability),
+    ...state.rivals.flatMap((rival) =>
+      rival.models
+        .filter((model) => isLivePublicModel(model))
+        .map((model) => model.capability),
+    ),
+  ].filter((value) => Number.isFinite(value) && value > 0)
+  return Math.max(50, ...capabilities)
+}
+
+function pitchInvestorName(strength: number): string {
+  if (strength >= 0.9) return 'Civic Frontier Partners'
+  if (strength >= 0.68) return 'Horizon Compute Fund'
+  return 'Northstar Growth'
+}
+
+function roundedMillion(value: number): number {
+  return Math.round(Math.max(0, value) / 1_000_000) * 1_000_000
+}
+
+function ineligiblePitchPreview(
+  state: SimState,
+  modelId: string,
+  reason: string,
+  labId: LabId,
+): InvestorPitchPreview {
+  const model = modelsForLab(state, labId).find((candidate) => candidate.id === modelId)
+  const capability = Math.max(0, model?.capability ?? 0)
+  const frontier = pitchFrontierCapability(state)
+  const lab = capitalLabView(state, labId)
+  const capital = capitalFor(state, labId)
+  return {
+    modelId,
+    modelName: model?.name ?? 'Unknown model',
+    eligible: false,
+    reason,
+    investorName: 'Investor desk',
+    capability,
+    frontierCapability: frontier,
+    capabilityScore: clamp(capability / frontier, 0, 1.2),
+    qualityScore: 0,
+    overusePenalty: model ? pitchModelOverusePenalty(model) : 0,
+    successChance: 0,
+    cashRaised: 0,
+    preMoneyValuation: Math.max(0, lab.finance.valuation),
+    postMoneyValuation: Math.max(0, lab.finance.valuation),
+    investorOwnership: 0,
+    optionPoolTopUp: 0,
+    confidenceRequired: 1,
+    cooldownUntilDay: Math.max(
+      state.day,
+      Math.floor(capital.pitchCooldownUntilDay ?? 0),
+    ),
+    expiresDay: state.day,
+  }
+}
+
+/**
+ * Build a transparent model-backed investor pitch. This is deliberately pure:
+ * previews never consume the seeded roll, cash, or a pitch cooldown.
+ */
+export function investorPitchPreview(
+  state: SimState,
+  modelId: string,
+  labId: LabId = state.playerLabId,
+): InvestorPitchPreview {
+  const model = investorPitchModels(state, labId).find((candidate) => candidate.id === modelId)
+  if (!model) {
+    return ineligiblePitchPreview(state, modelId, 'Choose an internal or released model first.', labId)
+  }
+  const capital = capitalFor(state, labId)
+  const deskCooldown = Math.max(0, Math.floor(capital.pitchCooldownUntilDay ?? 0))
+  const modelCooldown = Math.max(0, Math.floor(capital.pitchModelCooldowns?.[model.id] ?? 0))
+  const cooldownUntilDay = Math.max(deskCooldown, modelCooldown)
+  if (state.day < cooldownUntilDay) {
+    return ineligiblePitchPreview(
+      state,
+      modelId,
+      `Investor desk is cooling down until day ${cooldownUntilDay}.`,
+      labId,
+    )
+  }
+
+  const frontierCapability = pitchFrontierCapability(state)
+  const capability = Math.max(0, model.capability)
+  const capabilityScore = clamp(capability / frontierCapability, 0, 1.2)
+  const quality = model.quality
+  const qualityScore = clamp(
+    ((quality?.reliability ?? 50) * 0.45 +
+      (quality?.safety ?? 50) * 0.25 +
+      (quality?.reasoning ?? capability) * 0.2 +
+      (quality?.coding ?? capability) * 0.1) /
+      100,
+    0,
+    1,
+  )
+  const overusePenalty = pitchModelOverusePenalty(model)
+  const frontierEdge = clamp((capability - frontierCapability * 0.72) / frontierCapability, -0.5, 0.35)
+  const strength = clamp(
+    capabilityScore * 0.5 + qualityScore * 0.3 + (0.5 + frontierEdge) * 0.2 - overusePenalty * 0.25,
+    0,
+    1.2,
+  )
+  const confidence = clamp(capital.investorConfidence, 0, 1)
+  const successChance = clamp(
+    0.18 + confidence * 0.34 + strength * 0.42 - overusePenalty * 0.2,
+    0.08,
+    0.94,
+  )
+  const investorName = pitchInvestorName(strength)
+  const valuation = Math.max(
+    10_000_000,
+    capitalLabView(state, labId).finance.valuation,
+    capitalLabView(state, labId).finance.dayRevenue * DAY_COUNT * 8,
+  )
+  const preMoneyValuation = roundedMillion(
+    Math.max(10_000_000, valuation * (0.9 + strength * 1.4) * (0.9 + confidence * 0.25)),
+  )
+  const chequeMultiple = clamp(
+    0.06 + strength * 0.14 - overusePenalty * 0.04,
+    0.025,
+    0.24,
+  )
+  const cashRaised = roundedMillion(
+    clamp(valuation * chequeMultiple, 8_000_000, 900_000_000),
+  )
+  const postMoneyValuation = preMoneyValuation + cashRaised
+  const investorOwnership = cashRaised / Math.max(1, postMoneyValuation)
+  const optionPoolTopUp = clamp(0.005 + overusePenalty * 0.045 + (1 - strength) * 0.02, 0, 0.08)
+  const confidenceRequired = clamp(0.62 - strength * 0.22 + overusePenalty * 0.1, 0.3, 0.78)
+  const eligible = confidence >= confidenceRequired
+  return {
+    modelId: model.id,
+    modelName: model.name,
+    eligible,
+    reason: eligible
+      ? undefined
+      : `Investor confidence ${(confidence * 100).toFixed(0)}% is below the ${(
+          confidenceRequired *
+          100
+        ).toFixed(0)}% threshold for this pitch.`,
+    investorName,
+    capability,
+    frontierCapability,
+    capabilityScore,
+    qualityScore,
+    overusePenalty,
+    successChance,
+    cashRaised,
+    preMoneyValuation,
+    postMoneyValuation,
+    investorOwnership,
+    optionPoolTopUp,
+    confidenceRequired,
+    cooldownUntilDay,
+    expiresDay: state.day + INVESTOR_PITCH_COOLDOWN_DAYS,
+  }
+}
+
+function withPitchRecord(
+  state: SimState,
+  labId: LabId,
+  record: InvestorPitchRecord,
+  cooldownUntilDay: number,
+): SimState {
+  return updateLab(state, labId, (current) => {
+    const capital = current.capital ?? defaultCapital()
+    return {
+      ...current,
+      capital: {
+        ...capital,
+        pitchCooldownUntilDay: cooldownUntilDay,
+        pitchModelCooldowns: {
+          ...(capital.pitchModelCooldowns ?? {}),
+          [record.modelId]: cooldownUntilDay,
+        },
+        pitchHistory: [record, ...(capital.pitchHistory ?? [])].slice(
+          0,
+          INVESTOR_PITCH_HISTORY_LIMIT,
+        ),
+      },
+    }
+  })
+}
+
+/** Resolve a model-backed pitch using a stable (seed, day, model) roll. */
+export function acceptInvestorPitch(
+  state: SimState,
+  modelId: string,
+  labId: LabId = state.playerLabId,
+): SimState {
+  const preview = investorPitchPreview(state, modelId, labId)
+  const notify = (next: SimState, severity: 'info' | 'warn', message: string) =>
+    labId === state.playerLabId
+      ? pushAlert(next, severity, message)
+      : {
+          ...next,
+          news: [`Day ${state.day}: ${capitalLabView(state, labId).name} — ${message}`, ...next.news].slice(0, 64),
+        }
+  if (!preview.eligible) {
+    return notify(state, 'warn', preview.reason ?? 'That model is not ready for an investor pitch.')
+  }
+  const roll = createRng(hashSeed(state.seed, state.day, modelId, 'investor-pitch-v1')).next()
+  const funded = roll < preview.successChance
+  const cooldownUntilDay = state.day + INVESTOR_PITCH_COOLDOWN_DAYS
+  const record: InvestorPitchRecord = {
+    id: `pitch-${modelId}-${state.day}`,
+    modelId,
+    modelName: preview.modelName,
+    investorName: preview.investorName,
+    day: state.day,
+    outcome: funded ? 'funded' : 'declined',
+    successChance: preview.successChance,
+    cashRaised: funded ? preview.cashRaised : 0,
+    preMoneyValuation: preview.preMoneyValuation,
+    postMoneyValuation: funded ? preview.postMoneyValuation : preview.preMoneyValuation,
+    investorOwnership: funded ? preview.investorOwnership : 0,
+    cooldownUntilDay,
+  }
+  if (!funded) {
+    const cooled = updateLab(state, labId, (current) => {
+      const capital = current.capital ?? defaultCapital()
+      return {
+        ...current,
+        capital: {
+          ...capital,
+          investorConfidence: clamp(capital.investorConfidence - 0.015, 0, 1),
+          boardPressure: clamp(capital.boardPressure + 0.01, 0, 1),
+        },
+      }
+    })
+    return notify(
+      withPitchRecord(cooled, labId, record, cooldownUntilDay),
+      'warn',
+      `${preview.investorName} passed on ${preview.modelName}. The desk is closed until day ${cooldownUntilDay}.`,
+    )
+  }
+  const offer: EquityOffer = {
+    id: record.id,
+    modelId,
+    investorName: preview.investorName,
+    cashRaised: preview.cashRaised,
+    preMoneyValuation: preview.preMoneyValuation,
+    postMoneyValuation: preview.postMoneyValuation,
+    investorOwnership: preview.investorOwnership,
+    optionPoolTopUp: preview.optionPoolTopUp,
+    confidenceRequired: preview.confidenceRequired,
+    expiresDay: preview.expiresDay,
+  }
+  const fundedState = acceptEquityOffer(state, offer, labId)
+  return withPitchRecord(fundedState, labId, record, cooldownUntilDay)
+}
+
 /** Deterministic term sheets; requesting them never changes campaign state. */
 export function requestEquityOffers(
   state: SimState,
@@ -221,6 +566,7 @@ export function acceptEquityOffer(
   const capTable = capital.capTable.map((stake) => ({
     ...stake,
     ownership: stake.ownership * existingMultiplier,
+    votingPower: stake.votingPower * existingMultiplier,
   }))
   if (optionTopUp > 0) {
     const pool = capTable.find((stake) => stake.kind === 'option_pool')
@@ -244,9 +590,7 @@ export function acceptEquityOffer(
   })
   const total = capTable.reduce((sum, stake) => sum + stake.ownership, 0) || 1
   const normalized = capTable.map((stake) => ({ ...stake, ownership: stake.ownership / total }))
-  const founderControl = normalized
-    .filter((stake) => stake.kind === 'founder')
-    .reduce((sum, stake) => sum + stake.votingPower * (stake.ownership / Math.max(1e-9, capital.capTable.find((old) => old.holderId === stake.holderId)?.ownership ?? stake.ownership)), 0)
+  const founderControl = capital.founderControl * existingMultiplier
 
   const cash = lab.cash + offer.cashRaised
   const next = updateLab(state, labId, (current) => ({
@@ -462,7 +806,9 @@ function debtCapacity(state: SimState, kind: DebtInstrumentKind): { max: number;
     (sum, rack) => sum + Math.max(0, rack.count) * 650_000,
     0,
   )
-  const hasSite = state.map.tiles.some((tile) => tile.owner === 'player' && tile.kind === 'dc')
+  const hasSite = facilityAnchorTiles(state, {
+    ownerId: state.playerLabId,
+  }).some((tile) => isDcKind(tile.kind))
   switch (kind) {
     case 'revolver':
       return { max: annualRevenue * 0.25, collateral: annualRevenue, covenant: 'Debt below 35% of annual recurring revenue' }

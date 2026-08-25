@@ -9,6 +9,7 @@ import type {
 } from '../types'
 import { computeLabSnapshot, updateLab } from './labEngine'
 import { formatComputeMw } from './computeMarket'
+import { appendFeedEvents, type FeedEventInput } from './feed'
 
 const MIN_PF = 1
 /** ~2 GW at mwPerPfProxy 0.001 — large enough for late-game hyperscaler leases. */
@@ -441,7 +442,7 @@ export function signComputeContract(
     daysLeft: contract.daysTotal,
     interruptionDaysLeft: undefined,
   }
-  return {
+  const signed = {
     ...state,
     computeContracts: [...state.computeContracts, active],
     worldMarkets: { ...state.worldMarkets, cloudProviders: providers },
@@ -452,6 +453,19 @@ export function signComputeContract(
       ...state.news,
     ].slice(0, 48),
   }
+  return appendFeedEvents(signed, [
+    {
+      id: `feed-compute-contract-signed-${active.id}`,
+      day: state.day,
+      category: 'market',
+      title: `${active.providerName} quote accepted`,
+      body: `${formatComputeMw(active.pf)} ${active.kind.replace('_', ' ')} capacity at $${active.pricePerPfDay.toFixed(2)}/PF-day for ${active.daysTotal} days; ${buyerLabel(state, active.buyerLabId)} now has a live compute contract.`,
+      source: 'Compute Desk',
+      tone: 'positive',
+      entityId: active.buyerLabId,
+      kind: 'compute_contract_signed',
+    },
+  ])
 }
 
 function releaseProviderCapacity(
@@ -652,7 +666,7 @@ export function terminateComputeContract(state: SimState, contractId: string): S
   const providers = active
     ? releaseProviderCapacity(next.worldMarkets.cloudProviders, contract)
     : next.worldMarkets.cloudProviders
-  return {
+  const ended = {
     ...next,
     computeContracts: next.computeContracts.map((entry) =>
       entry.id === contractId
@@ -665,6 +679,19 @@ export function terminateComputeContract(state: SimState, contractId: string): S
       ...next.news,
     ].slice(0, 48),
   }
+  return appendFeedEvents(ended, [
+    {
+      id: `feed-compute-contract-ended-${contract.id}-${state.day}`,
+      day: state.day,
+      category: 'market',
+      title: `${contract.providerName} contract ended`,
+      body: `${formatComputeMw(contract.pf)} of ${contract.kind.replace('_', ' ')} capacity returned${fee > 0 ? ` after a $${fee.toFixed(0)} break fee` : ''}.`,
+      source: 'Compute Desk',
+      tone: fee > 0 ? 'warning' : 'neutral',
+      entityId: contract.buyerLabId,
+      kind: 'compute_contract_ended',
+    },
+  ])
 }
 
 /** Capacity visible to a lab today. Interrupted and expired contracts contribute zero capacity. */
@@ -734,6 +761,7 @@ export function tickComputeContracts(state: SimState): SimState {
   let providers = [...state.worldMarkets.cloudProviders]
   const contracts: ComputeContract[] = []
   const news: string[] = []
+  const feedEvents: FeedEventInput[] = []
 
   for (const original of state.computeContracts) {
     if (original.status === 'offered' || original.status === 'expired') {
@@ -770,6 +798,17 @@ export function tickComputeContracts(state: SimState): SimState {
         news.push(
           `Day ${state.day}: ${contract.providerName} spot capacity interrupted (${formatComputeMw(contract.pf)}).`,
         )
+        feedEvents.push({
+          id: `feed-compute-contract-interrupted-${contract.id}-${state.day}`,
+          day: state.day,
+          category: 'market',
+          title: `${contract.providerName} spot capacity interrupted`,
+          body: `${formatComputeMw(contract.pf)} of spot capacity is temporarily unavailable; the contract will retry after the interruption window.`,
+          source: 'Compute Desk',
+          tone: 'warning',
+          entityId: contract.buyerLabId,
+          kind: 'compute_contract_interrupted',
+        })
       }
     }
 
@@ -789,16 +828,28 @@ export function tickComputeContracts(state: SimState): SimState {
       news.push(
         `Day ${state.day}: ${contract.providerName} compute contract expired; ${formatComputeMw(contract.pf)} returned.`,
       )
+      feedEvents.push({
+        id: `feed-compute-contract-expired-${contract.id}-${state.day}`,
+        day: state.day,
+        category: 'market',
+        title: `${contract.providerName} compute contract expired`,
+        body: `${formatComputeMw(contract.pf)} of ${contract.kind.replace('_', ' ')} capacity returned to the provider pool.`,
+        source: 'Compute Desk',
+        tone: 'neutral',
+        entityId: contract.buyerLabId,
+        kind: 'compute_contract_expired',
+      })
     }
     contracts.push(contract)
   }
 
   providers = providers.map((provider) => growProviderCapacity(provider, state.day))
 
-  return {
+  const settled = {
     ...next,
     computeContracts: contracts,
     worldMarkets: { ...next.worldMarkets, cloudProviders: providers },
     news: [...news, ...next.news].slice(0, 48),
   }
+  return appendFeedEvents(settled, feedEvents)
 }

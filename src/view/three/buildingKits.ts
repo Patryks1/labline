@@ -4,6 +4,17 @@ import type { Neighbors } from './tileNeighbors'
 
 const TILE = 1.05
 
+const CIVIC_WALL = 0xe5d5b7
+const CIVIC_WALL2 = 0xc69c74
+const CIVIC_ROOF = 0x7a4b42
+const CIVIC_TRIM = 0x5a4030
+const CIVIC_MASS = 0xb8b4a8
+const CIVIC_GLASS = 0x78a9bd
+const CIVIC_DARK = 0x303b42
+const CIVIC_METAL = 0x596872
+const CIVIC_ACCENT = 0xe6a93d
+const CIVIC_CONCRETE = 0x9aa2a0
+
 const EMPTY_N: Neighbors = { n: false, e: false, s: false, w: false, mask: 0, count: 0 }
 
 function mat(
@@ -76,21 +87,21 @@ export function hqStyleVariant(tileX: number, tileY: number): HqStyleVariant {
   return (seed(tileX + 17, tileY + 41) % 3) as HqStyleVariant
 }
 
-/** World-unit height of one storey for HQ tower kits (visual only). */
-export const HQ_STOREY_HEIGHT = 0.11
+/** World-unit height of one commercial storey for HQ kits (visual only). */
+export const HQ_STOREY_HEIGHT = 0.32
 
 /**
- * Nominal HQ tower height in world units.
- * Small ~8 storeys, medium ~20, large ~36 (midpoints of 6–10 / 16–24 / 30–45).
+ * Nominal HQ height in world units.
+ * Small 1-storey storefront, medium 2-storey courtyard, large 3-storey campus.
  */
 export function hqTowerHeight(kind: 'hq' | 'hq_m' | 'hq_l' | 'office'): number {
   return hqStoreyCount(kind) * HQ_STOREY_HEIGHT
 }
 
 export function hqStoreyCount(kind: 'hq' | 'hq_m' | 'hq_l' | 'office'): number {
-  if (kind === 'hq_l') return 36
-  if (kind === 'hq_m') return 20
-  return 8
+  if (kind === 'hq_l') return 3
+  if (kind === 'hq_m') return 2
+  return 1
 }
 
 function mesh(
@@ -267,54 +278,51 @@ function kitLow(
       return g
     case 'dc': {
       const hh = Math.max(0.2, h * 0.75)
-      const shell = shellColor(color, 0x6a7580, 0.22)
-      g.add(mesh(new THREE.BoxGeometry(w * 0.7, hh, w * 0.48), mat(shell, { rough: 0.55, metal: 0.22, shellBase: 0x6a7580 }), 0, hh / 2, 0, { shellBase: 0x6a7580 }))
-      g.add(mesh(new THREE.BoxGeometry(w * 0.5, 0.04, 0.04), mat(color, { brand: true, emissive: color, emInt: 0.2 }), 0, hh * 0.7, w * 0.25, { brand: true }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.7, hh, w * 0.48), mat(CIVIC_WALL, { rough: 0.75, lockColor: true }), 0, hh / 2, 0, { lockColor: true }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.74, 0.08, w * 0.52), mat(CIVIC_ROOF, { rough: 0.7, lockColor: true }), 0, hh + 0.04, 0, { lockColor: true }))
       return g
     }
     case 'dc_m': {
       const hh = Math.max(0.26, h * 0.9)
-      const shell = shellColor(color, 0x5c6874, 0.2)
-      g.add(mesh(new THREE.BoxGeometry(w * 0.4, hh, w * 0.72), mat(shell, { rough: 0.5, metal: 0.25, shellBase: 0x5c6874 }), -w * 0.18, hh / 2, 0, { shellBase: 0x5c6874 }))
-      g.add(mesh(new THREE.BoxGeometry(w * 0.4, hh * 0.85, w * 0.72), mat(shell, { rough: 0.5, metal: 0.25, shellBase: 0x5c6874 }), w * 0.18, hh * 0.42, 0, { shellBase: 0x5c6874 }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.4, hh, w * 0.72), mat(CIVIC_WALL, { rough: 0.75, lockColor: true }), -w * 0.18, hh / 2, 0, { lockColor: true }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.4, hh * 0.85, w * 0.72), mat(CIVIC_MASS, { rough: 0.72, lockColor: true }), w * 0.18, hh * 0.42, 0, { lockColor: true }))
       return g
     }
     case 'dc_l': {
       const hh = Math.max(0.32, h * 1.05)
-      const shell = shellColor(color, 0x4f5b68, 0.18)
-      g.add(mesh(new THREE.BoxGeometry(w * 0.82, hh, w * 0.55), mat(shell, { rough: 0.48, metal: 0.28, shellBase: 0x4f5b68 }), 0, hh / 2, 0, { shellBase: 0x4f5b68 }))
-      g.add(mesh(new THREE.BoxGeometry(w * 0.24, hh * 1.35, w * 0.24), mat(shell, { rough: 0.48, metal: 0.28, shellBase: 0x4f5b68 }), w * 0.28, hh * 0.68, w * 0.12, { shellBase: 0x4f5b68 }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.82, hh, w * 0.55), mat(CIVIC_MASS, { rough: 0.72, lockColor: true }), 0, hh / 2, 0, { lockColor: true }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.24, hh * 1.15, w * 0.24), mat(CIVIC_CONCRETE, { rough: 0.7, lockColor: true }), w * 0.28, hh * 0.58, w * 0.12, { lockColor: true }))
       return g
     }
     case 'office':
     case 'hq': {
-      const hh = hqTowerHeight('hq')
-      const shell = shellColor(color || 0xc0c8d0, 0xb8c0cc, 0.35)
-      g.add(mesh(new THREE.BoxGeometry(w * 0.62, hh, w * 0.5), mat(shell, { rough: 0.42, metal: 0.22, shellBase: 0xb8c0cc }), 0, hh / 2, 0, { shellBase: 0xb8c0cc }))
+      const hh = 0.36
+      g.add(mesh(new THREE.BoxGeometry(w * 0.78, hh, w * 0.56), mat(CIVIC_WALL, { rough: 0.78, lockColor: true }), 0, hh / 2, 0, { lockColor: true }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.82, 0.07, w * 0.6), mat(CIVIC_DARK, { rough: 0.7, lockColor: true }), 0, hh + 0.04, 0, { lockColor: true }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.46, 0.14, 0.03), mat(CIVIC_GLASS, { rough: 0.22, lockColor: true }), 0.06, 0.22, w * 0.29, { lockColor: true }))
       return g
     }
     case 'hq_m': {
-      const hh = hqTowerHeight('hq_m')
-      const shell = shellColor(color || 0xb0b8c8, 0xa8b0c0, 0.32)
-      g.add(mesh(new THREE.BoxGeometry(w * 0.55, hh * 0.28, w * 0.7), mat(shell, { rough: 0.45, metal: 0.2, shellBase: 0xa8b0c0 }), 0, hh * 0.14, 0, { shellBase: 0xa8b0c0 }))
-      g.add(mesh(new THREE.BoxGeometry(w * 0.42, hh, w * 0.42), mat(shell, { rough: 0.4, metal: 0.25, shellBase: 0xa8b0c0 }), 0, hh / 2, 0, { shellBase: 0xa8b0c0 }))
+      const hh = 0.62
+      g.add(mesh(new THREE.BoxGeometry(w * 0.48, hh, w * 0.42), mat(CIVIC_WALL, { rough: 0.78, lockColor: true }), -w * 0.16, hh / 2, -0.08, { lockColor: true }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.42, hh, w * 0.68), mat(CIVIC_MASS, { rough: 0.75, lockColor: true }), w * 0.22, hh / 2, 0.08, { lockColor: true }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.52, 0.07, w * 0.46), mat(CIVIC_DARK, { rough: 0.7, lockColor: true }), -w * 0.16, hh + 0.04, -0.08, { lockColor: true }))
       return g
     }
     case 'hq_l': {
-      const hh = hqTowerHeight('hq_l')
-      const shell = shellColor(color || 0xa0a8bc, 0x98a0b4, 0.3)
-      g.add(mesh(new THREE.BoxGeometry(w * 0.7, hh * 0.22, w * 0.7), mat(shell, { rough: 0.48, metal: 0.18, shellBase: 0x98a0b4 }), 0, hh * 0.11, 0, { shellBase: 0x98a0b4 }))
-      g.add(mesh(new THREE.BoxGeometry(w * 0.38, hh, w * 0.38), mat(shell, { rough: 0.38, metal: 0.28, shellBase: 0x98a0b4 }), 0, hh / 2, 0, { shellBase: 0x98a0b4 }))
-      g.add(mesh(new THREE.BoxGeometry(w * 0.22, hh * 0.12, w * 0.22), mat(0x6a7488, { metal: 0.45, lockColor: true }), 0, hh + hh * 0.06, 0, { lockColor: true }))
+      const podium = 0.3
+      const hh = 0.86
+      g.add(mesh(new THREE.BoxGeometry(w * 0.88, podium, w * 0.78), mat(CIVIC_MASS, { rough: 0.75, lockColor: true }), 0, podium / 2, 0, { lockColor: true }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.52, hh - podium, w * 0.46), mat(CIVIC_WALL, { rough: 0.78, lockColor: true }), -0.06, podium + (hh - podium) / 2, -0.04, { lockColor: true }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.28, 0.5, w * 0.58), mat(CIVIC_WALL2, { rough: 0.78, lockColor: true }), w * 0.28, 0.55, 0.1, { lockColor: true }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.56, 0.08, w * 0.5), mat(CIVIC_DARK, { rough: 0.7, lockColor: true }), -0.06, hh + 0.04, -0.04, { lockColor: true }))
       return g
     }
     default: {
       // Player / rival structures: industrial shell + brand edge (not solid neon)
       const hh = Math.max(0.18, h * 0.85)
-      const base = 0x6a7080
-      const shell = shellColor(color || 0x888888, base, 0.25)
-      g.add(mesh(new THREE.BoxGeometry(w * 0.75, hh, w * 0.75), mat(shell, { rough: 0.55, metal: 0.22, shellBase: base }), 0, hh / 2, 0, { shellBase: base }))
-      g.add(mesh(new THREE.BoxGeometry(w * 0.55, 0.035, 0.04), mat(color || 0x3dffc0, { brand: true, emissive: color || 0x3dffc0, emInt: 0.18 }), 0, hh * 0.75, w * 0.38, { brand: true }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.75, hh, w * 0.75), mat(CIVIC_WALL, { rough: 0.75, lockColor: true }), 0, hh / 2, 0, { lockColor: true }))
+      g.add(mesh(new THREE.BoxGeometry(w * 0.55, 0.035, 0.04), mat(CIVIC_TRIM, { lockColor: true }), 0, hh * 0.75, w * 0.38, { lockColor: true }))
       return g
     }
   }
@@ -335,42 +343,22 @@ function kitEmpty(g: THREE.Group, _w: number, color: number, _r: () => number) {
   return g
 }
 
-/** Mix ownership tint into industrial base (avoids solid neon shells). */
-function shellColor(ownerTint: number, base = 0x6a7580, amount = 0.28): number {
-  const br = (base >> 16) & 0xff
-  const bg = (base >> 8) & 0xff
-  const bb = base & 0xff
-  const tr = (ownerTint >> 16) & 0xff
-  const tg = (ownerTint >> 8) & 0xff
-  const tb = ownerTint & 0xff
-  const a = amount
-  return (
-    (Math.floor(br * (1 - a) + tr * a) << 16) |
-    (Math.floor(bg * (1 - a) + tg * a) << 8) |
-    Math.floor(bb * (1 - a) + tb * a)
-  )
-}
-
-/** Small edge hall — compact 1-tile POP (96 bays). Single low box + dock + 2 chillers. */
-function kitDcSmall(g: THREE.Group, w: number, h: number, color: number, variant: DataCenterStyleVariant) {
-  const base = 0x6a7580
-  const shell = shellColor(color, base, 0.22)
-  const body = mat(shell, { rough: 0.55, metal: 0.22, shellBase: base })
-  const accent = mat(darken(shell, 0.22), { rough: 0.48, metal: 0.3, shellBase: base })
-  const brand = mat(color, { rough: 0.35, metal: 0.4, emissive: color, emInt: 0.22, brand: true })
-  const steel = mat(0x4a5568, { metal: 0.55, rough: 0.35, lockColor: true })
+function kitDcSmall(g: THREE.Group, w: number, h: number, _color: number, variant: DataCenterStyleVariant) {
+  const body = mat(CIVIC_WALL, { rough: 0.75, lockColor: true })
+  const accent = mat(CIVIC_WALL2, { rough: 0.7, lockColor: true })
+  const steel = mat(CIVIC_METAL, { metal: 0.4, rough: 0.4, lockColor: true })
 
   // Compact rectangular shell
   const hallH = Math.max(0.28, h * 0.92)
-  g.add(mesh(new THREE.BoxGeometry(w * 0.72, hallH, w * 0.48), body, 0, hallH / 2, 0.04, { shellBase: base }))
+  g.add(mesh(new THREE.BoxGeometry(w * 0.72, hallH, w * 0.48), body, 0, hallH / 2, 0.04, { lockColor: true }))
   g.add(
     mesh(
       new THREE.BoxGeometry(w * 0.78, hallH * 0.08, w * 0.54),
-      accent,
+      mat(CIVIC_ROOF, { rough: 0.7, lockColor: true }),
       0,
       hallH + hallH * 0.04,
       0.04,
-      { shellBase: base },
+      { lockColor: true },
     ),
   )
 
@@ -389,7 +377,7 @@ function kitDcSmall(g: THREE.Group, w: number, h: number, color: number, variant
   }
   if (variant === 1) {
     // Edge-compute variant: compact roof comms spine.
-    g.add(mesh(new THREE.BoxGeometry(w * 0.42, 0.035, 0.055), brand, 0, hallH + 0.18, -0.02, { brand: true }))
+    g.add(mesh(new THREE.BoxGeometry(w * 0.42, 0.035, 0.055), steel, 0, hallH + 0.18, -0.02, { lockColor: true }))
     g.add(mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.18, 8), steel, 0, hallH + 0.1, -0.02, { lockColor: true }))
   } else if (variant === 2) {
     // Warm-climate variant: visibly larger heat rejection bank.
@@ -413,11 +401,9 @@ function kitDcSmall(g: THREE.Group, w: number, h: number, color: number, variant
   g.add(
     mesh(
       new THREE.BoxGeometry(w * 0.55, hallH * 0.1, 0.03),
-      mat(0x88ccff, {
-        rough: 0.15,
-        metal: 0.55,
-        emissive: 0x224466,
-        emInt: 0.2,
+      mat(CIVIC_GLASS, {
+        rough: 0.22,
+        metal: 0.2,
         lockColor: true,
       }),
       0.04,
@@ -428,7 +414,7 @@ function kitDcSmall(g: THREE.Group, w: number, h: number, color: number, variant
   )
 
   // Ownership brand stripe (only place that uses bright tint)
-  g.add(mesh(new THREE.BoxGeometry(w * 0.72, 0.04, 0.03), brand, 0, hallH * 0.72, w * 0.25, { brand: true }))
+  g.add(mesh(new THREE.BoxGeometry(w * 0.72, 0.04, 0.03), mat(CIVIC_TRIM, { lockColor: true }), 0, hallH * 0.72, w * 0.25, { lockColor: true }))
 
   // One diesel pad + fence posts
   g.add(
@@ -462,19 +448,17 @@ function kitDcSmall(g: THREE.Group, w: number, h: number, color: number, variant
 }
 
 /** Medium campus hall — 2×2 footprint massing: dual wings + cooling yard. */
-function kitDcMedium(g: THREE.Group, w: number, h: number, color: number, variant: DataCenterStyleVariant) {
-  const base = 0x5c6874
-  const shell = shellColor(color, base, 0.2)
-  const body = mat(shell, { rough: 0.5, metal: 0.25, shellBase: base })
-  const accent = mat(darken(shell, 0.25), { rough: 0.45, metal: 0.35, shellBase: base })
-  const glow = mat(color, { rough: 0.28, metal: 0.48, emissive: color, emInt: 0.35, brand: true })
-  const brand = mat(color, { rough: 0.35, metal: 0.4, emissive: color, emInt: 0.25, brand: true })
-  const steel = mat(0x4a5568, { metal: 0.55, rough: 0.32, lockColor: true })
+function kitDcMedium(g: THREE.Group, w: number, h: number, _color: number, variant: DataCenterStyleVariant) {
+  const body = mat(CIVIC_MASS, { rough: 0.72, lockColor: true })
+  const accent = mat(CIVIC_WALL2, { rough: 0.7, lockColor: true })
+  const glow = mat(CIVIC_GLASS, { rough: 0.25, lockColor: true })
+  const brand = mat(CIVIC_TRIM, { rough: 0.5, lockColor: true })
+  const steel = mat(CIVIC_METAL, { metal: 0.4, rough: 0.4, lockColor: true })
   const hallH = Math.max(0.38, h)
 
   // Parallel dual halls (campus look on one tile visual)
-  g.add(mesh(new THREE.BoxGeometry(w * 0.42, hallH, w * 0.78), body, -w * 0.22, hallH / 2, 0, { shellBase: base }))
-  g.add(mesh(new THREE.BoxGeometry(w * 0.42, hallH * 0.88, w * 0.78), body, w * 0.22, hallH * 0.44, 0, { shellBase: base }))
+  g.add(mesh(new THREE.BoxGeometry(w * 0.42, hallH, w * 0.78), body, -w * 0.22, hallH / 2, 0, { lockColor: true }))
+  g.add(mesh(new THREE.BoxGeometry(w * 0.42, hallH * 0.88, w * 0.78), body, w * 0.22, hallH * 0.44, 0, { lockColor: true }))
 
   // Link corridor between wings
   g.add(
@@ -484,14 +468,14 @@ function kitDcMedium(g: THREE.Group, w: number, h: number, color: number, varian
       0,
       hallH * 0.22,
       0.08,
-      { shellBase: base },
+      { lockColor: true },
     ),
   )
 
   // Flat roofs
   g.add(
     mesh(new THREE.BoxGeometry(w * 0.46, hallH * 0.06, w * 0.82), accent, -w * 0.22, hallH + 0.02, 0, {
-      shellBase: base,
+      lockColor: true,
     }),
   )
   g.add(
@@ -501,7 +485,7 @@ function kitDcMedium(g: THREE.Group, w: number, h: number, color: number, varian
       w * 0.22,
       hallH * 0.88 + 0.02,
       0,
-      { shellBase: base },
+      { lockColor: true },
     ),
   )
 
@@ -514,7 +498,7 @@ function kitDcMedium(g: THREE.Group, w: number, h: number, color: number, varian
         -0.08 + (i % 2) * 0.16,
         hallH * 0.35,
         -0.22 + Math.floor(i / 2) * 0.2,
-        { brand: true },
+        { lockColor: true },
       ),
     )
   }
@@ -566,7 +550,7 @@ function kitDcMedium(g: THREE.Group, w: number, h: number, color: number, varian
   g.add(mesh(new THREE.BoxGeometry(0.03, hallH * 0.12, w * 0.55), glass, w * 0.44, hallH * 0.45, 0, { lockColor: true }))
 
   // Brand stripe on link corridor
-  g.add(mesh(new THREE.BoxGeometry(w * 0.18, 0.035, w * 0.28), brand, 0, hallH * 0.48, 0.08, { brand: true }))
+  g.add(mesh(new THREE.BoxGeometry(w * 0.18, 0.035, w * 0.28), brand, 0, hallH * 0.48, 0.08, { lockColor: true }))
 
   // Dual gens
   for (let i = 0; i < 2; i++) {
@@ -606,18 +590,16 @@ function kitDcMedium(g: THREE.Group, w: number, h: number, color: number, varian
 }
 
 /** Large mega campus — multi-volume hyperscale with tower, mast, cooling farm. */
-function kitDcLarge(g: THREE.Group, w: number, h: number, color: number, variant: DataCenterStyleVariant) {
-  const base = 0x4f5b68
-  const shell = shellColor(color, base, 0.18)
-  const body = mat(shell, { rough: 0.48, metal: 0.28, shellBase: base })
-  const accent = mat(darken(shell, 0.28), { rough: 0.42, metal: 0.4, shellBase: base })
-  const glow = mat(color, { rough: 0.25, metal: 0.55, emissive: color, emInt: 0.4, brand: true })
-  const brand = mat(color, { rough: 0.32, metal: 0.45, emissive: color, emInt: 0.28, brand: true })
-  const steel = mat(0x4a5568, { metal: 0.6, rough: 0.3, lockColor: true })
+function kitDcLarge(g: THREE.Group, w: number, h: number, _color: number, variant: DataCenterStyleVariant) {
+  const body = mat(CIVIC_MASS, { rough: 0.7, lockColor: true })
+  const accent = mat(CIVIC_WALL, { rough: 0.75, lockColor: true })
+  const glow = mat(CIVIC_GLASS, { rough: 0.25, lockColor: true })
+  const brand = mat(CIVIC_TRIM, { rough: 0.5, lockColor: true })
+  const steel = mat(CIVIC_METAL, { metal: 0.4, rough: 0.4, lockColor: true })
   const hallH = Math.max(0.48, h)
 
   // Main mega hall (wide footprint massing)
-  g.add(mesh(new THREE.BoxGeometry(w * 0.88, hallH, w * 0.55), body, 0.02, hallH / 2, -0.06, { shellBase: base }))
+  g.add(mesh(new THREE.BoxGeometry(w * 0.88, hallH, w * 0.55), body, 0.02, hallH / 2, -0.06, { lockColor: true }))
   // Secondary hall block
   g.add(
     mesh(
@@ -626,14 +608,14 @@ function kitDcLarge(g: THREE.Group, w: number, h: number, color: number, variant
       -w * 0.18,
       hallH * 0.41,
       w * 0.22,
-      { shellBase: base },
+      { lockColor: true },
     ),
   )
   // Admin / office tower
   const towerH = hallH * 1.45
   g.add(
     mesh(new THREE.BoxGeometry(w * 0.26, towerH, w * 0.26), accent, w * 0.3, towerH / 2, w * 0.18, {
-      shellBase: base,
+      lockColor: true,
     }),
   )
   // Antenna mast on tower
@@ -670,7 +652,7 @@ function kitDcLarge(g: THREE.Group, w: number, h: number, color: number, variant
   )
   if (variant === 1) {
     // Hyperscale colocation variant: paired cross-hall skybridges.
-    for (const z of [-0.16, 0.12]) g.add(mesh(new THREE.BoxGeometry(w * 0.7, 0.075, 0.07), brand, 0, hallH * 0.72, z, { brand: true }))
+    for (const z of [-0.16, 0.12]) g.add(mesh(new THREE.BoxGeometry(w * 0.7, 0.075, 0.07), brand, 0, hallH * 0.72, z, { lockColor: true }))
   } else if (variant === 2) {
     // Water-side cooling variant: unmistakable twin thermal stores.
     for (const x of [-0.23, 0.02]) g.add(mesh(new THREE.CylinderGeometry(0.085, 0.1, hallH * 0.68, 12), steel, x, hallH * 0.36, -w * 0.37, { lockColor: true }))
@@ -685,7 +667,7 @@ function kitDcLarge(g: THREE.Group, w: number, h: number, color: number, variant
         -0.34 + (i % 3) * 0.18,
         hallH + hallH * 0.28,
         -0.28 + Math.floor(i / 3) * 0.16,
-        { brand: true },
+        { lockColor: true },
       ),
     )
   }
@@ -746,7 +728,7 @@ function kitDcLarge(g: THREE.Group, w: number, h: number, color: number, variant
   // Brand stripe on main hall face
   g.add(
     mesh(new THREE.BoxGeometry(w * 0.88, 0.045, 0.03), brand, 0.02, hallH * 0.78, w * 0.22, {
-      brand: true,
+      lockColor: true,
     }),
   )
 
@@ -789,10 +771,10 @@ function kitDcLarge(g: THREE.Group, w: number, h: number, color: number, variant
   return g
 }
 
-function kitSubstation(g: THREE.Group, w: number, h: number, color: number) {
+function kitSubstation(g: THREE.Group, w: number, h: number, _color: number) {
   const base = mesh(
     new THREE.BoxGeometry(w * 0.75, Math.max(0.12, h * 0.35), w * 0.75),
-    mat(color, { rough: 0.55, metal: 0.4 }),
+    mat(CIVIC_WALL, { rough: 0.75, lockColor: true }),
     0,
     Math.max(0.06, h * 0.18),
     0,
@@ -892,7 +874,7 @@ function kitSubstation(g: THREE.Group, w: number, h: number, color: number) {
   return g
 }
 
-function kitSolar(g: THREE.Group, w: number, color: number) {
+function kitSolar(g: THREE.Group, w: number, _color: number) {
   const pad = mesh(
     new THREE.BoxGeometry(w, 0.05, w),
     mat(0x2a3040, { rough: 0.9, lockColor: true }),
@@ -902,11 +884,9 @@ function kitSolar(g: THREE.Group, w: number, color: number) {
     { lockColor: true },
   )
   g.add(pad)
-  const panelMat = mat(0x1a3a6a, {
-    rough: 0.15,
-    metal: 0.65,
-    emissive: color || 0x3dffc0,
-    emInt: 0.15,
+  const panelMat = mat(0x6a9bb8, {
+    rough: 0.28,
+    metal: 0.2,
     lockColor: true,
   })
   const frameMat = mat(0x888c94, { metal: 0.7, rough: 0.3, lockColor: true })
@@ -954,7 +934,7 @@ function kitSolar(g: THREE.Group, w: number, color: number) {
   return g
 }
 
-function kitGas(g: THREE.Group, w: number, h: number, color: number) {
+function kitGas(g: THREE.Group, w: number, h: number, _color: number) {
   const pad = mesh(
     new THREE.BoxGeometry(w * 0.9, 0.04, w * 0.9),
     mat(0x333840, { lockColor: true }),
@@ -967,7 +947,7 @@ function kitGas(g: THREE.Group, w: number, h: number, color: number) {
 
   const tank = mesh(
     new THREE.CylinderGeometry(w * 0.28, w * 0.3, h * 0.9, 16),
-    mat(color, { rough: 0.35, metal: 0.55 }),
+    mat(CIVIC_METAL, { rough: 0.45, lockColor: true }),
     0,
     h * 0.45,
     0,
@@ -975,7 +955,7 @@ function kitGas(g: THREE.Group, w: number, h: number, color: number) {
   g.add(tank)
   const cap = mesh(
     new THREE.SphereGeometry(w * 0.28, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2),
-    mat(darken(color, 0.15), { metal: 0.5 }),
+    mat(CIVIC_DARK, { rough: 0.5, lockColor: true }),
     0,
     h * 0.9,
     0,
@@ -1038,7 +1018,7 @@ function kitGas(g: THREE.Group, w: number, h: number, color: number) {
   return g
 }
 
-function kitNuclear(g: THREE.Group, w: number, h: number, color: number) {
+function kitNuclear(g: THREE.Group, w: number, h: number, _color: number) {
   const pad = mesh(
     new THREE.BoxGeometry(w * 0.95, 0.04, w * 0.95),
     mat(0x3a3e48, { rough: 0.85, lockColor: true }),
@@ -1051,7 +1031,7 @@ function kitNuclear(g: THREE.Group, w: number, h: number, color: number) {
 
   const containment = mesh(
     new THREE.CylinderGeometry(w * 0.28, w * 0.32, h, 16),
-    mat(color, { rough: 0.4, metal: 0.35 }),
+    mat(CIVIC_MASS, { rough: 0.7, lockColor: true }),
     0.12,
     h / 2,
     0.1,
@@ -1093,7 +1073,7 @@ function kitNuclear(g: THREE.Group, w: number, h: number, color: number) {
   // Turbine hall
   const hall = mesh(
     new THREE.BoxGeometry(0.35, h * 0.4, 0.25),
-    mat(darken(color, 0.2), { metal: 0.3, lockColor: true }),
+    mat(CIVIC_WALL, { rough: 0.75, lockColor: true }),
     0.3,
     h * 0.22,
     -0.28,
@@ -1103,10 +1083,10 @@ function kitNuclear(g: THREE.Group, w: number, h: number, color: number) {
   return g
 }
 
-function kitFab(g: THREE.Group, w: number, h: number, color: number) {
+function kitFab(g: THREE.Group, w: number, h: number, _color: number) {
   const body = mesh(
     new THREE.BoxGeometry(w * 0.95, h * 0.65, w * 0.8),
-    mat(color, { rough: 0.35, metal: 0.45 }),
+    mat(CIVIC_WALL, { rough: 0.75, lockColor: true }),
     0,
     h * 0.32,
     0,
@@ -2201,7 +2181,7 @@ function kitWarehouse(g: THREE.Group, w: number, h: number, color: number, r: ()
   return g
 }
 
-function kitCooling(g: THREE.Group, w: number, h: number, color: number) {
+function kitCooling(g: THREE.Group, w: number, h: number, _color: number) {
   const pad = mesh(
     new THREE.BoxGeometry(w * 0.9, 0.04, w * 0.9),
     mat(0x2a3040, { rough: 0.9, lockColor: true }),
@@ -2214,7 +2194,7 @@ function kitCooling(g: THREE.Group, w: number, h: number, color: number) {
   for (let i = 0; i < 3; i++) {
     const tower = mesh(
       new THREE.CylinderGeometry(0.12, 0.16, h * 0.9 + 0.15, 12),
-      mat(color || 0x7a8a9a, { rough: 0.55, metal: 0.35 }),
+      mat(CIVIC_CONCRETE, { rough: 0.7, lockColor: true }),
       -0.28 + i * 0.28,
       (h * 0.9 + 0.15) / 2,
       0,
@@ -2242,7 +2222,7 @@ function kitCooling(g: THREE.Group, w: number, h: number, color: number) {
   return g
 }
 
-function kitBattery(g: THREE.Group, w: number, h: number, color: number) {
+function kitBattery(g: THREE.Group, w: number, h: number, _color: number) {
   const pad = mesh(
     new THREE.BoxGeometry(w, 0.04, w),
     mat(0x1e2430, { rough: 0.9, lockColor: true }),
@@ -2256,7 +2236,7 @@ function kitBattery(g: THREE.Group, w: number, h: number, color: number) {
     for (let col = 0; col < 3; col++) {
       const cell = mesh(
         new THREE.BoxGeometry(0.22, 0.18 + h * 0.15, 0.28),
-        mat(color || 0x3dffc0, { metal: 0.4, rough: 0.4 }),
+        mat(CIVIC_METAL, { metal: 0.35, rough: 0.45, lockColor: true }),
         -0.28 + col * 0.28,
         0.12 + h * 0.08,
         -0.18 + row * 0.36,
@@ -2264,7 +2244,7 @@ function kitBattery(g: THREE.Group, w: number, h: number, color: number) {
       g.add(cell)
       const led = mesh(
         new THREE.BoxGeometry(0.06, 0.02, 0.02),
-        mat(0x44ff88, { emissive: 0x22aa44, emInt: 0.5, lockColor: true }),
+        mat(CIVIC_ACCENT, { lockColor: true }),
         -0.28 + col * 0.28,
         0.2 + h * 0.08,
         -0.18 + row * 0.36 + 0.15,
@@ -2285,433 +2265,303 @@ function kitBattery(g: THREE.Group, w: number, h: number, color: number) {
   return g
 }
 
-function hqGlass(
-  w: number,
-  bodyH: number,
-  floors: number,
-  z: number,
-  r: () => number,
-  widthFrac = 0.55,
-) {
-  const bandH = Math.min(0.045, bodyH / Math.max(6, floors * 1.4))
-  const step = bodyH / (floors + 1)
-  const group: THREE.Mesh[] = []
-  for (let f = 0; f < floors; f++) {
-    group.push(
-      mesh(
-        new THREE.BoxGeometry(w * widthFrac, bandH, 0.02),
-        mat(0x88ccee, {
-          metal: 0.55,
-          rough: 0.12,
-          emissive: 0x224455,
-          emInt: 0.18 + r() * 0.12,
-          lockColor: true,
-        }),
-        0,
-        step * (f + 1),
-        z,
-        { lockColor: true },
-      ),
-    )
-  }
-  return group
-}
-
-function hqPlaza(g: THREE.Group, w: number) {
+function hqYard(g: THREE.Group, w: number) {
   g.add(
     mesh(
-      new THREE.BoxGeometry(w, 0.05, w),
-      mat(0x2a2e38, { rough: 0.85, lockColor: true }),
+      new THREE.BoxGeometry(w, 0.04, w),
+      mat(0x4a5a42, { rough: 0.92, lockColor: true }),
       0,
-      0.025,
+      0.02,
       0,
       { lockColor: true },
     ),
   )
 }
 
-function hqBrandSign(g: THREE.Group, color: number, y: number, z: number, width = 0.22) {
+function civicDoor(g: THREE.Group, x: number, y: number, z: number) {
   g.add(
     mesh(
-      new THREE.BoxGeometry(width, 0.055, 0.02),
-      mat(color || 0x3dffc0, { emissive: color || 0x0a3d2e, emInt: 0.35, brand: true }),
-      0,
+      new THREE.BoxGeometry(0.12, 0.18, 0.03),
+      mat(CIVIC_DARK, { rough: 0.7, lockColor: true }),
+      x,
       y,
       z,
-      { brand: true },
+      { lockColor: true },
     ),
   )
 }
 
-/** Small 1×1 mid-rise HQ — ~6–10 storeys; slab / setback / glass-box variants. */
+function civicWindow(g: THREE.Group, x: number, y: number, z: number, width = 0.12, height = 0.1) {
+  g.add(
+    mesh(
+      new THREE.BoxGeometry(width, height, 0.02),
+      mat(CIVIC_GLASS, { rough: 0.22, metal: 0.2, lockColor: true }),
+      x,
+      y,
+      z,
+      { lockColor: true },
+    ),
+  )
+}
+
+function civicParapet(g: THREE.Group, width: number, depth: number, y: number, x = 0, z = 0) {
+  g.add(
+    mesh(
+      new THREE.BoxGeometry(width * 1.04, 0.07, depth * 1.06),
+      mat(CIVIC_DARK, { rough: 0.7, lockColor: true }),
+      x,
+      y,
+      z,
+      { lockColor: true },
+    ),
+  )
+}
+
+function civicCanopy(g: THREE.Group, width: number, depth: number, y: number, x: number, z: number) {
+  g.add(
+    mesh(
+      new THREE.BoxGeometry(width, 0.04, depth),
+      mat(CIVIC_TRIM, { rough: 0.65, lockColor: true }),
+      x,
+      y,
+      z,
+      { lockColor: true },
+    ),
+  )
+}
+
+function civicPlaza(g: THREE.Group, width: number, depth: number, x: number, z: number) {
+  g.add(
+    mesh(
+      new THREE.BoxGeometry(width, 0.03, depth),
+      mat(CIVIC_CONCRETE, { rough: 0.88, lockColor: true }),
+      x,
+      0.035,
+      z,
+      { lockColor: true },
+    ),
+  )
+}
+
+function civicSign(g: THREE.Group, x: number, y: number, z: number, width = 0.16, height = 0.1) {
+  g.add(
+    mesh(
+      new THREE.BoxGeometry(width, height, 0.04),
+      mat(CIVIC_DARK, { rough: 0.6, lockColor: true }),
+      x,
+      y,
+      z,
+      { lockColor: true },
+    ),
+  )
+}
+
+/** Small 1×1 HQ — 1-storey storefront office, not a house. */
 function kitHqSmall(
   g: THREE.Group,
   w: number,
-  color: number,
+  _color: number,
   r: () => number,
   variant: HqStyleVariant,
 ) {
-  const storeys = 6 + Math.floor(r() * 5) // 6–10
+  const storeys = 1
   const bodyH = storeys * HQ_STOREY_HEIGHT
-  g.userData.kitHeight = bodyH
+  g.userData.kitHeight = bodyH + 0.12
   g.userData.hqStoreys = storeys
   g.userData.hqVariant = variant
-  hqPlaza(g, w)
-  const base = 0xb8c0cc
-  const shell = shellColor(color || 0xc8d0dc, base, 0.35)
-  const bodyMat = mat(shell, { rough: 0.4, metal: 0.22, shellBase: base })
+  hqYard(g, w)
+  const wall = mat(CIVIC_WALL, { rough: 0.8, lockColor: true })
+  const front = w * 0.29
 
   if (variant === 0) {
-    // Street-wall slab
-    g.add(mesh(new THREE.BoxGeometry(w * 0.72, bodyH, w * 0.52), bodyMat, 0, bodyH / 2, 0, { shellBase: base }))
-    for (const glass of hqGlass(w, bodyH, Math.min(storeys, 8), w * 0.27, r, 0.58)) g.add(glass)
-    g.add(
-      mesh(
-        new THREE.BoxGeometry(w * 0.76, 0.04, w * 0.56),
-        mat(0x4a5566, { metal: 0.4, lockColor: true }),
-        0,
-        bodyH + 0.02,
-        0,
-        { lockColor: true },
-      ),
-    )
+    g.add(mesh(new THREE.BoxGeometry(w * 0.78, bodyH, w * 0.56), wall, 0, bodyH / 2 + 0.04, 0, { lockColor: true }))
+    civicParapet(g, w * 0.78, w * 0.56, bodyH + 0.08)
+    civicWindow(g, 0.08, 0.22, front, w * 0.42, 0.14)
+    civicDoor(g, -w * 0.24, 0.13, front)
+    civicCanopy(g, 0.32, 0.14, 0.3, -0.16, front + 0.08)
+    civicSign(g, w * 0.28, 0.28, front + 0.01)
+    civicPlaza(g, w * 0.7, 0.18, 0, front + 0.12)
   } else if (variant === 1) {
-    // Setback tower on low podium
-    const podiumH = HQ_STOREY_HEIGHT * 1.4
+    g.add(mesh(new THREE.BoxGeometry(w * 0.58, bodyH, w * 0.5), wall, -0.1, bodyH / 2 + 0.04, 0, { lockColor: true }))
     g.add(
       mesh(
-        new THREE.BoxGeometry(w * 0.82, podiumH, w * 0.7),
-        mat(darken(shell, 0.12), { rough: 0.5, metal: 0.18, shellBase: base }),
-        0,
-        podiumH / 2,
-        0,
-        { shellBase: base },
+        new THREE.BoxGeometry(w * 0.3, bodyH, w * 0.36),
+        mat(CIVIC_MASS, { rough: 0.75, lockColor: true }),
+        w * 0.28,
+        bodyH / 2 + 0.04,
+        0.06,
+        { lockColor: true },
       ),
     )
-    const shaftH = bodyH - podiumH
-    g.add(
-      mesh(
-        new THREE.BoxGeometry(w * 0.5, shaftH, w * 0.42),
-        bodyMat,
-        -w * 0.05,
-        podiumH + shaftH / 2,
-        0,
-        { shellBase: base },
-      ),
-    )
-    for (const glass of hqGlass(w, shaftH, Math.min(storeys - 1, 7), w * 0.22, r, 0.4)) {
-      glass.position.y += podiumH
-      glass.position.x = -w * 0.05
-      g.add(glass)
-    }
+    civicParapet(g, w * 0.58, w * 0.5, bodyH + 0.08, -0.1, 0)
+    civicParapet(g, w * 0.3, w * 0.36, bodyH + 0.08, w * 0.28, 0.06)
+    civicWindow(g, -0.06, 0.22, w * 0.26, w * 0.32, 0.14)
+    civicDoor(g, -w * 0.22, 0.13, w * 0.26)
+    civicCanopy(g, 0.28, 0.12, 0.3, -0.16, w * 0.32)
   } else {
-    // Glass box with stone end wall
-    g.add(mesh(new THREE.BoxGeometry(w * 0.62, bodyH, w * 0.58), bodyMat, 0, bodyH / 2, 0, { shellBase: base }))
-    g.add(
-      mesh(
-        new THREE.BoxGeometry(w * 0.12, bodyH, w * 0.58),
-        mat(0x8a909c, { rough: 0.65, metal: 0.08, lockColor: true }),
-        w * 0.37,
-        bodyH / 2,
-        0,
-        { lockColor: true },
-      ),
-    )
-    for (const glass of hqGlass(w, bodyH, Math.min(storeys, 8), w * 0.3, r, 0.5)) g.add(glass)
-    g.add(
-      mesh(
-        new THREE.BoxGeometry(w * 0.28, 0.08, w * 0.28),
-        mat(0x556070, { metal: 0.45, lockColor: true }),
-        0,
-        bodyH + 0.04,
-        0,
-        { lockColor: true },
-      ),
-    )
+    g.add(mesh(new THREE.BoxGeometry(w * 0.74, bodyH, w * 0.5), wall, 0, bodyH / 2 + 0.04, -0.04, { lockColor: true }))
+    civicParapet(g, w * 0.74, w * 0.5, bodyH + 0.08, 0, -0.04)
+    civicWindow(g, 0.06, 0.22, w * 0.22, w * 0.4, 0.14)
+    civicDoor(g, -w * 0.22, 0.13, w * 0.22)
+    civicCanopy(g, 0.3, 0.14, 0.3, -0.14, w * 0.3)
+    civicSign(g, w * 0.28, bodyH + 0.16, -0.04, 0.14, 0.16)
+    civicPlaza(g, w * 0.62, 0.16, 0, w * 0.32)
   }
-  hqBrandSign(g, color, bodyH * 0.72, w * 0.3)
+  void r
   return g
 }
 
-/** Medium 2×2 HQ campus — ~16–24 storeys; podium+shaft / twin / stepped. */
+/** Medium 2×2 HQ — 2-storey courtyard office, same family as small. */
 function kitHqMedium(
   g: THREE.Group,
   w: number,
-  color: number,
+  _color: number,
   r: () => number,
   variant: HqStyleVariant,
 ) {
-  const storeys = 16 + Math.floor(r() * 9) // 16–24
+  const storeys = 2
   const bodyH = storeys * HQ_STOREY_HEIGHT
-  g.userData.kitHeight = bodyH
+  g.userData.kitHeight = bodyH + 0.14
   g.userData.hqStoreys = storeys
   g.userData.hqVariant = variant
-  hqPlaza(g, w)
-  const base = 0xa8b0c0
-  const shell = shellColor(color || 0xb0b8c8, base, 0.32)
-  const bodyMat = mat(shell, { rough: 0.38, metal: 0.25, shellBase: base })
-  const podiumMat = mat(darken(shell, 0.15), { rough: 0.5, metal: 0.18, shellBase: base })
+  hqYard(g, w)
+  const wall = mat(CIVIC_WALL, { rough: 0.8, lockColor: true })
+  const mass = mat(CIVIC_MASS, { rough: 0.75, lockColor: true })
 
   if (variant === 0) {
-    const podiumH = HQ_STOREY_HEIGHT * 3
-    g.add(mesh(new THREE.BoxGeometry(w * 0.9, podiumH, w * 0.85), podiumMat, 0, podiumH / 2, 0, { shellBase: base }))
-    const shaftH = bodyH - podiumH
-    g.add(
-      mesh(
-        new THREE.BoxGeometry(w * 0.48, shaftH, w * 0.48),
-        bodyMat,
-        -w * 0.08,
-        podiumH + shaftH / 2,
-        -w * 0.04,
-        { shellBase: base },
-      ),
-    )
-    for (const glass of hqGlass(w, shaftH, Math.min(12, storeys - 3), w * 0.25, r, 0.38)) {
-      glass.position.y += podiumH
-      glass.position.x = -w * 0.08
-      g.add(glass)
-    }
-    g.add(
-      mesh(
-        new THREE.BoxGeometry(w * 0.52, 0.05, w * 0.52),
-        mat(0x4a5566, { metal: 0.42, lockColor: true }),
-        -w * 0.08,
-        bodyH + 0.03,
-        -w * 0.04,
-        { lockColor: true },
-      ),
-    )
+    g.add(mesh(new THREE.BoxGeometry(w * 0.5, bodyH, w * 0.42), wall, -w * 0.16, bodyH / 2 + 0.04, -0.1, { lockColor: true }))
+    civicParapet(g, w * 0.5, w * 0.42, bodyH + 0.08, -w * 0.16, -0.1)
+    g.add(mesh(new THREE.BoxGeometry(w * 0.42, bodyH, w * 0.68), mass, w * 0.22, bodyH / 2 + 0.04, 0.08, { lockColor: true }))
+    civicParapet(g, w * 0.42, w * 0.68, bodyH + 0.08, w * 0.22, 0.08)
+    civicWindow(g, -w * 0.16, bodyH * 0.72, w * 0.12, w * 0.32, 0.12)
+    civicWindow(g, -w * 0.16, bodyH * 0.32, w * 0.12, w * 0.32, 0.12)
+    civicDoor(g, -w * 0.22, 0.13, w * 0.12)
+    civicCanopy(g, 0.28, 0.14, 0.3, -w * 0.18, w * 0.2)
+    civicPlaza(g, 0.28, 0.28, 0, w * 0.22)
   } else if (variant === 1) {
-    // Twin slabs of unequal height
-    const leftH = bodyH
-    const rightH = bodyH * (0.72 + r() * 0.12)
-    g.add(mesh(new THREE.BoxGeometry(w * 0.38, leftH, w * 0.7), bodyMat, -w * 0.22, leftH / 2, 0, { shellBase: base }))
-    g.add(
-      mesh(
-        new THREE.BoxGeometry(w * 0.38, rightH, w * 0.7),
-        mat(darken(shell, 0.08), { rough: 0.4, metal: 0.22, shellBase: base }),
-        w * 0.22,
-        rightH / 2,
-        0,
-        { shellBase: base },
-      ),
-    )
-    for (const glass of hqGlass(w, leftH, Math.min(10, storeys), w * 0.36, r, 0.3)) {
-      glass.position.x = -w * 0.22
-      g.add(glass)
-    }
+    g.add(mesh(new THREE.BoxGeometry(w * 0.32, bodyH, w * 0.7), wall, -w * 0.22, bodyH / 2 + 0.04, 0, { lockColor: true }))
+    civicParapet(g, w * 0.32, w * 0.7, bodyH + 0.08, -w * 0.22, 0)
+    g.add(mesh(new THREE.BoxGeometry(w * 0.32, bodyH, w * 0.7), mass, w * 0.22, bodyH / 2 + 0.04, 0, { lockColor: true }))
+    civicParapet(g, w * 0.32, w * 0.7, bodyH + 0.08, w * 0.22, 0)
+    civicWindow(g, -w * 0.22, bodyH * 0.7, w * 0.36, 0.2, 0.12)
+    civicWindow(g, w * 0.22, bodyH * 0.7, w * 0.36, 0.2, 0.12)
+    civicDoor(g, -w * 0.22, 0.13, w * 0.36)
+    civicCanopy(g, 0.26, 0.12, 0.3, -w * 0.22, w * 0.42)
   } else {
-    // Stepped terraces
-    const tiers = [
-      { h: bodyH * 0.38, wFrac: 0.88, zOff: 0.02 },
-      { h: bodyH * 0.32, wFrac: 0.62, zOff: -0.04 },
-      { h: bodyH * 0.3, wFrac: 0.42, zOff: -0.08 },
-    ]
-    let y = 0
-    for (const tier of tiers) {
-      g.add(
-        mesh(
-          new THREE.BoxGeometry(w * tier.wFrac, tier.h, w * (tier.wFrac * 0.85)),
-          bodyMat,
-          0,
-          y + tier.h / 2,
-          tier.zOff,
-          { shellBase: base },
-        ),
-      )
-      y += tier.h
-    }
-    for (const glass of hqGlass(w, bodyH, Math.min(10, storeys), w * 0.32, r, 0.36)) g.add(glass)
+    g.add(mesh(new THREE.BoxGeometry(w * 0.78, bodyH * 0.92, w * 0.28), wall, 0, bodyH * 0.46 + 0.04, -w * 0.22, { lockColor: true }))
+    civicParapet(g, w * 0.78, w * 0.28, bodyH * 0.92 + 0.08, 0, -w * 0.22)
+    g.add(mesh(new THREE.BoxGeometry(w * 0.28, bodyH, w * 0.52), wall, -w * 0.26, bodyH / 2 + 0.04, w * 0.1, { lockColor: true }))
+    civicParapet(g, w * 0.28, w * 0.52, bodyH + 0.08, -w * 0.26, w * 0.1)
+    g.add(mesh(new THREE.BoxGeometry(w * 0.28, bodyH, w * 0.52), mass, w * 0.26, bodyH / 2 + 0.04, w * 0.1, { lockColor: true }))
+    civicParapet(g, w * 0.28, w * 0.52, bodyH + 0.08, w * 0.26, w * 0.1)
+    civicDoor(g, 0, 0.13, -w * 0.06)
+    civicCanopy(g, 0.3, 0.12, 0.3, 0, 0.04)
+    civicPlaza(g, 0.32, 0.28, 0, w * 0.16)
   }
-  hqBrandSign(g, color, bodyH * 0.55, w * 0.38, 0.28)
+  void r
   return g
 }
 
-/** Large HQ tower — ~30–45 storeys with crown; three façade/crown variants. */
+/** Large HQ campus — podium + taller office bar + wing, still low-rise. */
 function kitHqLarge(
   g: THREE.Group,
   w: number,
-  color: number,
+  _color: number,
   r: () => number,
   variant: HqStyleVariant,
 ) {
-  const storeys = 30 + Math.floor(r() * 16) // 30–45
+  const storeys = 3
   const bodyH = storeys * HQ_STOREY_HEIGHT
-  g.userData.kitHeight = bodyH
   g.userData.hqStoreys = storeys
   g.userData.hqVariant = variant
-  hqPlaza(g, w)
-  const base = 0x98a0b4
-  const shell = shellColor(color || 0xa0a8bc, base, 0.3)
-  const bodyMat = mat(shell, { rough: 0.36, metal: 0.28, shellBase: base })
-  const podiumH = HQ_STOREY_HEIGHT * 4
-  g.add(
-    mesh(
-      new THREE.BoxGeometry(w * 0.92, podiumH, w * 0.88),
-      mat(darken(shell, 0.18), { rough: 0.55, metal: 0.15, shellBase: base }),
-      0,
-      podiumH / 2,
-      0,
-      { shellBase: base },
-    ),
-  )
-  const shaftH = bodyH - podiumH
-  const shaftW = variant === 1 ? 0.36 : variant === 2 ? 0.4 : 0.38
-  g.add(
-    mesh(
-      new THREE.BoxGeometry(w * shaftW, shaftH, w * shaftW),
-      bodyMat,
-      variant === 1 ? w * 0.06 : 0,
-      podiumH + shaftH / 2,
-      variant === 2 ? -w * 0.04 : 0,
-      { shellBase: base },
-    ),
-  )
-  for (const glass of hqGlass(w, shaftH, Math.min(14, Math.floor(storeys / 2)), w * (shaftW * 0.52), r, shaftW * 0.85)) {
-    glass.position.y += podiumH
-    if (variant === 1) glass.position.x = w * 0.06
-    if (variant === 2) glass.position.z = -w * 0.04
-    g.add(glass)
-  }
+  hqYard(g, w)
+  const wall = mat(CIVIC_WALL, { rough: 0.8, lockColor: true })
+  const mass = mat(CIVIC_MASS, { rough: 0.75, lockColor: true })
+  const wing = mat(CIVIC_WALL2, { rough: 0.8, lockColor: true })
 
-  // Crown — distinct per variant so large upgrades never look like scaled mediums.
-  const crownY = bodyH
   if (variant === 0) {
-    // Lantern crown
-    g.add(
-      mesh(
-        new THREE.BoxGeometry(w * (shaftW + 0.08), HQ_STOREY_HEIGHT * 1.6, w * (shaftW + 0.08)),
-        mat(0x6a7488, { metal: 0.5, rough: 0.3, lockColor: true }),
-        0,
-        crownY + HQ_STOREY_HEIGHT * 0.8,
-        0,
-        { lockColor: true },
-      ),
-    )
-    g.add(
-      mesh(
-        new THREE.BoxGeometry(w * (shaftW - 0.06), HQ_STOREY_HEIGHT * 1.1, w * (shaftW - 0.06)),
-        mat(0xaaccff, {
-          metal: 0.4,
-          rough: 0.15,
-          emissive: 0x335577,
-          emInt: 0.35,
-          lockColor: true,
-        }),
-        0,
-        crownY + HQ_STOREY_HEIGHT * 2.2,
-        0,
-        { lockColor: true },
-      ),
-    )
+    g.add(mesh(new THREE.BoxGeometry(w * 0.9, 0.3, w * 0.8), mass, 0, 0.19, 0, { lockColor: true }))
+    civicParapet(g, w * 0.9, w * 0.8, 0.38)
+    g.add(mesh(new THREE.BoxGeometry(w * 0.52, bodyH - 0.12, w * 0.44), wall, -0.08, 0.3 + (bodyH - 0.12) / 2, -0.04, { lockColor: true }))
+    civicParapet(g, w * 0.52, w * 0.44, bodyH + 0.22, -0.08, -0.04)
+    g.add(mesh(new THREE.BoxGeometry(w * 0.3, 0.52, w * 0.58), wing, w * 0.28, 0.56, 0.1, { lockColor: true }))
+    civicParapet(g, w * 0.3, w * 0.58, 0.86, w * 0.28, 0.1)
+    civicWindow(g, -0.08, bodyH * 0.72, w * 0.19, w * 0.36, 0.14)
+    civicWindow(g, -0.08, bodyH * 0.42, w * 0.19, w * 0.36, 0.14)
+    civicDoor(g, -0.18, 0.13, w * 0.41)
+    civicCanopy(g, 0.36, 0.16, 0.3, -0.1, w * 0.5)
+    civicSign(g, w * 0.28, 0.7, w * 0.4, 0.18, 0.12)
+    civicPlaza(g, 0.4, 0.22, -0.1, w * 0.48)
+    g.userData.kitHeight = bodyH + 0.28
   } else if (variant === 1) {
-    // Spire
-    g.add(
-      mesh(
-        new THREE.BoxGeometry(w * 0.22, HQ_STOREY_HEIGHT * 1.2, w * 0.22),
-        mat(0x5a6478, { metal: 0.55, lockColor: true }),
-        w * 0.06,
-        crownY + HQ_STOREY_HEIGHT * 0.6,
-        0,
-        { lockColor: true },
-      ),
-    )
-    g.add(
-      mesh(
-        new THREE.CylinderGeometry(0.02, 0.05, HQ_STOREY_HEIGHT * 3.2, 6),
-        mat(0x8890a0, { metal: 0.65, lockColor: true }),
-        w * 0.06,
-        crownY + HQ_STOREY_HEIGHT * 2.8,
-        0,
-        { lockColor: true },
-      ),
-    )
+    g.add(mesh(new THREE.BoxGeometry(w * 0.82, 0.28, w * 0.28), wall, 0, 0.18, -w * 0.26, { lockColor: true }))
+    civicParapet(g, w * 0.82, w * 0.28, 0.36, 0, -w * 0.26)
+    g.add(mesh(new THREE.BoxGeometry(w * 0.28, bodyH * 0.85, w * 0.58), wall, -w * 0.28, bodyH * 0.425 + 0.04, w * 0.08, { lockColor: true }))
+    civicParapet(g, w * 0.28, w * 0.58, bodyH * 0.85 + 0.08, -w * 0.28, w * 0.08)
+    g.add(mesh(new THREE.BoxGeometry(w * 0.28, bodyH * 0.85, w * 0.58), wing, w * 0.28, bodyH * 0.425 + 0.04, w * 0.08, { lockColor: true }))
+    civicParapet(g, w * 0.28, w * 0.58, bodyH * 0.85 + 0.08, w * 0.28, w * 0.08)
+    g.add(mesh(new THREE.BoxGeometry(w * 0.26, bodyH, w * 0.26), mass, 0, bodyH / 2 + 0.04, 0, { lockColor: true }))
+    civicParapet(g, w * 0.26, w * 0.26, bodyH + 0.08)
+    civicDoor(g, 0, 0.13, w * 0.14)
+    civicCanopy(g, 0.32, 0.14, 0.3, 0, w * 0.22)
+    civicPlaza(g, 0.36, 0.24, 0, w * 0.28)
+    g.userData.kitHeight = bodyH + 0.16
   } else {
-    // Chamfered mechanical crown
-    g.add(
-      mesh(
-        new THREE.BoxGeometry(w * (shaftW + 0.1), HQ_STOREY_HEIGHT * 0.9, w * (shaftW + 0.1)),
-        mat(0x4a5566, { metal: 0.48, lockColor: true }),
-        0,
-        crownY + HQ_STOREY_HEIGHT * 0.45,
-        -w * 0.04,
-        { lockColor: true },
-      ),
-    )
-    for (const ox of [-0.08, 0.08] as const) {
-      g.add(
-        mesh(
-          new THREE.BoxGeometry(0.1, HQ_STOREY_HEIGHT * 0.7, 0.1),
-          mat(0x667088, { metal: 0.5, lockColor: true }),
-          ox,
-          crownY + HQ_STOREY_HEIGHT * 1.2,
-          -w * 0.04,
-          { lockColor: true },
-        ),
-      )
-    }
+    g.add(mesh(new THREE.BoxGeometry(w * 0.88, 0.28, w * 0.72), mass, 0, 0.18, 0, { lockColor: true }))
+    civicParapet(g, w * 0.88, w * 0.72, 0.36)
+    g.add(mesh(new THREE.BoxGeometry(w * 0.58, bodyH * 0.78, w * 0.42), wall, -0.08, 0.28 + bodyH * 0.39, -0.06, { lockColor: true }))
+    civicParapet(g, w * 0.58, w * 0.42, 0.28 + bodyH * 0.78 + 0.04, -0.08, -0.06)
+    g.add(mesh(new THREE.BoxGeometry(w * 0.28, 0.46, w * 0.5), wing, w * 0.3, 0.51, 0.12, { lockColor: true }))
+    civicParapet(g, w * 0.28, w * 0.5, 0.78, w * 0.3, 0.12)
+    civicWindow(g, -0.08, 0.72, w * 0.16, w * 0.36, 0.14)
+    civicDoor(g, -0.12, 0.13, w * 0.37)
+    civicCanopy(g, 0.34, 0.16, 0.3, -0.08, w * 0.46)
+    civicSign(g, w * 0.3, 0.62, w * 0.38, 0.16, 0.12)
+    civicPlaza(g, 0.42, 0.2, -0.08, w * 0.46)
+    g.userData.kitHeight = 0.28 + bodyH * 0.78 + 0.12
   }
-  hqBrandSign(g, color, podiumH + shaftH * 0.45, w * 0.42, 0.32)
-  // Total visual height includes crown
-  g.userData.kitHeight = crownY + HQ_STOREY_HEIGHT * (variant === 1 ? 4.2 : variant === 0 ? 2.8 : 1.6)
+  void r
   return g
 }
 
-function kitLab(g: THREE.Group, w: number, h: number, color: number) {
-  const pad = mesh(
-    new THREE.BoxGeometry(w, 0.04, w),
-    mat(0x243040, { rough: 0.9, lockColor: true }),
-    0,
-    0.02,
-    0,
-    { lockColor: true },
-  )
-  g.add(pad)
-  const bodyH = Math.max(0.28, h * 0.55)
-  const body = mesh(
-    new THREE.BoxGeometry(w * 0.85, bodyH, w * 0.7),
-    mat(color || 0x6a90b8, { metal: 0.35, rough: 0.4 }),
-    0,
-    bodyH / 2,
-    0,
-  )
-  g.add(body)
-  const dome = mesh(
-    new THREE.SphereGeometry(0.16, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2),
-    mat(0xaaccff, {
-      metal: 0.3,
-      rough: 0.2,
-      emissive: 0x335577,
-      emInt: 0.35,
-      lockColor: true,
-    }),
-    0.15,
-    bodyH,
-    -0.1,
-    { lockColor: true },
-  )
-  g.add(dome)
-  // Antenna array
-  for (let i = 0; i < 3; i++) {
-    const ant = mesh(
-      new THREE.CylinderGeometry(0.01, 0.015, 0.2, 5),
-      mat(0xcccccc, { metal: 0.7, lockColor: true }),
-      -0.2 + i * 0.12,
-      bodyH + 0.12,
-      0.15,
+function kitLab(g: THREE.Group, w: number, _h: number, _color: number) {
+  hqYard(g, w)
+  const bodyH = 0.4
+  g.add(
+    mesh(
+      new THREE.BoxGeometry(w * 0.72, bodyH, w * 0.52),
+      mat(CIVIC_WALL, { rough: 0.8, lockColor: true }),
+      -0.06,
+      bodyH / 2 + 0.04,
+      0,
       { lockColor: true },
-    )
-    g.add(ant)
-  }
-  const door = mesh(
-    new THREE.BoxGeometry(0.12, 0.14, 0.03),
-    mat(0x1a2030, { lockColor: true }),
-    0,
-    0.1,
-    w * 0.36,
-    { lockColor: true },
+    ),
   )
-  g.add(door)
+  civicParapet(g, w * 0.72, w * 0.52, bodyH + 0.08, -0.06, 0)
+  g.add(
+    mesh(
+      new THREE.BoxGeometry(w * 0.36, bodyH * 0.78, w * 0.36),
+      mat(CIVIC_MASS, { rough: 0.75, lockColor: true }),
+      w * 0.3,
+      bodyH * 0.39 + 0.04,
+      0.14,
+      { lockColor: true },
+    ),
+  )
+  civicParapet(g, w * 0.36, w * 0.36, bodyH * 0.78 + 0.08, w * 0.3, 0.14)
+  civicDoor(g, -0.16, 0.13, w * 0.27)
+  civicWindow(g, 0.1, bodyH * 0.55, w * 0.27, 0.32, 0.14)
+  civicCanopy(g, 0.26, 0.12, 0.28, -0.12, w * 0.34)
+  g.add(
+    mesh(
+      new THREE.BoxGeometry(0.16, 0.08, 0.16),
+      mat(CIVIC_METAL, { rough: 0.4, metal: 0.35, lockColor: true }),
+      -0.06,
+      bodyH + 0.16,
+      0,
+      { lockColor: true },
+    ),
+  )
   return g
 }
 

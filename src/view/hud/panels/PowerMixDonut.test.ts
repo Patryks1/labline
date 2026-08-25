@@ -98,6 +98,7 @@ describe('PowerEfficiencyCard', () => {
     expect(markup).toContain('PUE')
     expect(markup).toContain('PF per MW')
     expect(markup).toContain('Trend builds')
+    expect(markup).not.toContain('PF PF')
   })
 
   it('shows the PF/MW trend once history accumulates', () => {

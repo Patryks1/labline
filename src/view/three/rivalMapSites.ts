@@ -23,7 +23,7 @@ const KIND_LABELS: Record<string, string> = {
   dc_l: 'Hyperscale campus',
   hq: 'HQ',
   hq_m: 'HQ campus',
-  hq_l: 'HQ tower',
+  hq_l: 'HQ campus',
   lab: 'Research lab',
   substation: 'Grid interconnect',
   solar: 'Solar farm',

@@ -64,7 +64,9 @@ export function isServePrecisionResearchUnlocked(
   precision: PlanServePrecision,
   unlocked: readonly string[],
 ): boolean {
-  if (precision === 'fp16' || precision === 'bf16') return true
+  if (precision === 'fp32') return true
+  if (precision === 'fp16') return unlocked.includes('opt_fp16')
+  if (precision === 'bf16') return unlocked.includes('opt_mixed')
   if (precision === 'int8') return unlocked.includes('sys_quant')
   if (precision === 'fp8' || precision === 'int4' || precision === 'nvfp4') {
     return unlocked.includes('sys_fp8')

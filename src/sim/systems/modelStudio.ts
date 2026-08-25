@@ -3,7 +3,7 @@ import {
   defaultToolSkills,
   ensureModelStudio,
   gymPackageById,
-  gymQualityFromInvestment,
+  GYM_PACKAGES,
   gymUnlocked,
   normalizeModelRouters,
   normalizePostTrainGyms,
@@ -22,6 +22,8 @@ import type {
   ToolSkillId,
 } from "../types";
 import { chargeExpense } from "./financeLedger";
+import { dataResearchReservationShare, grossResearchPoolPf } from "./data";
+import { availableHqStaff } from "./staffReservations";
 
 function withAlert(
   state: SimState,
@@ -80,20 +82,44 @@ export function investPostTrainGym(
   }
   const pack = gymPackageById(packageId);
   if (!pack) return withAlert(studio, "warn", "Unknown gym package.");
+  const current = normalizePostTrainGyms(studio.player.postTrainGyms).find(
+    (gym) => gym.kind === kind,
+  );
+  if (!current) return withAlert(studio, "warn", "Gym not found.");
+  if (current.activePackageId) {
+    return withAlert(studio, "warn", `${current.name} already has an upgrade in progress.`);
+  }
+  if (pack.tier !== (current.tier ?? 0) + 1) {
+    const next = GYM_PACKAGES.find((candidate) => candidate.tier === (current.tier ?? 0) + 1);
+    return withAlert(
+      studio,
+      "warn",
+      next ? `Build ${next.label} before the later gym tiers.` : `${current.name} is already at full campus tier.`,
+    );
+  }
+  if ((current.assignedResearchers ?? 0) < pack.minResearchers) {
+    return withAlert(
+      studio,
+      "warn",
+      `Assign ${pack.minResearchers} HQ researchers before starting ${pack.label}.`,
+    );
+  }
+  if ((current.researchShare ?? 0) < 0.05) {
+    return withAlert(studio, "warn", `Reserve at least 5% research compute for ${current.name}.`);
+  }
   const blocked = affordOrWarn(studio, pack, `${kind} gym · ${pack.label}`);
   if (blocked) return blocked;
   const gyms = normalizePostTrainGyms(studio.player.postTrainGyms).map((gym) => {
     if (gym.kind !== kind) return gym;
-    const investedCash = gym.investedCash + pack.cash;
-    const investedComputeCash = gym.investedComputeCash + pack.computeCash;
     return {
       ...gym,
-      investedCash,
-      investedComputeCash,
-      quality: gymQualityFromInvestment(investedCash, investedComputeCash),
+      activePackageId: pack.id,
+      progressPfDays: 0,
+      targetPfDays: pack.researchPfDays,
+      operatingCostPerDay: pack.operatingCostPerDay,
     };
   });
-  const charged = chargeExpense(studio, packageTotalCash(pack), "training");
+  const charged = chargeExpense(studio, packageTotalCash(pack), "capex");
   return withAlert(
     {
       ...charged,
@@ -103,8 +129,156 @@ export function investPostTrainGym(
       },
     },
     "info",
-    `Funded ${kind} gym · ${pack.label}.`,
+    `Started ${kind} gym · ${pack.label}. Research staff and PF are now committed.`,
   );
+}
+
+export interface PostTrainGymAllocation {
+  assignedResearchers?: number;
+  researchShare?: number;
+}
+
+/** Reserve real HQ researchers and a slice of the one shared research pool. */
+export function setPostTrainGymAllocation(
+  state: SimState,
+  kind: PostTrainGymKind,
+  allocation: PostTrainGymAllocation,
+): SimState {
+  const studio = withStudioPlayer(state);
+  const gyms = normalizePostTrainGyms(studio.player.postTrainGyms);
+  const current = gyms.find((gym) => gym.kind === kind);
+  if (!current) return withAlert(studio, "warn", "Gym not found.");
+
+  const maxResearchers = availableHqStaff(studio, {
+    exceptGymKind: kind,
+  }).researchers;
+  const assignedResearchers = Math.max(
+    0,
+    Math.min(
+      maxResearchers,
+      Math.round(allocation.assignedResearchers ?? current.assignedResearchers ?? 0),
+    ),
+  );
+
+  const dataShare = dataResearchReservationShare(studio.player.data);
+  const safetyShare = studio.player.safetyCampaign ? 0.4 : 0;
+  const otherGymShare = gyms.reduce(
+    (sum, gym) => sum + (gym.kind === kind ? 0 : Math.max(0, gym.researchShare ?? 0)),
+    0,
+  );
+  // Keep at least 15% available to catalog research after all data, safety,
+  // and gym reservations. The gym-only normalizer separately prevents
+  // malformed saves from reserving more than its 75% aggregate ceiling.
+  const maxShare = Math.max(
+    0,
+    Math.min(
+      0.75 - otherGymShare,
+      0.85 - dataShare - safetyShare - otherGymShare,
+    ),
+  );
+  const researchShare = Math.max(
+    0,
+    Math.min(maxShare, allocation.researchShare ?? current.researchShare ?? 0),
+  );
+
+  const next = gyms.map((gym) =>
+    gym.kind === kind ? { ...gym, assignedResearchers, researchShare } : gym,
+  );
+  const wasClamped =
+    assignedResearchers !== Math.round(allocation.assignedResearchers ?? assignedResearchers) ||
+    Math.abs(researchShare - (allocation.researchShare ?? researchShare)) > 1e-6;
+  const updated = {
+    ...studio,
+    player: { ...studio.player, postTrainGyms: next },
+  };
+  return wasClamped
+    ? withAlert(updated, "warn", "Gym allocation was capped by available HQ staff or research compute.")
+    : updated;
+}
+
+/** Advance gym construction and continuous curriculum R&D once per game day. */
+export function tickPostTrainGyms(state: SimState): SimState {
+  const studio = withStudioPlayer(state);
+  const normalized = normalizePostTrainGyms(studio.player.postTrainGyms);
+  if (
+    !normalized.some(
+      (gym) =>
+        (gym.assignedResearchers ?? 0) > 0 &&
+        (gym.researchShare ?? 0) > 0 &&
+        (Boolean(gym.activePackageId) || (gym.tier ?? 0) > 0),
+    )
+  ) {
+    return studio;
+  }
+
+  const grossResearchPf = grossResearchPoolPf(studio);
+  let remainingCash = studio.player.cash;
+  let operatingSpend = 0;
+  const messages: string[] = [];
+  const gyms = normalized.map((gym) => {
+    const researchers = Math.max(0, gym.assignedResearchers ?? 0);
+    const share = Math.max(0, gym.researchShare ?? 0);
+    const activePack = GYM_PACKAGES.find((pack) => pack.id === gym.activePackageId);
+    const completedPack = GYM_PACKAGES.find((pack) => pack.tier === (gym.tier ?? 0));
+    const minResearchers = activePack?.minResearchers ?? Math.max(1, completedPack?.minResearchers ?? 1);
+    if (researchers < minResearchers || share <= 0 || grossResearchPf <= 0) return gym;
+
+    const dailyCost = Math.max(
+      0,
+      activePack?.operatingCostPerDay ?? completedPack?.operatingCostPerDay ?? gym.operatingCostPerDay ?? 0,
+    );
+    if (remainingCash + 1e-9 < dailyCost) {
+      if (studio.day % 5 === 0) messages.push(`${gym.name} R&D paused — operating budget exhausted.`);
+      return gym;
+    }
+    remainingCash -= dailyCost;
+    operatingSpend += dailyCost;
+    const staffMult = Math.min(1.35, Math.sqrt(researchers / Math.max(1, minResearchers)));
+    // The share is the physical PF reservation. Extra staff improves how much
+    // research progress that fixed compute produces; it does not draw more PF.
+    const reservedPfToday = grossResearchPf * share;
+    const effectiveProgressToday = reservedPfToday * staffMult;
+
+    if (activePack) {
+      const target = Math.max(0.001, gym.targetPfDays ?? activePack.researchPfDays);
+      const progress = Math.min(
+        target,
+        (gym.progressPfDays ?? 0) + effectiveProgressToday,
+      );
+      if (progress + 1e-9 >= target) {
+        messages.push(`${gym.name} commissioned ${activePack.label}.`);
+        return {
+          ...gym,
+          tier: activePack.tier,
+          activePackageId: null,
+          progressPfDays: 0,
+          targetPfDays: 0,
+          investedCash: gym.investedCash + activePack.cash,
+          investedComputeCash: gym.investedComputeCash + activePack.computeCash,
+          quality: Math.max(gym.quality, activePack.targetQuality),
+          operatingCostPerDay: activePack.operatingCostPerDay,
+        };
+      }
+      return { ...gym, progressPfDays: progress };
+    }
+
+    // A staffed completed gym keeps learning. Returns diminish toward the
+    // tier ceiling, so an expensive campus remains a long-term R&D choice.
+    const tier = Math.max(0, gym.tier ?? 0);
+    const ceiling = Math.min(0.995, (completedPack?.targetQuality ?? gym.quality) + 0.08);
+    const improvement =
+      (ceiling - gym.quality) *
+      Math.min(0.04, effectiveProgressToday / Math.max(80, tier * 180));
+    return { ...gym, quality: Math.min(ceiling, gym.quality + Math.max(0, improvement)) };
+  });
+
+  let next: SimState = {
+    ...studio,
+    player: { ...studio.player, postTrainGyms: gyms },
+  };
+  if (operatingSpend > 0) next = chargeExpense(next, operatingSpend, "research");
+  for (const message of messages) next = withAlert(next, "info", message);
+  return next;
 }
 
 export function teachToolSkill(

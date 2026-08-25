@@ -82,7 +82,7 @@ export function servingPrecisionForModel(
 ): ServePrecision {
   const candidates: ServePrecision[] = [
     ...(apiListed
-      ? [pricing.apiServePrecisionByModel?.[model.id] ?? "fp16"]
+      ? [pricing.apiServePrecisionByModel?.[model.id] ?? "fp32"]
       : []),
     ...pricing.plans
       .filter(
@@ -94,7 +94,7 @@ export function servingPrecisionForModel(
         (plan) =>
           plan.servePrecisionByModel?.[model.id] ??
           plan.servePrecision ??
-          "fp16",
+          "fp32",
       ),
   ];
   return (
@@ -102,7 +102,7 @@ export function servingPrecisionForModel(
       (a, b) =>
         estimateServingMemory({ model, precision: b }).residentMemoryGb -
         estimateServingMemory({ model, precision: a }).residentMemoryGb,
-    )[0] ?? "fp16"
+    )[0] ?? "fp32"
   );
 }
 

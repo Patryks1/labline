@@ -5,7 +5,7 @@ import type {
   EvaluationProfile,
 } from '../../../sim/types'
 import { SUITE_METRICS } from '../../../sim/balance/evaluationSuites'
-import { polygonPoints, radarGeometry, scaledPoint } from './radarGeometry'
+import { RADAR_LABEL_BOX, polygonPoints, radarGeometry, scaledPoint } from './radarGeometry'
 import { consumeChartEscape } from './dataViz/chartInteraction'
 
 export interface RadarComparisonSeries {
@@ -96,7 +96,7 @@ export function RadarChart({
     <figure className={compact ? 'rounded-lg border border-line/70 bg-void/35 p-1.5' : 'rounded-xl border border-line/70 bg-void/35 p-2.5'}>
       <div className={compact ? 'grid gap-1.5 grid-cols-[minmax(0,1fr)_8rem]' : 'grid gap-2 lg:grid-cols-[minmax(0,1fr)_11rem]'}>
         <svg
-          viewBox="-55 -16 430 292"
+          viewBox={geometry.viewBox}
           className={`mx-auto w-full overflow-visible touch-none ${compact ? 'max-w-[14rem]' : 'max-w-[28rem]'}`}
           role="group"
           aria-roledescription="radar chart"
@@ -155,6 +155,7 @@ export function RadarChart({
             const metric = metrics[index]!
             const point = scaledPoint(axis, scores[metric.id] ?? 0)
             const selected = metric.id === active
+            const badgeWidth = Math.max(40, metric.short.length * 5.7 + 10)
             return (
               <g
                 key={metric.id}
@@ -181,19 +182,34 @@ export function RadarChart({
                   strokeWidth="1.5"
                   aria-hidden="true"
                 />
-                <foreignObject
-                  x={axis.labelX - 78}
-                  y={axis.labelY - 14}
-                  width="156"
-                  height="34"
-                  aria-hidden="true"
-                >
-                  <span
-                    className={`w-full rounded px-1 py-0.5 text-center font-mono text-[0.56rem] leading-tight transition ${selected ? 'bg-mint/15 text-bone' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}
+                <g transform={`translate(${axis.labelX} ${axis.labelY})`} aria-hidden="true">
+                  <rect
+                    x={-RADAR_LABEL_BOX.width / 2}
+                    y={-RADAR_LABEL_BOX.height / 2}
+                    width={RADAR_LABEL_BOX.width}
+                    height={RADAR_LABEL_BOX.height}
+                    fill="transparent"
+                  />
+                  {selected ? (
+                    <rect
+                      x={-badgeWidth / 2}
+                      y={-8}
+                      width={badgeWidth}
+                      height={16}
+                      rx={3}
+                      fill="color-mix(in srgb, var(--color-mint) 15%, transparent)"
+                    />
+                  ) : null}
+                  <text
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill={selected ? 'var(--color-bone)' : 'var(--color-muted)'}
+                    className="pointer-events-none font-mono"
+                    style={{ fontSize: 9 }}
                   >
                     {metric.short}
-                  </span>
-                </foreignObject>
+                  </text>
+                </g>
               </g>
             )
           })}
@@ -201,9 +217,9 @@ export function RadarChart({
 
         <figcaption className={compact ? 'min-h-20 border-l border-line/60 pl-2 pt-0 text-[0.9em]' : 'min-h-32 border-t border-line/60 pt-2 lg:border-l lg:border-t-0 lg:pl-3 lg:pt-0'}>
           <div className="text-[0.625rem] uppercase tracking-[0.16em] text-muted">Axis readout</div>
-          <div className="mt-1 flex items-baseline justify-between gap-2">
-            <strong className="text-[0.8125rem] font-medium text-bone">{activeMetric?.label}</strong>
-            <span className="font-mono text-sm text-mint">{activeScore.toFixed(2)}</span>
+          <div className="mt-1 flex items-start justify-between gap-2">
+            <strong className="min-w-0 flex-1 text-[0.8125rem] font-medium leading-snug text-bone">{activeMetric?.label}</strong>
+            <span className="shrink-0 font-mono text-sm tabular-nums text-mint">{activeScore.toFixed(2)}</span>
           </div>
           <div className="mt-1 h-1.5 overflow-hidden rounded-sm bg-panel">
             <div

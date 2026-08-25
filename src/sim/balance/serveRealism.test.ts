@@ -128,6 +128,8 @@ describe('serving realism rebalance', () => {
 
   it('quant compute multipliers cannot diverge between tokenServe and planServeModifiers', () => {
     const unlocks = [
+      'opt_fp16',
+      'opt_mixed',
       'sys_quant',
       'sys_fp8',
       'sys_int4',
@@ -144,7 +146,7 @@ describe('serving realism rebalance', () => {
       expect(fromHelper).toBe(fromTable)
       expect(fromPlans).toBe(fromTable)
     }
-    // FP32 remains native-only and is intentionally absent from the deploy table.
+    // FP32 is the always-available, full-precision deployment baseline.
     expect(precisionComputeMult('fp32')).toBe(2)
   })
 

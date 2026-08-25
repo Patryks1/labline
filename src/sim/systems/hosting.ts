@@ -172,7 +172,7 @@ export function modelHostNeed(
   m: Model,
   opts?: { precision?: ServePrecision; concurrentRequests?: number; contextTokens?: number },
 ): ModelHostNeed {
-  const precision = opts?.precision ?? "fp16";
+  const precision = opts?.precision ?? "fp32";
   const memory = estimateServingMemory({
     model: m,
     precision,

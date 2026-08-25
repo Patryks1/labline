@@ -300,7 +300,7 @@ export function volumesFromRecipe(input: {
     input.postTrainShare ?? DEFAULT_POST_TRAIN_SHARE,
   );
   const postWeights =
-    input.postTrainWeights ?? alignmentDataWeights(input.weights);
+    input.postTrainWeights ?? alignmentDataWeights(normalizeWeights(input.weights));
   return {
     base: allocationsFromMix(input.weights, split.baseMTok),
     align: allocationsFromMix(postWeights, split.postTrainMTok),

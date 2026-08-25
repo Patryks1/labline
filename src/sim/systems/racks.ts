@@ -56,7 +56,7 @@ export function designToSku(design: RackDesign): RackSku | null {
       maxMw: st.mw,
       hostOverheadMw: st.mw * 0.08,
       supportedTrainingFormats: ['fp32', 'fp16_mixed', 'bf16_mixed', 'fp8_hybrid'],
-      supportedServePrecisions: ['fp16', 'bf16', 'fp8', 'int8', 'int4', 'ternary_1_58'],
+      supportedServePrecisions: ['fp32', 'fp16', 'bf16', 'fp8', 'int8', 'int4', 'ternary_1_58'],
     },
     price: Math.max(chassis.baseCost, Math.round(st.buildCost)),
     leadTimeDays: 5,

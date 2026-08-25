@@ -352,6 +352,7 @@ export function companyFromRival(_state: SimState, rival: RivalLab): CompanyStat
       marketingSpendPerDay: rival.marketingSpendPerDay ?? 0,
       marketingRevenueMultiple: rival.marketingRevenueMultiple,
       marketingChannels: rival.marketingChannels,
+      marketingOutcome: rival.marketingOutcome,
       enterpriseContracts: rival.enterpriseContracts ?? 0,
       computeLeaseIncomeToday: rival.computeLeaseIncomeToday,
       computeLeaseCostToday: rival.computeLeaseCostToday,
@@ -403,6 +404,7 @@ export function labFromCompany(company: CompanyState): LabState {
     marketingSpendPerDay: company.ops.marketingSpendPerDay,
     marketingRevenueMultiple: company.ops.marketingRevenueMultiple,
     marketingChannels: company.ops.marketingChannels,
+    marketingOutcome: company.ops.marketingOutcome,
     enterpriseContracts: company.ops.enterpriseContracts,
     wagesPerDay: company.organisation.wagesPerDay,
     abstractFlopsPf: company.infrastructure.abstractFlopsPf ?? 0,
@@ -473,11 +475,11 @@ export function playerFromCompany(company: CompanyState, previous: PlayerState):
     marketingSpendPerDay: company.ops.marketingSpendPerDay,
     marketingRevenueMultiple: company.ops.marketingRevenueMultiple,
     marketingChannels: company.ops.marketingChannels,
+    marketingOutcome: company.ops.marketingOutcome,
     enterpriseContracts: company.ops.enterpriseContracts,
     loans: company.ops.loans,
     capital: company.ops.capital,
     powerEfficiencyHistory: company.ops.powerEfficiencyHistory,
-    marketingOutcome: company.ops.marketingOutcome,
   };
 }
 
@@ -546,6 +548,7 @@ export function rivalFromCompany(company: CompanyState, previous: RivalLab): Riv
     marketingSpendPerDay: company.ops.marketingSpendPerDay,
     marketingRevenueMultiple: company.ops.marketingRevenueMultiple,
     marketingChannels: company.ops.marketingChannels,
+    marketingOutcome: company.ops.marketingOutcome,
     enterpriseContracts: company.ops.enterpriseContracts,
     wagesPerDay: company.organisation.wagesPerDay,
     publicEstimate: company.strategy?.publicEstimate,

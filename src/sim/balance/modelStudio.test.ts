@@ -6,6 +6,7 @@ import {
   gymQualityForStage,
   gymQualityFromInvestment,
   meanToolProficiency,
+  normalizePostTrainGyms,
   packageTotalCash,
   postTrainGymWorkMult,
   postTrainStageCashCost,
@@ -18,6 +19,8 @@ import { createGame } from '../createGame'
 import {
   createModelRouter,
   investPostTrainGym,
+  setPostTrainGymAllocation,
+  tickPostTrainGyms,
   setActiveModelRouter,
   setRouterLane,
   teachToolSkill,
@@ -54,6 +57,18 @@ function job(trainMTok: number, quality = 70): TrainingJob {
 }
 
 describe('model studio gyms and tools', () => {
+  it('repairs legacy gym allocations that overbook the shared research pool', () => {
+    const malformed = defaultPostTrainGyms().map((gym, index) => ({
+      ...gym,
+      researchShare: index < 2 ? 0.75 : 0,
+    }))
+    const normalized = normalizePostTrainGyms(malformed)
+
+    expect(
+      normalized.reduce((sum, gym) => sum + (gym.researchShare ?? 0), 0),
+    ).toBeCloseTo(0.75, 12)
+  })
+
   it('raises gym quality with cash and rented compute', () => {
     const foundry = gymQualityFromInvestment(6_000_000, 2_000_000)
     const campus = gymQualityFromInvestment(120_000_000, 90_000_000)
@@ -70,6 +85,8 @@ describe('model studio gyms and tools', () => {
             ...gym,
             investedCash: 120_000_000,
             investedComputeCash: 90_000_000,
+            tier: 3,
+            quality: gymQualityFromInvestment(120_000_000, 90_000_000),
           }
         : gym,
     )
@@ -113,25 +130,118 @@ describe('model studio gyms and tools', () => {
     expect(next.alerts[0]?.message).toMatch(/Research/i)
   })
 
-  it('funds a gym and teaches a tool from cash', () => {
+  it('builds a gym through staffed research instead of buying instant quality', () => {
     let state = createGame(45)
     state = {
       ...state,
       player: {
         ...state.player,
-        cash: 80_000_000,
+        cash: 120_000_000,
+        staff: {
+          researcher: 6,
+          engineer: state.player.staff?.engineer ?? 0,
+          data_processor: state.player.staff?.data_processor ?? 0,
+          ops: state.player.staff?.ops ?? 0,
+        },
+        allocation: { training: 0.1, inference: 0.1, research: 0.8 },
         researchUnlocked: [...state.player.researchUnlocked, 'domain_coding'],
       },
+      computeLeases: [
+        {
+          id: 'gym-test-compute',
+          rivalId: state.rivals[0]!.id,
+          playerSells: false,
+          pf: 100,
+          pricePerPfDay: 100,
+          daysLeft: 30,
+          daysTotal: 30,
+          status: 'active' as const,
+          from: 'rival' as const,
+        },
+      ],
     }
     const before = state.player.cash
-    state = investPostTrainGym(state, 'code', 'cluster')
-    const gym = state.player.postTrainGyms?.find((entry) => entry.kind === 'code')
-    expect(gym?.quality).toBeGreaterThan(0.3)
-    expect(state.player.cash).toBe(before - packageTotalCash(GYM_PACKAGES[1]!))
+    state = setPostTrainGymAllocation(state, 'code', {
+      assignedResearchers: 3,
+      researchShare: 0.5,
+    })
+    state = investPostTrainGym(state, 'code', 'foundry')
+    let gym = state.player.postTrainGyms?.find((entry) => entry.kind === 'code')
+    expect(gym?.quality).toBe(0)
+    expect(gym?.activePackageId).toBe('foundry')
+    expect(state.player.cash).toBe(before - packageTotalCash(GYM_PACKAGES[0]!))
+    state = tickPostTrainGyms(state)
+    gym = state.player.postTrainGyms?.find((entry) => entry.kind === 'code')
+    expect(gym?.activePackageId).toBeNull()
+    expect(gym?.tier).toBe(1)
+    expect(gym?.quality).toBeGreaterThanOrEqual(0.3)
+    expect(state.player.cash).toBeLessThan(
+      before - packageTotalCash(GYM_PACKAGES[0]!),
+    )
     state = teachToolSkill(state, 'json', 'drill')
     expect(
       state.player.toolSkills?.find((skill) => skill.id === 'json')?.proficiency,
     ).toBeGreaterThan(0.4)
+  })
+
+  it('caps gym reservations by the HQ staff and shared research pools', () => {
+    let state = createGame(145)
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        staff: { researcher: 4, engineer: 1, data_processor: 1, ops: 0 },
+        data: {
+          ...state.player.data,
+          synthQueue: [
+            {
+              id: 'synth-reservation',
+              domain: 'chat',
+              modelId: 'teacher',
+              modelName: 'Teacher',
+              targetMTok: 100,
+              progressMTok: 0,
+              researchShare: 0.7,
+              qualityTier: 'lq',
+            },
+          ],
+        },
+      },
+    }
+    state = setPostTrainGymAllocation(state, 'code', {
+      assignedResearchers: 99,
+      researchShare: 0.7,
+    })
+    const gym = state.player.postTrainGyms?.find((entry) => entry.kind === 'code')
+    expect(gym?.assignedResearchers).toBe(4)
+    expect(gym?.researchShare).toBeCloseTo(0.15)
+    expect(state.alerts[0]?.message).toMatch(/capped/i)
+  })
+
+  it('never lets interactive gym allocations exceed their aggregate PF cap', () => {
+    let state = createGame(146)
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        staff: { researcher: 20, engineer: 1, data_processor: 1, ops: 0 },
+      },
+    }
+    state = setPostTrainGymAllocation(state, 'code', {
+      assignedResearchers: 4,
+      researchShare: 0.7,
+    })
+    state = setPostTrainGymAllocation(state, 'math', {
+      assignedResearchers: 4,
+      researchShare: 0.7,
+    })
+
+    expect(
+      state.player.postTrainGyms?.reduce(
+        (sum, gym) => sum + (gym.researchShare ?? 0),
+        0,
+      ),
+    ).toBeCloseTo(0.75, 12)
   })
 })
 

@@ -56,6 +56,7 @@ import {
   teacherDomainStrength,
 } from "../balance/syntheticTraining";
 import { activeBalanceTuning } from "../balance/tuning";
+import { gymResearchReservationShare } from "../balance/modelStudio";
 import {
   synthAcceptanceChances,
   synthTeacherActiveParamsB,
@@ -66,7 +67,7 @@ import {
   syntheticDatasetAsset,
   type DatasetPruneBreakdown,
 } from "./dataAssets";
-import { playerStaff } from "./staff";
+import { availableHqStaff, unreservedStaffHeadcount } from "./staffReservations";
 import { energyPriceForState } from "./map";
 import {
   cloneLabData,
@@ -143,12 +144,34 @@ export function ensureLabData(state: SimState): LabData {
   return cloneLabData(raw);
 }
 
-/** Research PF fraction available for tech (1 − data gen). */
-export function researchPoolForTech(state: SimState): number {
+/** In-flight tech-tree / pod work keeps at least this share of the research pool. */
+export const TREE_RESEARCH_POOL_FLOOR = 0.15;
+
+function treeResearchActive(state: SimState): boolean {
+  return (
+    Boolean(state.player.activeResearch) ||
+    (state.player.researchPrograms?.some(
+      (program) => program.phase !== "complete",
+    ) ??
+      false)
+  );
+}
+
+/** Research PF fraction available for tech (1 − data gen / gyms / safety). */
+export function researchPoolForTech(
+  state: SimState,
+  options?: { reserveTree?: boolean },
+): number {
   const data = ensureLabData(state);
-  const share = dataResearchReservationShare(data);
+  const share =
+    dataResearchReservationShare(data) +
+    gymResearchReservationShare(state.player.postTrainGyms);
   const safetyShare = state.player.safetyCampaign ? 0.4 : 0;
-  return Math.max(0, 1 - share - safetyShare);
+  const remainder = Math.max(0, 1 - share - safetyShare);
+  if (options?.reserveTree || treeResearchActive(state)) {
+    return Math.max(TREE_RESEARCH_POOL_FLOOR, remainder);
+  }
+  return remainder;
 }
 
 /** One physical research pool is shared by synthesis, pruning, and tech research. */
@@ -167,18 +190,29 @@ export function dataResearchReservationShare(data: LabData): number {
   );
 }
 
+/** Maximum data-generation share after gym and safety reservations. */
+export function maxDataResearchShareForState(state: SimState): number {
+  const gymShare = gymResearchReservationShare(state.player.postTrainGyms);
+  const safetyShare = state.player.safetyCampaign ? 0.4 : 0;
+  return Math.max(
+    0,
+    DATA_ECONOMY.maxDataGenResearchShare - gymShare - safetyShare,
+  );
+}
+
 /** Gross research PF before continuous data-generation reservations are removed. */
 export function grossResearchPoolPf(state: SimState): number {
-  const data = ensureLabData(state);
-  const reserved = dataResearchReservationShare(data);
   const snapshot = computeSnapshot(state);
-  const techPool = snapshot.pools.research;
+  const scheduledPool = snapshot.pools.research;
   // The scheduler backfills an idle research reservation into training. Action
   // previews still need the capacity that would return when research work is queued.
   const prospectivePool =
     snapshot.effectiveFlopsPf *
     normalizeAllocation(state.player.allocation).research;
-  return Math.max(techPool / Math.max(0.15, 1 - reserved), prospectivePool);
+  // ComputeSnapshot exposes the physical research pool before data/gym/safety
+  // consumers split it. Dividing by a reservation here double-counted that
+  // slice and let concurrent work consume more PF than the lab owned.
+  return Math.max(scheduledPool, prospectivePool);
 }
 
 export const DATA_PRUNE_QUALITY_FLOOR = 65;
@@ -315,8 +349,11 @@ export function estimateDataPrune(
     Math.min(6, Math.ceil(totalMTok / 300)),
   );
   const existingShare = dataResearchReservationShare(data);
-  const researchers = playerStaff(state).researcher ?? 0;
-  const engineers = playerStaff(state).engineer ?? 0;
+  // Queue admission checks the lab's non-data reservations; prune jobs can
+  // wait behind one another and the daily scheduler assigns their slots.
+  const availableStaff = availableHqStaff(state, { includeDataJobs: false });
+  const researchers = availableStaff.researchers;
+  const engineers = availableStaff.engineers;
   const availableResearchPf =
     grossResearchPoolPf(state) * DATA_PRUNE_RESEARCH_SHARE;
   const cashCost = totalMTok * cashPerMTok;
@@ -343,7 +380,7 @@ export function estimateDataPrune(
     reason = "No research compute available";
   else if (
     existingShare + DATA_PRUNE_RESEARCH_SHARE >
-    DATA_ECONOMY.maxDataGenResearchShare + 1e-9
+    maxDataResearchShareForState(state) + 1e-9
   ) {
     reason = "Research pool is fully reserved";
   }
@@ -504,8 +541,9 @@ export function estimateAllDataPrunes(state: SimState): AllDataPruneEstimate {
   const totalShare =
     dataResearchReservationShare(data) +
     candidates.length * DATA_PRUNE_RESEARCH_SHARE;
-  const researchers = playerStaff(state).researcher ?? 0;
-  const engineers = playerStaff(state).engineer ?? 0;
+  const availableStaff = availableHqStaff(state, { includeDataJobs: false });
+  const researchers = availableStaff.researchers;
+  const engineers = availableStaff.engineers;
   const estimatedDays = estimateConcurrentPruneDays(
     candidates,
     researchers,
@@ -529,7 +567,7 @@ export function estimateAllDataPrunes(state: SimState): AllDataPruneEstimate {
     )
   ) {
     reason = "No research compute available";
-  } else if (totalShare > DATA_ECONOMY.maxDataGenResearchShare + 1e-9) {
+  } else if (totalShare > maxDataResearchShareForState(state) + 1e-9) {
     reason = "Needs more free research compute";
   }
   return {
@@ -749,7 +787,7 @@ export function startSynthGen(
 
   const share = Math.max(0.05, Math.min(0.5, opts.researchShare));
   const used = dataResearchReservationShare(data);
-  if (used + share > DATA_ECONOMY.maxDataGenResearchShare + 0.001) {
+  if (used + share > maxDataResearchShareForState(state) + 0.001) {
     return alert(
       state,
       "warn",
@@ -1228,7 +1266,7 @@ export function startSynthBudget(
     );
     const availableShare = Math.max(
       0,
-      DATA_ECONOMY.maxDataGenResearchShare - otherShare,
+      maxDataResearchShareForState(state) - otherShare,
     );
     if (availableShare < 0.05) {
       return alert(
@@ -1275,7 +1313,7 @@ export function startSynthBudget(
   }
   const share = Math.max(0.05, Math.min(0.5, opts.researchShare));
   const used = dataResearchReservationShare(data);
-  if (used + share > DATA_ECONOMY.maxDataGenResearchShare + 0.001) {
+  if (used + share > maxDataResearchShareForState(state) + 0.001) {
     return alert(
       state,
       "warn",
@@ -1440,8 +1478,9 @@ function processDataPruneJobs(
   let data = cloneLabData(dataInput);
   let cash = cashInput;
   let alerts = alertsInput ?? state.alerts;
-  const researchers = playerStaff(state).researcher ?? 0;
-  const engineers = playerStaff(state).engineer ?? 0;
+  const availableStaff = availableHqStaff(state, { includeDataJobs: false });
+  const researchers = availableStaff.researchers;
+  const engineers = availableStaff.engineers;
   let researcherSlots = Math.max(0, researchers);
   let engineerSlots = Math.max(0, engineers);
   const grossResearchPf = grossResearchPoolPf({
@@ -1810,6 +1849,13 @@ export function tickData(state: SimState): SimState {
       continue;
     }
     const pfScale = pf > 0 ? Math.min(1, budgetLeft / pf) : 0;
+    // Targeted generators use the same research-compute cash burden as the
+    // automatic portfolio. Fleet electricity is settled separately.
+    cash -=
+      pf *
+      pfScale *
+      ECONOMY.researchCashPerPfDay *
+      0.55;
     const filterIntensity = Math.max(
       0,
       Math.min(1, job.filterIntensity ?? 0.5),
@@ -1936,25 +1982,30 @@ export function tickData(state: SimState): SimState {
     snap.pools.research *
     researchPoolForTech({ ...state, player: { ...state.player, data } });
 
+  const dataRuntimeStaff = unreservedStaffHeadcount({
+    ...state,
+    player: { ...state.player, data },
+  });
+
   data = enqueueAutomaticProcessing({
     data,
     day: state.day,
     labId: state.playerLabId,
     dataQuality: state.player.dataQuality,
-    staff: state.player.staff,
+    staff: dataRuntimeStaff,
   });
   const effects = aggregateEffects(state.player.researchUnlocked);
   const processing = processDataJobs({
     data,
     cash,
     throughputMTok: dataProcessingThroughput({
-      staff: state.player.staff,
+      staff: dataRuntimeStaff,
       researchPf: researchLeft,
       labSites: campusBonuses(state).labSites,
       dataFlywheel: effects.dataFlywheel ?? 0,
     }),
     dataQuality: state.player.dataQuality,
-    staff: state.player.staff,
+    staff: dataRuntimeStaff,
     day: state.day,
   });
   data = processing.data;

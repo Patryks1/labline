@@ -20,12 +20,15 @@ import type {
   SimState,
 } from "../../../sim/types";
 import {
+  acceptInvestorPitch,
   acceptEquityOffer,
   applyForDebt,
   bankingProducts,
   buyBackEquity,
   capitalSnapshot,
   equityBuybackQuote,
+  investorPitchModels,
+  investorPitchPreview,
   repayDebt as repayTypedDebt,
   requestEquityOffers,
 } from "../../../sim/systems/capital";
@@ -46,6 +49,7 @@ import { CardGrid, GameCard } from "../ui/kit";
 import {
   HudButton,
   HudRange,
+  HudSelect,
   MetricTile,
   PanelScaffold,
   StatusChip,
@@ -152,8 +156,16 @@ export function OrgPanel({
   >(workspace === "marketing" ? "marketing" : workspace === "capital" ? "funding" : "staff");
   const [capitalView, setCapitalView] = useState<CapitalView>("ownership");
   const [buybackPct, setBuybackPct] = useState(1);
+  const pitchModels = useMemo(() => investorPitchModels(state), [state]);
+  const [pitchModelId, setPitchModelId] = useState<string | null>(null);
   const capital = useMemo(() => capitalSnapshot(state), [state]);
   const equityOffers = useMemo(() => requestEquityOffers(state), [state]);
+  const selectedPitchModelId = pitchModels.some((model) => model.id === pitchModelId)
+    ? pitchModelId
+    : pitchModels[0]?.id ?? null;
+  const pitchPreview = selectedPitchModelId
+    ? investorPitchPreview(state, selectedPitchModelId)
+    : null;
   const bankProducts = useMemo(() => bankingProducts(state), [state]);
   const featuredBankProducts = bankProducts.filter((product) =>
     FEATURED_BANK_KINDS.includes(product.kind as FeaturedBankKind),
@@ -205,6 +217,10 @@ export function OrgPanel({
       return Math.min(maxDraw, Math.max(minDraw, prev));
     });
   }, [maxDraw, minDraw]);
+
+  useEffect(() => {
+    if (pitchModelId !== selectedPitchModelId) setPitchModelId(selectedPitchModelId);
+  }, [pitchModelId, selectedPitchModelId]);
 
   const clampedDraw =
     maxDraw < minDraw ? 0 : Math.min(maxDraw, Math.max(minDraw, customAmt));
@@ -618,6 +634,77 @@ export function OrgPanel({
                   )}
                 </div>
 
+                <div className="space-y-2 rounded-lg border border-mint/25 bg-mint/5 p-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <h4 className="text-[0.75rem] font-medium text-bone">
+                        Pitch a model to investors
+                      </h4>
+                      <p className="mt-0.5 text-[0.625rem] leading-4 text-muted">
+                        Internal checkpoints and released models can unlock a
+                        model-backed raise. Capability, reliability, and data
+                        freshness change the odds and dilution.
+                      </p>
+                    </div>
+                    <span className="shrink-0 font-mono text-[0.625rem] uppercase tracking-wider text-mint">
+                      seeded desk
+                    </span>
+                  </div>
+                  {pitchModels.length === 0 ? (
+                    <p className="rounded border border-line/60 bg-void/35 px-2 py-1.5 text-[0.6875rem] text-muted">
+                      Keep an internal checkpoint or release a model before
+                      opening an investor conversation.
+                    </p>
+                  ) : (
+                    <>
+                      <label className="block text-[0.625rem] uppercase tracking-wider text-muted" htmlFor="investor-pitch-model">
+                        Model to disclose
+                      </label>
+                      <HudSelect
+                        id="investor-pitch-model"
+                        value={selectedPitchModelId ?? ""}
+                        onChange={(event) => setPitchModelId(event.target.value)}
+                        className="min-h-11 w-full rounded border border-line bg-void/60 px-2 text-[0.75rem] text-bone sm:min-h-0"
+                        aria-label="Model to pitch to investors"
+                      >
+                        {pitchModels.map((model) => (
+                          <option key={model.id} value={model.id} className="bg-void">
+                            {model.name} · cap {model.capability.toFixed(0)} · {model.release === "released" || model.shipped ? "released" : "internal"}
+                          </option>
+                        ))}
+                      </HudSelect>
+                      {pitchPreview ? (
+                        <div className="space-y-1.5 rounded border border-line/70 bg-void/35 p-2" aria-live="polite">
+                          <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+                            <Stat label="Chance" value={`${(pitchPreview.successChance * 100).toFixed(0)}%`} accent={pitchPreview.successChance >= 0.6 ? "text-mint" : "text-amber"} />
+                            <Stat label="Raise" value={pitchPreview.cashRaised > 0 ? money(pitchPreview.cashRaised) : "—"} />
+                            <Stat label="Dilution" value={pitchPreview.investorOwnership > 0 ? `${(pitchPreview.investorOwnership * 100).toFixed(1)}%` : "—"} />
+                            <Stat label="Data drag" value={`${(pitchPreview.overusePenalty * 100).toFixed(0)}%`} accent={pitchPreview.overusePenalty > 0.35 ? "text-amber" : "text-bone"} />
+                          </div>
+                          <p className="font-mono text-[0.625rem] leading-4 text-muted">
+                            {pitchPreview.investorName} · {money(pitchPreview.preMoneyValuation)} pre / {money(pitchPreview.postMoneyValuation)} post · frontier {pitchPreview.frontierCapability.toFixed(0)} · confidence floor {(pitchPreview.confidenceRequired * 100).toFixed(0)}%
+                          </p>
+                          {pitchPreview.reason ? (
+                            <p className="rounded border border-amber/25 bg-amber/5 px-2 py-1 text-[0.625rem] text-amber" role="status">
+                              {pitchPreview.reason}
+                            </p>
+                          ) : null}
+                          <HudButton
+                            type="button"
+                            variant="primary"
+                            disabled={!pitchPreview.eligible}
+                            onClick={() => setState(acceptInvestorPitch(state, pitchPreview.modelId))}
+                            className="min-h-11 w-full rounded bg-mint/20 px-2 py-1.5 font-mono text-[0.6875rem] text-mint disabled:opacity-35 sm:min-h-0"
+                            title={pitchPreview.eligible ? "Resolve the seeded investor pitch" : pitchPreview.reason}
+                          >
+                            Pitch {pitchPreview.modelName}
+                          </HudButton>
+                        </div>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+
                 <div className="space-y-1.5">
                   <h4 className="text-[0.6875rem] font-medium uppercase tracking-wider text-muted">
                     Equity term sheets
@@ -668,7 +755,7 @@ export function OrgPanel({
                         Bank offers
                       </h4>
                       <p className="mt-0.5 text-[0.625rem] text-muted">
-                        Three lenders. Choose the fit for your next move.
+                        Specialist lenders. Choose the fit for your next move.
                       </p>
                     </div>
                     <span className="shrink-0 font-mono text-[0.625rem] text-amber">
@@ -1044,7 +1131,12 @@ export function OrgPanel({
   );
 }
 
-const FEATURED_BANK_KINDS = ["revolver", "equipment", "venture_debt"] as const;
+const FEATURED_BANK_KINDS = [
+  "revolver",
+  "equipment",
+  "project_finance",
+  "venture_debt",
+] as const;
 type FeaturedBankKind = (typeof FEATURED_BANK_KINDS)[number];
 
 const BANKING_OFFER_PROFILE: Record<
@@ -1062,6 +1154,12 @@ const BANKING_OFFER_PROFILE: Record<
     name: "Equipment loan",
     share: 0.6,
     locked: "Own racks to unlock",
+  },
+  project_finance: {
+    bank: "Atlas Infrastructure",
+    name: "Campus finance",
+    share: 0.35,
+    locked: "Build a data-center campus to unlock",
   },
   venture_debt: {
     bank: "Frontier Capital",

@@ -64,7 +64,11 @@ import {
 import { startTraining, releaseFromJob, tickTraining } from './systems/training'
 import { buildScaledModel } from './balance/modelBuild'
 import {
+  apiComparablePeerRows,
+  apiDemandElasticityMultiplier,
   apiDemandPricePenalty,
+  analyzeApiPricing,
+  suggestCompetitiveApiInOut,
   suggestPlanPriceAndUsage,
 } from './balance/pricing'
 import {
@@ -269,6 +273,199 @@ const basePlan = (over: Partial<SubPlan> = {}): SubPlan => ({
   ...over,
 })
 
+function apiDemandFixture(cap = 55): SimState {
+  let s = shipModel(createGame(8801), cap)
+  s = withHall(s, 96)
+  const modelId = s.player.models[0]!.id
+  return {
+    ...s,
+    player: {
+      ...s.player,
+      rackFleet: s.player.rackFleet.map((r) => ({ ...r, count: 96 })),
+      allocation: { training: 0.1, inference: 0.85, research: 0.05 },
+      pricing: {
+        ...s.player.pricing,
+        apiModelIds: [modelId],
+        plans: [],
+      },
+    },
+  }
+}
+
+function withRivalApiOffer(
+  s: SimState,
+  rivalIndex: number,
+  cap: number,
+  pin: number,
+  pout: number,
+): SimState {
+  const rival = s.rivals[rivalIndex]
+  if (!rival) return s
+  const built = buildScaledModel({
+    id: `rival-api-${rival.id}-${cap}`,
+    name: `${rival.name} API`,
+    paramsB: 3,
+    family: 'dense',
+    day: s.day,
+    dataCoverage: 20,
+    dataQuality: 65,
+    postTrain: 'none',
+  })
+  const blend = blendApiPrice(pin, pout)
+  const model = {
+    ...built,
+    capability: cap,
+    quality: { ...built.quality, reliability: 58, chat: 55 },
+    shipped: true,
+    release: 'released' as const,
+    apiPricePerMTok: blend,
+    apiPriceInPerMTok: pin,
+    apiPriceOutPerMTok: pout,
+  }
+  const rivals = [...s.rivals]
+  rivals[rivalIndex] = {
+    ...rival,
+    flopsPf: 2_000_000,
+    models: [model],
+    pricing: {
+      ...rival.pricing,
+      apiPricePerMTok: blend,
+      apiPriceInPerMTok: pin,
+      apiPriceOutPerMTok: pout,
+    },
+  }
+  return { ...s, rivals }
+}
+
+describe('API suggested price and similar-capability demand', () => {
+  it('treats the suggested undercut as in-band for demand math', () => {
+    const peers = [
+      { price: 4, capability: 68, featureScore: 18, tokPerSec: 60 },
+      { price: 2.4, capability: 54, featureScore: 18, tokPerSec: 52 },
+    ]
+    const suggested = suggestCompetitiveApiInOut({
+      costIn: 0.4,
+      costOut: 1.2,
+      capability: 52,
+      featureScore: 18,
+      peers: peers.map((peer) => ({
+        priceIn: peer.price * 0.3,
+        priceOut: peer.price * 0.7,
+        capability: peer.capability,
+        featureScore: peer.featureScore,
+        tokPerSec: peer.tokPerSec,
+      })),
+      fallbackPriceIn: 1,
+      fallbackPriceOut: 3,
+    })
+    const blend = blendApiPrice(suggested.priceIn, suggested.priceOut)
+    const status = analyzeApiPricing({
+      price: blend,
+      marginalCost: 0.5,
+      capability: 52,
+      featureScore: 18,
+      peers,
+    })
+    expect(status.ratioToPeer).not.toBeNull()
+    expect(status.ratioToPeer!).toBeGreaterThan(0.3)
+    expect(status.ratioToPeer!).toBeLessThan(1.05)
+    expect(
+      apiDemandElasticityMultiplier({
+        ratioToPeer: status.ratioToPeer,
+        elasticity: 1.5,
+      }),
+    ).toBeGreaterThan(0.95)
+  })
+
+  it('undercutting while a bit worse still earns API demand after settlement', () => {
+    let s = apiDemandFixture(52)
+    s = withRivalApiOffer(s, 0, 62, 1.2, 3.6)
+    const rivalPeers = s.rivals[0]!.models.map((model) => ({
+      priceIn: model.apiPriceInPerMTok!,
+      priceOut: model.apiPriceOutPerMTok!,
+      capability: model.capability,
+      featureScore: model.modalities.length * 18,
+      tokPerSec:
+        model.serviceProfile?.interactiveTokPerSec ?? 52 * model.tokPerSecMult,
+    }))
+    const hostingIn = s.player.models[0]!.costApiPriceIn
+    const hostingOut = s.player.models[0]!.costApiPriceOut
+    const suggested = suggestCompetitiveApiInOut({
+      costIn: hostingIn,
+      costOut: hostingOut,
+      capability: 52,
+      featureScore: 18,
+      peers: rivalPeers,
+      fallbackPriceIn: hostingIn,
+      fallbackPriceOut: hostingOut,
+    })
+    s = withApiPrices(s, suggested.priceIn, suggested.priceOut)
+    s = tickMarket(s)
+    expect(s.lastMarket.apiDemandMTok ?? 0).toBeGreaterThan(0.05)
+  })
+
+  it('frontier with a modest premium still earns API demand', () => {
+    let s = apiDemandFixture(68)
+    s = withRivalApiOffer(s, 0, 60, 1, 3)
+    const rival = s.rivals[0]!.models[0]!
+    const rivalBlend = blendApiPrice(
+      rival.apiPriceInPerMTok!,
+      rival.apiPriceOutPerMTok!,
+    )
+    const premiumIn = rival.apiPriceInPerMTok! * 1.12
+    const premiumOut = rival.apiPriceOutPerMTok! * 1.12
+    expect(blendApiPrice(premiumIn, premiumOut)).toBeGreaterThan(rivalBlend)
+    s = withApiPrices(s, premiumIn, premiumOut)
+    s = tickMarket(s)
+    expect(s.lastMarket.apiDemandMTok ?? 0).toBeGreaterThan(0.05)
+  })
+
+  it('extreme overpricing collapses API demand versus a competitive list', () => {
+    let competitive = apiDemandFixture(55)
+    competitive = withRivalApiOffer(competitive, 0, 58, 1, 3)
+    competitive = withApiPrices(competitive, 1, 3)
+    competitive = tickMarket(competitive)
+
+    let gouged = apiDemandFixture(55)
+    gouged = withRivalApiOffer(gouged, 0, 58, 1, 3)
+    gouged = withApiPrices(gouged, 120, 300)
+    gouged = tickMarket(gouged)
+
+    expect(competitive.lastMarket.apiDemandMTok ?? 0).toBeGreaterThan(
+      gouged.lastMarket.apiDemandMTok ?? 0,
+    )
+    expect(gouged.lastMarket.apiDemandMTok ?? 0).toBeLessThan(
+      (competitive.lastMarket.apiDemandMTok ?? 0) * 0.15,
+    )
+  })
+
+  it('lists similar-capability rivals for the price control', () => {
+    const rows = apiComparablePeerRows(
+      2.1,
+      { capability: 55, featureScore: 18, tokPerSec: 52 },
+      [
+        {
+          name: 'Frontier',
+          price: 4,
+          capability: 85,
+          featureScore: 18,
+          tokPerSec: 60,
+        },
+        {
+          name: 'Peer',
+          price: 2.4,
+          capability: 56,
+          featureScore: 18,
+          tokPerSec: 50,
+        },
+      ],
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.name).toBe('Peer')
+    expect(rows[0]?.position).toBe('cheaper')
+  })
+})
+
 describe('gradual commercial elasticity and allowance abuse', () => {
   it('keeps near-market pricing unpenalized and preserves modality niches at high prices', () => {
     expect(apiDemandPricePenalty({ ratioToPeer: 1.12, kind: 'language' })).toBeLessThan(0.35)
@@ -391,6 +588,76 @@ describe('gradual commercial elasticity and allowance abuse', () => {
     )
     expect(video.includedMTokPerMonth).toBeLessThanOrEqual(300)
     expect(video.pricePerMonth).toBeLessThanOrEqual(5_000)
+  })
+})
+
+describe('subscriber enrollment caps', () => {
+  it('caps shaped demand before usage/compute and reports demand separately', () => {
+    let state = shipModel(createGame(26_016), 64)
+    const modelId = state.player.models[0]!.id
+    state = {
+      ...state,
+      rivals: state.rivals.map((rival) => ({ ...rival, models: [] })),
+      player: {
+        ...state.player,
+        pricing: {
+          ...state.player.pricing,
+          plans: [
+            basePlan({
+              id: 'capped',
+              name: 'Capped',
+              modelIds: [modelId],
+              subscriberCap: 10,
+            }),
+          ],
+        },
+      },
+    }
+
+    const next = tickMarket(state)
+    const stats = next.lastMarket.planStats.find((plan) => plan.planId === 'capped')!
+    expect(stats.configuredSubscriberCap).toBe(10)
+    expect(stats.demandSubscribers ?? 0).toBeGreaterThan(10)
+    expect(stats.subscribers).toBeLessThanOrEqual(10)
+    expect(next.lastMarket.capBlockedSubscriptionSeats ?? 0).toBeGreaterThan(0)
+  })
+
+  it('grandfathers retained seats when a live plan cap is lowered', () => {
+    let state = shipModel(createGame(26_017), 64)
+    const modelId = state.player.models[0]!.id
+    state = {
+      ...state,
+      rivals: state.rivals.map((rival) => ({ ...rival, models: [] })),
+      player: {
+        ...state.player,
+        pricing: {
+          ...state.player.pricing,
+          plans: [basePlan({ id: 'retained', modelIds: [modelId] })],
+        },
+      },
+    }
+    const open = tickMarket(state)
+    const prior = open.lastMarket.planStats.find((plan) => plan.planId === 'retained')!
+    expect(prior.subscribers).toBeGreaterThan(10)
+    const lowered = {
+      ...open,
+      day: open.day + 1,
+      player: {
+        ...open.player,
+        pricing: {
+          ...open.player.pricing,
+          plans: open.player.pricing.plans.map((plan) => ({
+            ...plan,
+            subscriberCap: 10,
+          })),
+        },
+      },
+    }
+    const next = tickMarket(lowered)
+    const stats = next.lastMarket.planStats.find((plan) => plan.planId === 'retained')!
+    expect(stats.configuredSubscriberCap).toBe(10)
+    expect(stats.grandfatheredSubscribers ?? 0).toBeGreaterThan(0)
+    expect(stats.subscribers).toBeGreaterThan(10)
   })
 })
 
@@ -1017,7 +1284,7 @@ describe('precision and premium scrutiny', () => {
         model,
         state.player.researchUnlocked,
       ),
-    ).toBe('fp16')
+    ).toBe('fp32')
 
     state = {
       ...state,
@@ -1043,7 +1310,7 @@ describe('precision and premium scrutiny', () => {
   })
 
   it('INT4 saves the most compute with bounded eval and brand risk', () => {
-    const unlocks = ['sys_quant', 'sys_fp8']
+    const unlocks = ['opt_fp16', 'sys_quant', 'sys_fp8']
     const full = planServeModifiers('fp16', unlocks)
     const int8 = planServeModifiers('int8', unlocks)
     const int4 = planServeModifiers('int4', unlocks)
@@ -1060,7 +1327,7 @@ describe('precision and premium scrutiny', () => {
   it('API precision changes effective evals and compute cost', () => {
     const state = shipModel(createGame(243), 64)
     const model = state.player.models[0]!
-    const unlocks = ['sys_quant', 'sys_fp8']
+    const unlocks = ['opt_fp16', 'sys_quant', 'sys_fp8']
     const full = modelForServePrecision(model, 'fp16', unlocks)
     const int4 = modelForServePrecision(model, 'int4', unlocks)
 
@@ -1081,6 +1348,7 @@ describe('precision and premium scrutiny', () => {
           brandTrust: 75,
           researchUnlocked: [
             ...state.player.researchUnlocked,
+            'opt_fp16',
             'sys_quant',
             'sys_fp8',
           ],
@@ -1133,6 +1401,7 @@ describe('precision and premium scrutiny', () => {
           brandTrust: 70,
           researchUnlocked: [
             ...state.player.researchUnlocked,
+            'opt_fp16',
             'sys_quant',
             'sys_fp8',
           ],

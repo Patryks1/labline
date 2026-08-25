@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
 import type { RivalLab } from '../types'
 import {
+  acceptComputeOffer,
   minComputeLeasePricePerPfDay,
   playerLeaseNetPf,
   rivalNeedsLeaseRevenue,
@@ -111,6 +112,61 @@ describe('rival compute leasing', () => {
     })
 
     expect(next.computeLeases.some((lease) => lease.id === 'legacy-player-proposal')).toBe(false)
+  })
+
+  it('expires stale rival quotes and rejects stale acceptance', () => {
+    const state = createGame(92031)
+    const rival = state.rivals[0]!
+    const offer = {
+      id: `offer-1-${rival.id}`,
+      rivalId: rival.id,
+      playerSells: false,
+      pf: 10,
+      pricePerPfDay: 200,
+      daysLeft: 21,
+      daysTotal: 21,
+      status: 'offer' as const,
+      from: 'rival' as const,
+      dayStarted: 1,
+    }
+    const stale = { ...state, day: 9, computeLeases: [offer] }
+
+    const rejected = acceptComputeOffer(stale, offer.id)
+    expect(rejected.computeLeases).toHaveLength(0)
+    expect(rejected.alerts[0]?.message).toContain('expired')
+
+    const expired = tickComputeMarket(stale)
+    expect(expired.computeLeases).toHaveLength(0)
+  })
+
+  it('retires imported rival quotes whose age cannot be established', () => {
+    const state = createGame(92032)
+    const rival = state.rivals[0]!
+    const unknownAgeOffer = {
+      id: 'legacy-rival-quote',
+      rivalId: rival.id,
+      playerSells: false,
+      pf: 10,
+      pricePerPfDay: 200,
+      daysLeft: 21,
+      daysTotal: 21,
+      status: 'offer' as const,
+      from: 'rival' as const,
+    }
+
+    const rejected = acceptComputeOffer(
+      { ...state, day: 100, computeLeases: [unknownAgeOffer] },
+      unknownAgeOffer.id,
+    )
+    expect(rejected.computeLeases).toHaveLength(0)
+    expect(rejected.alerts[0]?.message).toContain('expired')
+
+    const expired = tickComputeMarket({
+      ...state,
+      day: 100,
+      computeLeases: [unknownAgeOffer],
+    })
+    expect(expired.computeLeases).toHaveLength(0)
   })
 
   it('signs a negotiated capacity sale and reserves the sold PF immediately', () => {

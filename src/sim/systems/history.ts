@@ -5,6 +5,7 @@ export const HISTORY_LIMITS = {
   financeDays: 180,
   alerts: 40,
   news: 64,
+  feedEvents: 96,
   marketFills: 80,
   reviews: 120,
   evaluations: 240,
@@ -137,6 +138,7 @@ export function boundHistories(state: SimState): SimState {
     // Alerts, news, and fills are newest-first in the existing simulation.
     alerts: (state.alerts ?? []).slice(0, HISTORY_LIMITS.alerts),
     news: (state.news ?? []).slice(0, HISTORY_LIMITS.news),
+    feedEvents: (state.feedEvents ?? []).slice(0, HISTORY_LIMITS.feedEvents),
     worldMarkets: {
       ...state.worldMarkets,
       fills: (state.worldMarkets?.fills ?? []).slice(0, HISTORY_LIMITS.marketFills),

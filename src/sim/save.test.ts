@@ -71,6 +71,93 @@ describe("save / load v13", () => {
     expect(loaded.state.player.privateEvaluationJobs).toEqual([]);
   });
 
+  it("normalizes legacy cloud pools and additive investor-pitch state", () => {
+    const state = createGame(10_014);
+    const legacy = JSON.parse(serializeSave(buildSaveFile(state, "1")));
+    legacy.state.day = 1;
+    const provider = legacy.state.worldMarkets.cloudProviders.find(
+      (entry: { id: string }) => entry.id === "cloud-northstar",
+    );
+    provider.baselinePf = 3_600;
+    provider.availablePf = 3_576;
+    delete provider.launchBaselinePf;
+    delete provider.maxBaselinePf;
+    delete legacy.state.player.capital.pitchCooldownUntilDay;
+    delete legacy.state.player.capital.pitchModelCooldowns;
+    delete legacy.state.player.capital.pitchHistory;
+    const restored = parseSave(JSON.stringify(legacy)).state;
+    const normalized = restored.worldMarkets.cloudProviders.find(
+      (entry) => entry.id === "cloud-northstar",
+    )!;
+    expect(normalized.baselinePf).toBeLessThanOrEqual(1_000);
+    expect(normalized.availablePf).toBe(
+      normalized.baselinePf -
+        restored.computeContracts
+          .filter(
+            (contract) =>
+              contract.providerId === normalized.id &&
+              (contract.status === "active" || contract.status === "interrupted") &&
+              contract.kind !== "emergency" &&
+              contract.kind !== "rival_resale",
+          )
+          .reduce((sum, contract) => sum + contract.pf, 0),
+    );
+    expect(restored.player.capital?.pitchCooldownUntilDay).toBe(0);
+    expect(restored.player.capital?.pitchModelCooldowns).toEqual({});
+    expect(restored.player.capital?.pitchHistory).toEqual([]);
+    expect(restored.companies?.[restored.playerLabId]?.ops.capital).toEqual(
+      restored.player.capital,
+    );
+  });
+
+  it("keeps the newest investor pitches from oversized imported histories", () => {
+    const state = createGame(10_016);
+    const imported = JSON.parse(serializeSave(buildSaveFile(state, "1")));
+    imported.state.player.capital.pitchHistory = Array.from(
+      { length: 20 },
+      (_: unknown, index: number) => ({
+        id: `pitch-${index}`,
+        modelId: `model-${index}`,
+        modelName: `Model ${index}`,
+        investorName: "Northstar",
+        day: 20 - index,
+        outcome: "declined",
+        successChance: 0.25,
+        cashRaised: 0,
+        preMoneyValuation: 80_000_000,
+        postMoneyValuation: 80_000_000,
+        investorOwnership: 0,
+        cooldownUntilDay: 30,
+      }),
+    );
+
+    const restored = parseSave(JSON.stringify(imported)).state;
+    expect(restored.player.capital?.pitchHistory).toHaveLength(16);
+    expect(restored.player.capital?.pitchHistory?.map((record) => record.id)).toEqual(
+      Array.from({ length: 16 }, (_: unknown, index: number) => `pitch-${index}`),
+    );
+  });
+
+  it("caps partially migrated oversized day-one cloud launch pools", () => {
+    const state = createGame(10_015);
+    const partial = JSON.parse(serializeSave(buildSaveFile(state, "1")));
+    partial.state.day = 1;
+    const provider = partial.state.worldMarkets.cloudProviders.find(
+      (entry: { id: string }) => entry.id === "cloud-northstar",
+    );
+    provider.baselinePf = 3_600;
+    provider.availablePf = 3_576;
+    provider.launchBaselinePf = 3_600;
+    provider.maxBaselinePf = 3_600;
+
+    const restored = parseSave(JSON.stringify(partial)).state;
+    const normalized = restored.worldMarkets.cloudProviders.find(
+      (entry) => entry.id === "cloud-northstar",
+    )!;
+    expect(normalized.launchBaselinePf).toBeLessThanOrEqual(1_000);
+    expect(normalized.baselinePf).toBeLessThanOrEqual(1_000);
+  });
+
   it("repairs orphaned checkpoints without treating lineage history as ownership", () => {
     const base = createGame(10_013);
     const model = buildScaledModel({

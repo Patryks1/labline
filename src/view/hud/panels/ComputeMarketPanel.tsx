@@ -40,7 +40,6 @@ import {
   NegotiationHeader,
   NegotiationComposer,
   NegotiationMessage,
-  NegotiationMetric,
   NegotiationSlider,
   type NegotiationStatus,
 } from "../ui/NegotiationRoom";
@@ -53,6 +52,7 @@ import {
 } from "../ui/HudPrimitives";
 import { BlockerList, GameCard, SegmentedTabs, StatRow } from "../ui/kit";
 import { ResponsiveDonut } from "../ui/dataViz/ResponsiveDonut";
+import { LineChart, type LineChartSeries } from "../ui/LineChart";
 
 type ProviderEvent = {
   title: string;
@@ -102,7 +102,35 @@ function clamp(min: number, max: number, value: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-/** Opening package: a slice of open inventory, never a 1 MW ceiling. */
+function quoteProjectionSeries(
+  dailyCost: number,
+  termDays: number,
+  interruptionRisk: number,
+): { spend: LineChartSeries; risk: LineChartSeries } {
+  const days = Math.max(1, Math.floor(termDays));
+  const sampleDays = [...new Set([0, Math.round(days * 0.25), Math.round(days * 0.5), Math.round(days * 0.75), days])];
+  return {
+    spend: {
+      id: "spend",
+      label: "Cumulative spend",
+      color: "var(--color-mint)",
+      points: sampleDays.map((day) => ({ x: day, y: Math.max(0, day * dailyCost) })),
+    },
+    risk: {
+      id: "risk",
+      label: "Interruption exposure",
+      color: "var(--color-amber)",
+      points: sampleDays.map((day) => ({
+        x: day,
+        // Compute contracts roll the interruption draw once per simulation
+        // day, so cumulative exposure compounds over the quoted term.
+        y: 1 - Math.pow(1 - clamp(0, 0.999, interruptionRisk), day),
+      })),
+    },
+  };
+}
+
+/** Opening package: a slice of the provider's current (sub-MW at launch) pool. */
 export function defaultCloudContractPf(availablePf: number): number {
   const available = Math.max(1, Math.floor(availablePf));
   return Math.max(1, Math.min(available, Math.max(24, Math.round(available * 0.12))));
@@ -560,28 +588,15 @@ export function ComputeMarketPanel() {
                       </div>
                     </NegotiationComposer>
 
-                    <div className="grid grid-cols-2 gap-1 font-mono text-[0.6875rem]">
-                      <NegotiationMetric
-                        label="Capacity"
-                        value={computeMw(pfToMw(negotiatedQuote.contract.pf))}
-                      />
-                      <NegotiationMetric
-                        label="RAM"
-                        value={gb(remoteAcceleratorRamGb(negotiatedQuote.contract.pf))}
-                      />
-                      <NegotiationMetric
-                        label="Daily"
-                        value={money(negotiatedQuote.dailyCost)}
-                      />
-                      <NegotiationMetric
-                        label="Term"
-                        value={`${negotiatedQuote.contract.daysTotal}d`}
-                      />
-                      <NegotiationMetric
-                        label="Risk"
-                        value={`${(negotiatedQuote.contract.interruptionRisk * 100).toFixed(1)}%`}
-                      />
-                    </div>
+                    <ComputeQuoteCard
+                      providerName={selectedProvider?.name ?? "Provider"}
+                      availablePf={Math.max(0, negotiatedQuote.providerAvailablePf)}
+                      capacityPf={negotiatedQuote.contract.pf}
+                      ramGb={remoteAcceleratorRamGb(negotiatedQuote.contract.pf)}
+                      dailyCost={negotiatedQuote.dailyCost}
+                      termDays={negotiatedQuote.contract.daysTotal}
+                      interruptionRisk={negotiatedQuote.contract.interruptionRisk}
+                    />
                     <BlockerList items={blockers} />
                   </>
                 ) : null}
@@ -864,7 +879,134 @@ export function ComputeMarketPanel() {
           ) : null}
         </div>
       </div>
-    </PanelScaffold>
+  </PanelScaffold>
+  );
+}
+
+/**
+ * Negotiated capacity readout. Every visual is derived from the current quote:
+ * the bars show the inventory consumed by this package, while the projections
+ * show only the signed term and quoted daily rate (never fabricated history).
+ */
+export function ComputeQuoteCard({
+  providerName,
+  availablePf,
+  capacityPf,
+  ramGb,
+  dailyCost,
+  termDays,
+  interruptionRisk,
+}: {
+  providerName: string;
+  availablePf: number;
+  capacityPf: number;
+  ramGb: number;
+  dailyCost: number;
+  termDays: number;
+  interruptionRisk: number;
+}) {
+  const available = Math.max(0, availablePf);
+  const capacity = Math.max(0, capacityPf);
+  const remaining = Math.max(0, available - capacity);
+  const total = Math.max(1, available);
+  const projections = quoteProjectionSeries(dailyCost, termDays, interruptionRisk);
+  const cumulativeCost = Math.max(0, dailyCost * Math.max(1, termDays));
+  const cumulativeRisk = projections.risk.points.at(-1)?.y ?? 0;
+  return (
+    <section
+      className="compute-quote-card space-y-2 rounded-lg border border-mint/25 bg-void/45 p-2.5"
+      data-testid="compute-quote-card"
+      aria-label={`${providerName} quote projection`}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <div className="text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-mint">
+            Quote snapshot
+          </div>
+          <p className="mt-0.5 text-[0.6875rem] text-muted">
+            Current inventory and term projection for {providerName}.
+          </p>
+        </div>
+        <div className="text-right font-mono text-[0.6875rem] text-muted">
+          <div>{computeMw(pfToMw(capacity))} reserved</div>
+          <div>{termDays}d term</div>
+        </div>
+      </div>
+
+      <div className="space-y-1" role="img" aria-label={`${computeMw(pfToMw(capacity))} of ${computeMw(pfToMw(available))} available capacity reserved; ${computeMw(pfToMw(remaining))} remains open`}>
+        <div className="flex items-center justify-between gap-2 text-[0.6875rem] text-muted">
+          <span>Provider availability</span>
+          <span className="font-mono tabular-nums text-bone">
+            {computeMw(pfToMw(remaining))} open / {computeMw(pfToMw(available))}
+          </span>
+        </div>
+        <div className="flex h-2 overflow-hidden rounded-full bg-panel-2" aria-hidden="true">
+          <div className="bg-mint" style={{ width: `${Math.min(100, (capacity / total) * 100)}%` }} />
+          <div className="bg-infer/45" style={{ width: `${Math.min(100, (remaining / total) * 100)}%` }} />
+        </div>
+        <div className="flex justify-between gap-2 font-mono text-[0.625rem] text-muted">
+          <span>this quote {computeMw(pfToMw(capacity))}</span>
+          <span>RAM {gb(ramGb)}</span>
+        </div>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <div className="rounded-md border border-line/60 bg-panel-2/70 p-1.5" data-testid="compute-quote-cost-projection">
+          <div className="flex items-center justify-between gap-2 text-[0.625rem] uppercase tracking-[0.12em] text-muted">
+            <span>Spend projection</span>
+            <span className="font-mono normal-case tracking-normal text-bone">
+              {money(cumulativeCost)} total
+            </span>
+          </div>
+          <LineChart
+            series={[projections.spend]}
+            height={78}
+            compact
+            showAxes={false}
+            showPoints={false}
+            area
+            ariaLabel={`Projected spend reaches ${money(cumulativeCost)} by day ${termDays}`}
+            formatX={(value) => `D${Math.round(value)}`}
+            formatY={(value) => money(value)}
+          />
+        </div>
+        <div className="rounded-md border border-line/60 bg-panel-2/70 p-1.5" data-testid="compute-quote-risk-projection">
+          <div className="flex items-center justify-between gap-2 text-[0.625rem] uppercase tracking-[0.12em] text-muted">
+            <span>Risk projection</span>
+            <span className="font-mono normal-case tracking-normal text-amber">
+              {pct(cumulativeRisk, 1)} cumulative
+            </span>
+          </div>
+          <LineChart
+            series={[projections.risk]}
+            height={78}
+            compact
+            showAxes={false}
+            showPoints={false}
+            area
+            ariaLabel={`Projected interruption exposure reaches ${pct(cumulativeRisk, 1)} by day ${termDays}`}
+            formatX={(value) => `D${Math.round(value)}`}
+            formatY={(value) => pct(value, 1)}
+          />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-1.5 font-mono text-[0.6875rem] sm:grid-cols-4">
+        <QuoteMetric label="Daily" value={money(dailyCost)} />
+        <QuoteMetric label="Term" value={`${termDays}d`} />
+        <QuoteMetric label="Risk" value={`${(interruptionRisk * 100).toFixed(1)}%`} />
+        <QuoteMetric label="RAM" value={gb(ramGb)} />
+      </div>
+    </section>
+  );
+}
+
+function QuoteMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-line/50 bg-void/40 px-2 py-1.5">
+      <div className="text-[0.625rem] uppercase tracking-[0.1em] text-muted">{label}</div>
+      <div className="mt-0.5 text-bone">{value}</div>
+    </div>
   );
 }
 

@@ -212,7 +212,7 @@ export function TrainingDataRadar({
   syntheticMultiplier = 0,
   syntheticExpansionAvailable,
   syntheticHeadroomMTok,
-  syntheticSource = "lab",
+  syntheticSource: _syntheticSource = "lab",
   reservedMTokByDomain,
   teachers,
   syntheticTeacherIds,
@@ -223,6 +223,7 @@ export function TrainingDataRadar({
   onOpenPlanLibrary,
   trainShare,
   onTrainShareChange,
+  freezeBaseLayer = false,
 }: {
   baseWeights: Record<DataDomain, number>;
   postWeights: Record<DataDomain, number>;
@@ -251,6 +252,8 @@ export function TrainingDataRadar({
   onOpenPlanLibrary?: () => void;
   trainShare?: number;
   onTrainShareChange?: (share: number) => void;
+  /** Continue-train: inherited mix is already trained. Only Align is interactive. */
+  freezeBaseLayer?: boolean;
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const draggingRef = useRef<{
@@ -301,10 +304,24 @@ export function TrainingDataRadar({
         return [part.slice(0, sep), Number(part.slice(sep + 1))];
       }),
     ) as Record<DataDomain, number>;
+    if (freezeBaseLayer) {
+      const nextAlign = { ...propsAlign };
+      for (const domain of DATA_DOMAINS) {
+        const frozen = Math.max(0, propsBase[domain] ?? 0);
+        const cap = Math.max(0, usable[domain] ?? 0);
+        nextAlign[domain] = Math.max(
+          0,
+          Math.min(propsAlign[domain] ?? 0, Math.max(0, cap - frozen)),
+        );
+      }
+      setBaseAlloc(propsBase);
+      setPostAlloc(nextAlign);
+      return;
+    }
     const clamped = clampRecipeToUsable(propsBase, propsAlign, usable);
     setBaseAlloc(clamped.base);
     setPostAlloc(clamped.align);
-  }, [alignKey, baseKey, propsAlign, propsBase, stockKey]);
+  }, [alignKey, baseKey, freezeBaseLayer, propsAlign, propsBase, stockKey]);
 
   const expansionEnabled =
     syntheticExpansionAvailable ?? syntheticMultiplier > 0;
@@ -441,9 +458,18 @@ export function TrainingDataRadar({
     nextAlign: Record<DataDomain, number>,
     extraByDomain?: Partial<Record<DataDomain, number>>,
   ) => {
-    const clampedBase = { ...nextBase };
+    const clampedBase = freezeBaseLayer ? { ...baseAlloc } : { ...nextBase };
     const clampedAlign = { ...nextAlign };
     for (const domain of DATA_DOMAINS) {
+      if (freezeBaseLayer) {
+        const frozen = Math.max(0, clampedBase[domain] ?? 0);
+        const ownedCap = availabilityByDomain[domain].usableMTok;
+        clampedAlign[domain] = Math.max(
+          0,
+          Math.min(clampedAlign[domain] ?? 0, Math.max(0, ownedCap - frozen)),
+        );
+        continue;
+      }
       const split = clampEnvelopeSplit(
         clampedBase[domain] ?? 0,
         clampedAlign[domain] ?? 0,
@@ -499,10 +525,24 @@ export function TrainingDataRadar({
       return;
     }
     if (target === "base") {
+      if (freezeBaseLayer) return;
       const split = splitEnvelope(spokes[domain].mid, value);
       commitOwned(
         { ...baseAlloc, [domain]: split.base },
         { ...postAlloc, [domain]: split.align },
+      );
+      return;
+    }
+    if (freezeBaseLayer) {
+      const frozen = spokes[domain].base;
+      const usable = availabilityByDomain[domain].usableMTok;
+      const split = splitOwnedAndSynth(value, usable);
+      commitOwned(
+        baseAlloc,
+        { ...postAlloc, [domain]: Math.max(0, split.owned - frozen) },
+        expansionEnabled && split.synth > 0
+          ? { [domain]: split.synth }
+          : undefined,
       );
       return;
     }
@@ -538,6 +578,7 @@ export function TrainingDataRadar({
       return;
     }
     if (key === "base") {
+      if (freezeBaseLayer) return;
       const envelope = spokes[domain].mid;
       if (value <= envelope) {
         commitDomain("base", domain, value);
@@ -580,7 +621,7 @@ export function TrainingDataRadar({
     const projected = (x * Math.cos(angle) + y * Math.sin(angle)) / RADIUS;
     const liveCeiling = dragCeilingRef.current ?? ceiling;
     const liveZoom = dragZoomRef.current ?? zoom;
-    const target = draggingRef.current?.zone ?? "base";
+    const target = draggingRef.current?.zone ?? (freezeBaseLayer ? "post" : "base");
     let value: number;
     if (target === "base") {
       const ownedR = tokenRadius(spokes[domain].mid, liveCeiling, liveZoom);
@@ -601,6 +642,14 @@ export function TrainingDataRadar({
     const nextBase = { ...baseAlloc };
     const nextAlign = { ...postAlloc };
     for (const domain of DATA_DOMAINS) {
+      if (freezeBaseLayer) {
+        const frozen = Math.max(0, nextBase[domain] ?? 0);
+        nextAlign[domain] = Math.max(
+          0,
+          availabilityByDomain[domain].usableMTok - frozen,
+        );
+        continue;
+      }
       const scaled = scaleEnvelope(
         spokes[domain].base,
         spokes[domain].post,
@@ -635,7 +684,7 @@ export function TrainingDataRadar({
       label: RECIPE_ZONE_META.base.label,
       color: RECIPE_ZONE_META.base.stroke,
       value: selectedSpoke.base,
-      editable: true,
+      editable: !freezeBaseLayer,
     },
     {
       key: "post",
@@ -668,6 +717,7 @@ export function TrainingDataRadar({
     <section
       className="rounded-xl border border-line/80 bg-void/35"
       aria-label="Training data radar"
+      data-freeze-base={freezeBaseLayer ? "true" : "false"}
     >
       <div className="flex flex-wrap items-end justify-between gap-2 border-b border-line/70 px-3 py-2">
         {onTrainShareChange && trainShare != null ? (
@@ -747,7 +797,11 @@ export function TrainingDataRadar({
             variant="ghost"
             className="!min-h-9 !px-2.5 !text-[0.6875rem]"
             onClick={useAllData}
-            title="Fill every domain to owned usable stock. Does not add synthetic expansion."
+            title={
+              freezeBaseLayer
+                ? "Fill remaining owned stock as further-train mix. Does not retune the trained base."
+                : "Fill every domain to owned usable stock. Does not add synthetic expansion."
+            }
           >
             Use all data
           </HudButton>
@@ -772,7 +826,11 @@ export function TrainingDataRadar({
             viewBox={`0 0 ${SIZE} ${SIZE}`}
             className="block h-auto w-full touch-none overflow-visible"
             role="group"
-            aria-label="Draggable radar chart for training data domains"
+            aria-label={
+              freezeBaseLayer
+                ? "Further-training mix radar. Base mix is read-only."
+                : "Draggable radar chart for training data domains"
+            }
             onPointerMove={(event) => {
               const drag = draggingRef.current;
               if (drag)
@@ -842,6 +900,7 @@ export function TrainingDataRadar({
             />
             ) : null}
             <polygon
+              data-radar-layer="align"
               points={polygon(
                 DATA_DOMAINS.map((domain) => stackedRadii[domain].owned),
               )}
@@ -851,12 +910,21 @@ export function TrainingDataRadar({
               pointerEvents="none"
             />
             <polygon
+              data-radar-layer="base"
+              data-radar-base={freezeBaseLayer ? "ghost" : "control"}
               points={polygon(
                 DATA_DOMAINS.map((domain) => stackedRadii[domain].inner),
               )}
-              fill={RECIPE_ZONE_META.base.fill}
-              stroke={RECIPE_ZONE_META.base.stroke}
+              fill={
+                freezeBaseLayer ? "none" : RECIPE_ZONE_META.base.fill
+              }
+              stroke={
+                freezeBaseLayer
+                  ? "rgba(0,229,192,.42)"
+                  : RECIPE_ZONE_META.base.stroke
+              }
               strokeWidth="1.5"
+              strokeDasharray={freezeBaseLayer ? "5 4" : undefined}
               pointerEvents="none"
             />
             <polygon
@@ -887,11 +955,23 @@ export function TrainingDataRadar({
               }[] = [
                 {
                   zone: "post",
-                  value: spoke.post,
+                  value: freezeBaseLayer ? spoke.mid : spoke.post,
                   radius: radii.owned,
-                  hit: domainSelected ? 13 : 10,
-                  size: domainSelected ? 5 : 3.5,
-                  label: "data volume",
+                  hit: domainSelected
+                    ? freezeBaseLayer
+                      ? 16
+                      : 13
+                    : freezeBaseLayer
+                      ? 12
+                      : 10,
+                  size: domainSelected
+                    ? freezeBaseLayer
+                      ? 6.5
+                      : 5
+                    : freezeBaseLayer
+                      ? 4.5
+                      : 3.5,
+                  label: freezeBaseLayer ? "further-train volume" : "data volume",
                   tangent: 0,
                 },
                 ...(syntheticUnlocked
@@ -907,15 +987,19 @@ export function TrainingDataRadar({
                       },
                     ]
                   : []),
-                {
-                  zone: "base",
-                  value: spoke.base,
-                  radius: radii.inner,
-                  hit: domainSelected ? 16 : 12,
-                  size: domainSelected ? 6.5 : 4.5,
-                  label: "base volume",
-                  tangent: 0,
-                },
+                ...(freezeBaseLayer
+                  ? []
+                  : [
+                      {
+                        zone: "base" as const,
+                        value: spoke.base,
+                        radius: radii.inner,
+                        hit: domainSelected ? 16 : 12,
+                        size: domainSelected ? 6.5 : 4.5,
+                        label: "base volume",
+                        tangent: 0,
+                      },
+                    ]),
               ];
               return handles.map((handle) => {
                 const meta = RECIPE_ZONE_META[handle.zone];
@@ -976,7 +1060,9 @@ export function TrainingDataRadar({
                           ? Math.round(
                               spokes[domain].mid * (1 - MAX_POST_TRAIN_SHARE),
                             )
-                          : 0
+                          : freezeBaseLayer && handle.zone === "post"
+                            ? Math.round(spokes[domain].base)
+                            : 0
                       }
                       aria-valuemax={Math.round(
                         dragCapMTok(domain, handle.zone),
@@ -1131,7 +1217,12 @@ export function TrainingDataRadar({
             {(
               [
                 RECIPE_VERIFY_META,
-                RECIPE_ZONE_META.base,
+                freezeBaseLayer
+                  ? {
+                      ...RECIPE_ZONE_META.base,
+                      blurb: "Already-trained mix, read-only",
+                    }
+                  : RECIPE_ZONE_META.base,
                 RECIPE_ZONE_META.post,
                 ...(syntheticUnlocked ? [RECIPE_ZONE_META.synth] : []),
               ] as const

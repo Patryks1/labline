@@ -12,8 +12,8 @@ const STEPS: ReadonlyArray<{
   label: string;
   compactLabel: string;
 }> = [
-  { id: "product", label: "Product", compactLabel: "Goal" },
-  { id: "architecture", label: "Architecture", compactLabel: "Arch" },
+  { id: "product", label: "Goal & I/O", compactLabel: "Goal" },
+  { id: "architecture", label: "Topology", compactLabel: "Arch" },
   { id: "data", label: "Data", compactLabel: "Data" },
   { id: "compute", label: "Compute", compactLabel: "Recipe" },
   { id: "review", label: "Review", compactLabel: "Rev" },

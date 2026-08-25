@@ -194,6 +194,9 @@ describe("PlansPanel navigation and capacity summary", () => {
 
     expect(markup).toContain("Delete plan");
     expect(markup).toContain('data-hud-variant="danger"');
+    expect(markup).toContain('role="switch"');
+    expect(markup).toContain("Allow chat data collection");
+    expect(markup).not.toContain("chat data collection rate");
   });
 
   it("wraps plan KPI details instead of clipping the usage-per-seat readout", () => {

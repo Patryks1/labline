@@ -50,14 +50,16 @@ export function MetricTile({
   value,
   detail,
   tone = 'neutral',
+  title,
 }: {
   label: string
   value: ReactNode
   detail?: ReactNode
   tone?: HudTone
+  title?: string
 }) {
   return (
-    <div className={`metric-tile metric-tile--${tone}`}>
+    <div className={`metric-tile metric-tile--${tone}`} title={title}>
       <span className="metric-tile__label">{label}</span>
       <strong className="metric-tile__value">{value}</strong>
       {detail ? <span className="metric-tile__detail">{detail}</span> : null}

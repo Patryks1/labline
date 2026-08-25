@@ -7,7 +7,7 @@ import { resolveModelsFocusJobId } from "./models/modelsFocus";
 import { modelsWorkbenchLayoutForViewport } from "./models/modelsResponsiveLayout";
 
 describe("ModelsPanel workbench IA", () => {
-  it("keeps one Models heading and exposes rail navigation without nested tablists", () => {
+  it("keeps one Models heading and exposes one accessible workspace tablist", () => {
     const markup = renderToStaticMarkup(createElement(ModelsPanel));
 
     expect(markup.match(/<h2[^>]*>Models<\/h2>/g)).toHaveLength(1);
@@ -15,6 +15,7 @@ describe("ModelsPanel workbench IA", () => {
     expect(markup).toContain('data-view="runs"');
     expect(markup).toContain('data-view="checkpoints"');
     expect(markup).toContain('data-view="labs"');
+    expect(markup).toContain('aria-label="Gyms, 0 unlocked"');
     expect(markup).toContain('data-view="routers"');
     expect(markup).toContain('data-view="fleet"');
     expect(markup).toContain("Train model");
@@ -33,7 +34,9 @@ describe("ModelsPanel workbench IA", () => {
     expect(markup).not.toContain("Raw strong target");
     expect(markup).not.toContain("Quality ×");
     expect(markup).not.toContain("verification holdout");
-    expect(markup).not.toContain('role="tablist"');
+    expect(markup).toContain('role="tablist"');
+    expect(markup).toContain('aria-label="Models workspace tabs"');
+    expect(markup).toContain('role="tabpanel"');
     expect(markup).not.toContain("Runs · Checkpoints · Fleet");
   });
 

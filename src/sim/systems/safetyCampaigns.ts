@@ -3,6 +3,9 @@ import { normalizeModelEvaluations } from '../balance/evaluationSuites'
 import { computeSnapshot } from './compute'
 import { playerTrainingResourcePlan } from './training'
 import { playerStaff } from './staff'
+import { availableHqStaff } from './staffReservations'
+import { dataResearchReservationShare } from './data'
+import { gymResearchReservationShare } from '../balance/modelStudio'
 import { createRng, hashSeed, seededId } from '../rng'
 import { chargeExpense } from './financeLedger'
 
@@ -68,7 +71,10 @@ export function safetyCampaignEstimate(
   const safetyDataMTok =
     (model.dataVerifyMTok ?? 0) + mult * Math.max(5, Math.log10(model.paramsB * 1000 + 10) * 20)
   const cashBudget = Math.round(totalPfDays * 95_000 + safetyDataMTok * 160 + paramsB * 25_000)
-  const researchers = playerStaff(state).researcher ?? 0
+  const researchers = availableHqStaff(state).researchers
+  const reservedResearchShare =
+    dataResearchReservationShare(state.player.data) +
+    gymResearchReservationShare(state.player.postTrainGyms)
   const reason =
     !state.player.researchUnlocked.includes('align_rlhf')
       ? 'Unlock RLHF Pipeline first.'
@@ -76,6 +82,8 @@ export function safetyCampaignEstimate(
           ? 'A safety campaign is already running.'
           : researchers < minimumResearchers
             ? `Needs ${minimumResearchers} researchers (have ${researchers}).`
+            : reservedResearchShare > 0.45 + 1e-9
+              ? 'Needs 40% research compute; reduce synthetic-data or gym reservations first.'
             : state.player.cash < cashBudget
               ? `Needs $${(cashBudget / 1_000_000).toFixed(2)}M cash.`
               : undefined
@@ -98,7 +106,7 @@ export function startSafetyCampaign(
   const model = state.player.models.find((candidate) => candidate.id === opts.modelId)
   const estimate = safetyCampaignEstimate(state, opts.modelId, opts.intensity)
   if (!model || !estimate.ok) return withAlert(state, 'warn', estimate.reason ?? 'Cannot start safety campaign.')
-  const availableResearchers = playerStaff(state).researcher ?? 0
+  const availableResearchers = availableHqStaff(state).researchers
   const assignedResearchers = Math.max(
     estimate.minimumResearchers,
     Math.min(availableResearchers, Math.floor(opts.researchers)),

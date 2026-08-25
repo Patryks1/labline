@@ -40,9 +40,9 @@
     },
     {
       "family": "facilities",
-      "url": "/assets/world-v4/facilities.564cfe7ed80f.glb",
-      "sha256": "564cfe7ed80f23a6adee9f7a9b2e57b4b67742ed78ce99da1ab0084c59c1806f",
-      "bytes": 989044
+      "url": "/assets/world-v4/facilities.dfd7f2346605.glb",
+      "sha256": "dfd7f2346605818c1836a55d96c40bd7dddfed91d9a7616cab775aaa39d65aa0",
+      "bytes": 677800
     },
     {
       "family": "municipal",
@@ -1296,7 +1296,7 @@
       "family": "facilities",
       "key": "facility-small",
       "archetypeId": 100,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1312,7 +1312,7 @@
       "family": "facilities",
       "key": "facility-medium",
       "archetypeId": 101,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1328,7 +1328,7 @@
       "family": "facilities",
       "key": "facility-large",
       "archetypeId": 102,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1344,7 +1344,7 @@
       "family": "facilities",
       "key": "headquarters",
       "archetypeId": 110,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1360,7 +1360,7 @@
       "family": "facilities",
       "key": "solar-field",
       "archetypeId": 111,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1376,7 +1376,7 @@
       "family": "facilities",
       "key": "grid-substation",
       "archetypeId": 112,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1392,7 +1392,7 @@
       "family": "facilities",
       "key": "power-generation",
       "archetypeId": 113,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1408,7 +1408,7 @@
       "family": "facilities",
       "key": "chip-fabrication",
       "archetypeId": 114,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1424,7 +1424,7 @@
       "family": "facilities",
       "key": "cooling-campus",
       "archetypeId": 115,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1440,7 +1440,7 @@
       "family": "facilities",
       "key": "gas-generation",
       "archetypeId": 116,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1456,7 +1456,7 @@
       "family": "facilities",
       "key": "battery-yard",
       "archetypeId": 117,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1472,7 +1472,7 @@
       "family": "facilities",
       "key": "office-campus",
       "archetypeId": 118,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1488,7 +1488,7 @@
       "family": "facilities",
       "key": "headquarters-small",
       "archetypeId": 119,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1504,7 +1504,7 @@
       "family": "facilities",
       "key": "headquarters-medium",
       "archetypeId": 120,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1520,7 +1520,7 @@
       "family": "facilities",
       "key": "research-lab",
       "archetypeId": 121,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1536,7 +1536,7 @@
       "family": "facilities",
       "key": "training-centre",
       "archetypeId": 468,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1552,7 +1552,7 @@
       "family": "facilities",
       "key": "network-operations",
       "archetypeId": 469,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1568,7 +1568,7 @@
       "family": "facilities",
       "key": "construction-shell",
       "archetypeId": 470,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1584,7 +1584,7 @@
       "family": "facilities",
       "key": "utility-plant",
       "archetypeId": 471,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2
@@ -1600,7 +1600,7 @@
       "family": "facilities",
       "key": "security-centre",
       "archetypeId": 472,
-      "tintMode": "owner",
+      "tintMode": "base",
       "footprint": [
         2,
         2

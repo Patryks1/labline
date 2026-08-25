@@ -18,14 +18,15 @@ import {
 } from './research'
 
 export const RESEARCH_LAYOUT = {
-  nodeW: 164,
-  nodeH: 70,
+  /** Slightly larger cards keep method names and status readable at working zoom. */
+  nodeW: 176,
+  nodeH: 76,
   /** Horizontal gap between trunk columns */
-  colGap: 64,
+  colGap: 78,
   /** Vertical gap between nodes in the same layer */
-  rowGap: 38,
+  rowGap: 50,
   /** Extra vertical gap after a depth layer */
-  layerGap: 46,
+  layerGap: 58,
   padX: 42,
   padY: 56,
   headerH: 32,
@@ -132,8 +133,11 @@ export function layoutResearchTree(
   }
 
   const placed: TreeLayoutNode[] = []
-  const depthPitch = L.nodeW + 138
-  const lanePitch = L.nodeH + 104
+  // Leave a deliberate edge corridor between dependency columns.  The old
+  // pitch made cross-trunk paths visually stack on top of neighbouring cards
+  // once the catalog grew past the original handful of methods.
+  const depthPitch = L.nodeW + 190
+  const lanePitch = L.nodeH + 132
 
   for (const depth of [...byDepth.keys()].sort((a, b) => a - b)) {
     const layer = (byDepth.get(depth) ?? [])

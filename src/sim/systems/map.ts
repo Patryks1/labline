@@ -1450,7 +1450,7 @@ const KIND_FALLBACK: Partial<Record<TileKind, string>> = {
   battery: 'Battery farm',
   hq: 'HQ',
   hq_m: 'HQ campus',
-  hq_l: 'HQ tower',
+  hq_l: 'HQ campus',
   office: 'HQ',
   lab: 'Research lab',
 }

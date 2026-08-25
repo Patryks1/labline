@@ -253,10 +253,24 @@ export const POWER_EFFICIENCY_HISTORY_DAYS = 30
  */
 export function recordPowerEfficiencyDay(state: SimState): SimState {
   const snap = computeSnapshot(state)
-  const pfPerMw = snap.mwDemand > 1e-6 ? snap.rawFlopsPf / snap.mwDemand : 0
+  // Grid MW belongs to the local campus only. Remote/cloud PF is a contracted
+  // workload and must never inflate a PF/MW ratio by sharing the local MW
+  // denominator. Keep the combined effective PF separately for trend/metric
+  // consumers that need the full serving capacity.
+  const localPf = Math.max(0, snap.rawFlopsPf - snap.remoteFlopsPf)
+  const localMw = Math.max(0, snap.mwDemand)
+  const pfPerMw = localMw > 1e-6 ? localPf / localMw : 0
+  const sample = {
+    day: state.day,
+    pfPerMw,
+    localPf,
+    cloudPf: Math.max(0, snap.remoteFlopsPf),
+    localMw,
+    combinedEffectivePf: Math.max(0, snap.effectiveFlopsPf),
+    cloudEffectivePf: Math.max(0, snap.remoteEffectiveFlopsPf),
+  }
   const history = state.player.powerEfficiencyHistory ?? []
   const last = history[history.length - 1]
-  const sample = { day: state.day, pfPerMw }
   const next =
     last && last.day === state.day
       ? [...history.slice(0, -1), sample]

@@ -50,6 +50,10 @@ export interface ComputeSnapshot {
   mwForecast: { training: number; research: number };
   powerDerate: number;
   effectiveFlopsPf: number;
+  /** Effective PF supplied by the local/grid-backed fleet only. */
+  localEffectiveFlopsPf: number;
+  /** Effective PF supplied by remote/cloud contracts only. */
+  remoteEffectiveFlopsPf: number;
   pools: { training: number; inference: number; research: number };
   /** Workable base before allocation split (local+remote util-adjusted). */
   fullRawPool: number;
@@ -142,6 +146,8 @@ function snapshotKey(state: SimState): string {
     referenceId(player.trainingJobs),
     referenceId(player.activeResearch),
     referenceId(player.researchPrograms),
+    referenceId(player.postTrainGyms),
+    referenceId(player.data),
     referenceId(player.safetyCampaign),
     referenceId(state.lastMarket),
     referenceId(player.staff),
@@ -361,7 +367,15 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
     activeTrainingJobs.length > 0 || Boolean(player.safetyCampaign);
   const hasResearch =
     Boolean(player.activeResearch) ||
-    (player.researchPrograms?.length ?? 0) > 0 ||
+    (player.researchPrograms?.some((program) => program.phase !== 'complete') ?? false) ||
+    (player.data.synthQueue?.length ?? 0) > 0 ||
+    (player.data.pruneQueue?.length ?? 0) > 0 ||
+    (player.postTrainGyms?.some(
+      (gym) =>
+        (gym.assignedResearchers ?? 0) > 0 &&
+        (gym.researchShare ?? 0) > 0 &&
+        (Boolean(gym.activePackageId) || (gym.tier ?? 0) > 0),
+    ) ?? false) ||
     Boolean(player.safetyCampaign);
   const configured = normalizeAllocation(player.allocation);
   const trainingDuty = hasTraining ? configured.training * 0.9 : 0;
@@ -545,14 +559,20 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
   // Reservations are guarantees, not hard partitions. Serving claims its p95
   // requirement first; idle reservation backfills offline work immediately.
   const fullRawPool = Math.max(0, localBase + remoteWorkBase);
-  const fullTrainCapacity = (localBase + remoteWorkBase) * (1 + engTrain);
-  const fullInferCapacity =
-    (localBase * serveMem * (0.9 + 0.1 * cpuDerate) + remoteInferBase) *
+  const localTrainCapacity = localBase * (1 + engTrain);
+  const remoteTrainCapacity = remoteWorkBase * (1 + engTrain);
+  const localInferCapacity =
+    localBase * serveMem * (0.9 + 0.1 * cpuDerate) *
     (1 + engServe) *
     tuning.serveCapacityMult;
-  const fullResearchCapacity =
-    localBase * (0.55 + 0.45 * cpuDerate) * (0.8 + 0.2 * systemRamDerate) +
-    remoteWorkBase;
+  const remoteInferCapacity =
+    remoteInferBase * (1 + engServe) * tuning.serveCapacityMult;
+  const localResearchCapacity =
+    localBase * (0.55 + 0.45 * cpuDerate) * (0.8 + 0.2 * systemRamDerate);
+  const remoteResearchCapacity = remoteWorkBase;
+  const fullTrainCapacity = localTrainCapacity + remoteTrainCapacity;
+  const fullInferCapacity = localInferCapacity + remoteInferCapacity;
+  const fullResearchCapacity = localResearchCapacity + remoteResearchCapacity;
   const hasServing = player.models.some(isLivePublicModel);
   const onlineHeadroom = state.industryDataPack.compute.onlineHeadroom ?? 0.25;
   const forecastServePf =
@@ -598,6 +618,12 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
   const trainPool = fullTrainCapacity * trainFraction;
   const inferPool = fullInferCapacity * serveFraction;
   const researchPool = fullResearchCapacity * researchFraction;
+  const localTrainPool = localTrainCapacity * trainFraction;
+  const remoteTrainPool = remoteTrainCapacity * trainFraction;
+  const localInferPool = localInferCapacity * serveFraction;
+  const remoteInferPool = remoteInferCapacity * serveFraction;
+  const localResearchPool = localResearchCapacity * researchFraction;
+  const remoteResearchPool = remoteResearchCapacity * researchFraction;
   const configuredOfflineFraction =
     (hasTraining ? alloc.training : 0) + (hasResearch ? alloc.research : 0);
   const backfilledFraction = Math.max(
@@ -651,7 +677,11 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
       : 0;
   const hardwareTokPerSec = fleet.tokPerSec + remoteDisplayTokPerSec;
 
-  const effectiveFlopsPf = trainPool * trainBoost + inferPool + researchPool;
+  const localEffectiveFlopsPf =
+    localTrainPool * trainBoost + localInferPool + localResearchPool;
+  const remoteEffectiveFlopsPf =
+    remoteTrainPool * trainBoost + remoteInferPool + remoteResearchPool;
+  const effectiveFlopsPf = localEffectiveFlopsPf + remoteEffectiveFlopsPf;
   const stall = diagnoseComputeStall({
     localFleetPf,
     fleetFlops,
@@ -681,6 +711,8 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
     mwForecast,
     powerDerate: combinedPowerDerate,
     effectiveFlopsPf,
+    localEffectiveFlopsPf,
+    remoteEffectiveFlopsPf,
     pools: {
       training: trainPool * trainBoost,
       inference: inferPool,

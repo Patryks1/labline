@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createGame } from "../createGame";
-import { MAX_PLANS, createPlan } from "./plans";
+import {
+  MAX_PLANS,
+  createPlan,
+  unlockedPlanPrecisions,
+} from "./plans";
 
 describe("subscription plan limits", () => {
   it("allows a normal plan creation below the cap", () => {
@@ -15,6 +19,17 @@ describe("subscription plan limits", () => {
       state.player.pricing.plans.length + 1,
     );
     expect(next.player.pricing.plans.at(-1)?.name).toBe("Team");
+    expect(next.player.pricing.plans.at(-1)?.servePrecision).toBe("fp32");
+  });
+
+  it("starts with FP32 serving and research-unlocks FP16 then BF16", () => {
+    expect(unlockedPlanPrecisions([])).toEqual(["fp32"]);
+    expect(unlockedPlanPrecisions(["opt_fp16"])).toEqual(["fp32", "fp16"]);
+    expect(unlockedPlanPrecisions(["opt_fp16", "opt_mixed"])).toEqual([
+      "fp32",
+      "fp16",
+      "bf16",
+    ]);
   });
 
   it("rejects the ninth plan in simulation logic and records feedback", () => {

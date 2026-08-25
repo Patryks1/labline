@@ -504,7 +504,13 @@ export function chooseRivalServePrecision(rival: RivalLab): PlanServePrecision {
   ) {
     return 'int8'
   }
-  return 'fp16'
+  if (rival.researchUnlocked.includes('opt_mixed') && supportsServePrecision(rival, 'bf16')) {
+    return 'bf16'
+  }
+  if (rival.researchUnlocked.includes('opt_fp16') && supportsServePrecision(rival, 'fp16')) {
+    return 'fp16'
+  }
+  return 'fp32'
 }
 
 // ────────────────────────────────────────────────────────────────────────────

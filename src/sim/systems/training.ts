@@ -112,6 +112,7 @@ import {
   TRAINING_CAMPAIGN_MILESTONES,
 } from "../balance/trainingCampaign";
 import { clampTrainingCampaignIntervention } from "../balance/trainingCampaignIntervention";
+import { appendFeedEvents } from "./feed";
 
 /** @deprecated Fixed PF targets replace calendar extensions. */
 export const TRAINING_EXTENSION_DAYS = 10;
@@ -2655,7 +2656,7 @@ export function startTraining(
       : "";
   const dataNote = ` · ${formatTokens(consume.trainMTok + consume.verifyMTok)} data (train ${Math.round(consume.plan.trainShare * 100)}%/verify ${Math.round((1 - consume.plan.trainShare) * 100)}%)`;
 
-  return {
+  const started = {
     ...chargeExpense(
       {
         ...state,
@@ -2687,6 +2688,19 @@ export function startTraining(
       ...state.alerts,
     ].slice(0, 40),
   };
+  return appendFeedEvents(started, [
+    {
+      id: `feed-training-start-${job.id}`,
+      day: state.day,
+      category: "models",
+      title: `${modeLabel} started: ${opts.name}`,
+      body: `${sizeLabel} run scheduled for ~${target.toFixed(0)} PF-days using ${formatTokens(consume.trainMTok + consume.verifyMTok)} MTok of data (${Math.round(consume.coverage * 100)}% coverage).`,
+      source: state.player.name,
+      tone: "research",
+      entityId: job.id,
+      kind: "training_started",
+    },
+  ]);
 }
 
 function withAlert(
@@ -4527,7 +4541,22 @@ function finalizeJob(
     if (list) next = attachModelToEmptyPlans(next, model.id);
     next = scheduleReleaseEvaluations(next, model.id);
   }
-  return next;
+  return appendFeedEvents(next, [
+    {
+      id: `feed-training-complete-${model.id}-${state.day}`,
+      day: state.day,
+      category: "models",
+      title:
+        release === "released"
+          ? `Model released: ${model.name}`
+          : `Checkpoint captured: ${model.name}`,
+      body: `${release === "released" ? "Public endpoint" : "Private checkpoint"} at capability ${model.capability.toFixed(0)} from ${formatParams(model.paramsB)}. ${outcomeLine || "Training completed with no special outcome."}`,
+      source: state.player.name,
+      tone: release === "released" ? "positive" : "research",
+      entityId: model.id,
+      kind: release === "released" ? "model_released" : "training_checkpoint",
+    },
+  ]);
 }
 
 /** Release an existing internal model to the public product surface. */
@@ -4608,7 +4637,19 @@ export function releaseModel(
     next = attachModelToEmptyPlans(next, m.id);
   }
   next = scheduleReleaseEvaluations(next, m.id);
-  return next;
+  return appendFeedEvents(next, [
+    {
+      id: `feed-model-release-${m.id}-${state.day}`,
+      day: state.day,
+      category: "models",
+      title: `Model released: ${m.name}`,
+      body: `Public endpoint at capability ${m.capability.toFixed(0)}; pricing and plan routing can now turn the checkpoint into demand.`,
+      source: state.player.name,
+      tone: "positive",
+      entityId: m.id,
+      kind: "model_released",
+    },
+  ]);
 }
 
 function stripModelFromProductSurface(
@@ -6712,8 +6753,38 @@ export function tickTraining(state: SimState): SimState {
   const newlyFailed = nextJobs.filter(
     (job) => job.failed && !jobs.find((before) => before.id === job.id)?.failed,
   );
+  const milestoneEvents = nextJobs.flatMap((job) => {
+    const before = jobs.find((candidate) => candidate.id === job.id);
+    const prior = new Set(before?.campaignMilestonesReached ?? []);
+    return (job.campaignMilestonesReached ?? [])
+      .filter((milestone) => !prior.has(milestone))
+      .map((milestone) => ({
+        id: `feed-training-milestone-${job.id}-${Math.round(milestone * 100)}-${state.day}`,
+        day: state.day,
+        category: "models" as const,
+        title: `Training milestone: ${job.name} at ${Math.round(milestone * 100)}%`,
+        body: job.pendingCampaignEvent?.title
+          ? `${job.pendingCampaignEvent.title} — a campaign decision is now waiting in the training queue.`
+          : `${job.name} crossed a deterministic checkpoint in its training process.`,
+        source: state.player.name,
+        tone: "research" as const,
+        entityId: job.id,
+        kind: "training_milestone",
+      }));
+  });
+  const failureEvents = newlyFailed.map((job) => ({
+    id: `feed-training-failed-${job.id}-${state.day}`,
+    day: state.day,
+    category: "models" as const,
+    title: `Training failure: ${job.name}`,
+    body: `The ${job.failureStage === "base" ? "base" : `${job.failureStage?.toUpperCase()} post-training`} stage destabilized; recover from an eligible immutable checkpoint or retire the run.`,
+    source: state.player.name,
+    tone: "danger" as const,
+    entityId: job.id,
+    kind: "training_failed",
+  }));
   // Cash was already charged via chargeExpense on nextState.
-  return {
+  const settled = {
     ...next,
     alerts: [
       ...newlyFailed.map((job) => ({
@@ -6730,6 +6801,7 @@ export function tickTraining(state: SimState): SimState {
       ...nextState.alerts,
     ].slice(0, 40),
   };
+  return appendFeedEvents(settled, [...milestoneEvents, ...failureEvents]);
 }
 
 export { formatParams, trainCostPfDays };

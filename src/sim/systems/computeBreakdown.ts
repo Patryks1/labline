@@ -9,13 +9,18 @@ import {
   pfPerMTokForModel,
   sizeTokMult,
 } from '../balance/serveCompute'
+import { gymResearchReservationShare } from '../balance/modelStudio'
+import { getResearchNode } from '../balance/research'
 import { formatParams } from '../balance/training'
 import type { SimState } from '../types'
 import { isLivePublicModel } from '../modelRelease'
-import { getResearchNode } from '../balance/research'
 import { computeSnapshot, normalizeAllocation, type ComputeSnapshot } from './compute'
 import { estimateResearchRate, researchPfTarget } from './research'
-import { researchPoolForTech } from './data'
+import {
+  dataResearchReservationShare,
+  ensureLabData,
+  researchPoolForTech,
+} from './data'
 import { playerStaff } from './staff'
 import { serveInfraCost } from '../balance/pricing'
 import { energyPriceForState } from './map'
@@ -61,6 +66,108 @@ export interface ComputeBreakdown {
   train: PoolBreakdown
   serve: PoolBreakdown
   research: PoolBreakdown
+}
+
+/** Live consumers of the shared research PF pool (tree/pods, data, gyms, safety). */
+export type ResearchComputeConsumer =
+  | 'tree'
+  | 'synthetic'
+  | 'prune'
+  | 'gyms'
+  | 'safety'
+
+export interface ResearchComputeSlice {
+  id: ResearchComputeConsumer
+  label: string
+  short: string
+  share: number
+  pf: number
+}
+
+export interface ResearchComputeUsage {
+  /** Allocated research pool PF. */
+  poolPf: number
+  /** PF actually reserved by active research-side work. */
+  usedPf: number
+  idlePf: number
+  /** Physical campus draw attributed to the research pool. */
+  powerMw: number
+  slices: ResearchComputeSlice[]
+  techAvailablePf: number
+}
+
+const RESEARCH_SLICE_META: Record<
+  ResearchComputeConsumer,
+  { label: string; short: string }
+> = {
+  tree: { label: 'Tech / pods', short: 'tree' },
+  synthetic: { label: 'Synthetic data', short: 'synth' },
+  prune: { label: 'Corpus audit', short: 'prune' },
+  gyms: { label: 'Post-train gyms', short: 'gyms' },
+  safety: { label: 'Safety campaign', short: 'safety' },
+}
+
+function treeResearchActive(state: SimState): boolean {
+  return (
+    Boolean(state.player.activeResearch) ||
+    (state.player.researchPrograms?.some((program) => program.phase !== 'complete') ??
+      false)
+  )
+}
+
+/** Split the research pool across tree/pods, synthetic, prune, gyms, and safety. */
+export function researchComputeUsage(
+  state: SimState,
+  snap: ComputeSnapshot = computeSnapshot(state),
+): ResearchComputeUsage {
+  const poolPf = Math.max(0, snap.pools.research)
+  const data = ensureLabData(state)
+  const synthRaw = (data.synthQueue ?? []).reduce(
+    (sum, job) => sum + Math.max(0, job.researchShare),
+    0,
+  )
+  const pruneRaw = (data.pruneQueue ?? []).reduce(
+    (sum, job) => sum + Math.max(0, job.researchShare),
+    0,
+  )
+  const dataRaw = synthRaw + pruneRaw
+  const dataShare = dataResearchReservationShare(data)
+  const synthShare = dataRaw > 1e-9 ? dataShare * (synthRaw / dataRaw) : 0
+  const pruneShare = dataRaw > 1e-9 ? dataShare * (pruneRaw / dataRaw) : 0
+  const gymShare = gymResearchReservationShare(state.player.postTrainGyms)
+  const safetyShare = state.player.safetyCampaign ? 0.4 : 0
+  const techAvailableShare = researchPoolForTech(state)
+  const techUsedShare = treeResearchActive(state) ? techAvailableShare : 0
+
+  const slices: ResearchComputeSlice[] = []
+  const push = (id: ResearchComputeConsumer, share: number) => {
+    if (share <= 0.001) return
+    slices.push({
+      id,
+      ...RESEARCH_SLICE_META[id],
+      share,
+      pf: poolPf * share,
+    })
+  }
+  push('tree', techUsedShare)
+  push('synthetic', synthShare)
+  push('prune', pruneShare)
+  push('gyms', gymShare)
+  push('safety', safetyShare)
+
+  const usedShare = Math.min(
+    1,
+    slices.reduce((sum, slice) => sum + slice.share, 0),
+  )
+  const usedPf = poolPf * usedShare
+  return {
+    poolPf,
+    usedPf,
+    idlePf: Math.max(0, poolPf - usedPf),
+    powerMw: snap.mwBreakdown.research,
+    slices,
+    techAvailablePf: poolPf * techAvailableShare,
+  }
 }
 
 function fmtPf(n: number): string {
@@ -393,18 +500,23 @@ function buildResearchBreakdown(
   snap: ComputeSnapshot,
   allocShare: number,
 ): PoolBreakdown {
-  const poolPf = snap.pools.research
-  const powerMw = snap.mwBreakdown.research
-  const techShare = researchPoolForTech(state)
-  const dataShare = Math.max(0, 1 - techShare)
-  const researchPf = poolPf * techShare
+  const usage = researchComputeUsage(state, snap)
+  const poolPf = usage.poolPf
+  const powerMw = usage.powerMw
   const job = state.player.activeResearch
-  const programs = state.player.researchPrograms ?? []
+  const programs = (state.player.researchPrograms ?? []).filter(
+    (program) => program.phase !== 'complete',
+  )
   const staff = playerStaff(state)
   const lines: BreakdownLine[] = [
     {
       label: 'Pool PF',
       value: `${fmtPf(poolPf)} PF`,
+    },
+    {
+      label: 'In use',
+      value: `${fmtPf(usage.usedPf)} PF`,
+      bar: poolPf > 1e-9 ? Math.min(1, usage.usedPf / poolPf) : 0,
     },
     {
       label: 'Power draw',
@@ -415,16 +527,18 @@ function buildResearchBreakdown(
       value: pct01(allocShare),
       bar: allocShare,
     },
-    {
-      label: 'To tech tree',
-      value: `${pct01(techShare)} · ${fmtPf(researchPf)} PF`,
-      bar: techShare,
-    },
   ]
-  if (dataShare > 0.02) {
+  for (const slice of usage.slices) {
     lines.push({
-      label: 'To data pipeline',
-      value: `${pct01(dataShare)} · ${fmtPf(poolPf * dataShare)} PF`,
+      label: slice.label,
+      value: `${pct01(slice.share)} · ${fmtPf(slice.pf)} PF`,
+      bar: slice.share,
+    })
+  }
+  if (usage.idlePf > 0.001 && usage.slices.length > 0) {
+    lines.push({
+      label: 'Idle',
+      value: `${fmtPf(usage.idlePf)} PF`,
       muted: true,
     })
   }
@@ -434,9 +548,12 @@ function buildResearchBreakdown(
     warn: (staff.researcher ?? 0) < 1,
   })
 
-  let utilization = 0
-  let utilizationLabel = 'Idle'
-  let summary = 'No active research — research PF is idle.'
+  let utilization = poolPf > 1e-9 ? Math.min(1, usage.usedPf / poolPf) : 0
+  let utilizationLabel = usage.slices.length === 0 ? 'Idle' : usage.slices.length === 1 ? usage.slices[0]!.label : 'In use'
+  let summary =
+    usage.slices.length === 0
+      ? 'No active research — research PF is idle.'
+      : usage.slices.map((slice) => `${slice.label} ${fmtPf(slice.pf)} PF`).join(' · ') + '.'
 
   if (programs.length > 0) {
     lines.push({
@@ -454,12 +571,13 @@ function buildResearchBreakdown(
       rate.pfPerDay > 1e-6
         ? Math.max(0, target - job.progressPfDays) / rate.pfPerDay
         : Infinity
-    utilization = rate.pfPerDay > 0 ? 1 : 0
-    utilizationLabel = rate.pfPerDay > 0 ? 'In use' : 'Stalled'
-    summary =
-      rate.pfPerDay > 0
-        ? `Researching ${node.name} · ${pct01(progress)} · ${fmtPf(rate.pfPerDay)} PF·d/day.`
-        : `Stalled on ${node.name} — need researchers or more research PF.`
+    if (rate.pfPerDay <= 0 && usage.slices.every((slice) => slice.id === 'tree')) {
+      utilization = 0
+      utilizationLabel = 'Stalled'
+      summary = `Stalled on ${node.name} — need researchers or more research PF.`
+    } else if (rate.pfPerDay > 0) {
+      summary = `Researching ${node.name} · ${pct01(progress)} · ${fmtPf(rate.pfPerDay)} PF·d/day.`
+    }
     lines.push(
       {
         label: 'Project',
@@ -483,16 +601,10 @@ function buildResearchBreakdown(
         value: Number.isFinite(daysLeft) ? `~${Math.ceil(daysLeft)}d` : '—',
       },
     )
-  } else if (programs.length > 0) {
-    utilization = 1
+  } else if (programs.length > 0 && usage.slices.every((slice) => slice.id === 'tree')) {
     utilizationLabel = 'Programs'
     summary = `${programs.length} research program${programs.length === 1 ? '' : 's'} drawing from the research pool.`
-    lines.push({
-      label: 'Status',
-      value: 'Programs running — tech-tree node idle',
-      muted: true,
-    })
-  } else {
+  } else if (usage.slices.length === 0) {
     lines.push({
       label: 'Status',
       value: 'Idle — queue a node in Tech',

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useGameStore } from '../../store/gameStore'
-import { money, pct } from './format'
+import { money, num, pct } from './format'
 import type { Speed } from '../../sim/types'
 import {
   CalendarBlank,
@@ -15,7 +15,7 @@ import { useUiStore } from '../../store/uiStore'
 import { formatCampaignDate } from '../../sim/campaign'
 import { KpiHistoryPopover, type KpiHistoryMetric } from './KpiHistoryPopover'
 import { selectFinanceDashboardView } from './data/financeDashboardModel'
-import { CompanyMark } from './NewGameMenu'
+import { CompanyMarkBadge } from './ui/CompanyMark'
 import { selectPlayerCompany } from '../../sim/company'
 
 /** Play speeds only — pause is a separate control (not crammed as "0"). */
@@ -47,14 +47,18 @@ export function TopBar() {
   const campaignDate = formatCampaignDate(state.calendar)
   const companyName = state.config.labName?.trim() || state.player.name?.trim() || 'Labline'
   const companyMark = state.config.companyMark ?? 'orbit'
+  const companyLogo = state.config.companyLogo
 
   return (
     <header className="top-command-bar pointer-events-none p-2 pb-1">
       <div className="top-command-main hud-surface pointer-events-auto relative flex h-full min-w-0 items-center gap-3 overflow-hidden rounded-lg px-3">
         <div className="top-command-brand shrink-0 items-center gap-2" aria-label={companyName} title={companyName}>
-          <span className="top-command-brand__mark" aria-hidden="true">
-            <CompanyMark mark={companyMark} />
-          </span>
+          <CompanyMarkBadge
+            mark={companyMark}
+            logo={companyLogo}
+            className="top-command-brand__mark"
+            markClassName="size-[1.15rem]"
+          />
           <span className="top-command-brand__wordmark truncate">{companyName}</span>
         </div>
 
@@ -153,7 +157,7 @@ export function TopBar() {
           />
           <Metric
             label="Brand"
-            value={`${(finance.brand ?? 0).toFixed(2)}/100`}
+            value={`${num(finance.brand ?? 0, 0)}/100`}
             className="hidden md:flex"
             active={activeMetric === 'brand'}
             onClick={() => setActiveMetric((current) => current === 'brand' ? null : 'brand')}

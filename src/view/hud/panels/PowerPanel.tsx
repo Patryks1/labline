@@ -1027,8 +1027,10 @@ export function PowerMixDonut({
 export function PowerEfficiencyCard({ state }: { state: SimState }) {
   const snap = computeSnapshot(state);
   const fleet = fleetStats(state);
-  const hasCompute = snap.rawFlopsPf > 1e-6;
-  const pfPerMw = snap.mwDemand > 1e-6 ? snap.rawFlopsPf / snap.mwDemand : 0;
+  const localRawPf = Math.max(0, snap.rawFlopsPf - snap.remoteFlopsPf);
+  const hasCompute = snap.effectiveFlopsPf > 1e-6;
+  const localPfPerMw =
+    snap.mwDemand > 1e-6 ? localRawPf / snap.mwDemand : 0;
   const conversionLoss = hasCompute
     ? Math.max(0, 1 - snap.effectiveFlopsPf / snap.rawFlopsPf)
     : 0;
@@ -1076,7 +1078,18 @@ export function PowerEfficiencyCard({ state }: { state: SimState }) {
         />
       </div>
       <div className="mt-2 space-y-0.5">
-        <StatRow label="PF per MW" value={num(pfPerMw)} strong />
+        <StatRow label="Local PF per MW" value={num(localPfPerMw)} strong />
+        <StatRow
+          label="Cloud compute"
+          value={snap.remoteFlopsPf > 1e-6 ? pf(snap.remoteFlopsPf) : "—"}
+          hint="Contracted PF; it has no local MW denominator."
+        />
+        <StatRow
+          label="Combined effective"
+          value={pf(snap.effectiveFlopsPf)}
+          hint={`${pf(snap.localEffectiveFlopsPf)} local · ${pf(snap.remoteEffectiveFlopsPf)} cloud`}
+          strong
+        />
         <StatRow
           label="Fleet draw"
           value={
@@ -1090,14 +1103,14 @@ export function PowerEfficiencyCard({ state }: { state: SimState }) {
             values={history.map((sample) => sample.pfPerMw)}
             days={history.map((sample) => sample.day)}
             format={(value) => num(value)}
-            label="PF per MW"
+            label="Local PF per MW"
             height={20}
             color="var(--color-mint)"
             className="h-5 w-24 shrink-0"
             ariaLabel="PF per MW trend"
           />
           <span className="text-[0.6875rem] text-muted">
-            PF/MW {trendDelta >= 0 ? "up" : "down"} {pct(Math.abs(trendDelta), 1)}{" "}
+            Local PF/MW {trendDelta >= 0 ? "up" : "down"} {pct(Math.abs(trendDelta), 1)}{" "}
             over {history.length}d
           </span>
         </div>
@@ -1107,8 +1120,8 @@ export function PowerEfficiencyCard({ state }: { state: SimState }) {
         </p>
       )}
       <p className="mt-2 text-[0.6875rem] leading-snug text-muted">
-        Efficiency rises with better chips (lower fleet MW/PF) and optimization
-        research.
+        Local PF/MW tracks grid-backed hardware only. Cloud PF adds to the
+        combined effective total without pretending it draws campus MW.
       </p>
     </GameCard>
   );

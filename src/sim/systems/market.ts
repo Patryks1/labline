@@ -59,7 +59,10 @@ import {
   strainLatencyFactor,
   strainSpeedFactor,
   surgeBrandPressure,
+  peakPricingDemandMultiplier,
   surgePriceMultiplier,
+  configuredAbsorbShare,
+  serveControls,
   throttleAbsorbShare,
   throttleChurnScale,
   throttlePainScale,
@@ -477,10 +480,12 @@ function bestPlayerModel(state: SimState) {
 }
 
 function postedApiSurgeMultiplier(state: SimState): number {
-  if ((state.player.pricing.serveThrottlePolicy ?? "balanced") !== "surge") {
-    return 1;
-  }
-  return surgePriceMultiplier(state.player.apiSurgeLevel ?? 0);
+  const controls = serveControls(state.player.pricing);
+  if (controls.peakPricingPct <= 0) return 1;
+  return surgePriceMultiplier(
+    state.player.apiSurgeLevel ?? 0,
+    controls.peakPricingPct,
+  );
 }
 
 /** Blended list price for market scoring (in/out weighted). Per-model first. */
@@ -627,6 +632,13 @@ export function marketingOutcomeUtilityBonus(
   return (
     Math.log(lift) * (prefersSubscription ? 1.4 + enterpriseTilt * 0.4 : 1.3)
   );
+}
+
+/** Brand changes the premium customers will tolerate, without duplicating its
+ * acquisition utility. Strong trust can defend a modest premium; weak trust
+ * makes the same price feel riskier. */
+export function brandPricingToleranceMultiplier(brandTrust: number): number {
+  return Math.max(0.78, Math.min(1.24, 1 + (Math.max(0, Math.min(100, brandTrust)) - 50) / 420));
 }
 
 /** Resolve a rival model's list price with the same model-first precedence as the player. */
@@ -1655,10 +1667,12 @@ export function tickMarket(state: SimState): SimState {
           segDef.prefersSub,
         );
       } else {
-        const marketingSpend =
-          state.rivals.find((rival) => rival.id === o.labId)
-            ?.marketingSpendPerDay ?? 0;
-        u += marketingUtilityBonus(marketingSpend, segDef.prefersSub);
+        const rival = state.rivals.find((candidate) => candidate.id === o.labId);
+        const outcome = rival?.marketingOutcome;
+        u +=
+          outcome && outcome.day === state.day
+            ? marketingOutcomeUtilityBonus(outcome, segDef.prefersSub)
+            : marketingUtilityBonus(rival?.marketingSpendPerDay ?? 0, segDef.prefersSub);
       }
       return u;
     });
@@ -1689,8 +1703,8 @@ export function tickMarket(state: SimState): SimState {
     // Freed mass flows to the other labs ∝ their target shares — never to the
     // outside option — and settleSegmentProviderShares conserves the total.
     const playerSpillDamp = throttleSpillScale(
-      throttleAbsorbShare(
-        state.player.pricing.serveThrottlePolicy ?? "balanced",
+      configuredAbsorbShare(
+        state.player.pricing,
         state.lastMarket.unservedRatio ?? 0,
       ),
     );
@@ -1824,7 +1838,11 @@ export function tickMarket(state: SimState): SimState {
         // per-segment elasticity: premiums beyond the tolerated ratio collapse
         // MTok toward a 2% trickle; mild undercuts earn up to +15%.
         mtok *= apiDemandElasticityMultiplier({
-          ratioToPeer: pricingStatus?.ratioToPeer ?? null,
+          ratioToPeer:
+            pricingStatus?.ratioToPeer == null
+              ? null
+              : pricingStatus.ratioToPeer /
+                brandPricingToleranceMultiplier(offer.brandTrust),
           kind,
           capabilityLead: pricingStatus?.capabilityLead,
           featureLead: pricingStatus?.featureLead,
@@ -1832,6 +1850,13 @@ export function tickMarket(state: SimState): SimState {
             SEGMENT_API_PRICE_ELASTICITY[segState.id] ??
             DEFAULT_API_PRICE_ELASTICITY,
         });
+        // Peak pricing is an explicit demand control, not just a revenue
+        // multiplier. At aggressive uplifts the API audience walks away even
+        // when the lab is the only seller; this prevents a high posted price
+        // from leaving the demand ledger falsely saturated.
+        if (offer.labId === state.playerLabId) {
+          mtok *= peakPricingDemandMultiplier(postedApiSurgeMultiplier(state));
+        }
         if (
           offer.labId === state.playerLabId &&
           pricingStatus?.ratioToPeer != null
@@ -2028,6 +2053,10 @@ export function tickMarket(state: SimState): SimState {
 
   type PlanBucket = {
     plan: SubPlan;
+    /** Shaped/sticky demand before the configured enrollment cap. */
+    demandSubscribers: number;
+    /** Seats retained above a newly lowered cap. */
+    grandfatheredSubscribers: number;
     subscribers: number;
     maxSeats: number;
     rawMTok: number;
@@ -2229,10 +2258,12 @@ export function tickMarket(state: SimState): SimState {
       frontierCapability: frontierCap,
       utilization: usageRate,
     });
+    const brandAdjustedPriceTooHigh =
+      priceTooHigh / brandPricingToleranceMultiplier(state.player.brandTrust);
     // Softer price rejection — gouging still hurts, fair Plus/Pro still sell
     subscribers *= Math.max(
       0.14,
-      Math.pow(Math.max(0.08, 1 - priceTooHigh), 1.3),
+      Math.pow(Math.max(0.08, 1 - brandAdjustedPriceTooHigh), 1.3),
     );
     // Closing free: paid take-rate bonus (conversion funnel)
     if (!free && !freePlanOn) subscribers *= 1.35;
@@ -2333,9 +2364,33 @@ export function tickMarket(state: SimState): SimState {
   }
 
   const buckets: PlanBucket[] = rawBuckets.map((b) => {
-    // Demand is calculated before capacity. Shortage is visible as unserved
-    // demand and only then feeds churn; it is never silently clipped here.
-    const subscribers = b.subscribers;
+    // Enrollment caps are applied only after all demand shaping, plan
+    // migration, pyramid rules, and seat stickiness. A lowered cap does not
+    // evict existing seats in one tick: the prior enrolled cohort is
+    // grandfathered until natural demand/churn moves it below the cap. New
+    // demand cannot grow beyond that retained cohort while the cap is active.
+    const demandSubscribers = Math.max(0, b.subscribers);
+    const configuredCap =
+      Number.isFinite(b.plan.subscriberCap) && (b.plan.subscriberCap ?? 0) > 0
+        ? Math.max(1, Math.floor(b.plan.subscriberCap!))
+        : undefined;
+    const priorSubscribers =
+      state.lastMarket.planStats.find((stat) => stat.planId === b.plan.id)
+        ?.subscribers ?? 0;
+    const subscribers =
+      configuredCap == null
+        ? demandSubscribers
+        : Math.min(
+            demandSubscribers,
+            Math.max(configuredCap, Math.max(0, priorSubscribers)),
+          );
+    const grandfatheredSubscribers =
+      configuredCap == null
+        ? 0
+        : Math.max(
+            0,
+            subscribers - Math.min(demandSubscribers, configuredCap),
+          );
     const rawMTok = subscribers * b.perUser;
     const demandPf = b.modelMix.reduce(
       (sum, item) =>
@@ -2351,6 +2406,8 @@ export function tickMarket(state: SimState): SimState {
     const subsidyRatio = planSubsidyRatio(b.plan, playerApiBlend, b.usageRate);
     return {
       plan: b.plan,
+      demandSubscribers,
+      grandfatheredSubscribers,
       subscribers,
       maxSeats: b.planMax,
       rawMTok,
@@ -2573,7 +2630,11 @@ export function tickMarket(state: SimState): SimState {
   // balanced mixes. Each channel's strain tracks ITS serve fraction, so the
   // API/sub split visibly moves speed between channels.
   const throttlePolicy = state.player.pricing.serveThrottlePolicy ?? "balanced";
-  const absorbShare = throttleAbsorbShare(throttlePolicy, unservedRatio);
+  const servePolicyControls = serveControls(state.player.pricing);
+  const absorbShare = configuredAbsorbShare(
+    state.player.pricing,
+    unservedRatio,
+  );
   const prevApiStrain =
     state.player.apiSpeedStrain ?? state.player.speedStrain ?? 0;
   const prevSubStrain =
@@ -2593,9 +2654,12 @@ export function tickMarket(state: SimState): SimState {
     state.player.apiSurgeLevel ?? 0,
     1 - serveFracApi,
     throttlePolicy,
+    servePolicyControls.peakPricingPct,
+    servePolicyControls.slowdownLimit,
   );
   const apiSurgeMultiplier = surgePriceMultiplier(
-    throttlePolicy === "surge" ? apiSurgeLevel : 0,
+    apiSurgeLevel,
+    servePolicyControls.peakPricingPct,
   );
   const servicePain = nextServicePain(
     priorPain,
@@ -2706,6 +2770,7 @@ export function tickMarket(state: SimState): SimState {
   );
 
   let blockedSubscriptionSeats = 0;
+  let capBlockedSubscriptionSeats = 0;
   const rawPlanStats = buckets.map((b) => {
     const free = isFreePlan(b.plan);
     const planServeFrac = planServeFractions.get(b.plan.id) ?? 1;
@@ -2718,6 +2783,7 @@ export function tickMarket(state: SimState): SimState {
       Math.max(0.08, 1 - planSubChurnFrac * (free ? 0.75 : 1.05));
     const kept = retainedAfterChurn;
     blockedSubscriptionSeats += retainedAfterChurn * (1 - planServeFrac);
+    capBlockedSubscriptionSeats += Math.max(0, b.demandSubscribers - b.subscribers);
     const planRows = computeLedger.rows.filter(
       (row) => computeWorkMeta.get(row.id)?.planId === b.plan.id,
     );
@@ -2751,6 +2817,12 @@ export function tickMarket(state: SimState): SimState {
     return {
       planId: b.plan.id,
       name: b.plan.name,
+      demandSubscribers: b.demandSubscribers,
+      configuredSubscriberCap:
+        Number.isFinite(b.plan.subscriberCap) && (b.plan.subscriberCap ?? 0) > 0
+          ? Math.max(1, Math.floor(b.plan.subscriberCap!))
+          : undefined,
+      grandfatheredSubscribers: b.grandfatheredSubscribers,
       subscribers: kept,
       maxSeats: b.maxSeats,
       dayRevenue,
@@ -2847,12 +2919,22 @@ export function tickMarket(state: SimState): SimState {
       plan.isFree,
       weightedPlayerOfferTokPerSec(offers, plan.modelUsage, "subscription"),
     );
-    const dissatisfaction = Math.min(
+    const operationalDissatisfaction = Math.min(
       1,
       1 -
         (1 - allowanceDissatisfaction) *
           (1 - stabilityDissatisfaction) *
           (1 - slownessDissatisfaction),
+    );
+    // Trusted brands retain a little more patience through ordinary pricing
+    // and latency variance; weak brands lose the same cohort sooner.
+    const brandDissatisfaction = Math.max(
+      0,
+      Math.min(0.3, (55 - state.player.brandTrust) / 120),
+    );
+    const dissatisfaction = Math.min(
+      1,
+      1 - (1 - operationalDissatisfaction) * (1 - brandDissatisfaction),
     );
     const modelUsage = plan.modelUsage.map((usage) => {
       const modelCost =
@@ -3697,6 +3779,8 @@ export function tickMarket(state: SimState): SimState {
         name: p.name,
         pricePerMonth:
           enabledPlans.find((plan) => plan.id === p.planId)?.pricePerMonth ?? 0,
+        demandSubscribers: p.demandSubscribers,
+        configuredSubscriberCap: p.configuredSubscriberCap,
         subscribers: p.subscribers,
         dayRevenue: p.dayRevenue,
         dayMTok: p.dayMTok,
@@ -3795,6 +3879,7 @@ export function tickMarket(state: SimState): SimState {
       capacitySalesCapped,
       blockedApiMTok: Math.max(0, playerApiMTok - apiServed),
       blockedSubscriptionSeats,
+      capBlockedSubscriptionSeats,
       capacityProductRevenueCeiling,
       computeLedger: reconciledComputeLedger,
     },

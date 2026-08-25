@@ -142,7 +142,7 @@ describe('layered rival strategy', () => {
         ...efficiency,
         researchUnlocked: ['dense_basics'],
       }),
-    ).toBe('fp16')
+    ).toBe('fp32')
   })
 
   it('chooses training numerics only when both research and hardware support them', () => {

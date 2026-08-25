@@ -29,13 +29,13 @@ export type NativeWeightFormat = "float" | "ternary_1_58";
 
 /** Precision of a concrete serving artifact, not of its source checkpoint. */
 export type ServePrecision =
-  "fp16" | "bf16" | "fp8" | "int8" | "int4" | "nvfp4" | "ternary_1_58";
+  "fp32" | "fp16" | "bf16" | "fp8" | "int8" | "int4" | "nvfp4" | "ternary_1_58";
 
 /**
  * Weight precision a released checkpoint natively carries out of training.
  * Serving defaults to this precision; quantization research can override it.
- * FP32 remains a valid native precision even though it is not a deployable
- * endpoint format (endpoints fall back to BF16 kernels over FP32 weights).
+ * FP32 remains a valid native and deployable precision for labs willing to
+ * pay its 4-byte residency and TF32-rate serving cost.
  */
 export type NativeWeightPrecision =
   "fp32" | "fp16" | "bf16" | "fp8" | "nvfp4" | "ternary_1_58";
@@ -322,6 +322,19 @@ export interface PostTrainGym {
   /** Compute rented as cash (cluster-time), not live PF. */
   investedComputeCash: number;
   quality: number;
+  /** Completed facility tier: 0 locked shell, 1 foundry, 2 cluster, 3 campus. */
+  tier?: number;
+  /** Upgrade currently being built. Cash is charged once when this is set. */
+  activePackageId?: string | null;
+  /** Live research PF-days completed toward activePackageId. */
+  progressPfDays?: number;
+  targetPfDays?: number;
+  /** Fraction of the shared research pool reserved for this gym (0-0.75). */
+  researchShare?: number;
+  /** Real HQ researchers reserved for this gym and unavailable to pods. */
+  assignedResearchers?: number;
+  /** Recurring operation / experiment burn while the gym is staffed. */
+  operatingCostPerDay?: number;
 }
 
 export type ToolSkillId = "json" | "grep" | "python" | "shell" | "web";
@@ -2382,6 +2395,12 @@ export interface SubPlan {
 export interface PlanDayStats {
   planId: string;
   name: string;
+  /** Shaped demand after pricing, migration, and stickiness, before enrollment cap. */
+  demandSubscribers?: number;
+  /** Configured enrollment cap (0/open is represented as undefined). */
+  configuredSubscriberCap?: number;
+  /** Seats retained above a newly lowered cap under grandfathering. */
+  grandfatheredSubscribers?: number;
   subscribers: number;
   /** Soft seat cap from inference capacity for this plan today */
   maxSeats?: number;
@@ -2450,6 +2469,8 @@ export interface PlanStatsDaySnapshot {
     planId: string;
     name: string;
     pricePerMonth: number;
+    demandSubscribers?: number;
+    configuredSubscriberCap?: number;
     subscribers: number;
     dayRevenue: number;
     dayMTok: number;
@@ -2471,12 +2492,22 @@ export interface ProductPricing {
    */
   apiVsSubPriority: number;
   /**
-   * Overload policy: 'shed' rejects excess demand (queues/timeouts → churn),
-   * 'throttle' serves everyone but slows streams (speed strain → demand cools
-   * tomorrow), 'balanced' throttles the first ~25% of overload then sheds,
-   * 'surge' uses the balanced absorb curve and raises API prices under load.
+   * Legacy overload selector retained for save migration. New UI and market
+   * settlement use serveSlowdownLimit + peakPricingPct instead.
    */
   serveThrottlePolicy?: ServeThrottlePolicy;
+  /**
+   * Fraction of the inference pool that may be consumed by slowed streams
+   * once the pool is full, before the remaining excess is shed. A value of
+   * 0 sheds immediately; 0.25 preserves the legacy balanced policy; 1.0
+   * keeps all overload in the queue/slow-stream path.
+   *
+   * This is intentionally independent from {@link serveThrottlePolicy},
+   * which remains only as a compatibility hint for pre-v15 saves.
+   */
+  serveSlowdownLimit?: number;
+  /** Maximum temporary API peak-price uplift while the pool is overloaded. */
+  peakPricingPct?: number;
   /** Public models currently listed as simultaneous API endpoints. */
   apiModelIds?: string[];
   /**
@@ -2845,6 +2876,26 @@ export interface EquityOffer {
   optionPoolTopUp: number;
   confidenceRequired: number;
   expiresDay: number;
+  /** Optional model-backed origin for an investor pitch. */
+  modelId?: string;
+}
+
+export type InvestorPitchOutcome = "funded" | "declined";
+
+/** Persisted result of a model-backed investor conversation. */
+export interface InvestorPitchRecord {
+  id: string;
+  modelId: string;
+  modelName: string;
+  investorName: string;
+  day: number;
+  outcome: InvestorPitchOutcome;
+  successChance: number;
+  cashRaised: number;
+  preMoneyValuation: number;
+  postMoneyValuation: number;
+  investorOwnership: number;
+  cooldownUntilDay: number;
 }
 
 export type MarketingChannel =
@@ -2897,6 +2948,10 @@ export interface CapitalStack {
   investorConfidence: number;
   boardPressure: number;
   founderControl: number;
+  /** Global and per-model cooldowns for the model-backed investor desk. */
+  pitchCooldownUntilDay?: number;
+  pitchModelCooldowns?: Record<string, number>;
+  pitchHistory?: InvestorPitchRecord[];
   restructuring: {
     active: boolean;
     daysLeft: number;
@@ -3184,6 +3239,8 @@ export interface RivalLab {
   /** Persistent growth allocation as a multiple of the lab's daily revenue basis. */
   marketingRevenueMultiple?: number;
   marketingChannels?: MarketingChannels;
+  /** Latest settled rival campaign result; absent on legacy saves. */
+  marketingOutcome?: MarketingOutcome;
   enterpriseContracts?: number;
   wagesPerDay?: number;
   powerExportEnabled?: boolean;
@@ -3300,6 +3357,7 @@ export interface LabState {
   /** Persistent growth allocation as a multiple of the lab's daily revenue basis. */
   marketingRevenueMultiple?: number;
   marketingChannels?: MarketingChannels;
+  marketingOutcome?: MarketingOutcome;
   enterpriseContracts: number;
   wagesPerDay: number;
   /** Compatibility bridge until every physical rival rack has been materialized. */
@@ -3744,7 +3802,7 @@ export interface PlayerState {
   apiSpeedStrain?: number;
   /** 0–1 throttling EMA on the subscription channel (plan streams). */
   subSpeedStrain?: number;
-  /** 0–1 EMA of API unserved load used by the surge pricing policy. */
+  /** 0–1 EMA of API unserved load used by the peak-pricing control. */
   apiSurgeLevel?: number;
   researchUnlocked: string[];
   activeResearch: ResearchProgress | null;
@@ -3814,6 +3872,28 @@ export interface SimAlert {
   day: number;
   severity: "info" | "warn" | "danger";
   message: string;
+}
+
+/**
+ * Durable, typed intelligence entries for the World feed. `news` remains the
+ * legacy wire for save compatibility; systems append meaningful transitions
+ * here so the feed can filter model/research and rival/market activity without
+ * parsing prose.
+ */
+export type WorldFeedCategory = "world" | "models" | "market" | "rivals";
+
+export type WorldFeedTone = "neutral" | "positive" | "warning" | "danger" | "research";
+
+export interface WorldFeedEvent {
+  id: string;
+  day: number;
+  category: WorldFeedCategory;
+  title: string;
+  body: string;
+  source?: string;
+  tone?: WorldFeedTone;
+  entityId?: LabId;
+  kind?: string;
 }
 
 export interface VictoryState {
@@ -4026,6 +4106,8 @@ export interface RunConfig {
   labName: string;
   /** Geometric company mark selected when this sandbox was created. */
   companyMark?: import("./balance/gameConfig").CompanyMarkId;
+  /** Procedural geometry selected for the company mark. */
+  companyLogo?: import("./balance/gameConfig").CompanyLogoSpec;
   difficulty: "easy" | "normal" | "hard";
   mapWidth: number;
   mapHeight: number;
@@ -4157,6 +4239,8 @@ export interface SimState {
   };
   alerts: SimAlert[];
   news: string[];
+  /** Newest-first typed feed entries; optional for migration-safe old saves. */
+  feedEvents?: WorldFeedEvent[];
   onboardingStep: number;
   onboardingDismissed: boolean;
   activeEvents: WorldEvent[];
@@ -4242,6 +4326,8 @@ export interface SimState {
     blockedApiMTok?: number;
     /** Paid/free plan seats not admitted today because the inference pool was full. */
     blockedSubscriptionSeats?: number;
+    /** Shaped subscription seats declined by configured enrollment caps. */
+    capBlockedSubscriptionSeats?: number;
     /** Product revenue at the current saturated capacity and channel mix. */
     capacityProductRevenueCeiling?: number;
     /** Compute-v2 reconciliation record for the player lab. */
@@ -4270,5 +4356,16 @@ export interface TickResult {
 /** One daily power→compute efficiency sample (raw PF per drawn MW). */
 export interface PowerEfficiencySample {
   day: number;
+  /** Local, grid-backed raw PF only. Cloud PF is not divided by MW. */
   pfPerMw: number;
+  /** Local raw PF represented by this sample (after local derates/leases). */
+  localPf?: number;
+  /** Remote/cloud raw PF represented by this sample. */
+  cloudPf?: number;
+  /** Local MW draw used for the local PF/MW ratio. */
+  localMw?: number;
+  /** Combined effective PF across local and cloud pools. */
+  combinedEffectivePf?: number;
+  /** Effective PF attributable to the cloud pool (for the breakdown UI). */
+  cloudEffectivePf?: number;
 }

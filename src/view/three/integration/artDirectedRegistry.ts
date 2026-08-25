@@ -25,8 +25,10 @@ const WHITE_HEX = 0xffffff
 const WHITE: Rgb = [1, 1, 1]
 const LIGHT_METAL: Rgb = [0.78, 0.86, 0.9]
 const DARK_METAL: Rgb = [0.42, 0.5, 0.56]
-const GLASS: Rgb = [0.55, 0.72, 0.82]
-const ROOF: Rgb = [0.62, 0.68, 0.72]
+const GLASS: Rgb = [0.47, 0.66, 0.74]
+const ROOF: Rgb = [0.48, 0.29, 0.26]
+const CIVIC_WALL: Rgb = [0.9, 0.84, 0.72]
+const CIVIC_MASS: Rgb = [0.72, 0.71, 0.66]
 const FOLIAGE: Rgb = [1, 1, 1]
 const FOLIAGE_DARK: Rgb = [0.62, 0.78, 0.62]
 const TRUNK: Rgb = [0.58, 0.38, 0.22]
@@ -887,18 +889,18 @@ function facilityFar(kind: MapTile['kind']): THREE.BufferGeometry {
   switch (kind) {
     case 'dc':
       return compound([
-        box(0.76, 0.5, 0.52, 0, 0.25, 0, LIGHT_METAL),
-        box(0.5, 0.08, 0.32, 0, 0.54, 0, DARK_METAL),
+        box(0.76, 0.42, 0.52, 0, 0.21, 0, CIVIC_WALL),
+        box(0.82, 0.08, 0.58, 0, 0.46, 0, ROOF),
       ])
     case 'dc_m':
       return compound([
-        box(0.4, 0.68, 0.78, -0.22, 0.34, 0, LIGHT_METAL),
-        box(0.4, 0.58, 0.78, 0.22, 0.29, 0, LIGHT_METAL),
+        box(0.4, 0.5, 0.78, -0.22, 0.25, 0, CIVIC_WALL),
+        box(0.4, 0.42, 0.7, 0.22, 0.21, 0, CIVIC_MASS),
       ])
     case 'dc_l':
       return compound([
-        box(0.9, 0.76, 0.58, -0.04, 0.38, -0.08, LIGHT_METAL),
-        box(0.3, 1.12, 0.3, 0.28, 0.56, 0.2, DARK_METAL),
+        box(0.72, 0.52, 0.9, -0.16, 0.26, 0, CIVIC_MASS),
+        box(0.36, 0.7, 0.36, 0.36, 0.35, 0.18, LIGHT_METAL),
       ])
     case 'substation':
       return compound([
@@ -944,29 +946,32 @@ function facilityFar(kind: MapTile['kind']): THREE.BufferGeometry {
       ])
     case 'office':
       return compound([
-        box(0.62, 0.88, 0.5, 0, 0.44, 0, LIGHT_METAL),
-        box(0.5, 0.12, 0.03, 0, 0.5, 0.26, GLASS),
+        box(0.92, 0.36, 0.58, 0, 0.18, 0, CIVIC_WALL),
+        box(0.96, 0.07, 0.62, 0, 0.4, 0, DARK_METAL),
       ])
     case 'hq':
       return compound([
-        box(0.62, 0.88, 0.5, 0, 0.44, 0, LIGHT_METAL),
-        box(0.5, 0.12, 0.03, 0, 0.5, 0.26, GLASS),
+        box(0.78, 0.36, 0.56, 0, 0.18, 0, CIVIC_WALL),
+        box(0.82, 0.07, 0.6, 0, 0.4, 0, DARK_METAL),
       ])
     case 'hq_m':
       return compound([
-        box(0.85, 0.55, 0.8, 0, 0.275, 0, DARK_METAL),
-        box(0.42, 2.2, 0.42, -0.08, 1.1, -0.04, LIGHT_METAL),
+        box(0.5, 0.62, 0.44, -0.18, 0.31, -0.1, CIVIC_WALL),
+        box(0.44, 0.62, 0.7, 0.24, 0.31, 0.08, CIVIC_MASS),
+        box(0.54, 0.07, 0.48, -0.18, 0.66, -0.1, DARK_METAL),
       ])
     case 'hq_l':
       return compound([
-        box(0.9, 0.55, 0.86, 0, 0.275, 0, DARK_METAL),
-        box(0.36, 4.0, 0.36, 0, 2.0, 0, LIGHT_METAL),
-        box(0.22, 0.35, 0.22, 0, 4.2, 0, DARK_METAL),
+        box(0.92, 0.3, 0.82, 0, 0.15, 0, CIVIC_MASS),
+        box(0.52, 0.56, 0.48, -0.08, 0.58, -0.04, CIVIC_WALL),
+        box(0.3, 0.42, 0.58, 0.32, 0.51, 0.1, CIVIC_WALL),
+        box(0.56, 0.08, 0.52, -0.08, 0.9, -0.04, DARK_METAL),
       ])
     case 'lab':
       return compound([
-        box(0.84, 0.48, 0.72, 0, 0.24, 0, LIGHT_METAL),
-        cone(0.18, 0.24, 8, 0.16, 0.6, -0.1, GLASS),
+        box(0.74, 0.42, 0.52, -0.08, 0.21, 0, CIVIC_WALL),
+        box(0.36, 0.34, 0.36, 0.32, 0.17, 0.16, CIVIC_MASS),
+        box(0.78, 0.07, 0.56, -0.08, 0.46, 0, DARK_METAL),
       ])
     default:
       return simpleBox(0.8, 0.6, 0.72)

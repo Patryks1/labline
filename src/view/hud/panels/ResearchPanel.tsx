@@ -12,6 +12,7 @@ import {
 import {
   ArrowCounterClockwise,
   CornersOut,
+  Lock,
   Minus,
   Plus,
   Trash,
@@ -29,6 +30,7 @@ import {
   layoutResearchTree,
   type ResearchTreeLayout,
 } from "../../../sim/balance/researchLayout";
+import { RESEARCH_POD_TEMPLATES } from "../../../sim/balance/researchPods";
 import type {
   ResearchEffects,
   ResearchNodeDef,
@@ -52,13 +54,23 @@ import {
 } from "../../../sim/systems/research";
 import {
   dequeueResearchProgram,
+  effectiveResearchPodStaff,
+  openResearchPod,
   queueResearchProgram,
+  researchPodOpenStatus,
+  researchPodStaffAvailability,
   researchPodStaffRequirements,
+  researchProgramBlockReason,
+  setResearchPodStaff,
   startResearchProgram,
 } from "../../../sim/systems/researchPrograms";
 import { playerStaff } from "../../../sim/systems/staff";
 import { useGameStore } from "../../../store/gameStore";
 import { computeSnapshot } from "../../../sim/tick";
+import {
+  researchComputeUsage,
+  type ResearchComputeUsage,
+} from "../../../sim/systems/computeBreakdown";
 import { money, mw, num } from "../format";
 import { GameCard, LiveDot, MeterBar, StatRow } from "../ui/kit";
 import {
@@ -72,9 +84,15 @@ import {
   RESEARCH_TREE_DEFAULT_ZOOM,
   RESEARCH_TREE_MIN_ZOOM,
 } from "./researchCanvasLayout";
+import { consumeChartEscape } from "../ui/dataViz/chartInteraction";
 import {
+  ancestorClassTokens,
+  initialResearchViewportNodeId,
+  nextResearchSelection,
   researchNodeSummaryId,
+  researchRelationshipSet,
   researchRelationshipTargets,
+  shouldClearResearchSelection,
 } from "./researchPanelA11y";
 
 const FULL_RESEARCH_LAYOUT = layoutResearchTree();
@@ -102,22 +120,46 @@ function statusTone(
   return "neutral";
 }
 
+export function researchPoolTileValue(usage: ResearchComputeUsage): string {
+  if (usage.usedPf > 0.001) {
+    return `${num(usage.usedPf, 2)} / ${num(usage.poolPf, 2)} PF`;
+  }
+  return `${num(usage.poolPf, 2)} PF`;
+}
+
+export function researchPoolTileDetail(usage: ResearchComputeUsage): string {
+  const draw = `${mw(usage.powerMw)} physical draw`;
+  if (usage.slices.length === 0) return `idle · ${draw}`;
+  return `${usage.slices.map((slice) => slice.short).join(" · ")} · ${draw}`;
+}
+
+export function researchPoolTileTitle(usage: ResearchComputeUsage): string {
+  if (usage.slices.length === 0) {
+    return `${num(usage.poolPf, 2)} PF reserved · idle`;
+  }
+  return usage.slices
+    .map((slice) => `${num(slice.pf, 2)} PF ${slice.label.toLowerCase()}`)
+    .join(" · ");
+}
+
 export function ResearchPanel() {
   const state = useGameStore((s) => s.state);
   const focusRequest = useGameStore((s) => s.researchFocusRequest);
   const setState = useGameStore.setState;
   const snap = computeSnapshot(state);
+  const researchUsage = researchComputeUsage(state, snap);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedPodId, setSelectedPodId] = useState(
     () => state.player.researchPods?.[0]?.id ?? "",
   );
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [queuedPulseId, setQueuedPulseId] = useState<string | null>(null);
   const selectedMethodRef = useRef<HTMLDivElement | null>(null);
 
   const active = state.player.activeResearch;
   const legacyQueue = state.player.researchQueue;
-  const leads = state.player.researchLeads ?? [];
   const pods = state.player.researchPods ?? [];
   const programs = state.player.researchPrograms ?? [];
   const usesPodPrograms = pods.length > 0;
@@ -158,6 +200,11 @@ export function ResearchPanel() {
   const selectedLineage = useMemo(
     () => researchLineage(selectedId),
     [selectedId],
+  );
+  const focusedId = hoveredId ?? selectedId;
+  const focusedRelationships = useMemo(
+    () => researchRelationshipSet(focusedId),
+    [focusedId],
   );
 
   const apply = (next: typeof state) => setState({ state: next });
@@ -227,7 +274,34 @@ export function ResearchPanel() {
     return () => window.cancelAnimationFrame(frame);
   }, [selectedId]);
 
+  useEffect(() => {
+    if (!selectedId) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) return;
+      if (!shouldClearResearchSelection(ancestorClassTokens(event.target))) return;
+      setSelectedId(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      const ui = useGameStore.getState();
+      if (ui.hotkeyHelpOpen || ui.pauseMenuOpen) return;
+      consumeChartEscape(event, () => setSelectedId(null));
+    };
+
+    document.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [selectedId]);
+
   const startOrQueue = (id: string) => apply(startResearch(state, id));
+  const queueNode = (id: string) => {
+    apply(usesPodPrograms ? queueResearchProgram(state, id) : enqueueResearch(state, id));
+    setQueuedPulseId(id);
+    window.setTimeout(() => setQueuedPulseId((current) => (current === id ? null : current)), 900);
+  };
   const L = RESEARCH_LAYOUT;
 
   return (
@@ -242,8 +316,9 @@ export function ResearchPanel() {
         <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
           <MetricTile
             label="Pool"
-            value={`${num(snap.pools.research, 2)} PF`}
-            detail={`${mw(snap.mwForecast.research)} physical draw`}
+            value={researchPoolTileValue(researchUsage)}
+            detail={researchPoolTileDetail(researchUsage)}
+            title={researchPoolTileTitle(researchUsage)}
             tone="research"
           />
           <MetricTile
@@ -270,8 +345,8 @@ export function ResearchPanel() {
         </div>
 
       <div className="research-workbench-layout flex min-h-0 flex-1 flex-col gap-2 overflow-visible">
-        <aside className="research-workbench-queue order-1 flex min-h-0 w-full shrink-0 flex-col gap-2 overflow-visible">
-          <div className="panel-scroll min-h-0 flex-1 space-y-2 pr-0.5 xl:overflow-y-auto">
+        <aside className="research-workbench-queue order-1 flex min-h-0 w-full shrink-0 flex-col gap-2">
+          <div className="panel-scroll min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain pr-0.5">
             {usesPodPrograms ? (
               <>
                 <div className="flex flex-wrap items-center gap-2">
@@ -279,55 +354,15 @@ export function ResearchPanel() {
                     {(activePrograms.length > 0 || !!active) && (
                       <LiveDot className="text-research" />
                     )}
-                    Pods · queue
+                    Pods
                   </p>
                 </div>
-                <div className="anim-stagger grid gap-2">
-                  {pods.map((pod) => {
-                    const lead = leads.find(
-                      (candidate) => candidate.id === pod.leadId,
-                    );
-                    const program = programs.find(
-                      (candidate) => candidate.id === pod.assignmentId,
-                    );
-                    const progress = program ? programProgress(program) : 0;
-                    return (
-                      <GameCard
-                        key={pod.id}
-                        eyebrow={lead?.name ?? "No lead"}
-                        title={pod.name}
-                        tone="research"
-                        live={!!program}
-                        interactive
-                        selected={pod.id === selectedPodId}
-                        ariaLabel={`Select research pod ${pod.name}`}
-                        onActivate={() => setSelectedPodId(pod.id)}
-                        className="min-h-11"
-                        actions={
-                          <StatusChip tone={program ? "research" : "neutral"}>
-                            {program?.phase ?? "available"}
-                          </StatusChip>
-                        }
-                      >
-                        <p className="truncate text-[0.8125rem] text-muted">
-                          {pod.researchers} research · {pod.engineers} eng ·{" "}
-                          {pod.dataStaff} data
-                        </p>
-                        {program && (
-                          <div className="mt-2">
-                            <MeterBar
-                              label={getResearchNode(program.methodId).name}
-                              value={progress}
-                              detail={`${Math.round(progress * 100)}%`}
-                              tone="research"
-                              live
-                            />
-                          </div>
-                        )}
-                      </GameCard>
-                    );
-                  })}
-                </div>
+                <ResearchPodRoster
+                  state={state}
+                  selectedPodId={selectedPodId}
+                  onSelectPod={setSelectedPodId}
+                  apply={apply}
+                />
                 {queue.length > 0 && (
                   <GameCard
                     eyebrow="Queued"
@@ -432,10 +467,9 @@ export function ResearchPanel() {
         </aside>
 
         <div className="research-workbench-main order-2 flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-visible">
-          <div
-            className={`research-canvas-column grid min-h-0 flex-1 grid-cols-1 gap-2 overflow-visible${selected && status ? " research-canvas-column--detail" : ""}`}
-          >
-            <div
+          <div className="research-canvas-column grid min-h-0 flex-1 grid-cols-1 gap-2 overflow-visible">
+            <div className="research-tree-shell relative min-h-0">
+              <div
               ref={canvas.viewportRef}
               onPointerDown={canvas.onPointerDown}
               onPointerMove={canvas.onPointerMove}
@@ -459,7 +493,7 @@ export function ResearchPanel() {
                   ))}
                 </ul>
               </div>
-              <div className="research-tree-toolbar absolute right-2 top-2 z-20 flex items-center gap-1 rounded-lg border border-line bg-panel/95 p-1.5 shadow-lg backdrop-blur-md sm:right-3 sm:top-3">
+              <div className="research-tree-toolbar absolute right-2 top-2 z-40 flex items-center gap-1 rounded-lg border border-line bg-panel/95 p-1.5 shadow-lg backdrop-blur-md sm:right-3 sm:top-3">
                 <span className="min-w-12 rounded bg-void/70 px-2 py-1 text-center font-mono text-[0.6875rem] tabular-nums text-bone">
                   {Math.round(canvas.zoom * 100)}%
                 </span>
@@ -499,8 +533,8 @@ export function ResearchPanel() {
                 </HudButton>
               </div>
               <div className="pointer-events-none absolute bottom-2 left-2 z-20 rounded-md border border-line/70 bg-panel/85 px-2 py-1 font-mono text-[0.625rem] text-muted backdrop-blur-md">
-                <span className="sm:hidden">drag · +/− zoom · tap a method</span>
-                <span className="hidden sm:inline">drag · wheel · double-click to queue</span>
+                <span className="sm:hidden">tap select · Queue action · pinch/drag</span>
+                <span className="hidden sm:inline">click select · double-click or Queue to queue</span>
               </div>
               <div
                 ref={canvas.contentRef}
@@ -543,8 +577,8 @@ export function ResearchPanel() {
                     const midX = (e.x1 + e.x2) / 2;
                     const midY = (e.y1 + e.y2) / 2;
                     const done = state.player.researchUnlocked.includes(e.from);
-                    const selectedEdge =
-                      selectedLineage.has(e.from) && selectedLineage.has(e.to);
+                    const focusedEdge =
+                      focusedRelationships.has(e.from) && focusedRelationships.has(e.to);
                     const path = horizontal
                       ? `M ${e.x1} ${e.y1} C ${midX} ${e.y1}, ${midX} ${e.y2}, ${e.x2} ${e.y2}`
                       : `M ${e.x1} ${e.y1} C ${e.x1} ${midY}, ${e.x2} ${midY}, ${e.x2} ${e.y2}`;
@@ -554,18 +588,20 @@ export function ResearchPanel() {
                           d={path}
                           fill="none"
                           stroke={
-                            e.crossTrunk
-                              ? done
-                                ? "#3dffc044"
-                                : "#2a2f3a88"
-                              : done
-                                ? "#3dffc088"
-                                : "#3a4150"
+                            focusedEdge
+                              ? "#bda8ff"
+                              : e.crossTrunk
+                                ? done
+                                  ? "#3dffc044"
+                                  : "#2a2f3a88"
+                                : done
+                                  ? "#3dffc088"
+                                  : "#3a4150"
                           }
-                          strokeWidth={e.crossTrunk ? 1 : 1.5}
+                          strokeWidth={focusedEdge ? (e.crossTrunk ? 2 : 2.5) : e.crossTrunk ? 1 : 1.5}
                           strokeDasharray={e.crossTrunk ? "4 3" : undefined}
                         />
-                        {selectedEdge ? (
+                        {focusedEdge ? (
                           <path
                             data-selected-research-edge="true"
                             className="research-edge-selected"
@@ -596,6 +632,8 @@ export function ResearchPanel() {
                       : nodeVisualStatus(state, n.id);
                   const sel = selectedId === n.id;
                   const highlighted = highlightedId === n.id;
+                  const related = !focusedId || focusedRelationships.has(n.id);
+                  const inLineage = selectedLineage.has(n.id);
                   const relation = relationshipTargets.get(n.id) ?? {
                     incoming: [],
                     outgoing: [],
@@ -608,7 +646,7 @@ export function ResearchPanel() {
                   return (
                     <div
                       key={n.id}
-                      className={`absolute ${sel ? "z-30" : "z-10"}`}
+                      className={`absolute ${sel ? "z-20" : "z-30"}`}
                       style={{
                         left: n.x,
                         top: n.y,
@@ -619,21 +657,35 @@ export function ResearchPanel() {
                         type="button"
                         aria-expanded={sel}
                         aria-describedby={summaryId}
-                        aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown"
-                        onClick={() => setSelectedId(sel ? null : n.id)}
-                        onKeyDown={(event) => moveResearchRelationship(event, n.id)}
+                        aria-keyshortcuts="Enter Shift+Enter Escape ArrowLeft ArrowRight ArrowUp ArrowDown"
+                        onMouseEnter={() => setHoveredId(n.id)}
+                        onMouseLeave={() => setHoveredId((current) => (current === n.id ? null : current))}
+                        onFocus={() => setHoveredId(n.id)}
+                        onBlur={() => setHoveredId((current) => (current === n.id ? null : current))}
+                        onClick={() =>
+                          setSelectedId((current) => nextResearchSelection(current, n.id))
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && event.shiftKey) {
+                            event.preventDefault();
+                            queueNode(n.id);
+                            return;
+                          }
+                          if (event.key === "Escape") {
+                            consumeChartEscape(event, () => setSelectedId(null));
+                            return;
+                          }
+                          moveResearchRelationship(event, n.id);
+                        }}
                         onDoubleClick={(event) => {
                           event.stopPropagation();
-                          setSelectedId(n.id);
-                          if (usesPodPrograms) {
-                            apply(queueResearchProgram(state, n.id));
-                          } else {
-                            startOrQueue(n.id);
-                          }
+                          queueNode(n.id);
                         }}
-                        className="research-node-hit relative block min-h-11 w-full border-0 bg-transparent p-0 text-left"
+                        className={`research-node-hit relative block min-h-11 w-full border-0 bg-transparent p-0 text-left ${related ? "research-node-related" : "research-node-dimmed"} ${hoveredId === n.id ? "research-node-hovered" : ""}`}
                         style={nodeStyle}
-                        title={sel ? "Collapse research details" : def.description}
+                        title={sel ? "Research details are open beside this method" : def.description}
+                        data-related={related ? "true" : "false"}
+                        data-lineage={inLineage ? "true" : "false"}
                       >
                         <span
                           aria-hidden="true"
@@ -665,12 +717,24 @@ export function ResearchPanel() {
                                 </>
                               )}
                             </span>
-                            {sel && (
-                              <span className="text-research">details below</span>
-                            )}
+                            {sel && <span className="text-research">details beside</span>}
                           </span>
                         </span>
                       </button>
+                      <HudButton
+                        type="button"
+                        variant="ghost"
+                        aria-label={`Queue ${def.name}`}
+                        title={`Queue ${def.name}`}
+                        className={`research-node-queue-action absolute bottom-1 right-1 z-20 !min-h-7 !h-7 !min-w-7 !rounded-md !px-1 text-[0.625rem] ${queuedPulseId === n.id ? "!border-research !bg-research/20 !text-research" : "!border-line/70 !bg-void/80 !text-muted"}`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setSelectedId(n.id);
+                          queueNode(n.id);
+                        }}
+                      >
+                        Q
+                      </HudButton>
                       <span id={summaryId} className="sr-only">
                         {def.name}. Status: {st}.{" "}
                         {relation.incoming.length > 0
@@ -692,11 +756,13 @@ export function ResearchPanel() {
                   );
                 })}
               </div>
-            </div>
+              </div>
             {selected && status ? (
               <div
                 ref={selectedMethodRef}
-                className="research-method-detail mt-2 min-w-0"
+                className="research-method-detail absolute z-[25] min-w-0"
+                style={canvas.detailPosition(selected.id)}
+                onPointerDown={(event) => event.stopPropagation()}
               >
                 <ResearchMethodDetail
                   state={state}
@@ -718,11 +784,239 @@ export function ResearchPanel() {
                 />
               </div>
             ) : null}
+            </div>
           </div>
         </div>
       </div>
       </div>
     </PanelScaffold>
+  );
+}
+
+function ResearchPodRoster({
+  state,
+  selectedPodId,
+  onSelectPod,
+  apply,
+}: {
+  state: SimState;
+  selectedPodId: string;
+  onSelectPod: (id: string) => void;
+  apply: (next: SimState) => void;
+}) {
+  const opened = new Map(
+    (state.player.researchPods ?? []).map((pod) => [pod.id, pod]),
+  );
+  const leads = state.player.researchLeads ?? [];
+  const programs = state.player.researchPrograms ?? [];
+  return (
+    <div className="anim-stagger grid gap-1.5">
+      {RESEARCH_POD_TEMPLATES.map((template) => {
+        const pod = opened.get(template.id);
+        if (pod) {
+          const lead = leads.find((candidate) => candidate.id === pod.leadId);
+          const program = programs.find(
+            (candidate) => candidate.id === pod.assignmentId,
+          );
+          const selected = pod.id === selectedPodId;
+          const progress = program ? programProgress(program) : 0;
+          const seated = effectiveResearchPodStaff(state, pod);
+          const blockReason = program
+            ? researchProgramBlockReason(state, program)
+            : undefined;
+          return (
+            <GameCard
+              key={pod.id}
+              title={pod.name}
+              tone="research"
+              live={!!program}
+              pad={false}
+              interactive={!selected}
+              selected={selected}
+              ariaLabel={`Select research pod ${pod.name}`}
+              onActivate={() => onSelectPod(pod.id)}
+              className="research-pod-card min-h-0"
+              actions={
+                <StatusChip tone={program ? "research" : "neutral"}>
+                  {program?.phase ?? "idle"}
+                </StatusChip>
+              }
+            >
+              <div className="space-y-1.5 px-2.5 py-2">
+                <p className="truncate text-[0.6875rem] text-muted">
+                  {lead?.name ?? "No lead"}
+                  <span className="font-mono text-bone/80">
+                    {" "}
+                    · {seated.researchers}/{seated.engineers}/{seated.dataStaff}
+                  </span>
+                </p>
+                {program ? (
+                  <MeterBar
+                    label={getResearchNode(program.methodId).name}
+                    value={progress}
+                    detail={`${Math.round(progress * 100)}%`}
+                    tone="research"
+                    live
+                  />
+                ) : null}
+                {blockReason ? (
+                  <p
+                    className="text-[0.625rem] leading-4 text-amber"
+                    role="status"
+                  >
+                    {blockReason}
+                  </p>
+                ) : null}
+                {selected ? (
+                  <ResearchPodStaffEditor
+                    state={state}
+                    pod={pod}
+                    program={program}
+                    apply={apply}
+                  />
+                ) : null}
+              </div>
+            </GameCard>
+          );
+        }
+
+        const status = researchPodOpenStatus(state, template.id)!;
+        const prerequisite = template.requiresResearch
+          ? getResearchNode(template.requiresResearch)
+          : undefined;
+        const ready = status.prerequisiteMet && status.affordable;
+        return (
+          <GameCard
+            key={template.id}
+            title={template.podName}
+            pad={false}
+            className="research-pod-card min-h-0 opacity-[0.78]"
+            actions={
+              <StatusChip tone={ready ? "research" : "warning"}>
+                {ready ? "ready" : "locked"}
+              </StatusChip>
+            }
+          >
+            <div className="space-y-1.5 px-2.5 py-2">
+              <p className="flex items-start gap-1.5 text-[0.6875rem] leading-snug text-muted">
+                {!status.prerequisiteMet ? (
+                  <Lock
+                    size="0.75rem"
+                    className="mt-0.5 shrink-0 text-amber"
+                    aria-hidden
+                  />
+                ) : null}
+                <span>
+                  {!status.prerequisiteMet
+                    ? `Requires ${prerequisite?.name ?? template.requiresResearch}`
+                    : !status.affordable
+                      ? `Need ${money(template.openCost)}`
+                      : `${template.lead.name} · ${money(template.openCost)}`}
+                </span>
+              </p>
+              {status.prerequisiteMet ? (
+                <HudButton
+                  type="button"
+                  variant={ready ? "primary" : "ghost"}
+                  className="!min-h-9 !w-full !px-2 !py-1 !text-[0.6875rem]"
+                  disabled={!ready}
+                  title={
+                    !status.affordable
+                      ? `Need ${money(template.openCost)} to open ${template.podName}`
+                      : `Open ${template.podName}`
+                  }
+                  onClick={() => {
+                    apply(openResearchPod(state, template.id));
+                    onSelectPod(template.id);
+                  }}
+                >
+                  Open
+                </HudButton>
+              ) : null}
+            </div>
+          </GameCard>
+        );
+      })}
+    </div>
+  );
+}
+
+function ResearchPodStaffEditor({
+  state,
+  pod,
+  program,
+  apply,
+}: {
+  state: SimState;
+  pod: ResearchPod;
+  program?: ResearchProgram;
+  apply: (next: SimState) => void;
+}) {
+  const availability = researchPodStaffAvailability(state, pod.id);
+  const required = program
+    ? researchPodStaffRequirements(program.methodId)
+    : { researchers: 0, engineers: 0, dataStaff: 0 };
+  const roles = [
+    {
+      key: "researchers" as const,
+      short: "R",
+      label: "Researchers",
+    },
+    {
+      key: "engineers" as const,
+      short: "E",
+      label: "Engineers",
+    },
+    {
+      key: "dataStaff" as const,
+      short: "D",
+      label: "Data staff",
+    },
+  ];
+  return (
+    <section
+      className="research-pod-staff-editor border-t border-research/25 pt-1.5"
+      aria-label={`${pod.name} staff assignment`}
+    >
+      <div className="research-pod-staff">
+        {roles.map(({ key, short, label }) => {
+          const assigned = Math.max(0, pod[key]);
+          const minimum = required[key];
+          const max = availability.available[key];
+          return (
+            <div key={key} className="research-pod-staff-row">
+              <span className="research-pod-staff-label">
+                <span className="sr-only">{label}</span>
+                <span aria-hidden>{short}</span>
+              </span>
+              <HudButton
+                type="button"
+                variant="ghost"
+                aria-label={`Release one ${label.toLowerCase()} from ${pod.name}`}
+                disabled={assigned <= minimum}
+                onClick={() =>
+                  apply(setResearchPodStaff(state, pod.id, key, -1))
+                }
+              >
+                −
+              </HudButton>
+              <span className="research-pod-staff-value">{assigned}</span>
+              <HudButton
+                type="button"
+                variant="ghost"
+                aria-label={`Assign one ${label.toLowerCase()} to ${pod.name}`}
+                disabled={assigned >= max}
+                onClick={() =>
+                  apply(setResearchPodStaff(state, pod.id, key, 1))
+                }
+              >
+                +
+              </HudButton>
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -941,7 +1235,7 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
   const dragRef = useRef<{ pointerId: number; x: number; y: number } | null>(
     null,
   );
-  const [zoom, setZoom] = useState(viewRef.current.scale);
+  const [view, setView] = useState(viewRef.current);
 
   const applyView = useCallback((next: CanvasView) => {
     viewRef.current = next;
@@ -950,9 +1244,9 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
       content.style.transformOrigin = "0 0";
       content.style.transform = `translate3d(${next.x}px, ${next.y}px, 0) scale(${next.scale})`;
     }
-    setZoom((current) =>
-      Math.abs(current - next.scale) > 0.001 ? next.scale : current,
-    );
+    // Keep panning reactive as well as zooming so an anchored detail card
+    // follows its node without forcing a camera recenter.
+    setView(next);
   }, []);
 
   const fit = useCallback(() => {
@@ -990,18 +1284,39 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
     [applyView, layout.height, layout.width],
   );
 
-  const readableDefault = useCallback(
-    () => centerAtScale(RESEARCH_TREE_DEFAULT_ZOOM),
-    [centerAtScale],
-  );
+  const readableDefault = useCallback(() => {
+    const viewport = viewportRef.current;
+    const nodeId = initialResearchViewportNodeId(layout);
+    const node = nodeId
+      ? layout.nodes.find((candidate) => candidate.id === nodeId)
+      : undefined;
+    if (!viewport || !node) {
+      centerAtScale(RESEARCH_TREE_DEFAULT_ZOOM);
+      return;
+    }
+    const bounds = viewport.getBoundingClientRect();
+    const scale = RESEARCH_TREE_DEFAULT_ZOOM;
+    applyView({
+      // Roots flow left-to-right. Keep the starting method near the leading
+      // edge so its outgoing branches, rather than empty history, fill the
+      // initial viewport.
+      x: bounds.width * 0.18 - (node.x + node.w / 2) * scale,
+      y: bounds.height / 2 - (node.y + node.h / 2) * scale,
+      scale,
+    });
+  }, [applyView, centerAtScale, layout]);
 
   useEffect(() => {
     // Initialize once. Selecting a method can resize the graph when its detail
     // column opens; observing that resize used to re-center the entire canvas
     // and made a normal click appear to teleport to another branch.
     const frame = window.requestAnimationFrame(readableDefault);
+    // The workspace drawer expands after mount. Re-focus once that transition
+    // settles, without observing later detail-card resizes or user panning.
+    const settle = window.setTimeout(readableDefault, 280);
     return () => {
       window.cancelAnimationFrame(frame);
+      window.clearTimeout(settle);
     };
   }, [readableDefault]);
 
@@ -1029,7 +1344,10 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
 
   const onPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
-      if (event.button !== 0 || (event.target as HTMLElement).closest("button"))
+      if (
+        event.button !== 0 ||
+        (event.target as HTMLElement).closest("button, .research-method-detail")
+      )
         return;
       dragRef.current = {
         pointerId: event.pointerId,
@@ -1093,10 +1411,40 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
     [applyView, layout.nodes],
   );
 
+  const detailPosition = useCallback(
+    (nodeId: string): CSSProperties => {
+      const viewport = viewportRef.current;
+      const node = layout.nodes.find((candidate) => candidate.id === nodeId);
+      if (!viewport || !node) {
+        return { top: "0.5rem", right: "0.5rem", width: "min(22rem, calc(100% - 1rem))" };
+      }
+      const bounds = viewport.getBoundingClientRect();
+      const cardWidth = Math.min(352, Math.max(260, bounds.width * 0.34));
+      const cardHeight = Math.min(480, Math.max(260, bounds.height * 0.78));
+      const nodeLeft = view.x + node.x * view.scale;
+      const nodeTop = view.y + node.y * view.scale;
+      const nodeRight = nodeLeft + node.w * view.scale;
+      const gap = 12;
+      const preferredLeft = nodeRight + gap;
+      const left = preferredLeft + cardWidth <= bounds.width - 8
+        ? preferredLeft
+        : nodeLeft - cardWidth - gap;
+      const clampedLeft = Math.max(8, Math.min(bounds.width - cardWidth - 8, left));
+      const clampedTop = Math.max(8, Math.min(bounds.height - cardHeight - 8, nodeTop));
+      return {
+        left: `${clampedLeft}px`,
+        top: `${clampedTop}px`,
+        width: `${cardWidth}px`,
+        maxHeight: `${cardHeight}px`,
+      };
+    },
+    [layout.nodes, view],
+  );
+
   return {
     viewportRef,
     contentRef,
-    zoom,
+    zoom: view.scale,
     fit,
     reset,
     centerNode,
@@ -1105,6 +1453,7 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
     onPointerMove,
     onPointerUp,
     onWheel,
+    detailPosition,
   };
 }
 

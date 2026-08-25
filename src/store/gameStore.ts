@@ -52,6 +52,7 @@ import {
   createModelRouter,
   deleteModelRouter,
   investPostTrainGym,
+  setPostTrainGymAllocation,
   setActiveModelRouter,
   setRouterLane,
   teachToolSkill,
@@ -82,6 +83,7 @@ import {
   type RackDeploymentTarget,
 } from "../sim/systems/hosting";
 import {
+  canPlaceBuilding,
   placeBuilding,
   upgradeBuilding,
   renameBuilding,
@@ -365,6 +367,10 @@ interface GameStore {
     stage: Exclude<import("../sim/types").PostTrainStage, "none">,
   ) => void;
   investPostTrainGym: (kind: PostTrainGymKind, packageId: string) => void;
+  setPostTrainGymAllocation: (
+    kind: PostTrainGymKind,
+    allocation: { assignedResearchers?: number; researchShare?: number },
+  ) => void;
   setTrainingLabs: (jobId: string, kinds: PostTrainGymKind[]) => void;
   teachToolSkill: (skillId: ToolSkillId, packageId: string) => void;
   createModelRouter: (name?: string) => void;
@@ -971,11 +977,16 @@ export const useGameStore = create<GameStore>((rawSet, get) => {
       return;
     }
 
-    if (
-      buildMode &&
+    const placementCheck = buildMode
+      ? canPlaceBuilding(state, x, y, buildMode)
+      : null;
+    // Keep the legacy warning path for an empty parcel that is blocked by
+    // cash, slope, footprint or a later rule, while allowing eligible city
+    // infill to enter the same authoritative placement path.
+    const emptyParcelCandidate =
       tile.kind === "empty" &&
-      (tile.owner === "neutral" || tile.owner === "player")
-    ) {
+      (tile.owner === "neutral" || tile.owner === "player");
+    if (buildMode && (placementCheck?.ok || emptyParcelCandidate)) {
       const next = placeBuilding(state, x, y, buildMode);
       // Keep build mode so you can place multiple of the same type
       const placed = mapTileAt(next, x, y);
@@ -1213,6 +1224,10 @@ export const useGameStore = create<GameStore>((rawSet, get) => {
     set((st) => ({ state: selectPostTrain(st.state, jobId, stage) })),
   investPostTrainGym: (kind, packageId) =>
     set((st) => ({ state: investPostTrainGym(st.state, kind, packageId) })),
+  setPostTrainGymAllocation: (kind, allocation) =>
+    set((st) => ({
+      state: setPostTrainGymAllocation(st.state, kind, allocation),
+    })),
   setTrainingLabs: (jobId, kinds) =>
     set((st) => ({ state: setTrainingLabs(st.state, jobId, kinds) })),
   teachToolSkill: (skillId, packageId) =>
@@ -1618,6 +1633,7 @@ export const useGameStore = create<GameStore>((rawSet, get) => {
         ...opts,
         seed: opts.seed ?? Date.now() % 100000,
       });
+      useUiStore.getState().beginCampaign();
       set({
         loading: {
           operation: "new-game",
@@ -1735,6 +1751,7 @@ export const useGameStore = create<GameStore>((rawSet, get) => {
       const loadedState = applyLoadedState(state);
       setActiveBalanceTuning(loadedState.state.balanceTuning);
       useUiStore.getState().clearNegotiations();
+      useUiStore.getState().beginCampaign();
       set({ ...loadedState, saveStatus: "idle" });
       return { ok: true as const };
     } catch (e) {

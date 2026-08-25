@@ -156,6 +156,18 @@ describe('cloud visibility UI preference', () => {
   })
 })
 
+describe('campaign-scoped UI state', () => {
+  it('advances an ephemeral epoch so mounted campaign views can reset', () => {
+    const before = useUiStore.getState().campaignEpoch
+    useUiStore.getState().beginCampaign()
+
+    expect(useUiStore.getState().campaignEpoch).toBe(before + 1)
+    expect(partializeUiPreferences(useUiStore.getState())).not.toHaveProperty(
+      'campaignEpoch',
+    )
+  })
+})
+
 describe('audio UI preferences', () => {
   it('adds safe audio defaults to legacy persisted state', () => {
     expect(migrateUiPreferences({ renderPreset: 'quality', reducedMotion: true })).toMatchObject({

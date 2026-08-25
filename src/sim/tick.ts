@@ -59,6 +59,9 @@ import { tickFacilityMarket } from "./systems/facilityMarket";
 import { tickDataHallLayouts } from "./systems/dataHallLayouts";
 import { resetDayLedgerCosts } from "./systems/financeLedger";
 import { tickCheckpointEvaluations } from "./systems/checkpointEvaluations";
+import { tickPostTrainGyms } from "./systems/modelStudio";
+import { tickMarketing } from "./systems/marketing";
+import { facilityAnchorTiles } from "./systems/worldAccess";
 
 /**
  * Stable count of player-visible work that has crossed its completion
@@ -66,10 +69,11 @@ import { tickCheckpointEvaluations } from "./systems/checkpointEvaluations";
  * of depending on alert wording, so new project types can opt in simply by
  * exposing a completed state here.
  */
-function completedProjectCount(state: SimState): number {
-  const completedBuildings = state.map.tiles.filter(
+export function completedProjectCount(state: SimState): number {
+  const completedBuildings = facilityAnchorTiles(state, {
+    ownerId: state.playerLabId,
+  }).filter(
     (tile) =>
-      tile.owner === "player" &&
       tile.buildingTarget > 0 &&
       tile.buildingProgress >= tile.buildingTarget &&
       tile.campusRole !== "pad",
@@ -81,11 +85,16 @@ function completedProjectCount(state: SimState): number {
     (project) =>
       project.labId === state.playerLabId && project.status === "complete",
   ).length;
+  const completedGymTiers = (state.player.postTrainGyms ?? []).reduce(
+    (sum, gym) => sum + Math.max(0, gym.tier ?? 0),
+    0,
+  );
 
   return (
     completedBuildings +
     completedPrograms +
     completedSites +
+    completedGymTiers +
     state.player.researchUnlocked.length +
     state.player.models.length
   );
@@ -188,6 +197,9 @@ export function tickDay(state: SimState): SimState {
   // same day's settled physical resources.
   s = runTickSystem(s, "tickData", tickData);
   s = runTickSystem(s, "tickDataSupplierContracts", tickDataSupplierContracts);
+  // Gym programs reserve the same research pool as synthesis and catalog
+  // research. Advance them before tech research observes the remaining share.
+  s = runTickSystem(s, "tickPostTrainGyms", tickPostTrainGyms);
   s = runTickSystem(s, "tickRivals", tickRivals);
   s = runTickSystem(s, "tickRivalCloudPurchases", tickRivalCloudPurchases);
   // One player-research authority per day. Preserve an in-flight legacy
@@ -224,6 +236,9 @@ export function tickDay(state: SimState): SimState {
   };
 
   // 7–8. Resolve unconstrained demand, capacity shortages, and settlement.
+  // Controllers (including rivals) have already chosen their campaign mix;
+  // settle the player's deterministic outcome before offers are scored.
+  s = runTickSystem(s, "tickMarketing", tickMarketing);
   s = runTickSystem(s, "tickMarket", tickMarket);
   s = runTickSystem(s, "tickEnergyContracts", tickEnergyContracts);
   s = runTickSystem(s, "tickLoans", tickLoans);

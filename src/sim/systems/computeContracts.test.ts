@@ -918,8 +918,13 @@ describe("compute provider negotiation kernel", () => {
     );
   });
 
-  it("quotes contracts larger than 1 MW when the provider has the inventory", () => {
-    const state = endStarterContract(createGame(8_131));
+  it("starts below 1 MW and grows into larger contracts on the supply curve", () => {
+    let state = endStarterContract(createGame(8_131));
+    const opening = providerCapacity(state, "cloud-northstar");
+    expect(opening.availablePf).toBeLessThanOrEqual(1_000);
+    for (let day = 2; day <= 90; day += 1) {
+      state = tickComputeContracts({ ...state, day });
+    }
     const provider = providerCapacity(state, "cloud-northstar");
     expect(provider.availablePf).toBeGreaterThan(1_000);
     const quote = quoteComputeContract(state, {

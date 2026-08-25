@@ -1,3 +1,4 @@
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { TrainingJob } from "../../../../sim/types";
 import type { TrainingResourceAllocation } from "../../../../sim/systems/training";
 import {
@@ -22,9 +23,9 @@ const VIEW_ITEMS: ReadonlyArray<{
   unit: string;
 }> = [
   { view: "runs", label: "Runs", unit: "in flight" },
-  { view: "checkpoints", label: "Checkpoints", unit: "checkpoints" },
-  { view: "labs", label: "Gyms", unit: "gyms" },
-  { view: "routers", label: "Routers", unit: "routers" },
+  { view: "checkpoints", label: "Checkpoints", unit: "available" },
+  { view: "labs", label: "Gyms", unit: "unlocked" },
+  { view: "routers", label: "Routers", unit: "configured" },
   { view: "fleet", label: "Fleet", unit: "models" },
 ];
 
@@ -65,6 +66,29 @@ export function ModelsTrainingQueue({
       }),
     ),
   );
+  const moveTab = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    current: ModelsWorkspaceView,
+  ) => {
+    const index = VIEW_ITEMS.findIndex((item) => item.view === current);
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextIndex = (index + 1) % VIEW_ITEMS.length;
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextIndex = (index - 1 + VIEW_ITEMS.length) % VIEW_ITEMS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = VIEW_ITEMS.length - 1;
+    }
+    if (nextIndex == null) return;
+    event.preventDefault();
+    const next = VIEW_ITEMS[nextIndex]!.view;
+    onViewChange(next);
+    requestAnimationFrame(() =>
+      document.getElementById(`models-view-tab-${next}`)?.focus(),
+    );
+  };
 
   return (
     <aside
@@ -77,12 +101,14 @@ export function ModelsTrainingQueue({
       </header>
 
       <nav
-        aria-label="Models workspace views"
+        aria-label="Models workspace tabs"
         data-models-view-nav="true"
-        className="models-view-nav mb-2 space-y-1.5"
+        className="models-view-nav mb-2"
+        role="tablist"
+        aria-orientation="horizontal"
       >
-        {VIEW_ITEMS.filter((item) => item.view === "runs").map(
-          ({ view, label, unit }) => {
+        <div className="models-view-tabs" data-models-view-tabs="true">
+          {VIEW_ITEMS.map(({ view, label, unit }) => {
             const active = activeView === view;
             const count = viewCounts[view];
             return (
@@ -90,63 +116,31 @@ export function ModelsTrainingQueue({
                 key={view}
                 type="button"
                 variant="ghost"
-                aria-current={active ? "page" : undefined}
-                aria-pressed={active}
+                role="tab"
+                id={`models-view-tab-${view}`}
+                aria-selected={active}
+                aria-controls="models-workspace-panel"
+                tabIndex={active ? 0 : -1}
                 aria-label={`${label}, ${count} ${unit}`}
                 data-view={view}
                 data-selected={active ? "true" : "false"}
                 onClick={() => onViewChange(view)}
-                className={`!flex min-h-12 !w-full !flex-col !items-start !justify-center !gap-0.5 !rounded-md !border !px-2.5 !py-2 !text-left ${
+                onKeyDown={(event) => moveTab(event, view)}
+                className={`models-view-tab !flex min-h-12 min-w-[6.5rem] flex-1 !flex-col !items-start !justify-center !gap-1 !rounded-md !border !px-2.5 !py-2 !text-left ${
                   active
-                    ? "!border-mint/50 !bg-mint/10 !text-mint"
+                    ? "!border-mint/60 !bg-mint/10 !text-mint"
                     : "!border-line/60 !bg-void/30 !text-muted hover:!border-line hover:!text-bone"
                 }`}
               >
                 <span className="text-[0.75rem] font-semibold leading-none">
                   {label}
                 </span>
-                <span className="font-mono text-[0.6875rem] tabular-nums leading-none text-bone">
+                <span className="font-mono text-[0.625rem] tabular-nums leading-none text-bone">
                   {count} {unit}
                 </span>
               </HudButton>
             );
-          },
-        )}
-        <p className="px-0.5 pt-1 font-mono text-[0.5625rem] uppercase tracking-[0.12em] text-muted">
-          Catalogs
-        </p>
-        <div className="flex flex-wrap gap-1 rounded-lg bg-void/50 p-1">
-          {VIEW_ITEMS.filter((item) => item.view !== "runs").map(
-            ({ view, label, unit }) => {
-              const active = activeView === view;
-              const count = viewCounts[view];
-              return (
-                <HudButton
-                  key={view}
-                  type="button"
-                  variant="ghost"
-                  aria-current={active ? "page" : undefined}
-                  aria-pressed={active}
-                  aria-label={`${label}, ${count} ${unit}`}
-                  data-view={view}
-                  data-selected={active ? "true" : "false"}
-                  onClick={() => onViewChange(view)}
-                  className={`!flex min-h-11 min-w-[4.5rem] flex-1 !flex-col !items-start !justify-center !gap-0.5 !rounded-md !border-0 !px-2 !py-1.5 !text-left ${
-                    active
-                      ? "!bg-panel-2 !text-mint"
-                      : "!bg-transparent !text-muted hover:!bg-panel-2/80 hover:!text-bone"
-                  }`}
-                >
-                  <span className="text-[0.625rem] font-semibold leading-none">
-                    {label}
-                  </span>
-                  <span className="font-mono text-[0.6875rem] tabular-nums leading-none text-bone">
-                    {count}
-                  </span>
-                </HudButton>
-              );
-            },
-          )}
+          })}
         </div>
       </nav>
 

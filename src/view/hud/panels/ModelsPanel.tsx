@@ -61,11 +61,14 @@ import {
 } from "../../../sim/balance/data";
 import {
   ensureLabData,
+  dataResearchReservationShare,
   newDataSinceModel,
   totalProcessed,
 } from "../../../sim/systems/data";
 import { apiUnitCostPerMTok } from "../../../sim/balance/pricing";
 import { unlockedGymKinds } from "../../../sim/balance/modelStudio";
+import { assignedPodStaff } from "../../../sim/systems/researchPrograms";
+import { reservedHqStaff } from "../../../sim/systems/staffReservations";
 import { energyPriceForState } from "../../../sim/systems/map";
 import { computeSnapshot } from "../../../sim/tick";
 import {
@@ -250,6 +253,9 @@ export function ModelsPanel({
   const cancelTraining = useGameStore((s) => s.cancelTraining);
   const selectPostTrain = useGameStore((s) => s.selectPostTrain);
   const investPostTrainGym = useGameStore((s) => s.investPostTrainGym);
+  const setPostTrainGymAllocation = useGameStore(
+    (s) => s.setPostTrainGymAllocation,
+  );
   const setTrainingLabs = useGameStore((s) => s.setTrainingLabs);
   const teachToolSkill = useGameStore((s) => s.teachToolSkill);
   const createModelRouter = useGameStore((s) => s.createModelRouter);
@@ -548,6 +554,7 @@ export function ModelsPanel({
   const recipeVolumes = useMemo(() => {
     const base = { ...baseVolumes };
     const align = { ...alignVolumes };
+    if (mode === "continue") return { base, align };
     for (const domain of DATA_DOMAINS) {
       const split = clampEnvelopeSplit(
         base[domain] ?? 0,
@@ -557,7 +564,7 @@ export function ModelsPanel({
       align[domain] = split.align;
     }
     return { base, align };
-  }, [alignVolumes, baseVolumes]);
+  }, [alignVolumes, baseVolumes, mode]);
   const baseVolumeTotal = DATA_DOMAINS.reduce(
     (sum, domain) => sum + Math.max(0, recipeVolumes.base[domain] ?? 0),
     0,
@@ -1435,10 +1442,12 @@ export function ModelsPanel({
   const handleReleaseModel = (id: string) => {
     const model = playerModels.find((m) => m.id === id);
     releaseModel(id, { list: false });
+    const latestState = useGameStore.getState().state;
+    const latestPlayerCompany = selectPlayerCompany(latestState);
     const released =
-      useGameStore
-        .getState()
-        .playerModels.find((candidate) => candidate.id === id) ?? model;
+      selectCompanyModels(latestState, latestPlayerCompany.id).find(
+        (candidate: Model) => candidate.id === id,
+      ) ?? model;
     if (released) {
       announceRelease({
         modelId: released.id,
@@ -1593,7 +1602,7 @@ export function ModelsPanel({
             viewCounts={{
               runs: jobs.length,
               checkpoints: checkpointCandidates.length,
-              labs: playerCompany.ops.postTrainGyms?.length ?? 3,
+              labs: availableGymKinds.length,
               routers: state.player.modelRouters?.length ?? 0,
               fleet: internal.length + released.length,
             }}
@@ -1608,7 +1617,13 @@ export function ModelsPanel({
               recoverFailedPostTrainFromCheckpoint({ jobId, checkpointId })
             }
           />
-          <div className="models-workbench-detail min-w-0 space-y-3">
+          <div
+            id="models-workspace-panel"
+            className="models-workbench-detail min-w-0 space-y-3"
+            role="tabpanel"
+            aria-labelledby={`models-view-tab-${panelTab}`}
+            tabIndex={-1}
+          >
             {panelTab === "runs" ? (
               <>
                 {!showNewModel && !selectedJob ? (
@@ -1759,12 +1774,16 @@ export function ModelsPanel({
                       </GameCard>
 
                       <GameCard
-                        eyebrow="Define · Lineage"
+                        eyebrow={newModelStep === "product" ? "Define · Product" : "Architecture · Scale"}
                         title={
-                          mode === "pretrain" ? "Name & family" : "Base model"
+                          newModelStep === "product"
+                            ? mode === "pretrain" ? "Goal, identity & lineage" : "Goal & base model"
+                            : mode === "continue" ? "Inherited topology" : "Backbone & parameter topology"
                         }
                       >
                         <div className="space-y-2.5">
+                          {newModelStep === "product" ? (
+                            <>
                           {mode === "continue" ? (
                             <div className="space-y-2">
                               <label className="block text-[0.8125rem] text-muted">
@@ -1897,8 +1916,12 @@ export function ModelsPanel({
                             </div>
                           ) : null}
 
+                            </>
+                          ) : null}
+
                           <div className="space-y-2.5">
-                            <div className="grid items-end gap-2 lg:grid-cols-[minmax(12rem,1fr)_auto]">
+                            <div className="grid items-end gap-2">
+                              {newModelStep === "product" ? (
                               <div className="block min-w-0 text-[0.8125rem] text-muted">
                                 <label htmlFor="model-family-name">
                                   {mode === "continue"
@@ -1943,6 +1966,8 @@ export function ModelsPanel({
                                   </HudButton>
                                 </div>
                               </div>
+                              ) : null}
+                              {newModelStep === "architecture" ? (
                               <fieldset className="min-w-0">
                                 <legend className="text-[0.8125rem] text-muted">
                                   Backbone
@@ -2030,8 +2055,9 @@ export function ModelsPanel({
                                   })}
                                 </div>
                               </fieldset>
+                              ) : null}
                             </div>
-                            {nameTaken ? (
+                            {newModelStep === "product" && nameTaken ? (
                               <p
                                 className="text-[0.75rem] text-danger"
                                 role="alert"
@@ -2039,6 +2065,7 @@ export function ModelsPanel({
                                 {MODEL_NAME_TAKEN_MESSAGE}
                               </p>
                             ) : null}
+                            {newModelStep === "product" ? (
                             <fieldset>
                               <legend className="text-[0.8125rem] text-muted">
                                 Product / I/O preset
@@ -2122,6 +2149,8 @@ export function ModelsPanel({
                                 })}
                               </div>
                             </fieldset>
+                            ) : null}
+                            {newModelStep === "architecture" ? (
                             <div className="min-w-0 overflow-x-hidden rounded-md border border-line/60 bg-void/25 p-3 pb-4">
                               <SizeSlider
                                 label={
@@ -2182,6 +2211,7 @@ export function ModelsPanel({
                                 </div>
                               ) : null}
                             </div>
+                            ) : null}
                           </div>
                         </div>
                       </GameCard>
@@ -2309,6 +2339,7 @@ export function ModelsPanel({
                             syntheticTeacherIds={syntheticTeacherIds}
                             includeSynthHQ={includeSynthHQ && synthUnlocked}
                             includeSynthLQ={includeSynthLQ && synthUnlocked}
+                            freezeBaseLayer={mode === "continue"}
                             onOpenPlanLibrary={() => setPlanLibraryOpen(true)}
                             onOwnedChange={(recipe) => {
                               recipeTouchedRef.current = true;
@@ -2935,7 +2966,25 @@ export function ModelsPanel({
                 tools={state.player.toolSkills}
                 researchUnlocked={unlocked}
                 onInvestGym={investPostTrainGym}
+                onSetGymAllocation={setPostTrainGymAllocation}
                 onTeachTool={teachToolSkill}
+                researchAllocation={{
+                  dataShare: dataResearchReservationShare(state.player.data),
+                  safetyShare: state.player.safetyCampaign ? 0.4 : 0,
+                  employedResearchers: state.player.staff?.researcher ?? 0,
+                  podResearchers: assignedPodStaff(
+                    state.player.researchPods ?? [],
+                  ).researchers,
+                  fixedResearchers: Math.max(
+                    0,
+                    reservedHqStaff(state).researchers -
+                      assignedPodStaff(state.player.researchPods ?? []).researchers -
+                      (state.player.postTrainGyms ?? []).reduce(
+                        (sum, gym) => sum + Math.max(0, gym.assignedResearchers ?? 0),
+                        0,
+                      ),
+                  ),
+                }}
               />
             ) : panelTab === "routers" ? (
               <RoutersTab

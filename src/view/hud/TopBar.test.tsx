@@ -17,6 +17,8 @@ describe('TopBar shell semantics', () => {
     expect(markup).toContain('aria-label="Open hotkey help"')
     expect(markup).toContain('aria-expanded="false"')
     expect(markup).toContain('aria-controls="kpi-history-popover"')
+    expect(markup).not.toContain('50.00/100')
+    expect(markup).toContain('/100')
   })
 
 })

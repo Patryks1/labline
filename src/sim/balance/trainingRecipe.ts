@@ -408,7 +408,7 @@ export function planTrainingRecipe(opts: {
     alignMTok > 1e-9
       ? normalizeWeights(seeded.align)
       : normalizeWeights(
-          opts.postTrainWeights ?? alignmentDataWeights(opts.weights),
+          opts.postTrainWeights ?? alignmentDataWeights(normalizeWeights(opts.weights)),
         );
   const signals = recipeOutcomeSignals({
     totalMTok: seeded.totalMTok,

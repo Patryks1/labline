@@ -11,6 +11,9 @@
  */
 import type {
   ComputeWorkItem,
+  CapitalStack,
+  CloudProvider,
+  ComputeContract,
   DataSupplierContract,
   MapCity,
   MapRegion,
@@ -30,6 +33,8 @@ import type {
   TrainingDataPlan,
   TrainingJob,
   TrainingNumerics,
+  InvestorPitchRecord,
+  WorldFeedEvent,
 } from "./types";
 import { calendarForDay, formatCampaignDate } from "./campaign";
 import {
@@ -38,6 +43,7 @@ import {
   WORLD_POPULATION,
 } from "./balance/economy";
 import { DATA_DOMAINS } from "./balance/data";
+import { normalizeCompanyLogoSpec } from "./balance/gameConfig";
 import { normalizeDomainHeat } from "./balance/domainHeat";
 import { normalizeModelEvaluations } from "./balance/evaluationSuites";
 import type { CheckpointEvaluationReport } from "./balance/checkpointEvaluation";
@@ -69,6 +75,11 @@ import {
   planAllowanceMTokPerMonth,
   subsidyFromIncludedMTok,
 } from "./systems/plans";
+import {
+  DEFAULT_PEAK_PRICING_PCT,
+  DEFAULT_SERVE_SLOWDOWN_LIMIT,
+  legacyServeControls,
+} from "./balance/serveThrottle";
 import {
   migrateDataHallLayouts,
   refreshAllDataHallAnalyses,
@@ -130,6 +141,11 @@ const DATABASE_NAME = "labline-saves-v2";
 const DATABASE_VERSION = 1;
 const SLOT_STORE = "slots";
 const SYNTH_DOMAIN_KEYS = new Set<string>(DATA_DOMAINS);
+const CLOUD_OPENING_MAX_MW = 1;
+const CLOUD_MW_PER_PF_PROXY = ECONOMY.mwPerPfProxy ?? 0.001;
+const CLOUD_OPENING_MAX_PF = Math.floor(
+  CLOUD_OPENING_MAX_MW / Math.max(1e-9, CLOUD_MW_PER_PF_PROXY),
+);
 
 export interface SaveMeta {
   slotId: SaveSlotId;
@@ -487,6 +503,114 @@ function ensureRecord(value: unknown): Record<string, number> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, number>)
     : {};
+}
+
+/** Additive migration for model-backed investor pitches introduced after v14. */
+function normalizeCapitalStack(
+  capital: CapitalStack | undefined,
+): CapitalStack | undefined {
+  if (!capital || typeof capital !== "object") return capital;
+  const cooldowns = ensureRecord(capital.pitchModelCooldowns);
+  const pitchModelCooldowns = Object.fromEntries(
+    Object.entries(cooldowns)
+      .filter(([, value]) => Number.isFinite(value))
+      .map(([modelId, value]) => [modelId, Math.max(0, Math.floor(value))]),
+  );
+  const pitchHistory = ensureArray<InvestorPitchRecord>(capital.pitchHistory)
+    .filter(
+      (record) =>
+        record &&
+        typeof record.id === "string" &&
+        typeof record.modelId === "string" &&
+        typeof record.modelName === "string" &&
+        typeof record.investorName === "string",
+    )
+    // Pitch records are stored newest-first. Keep the latest records when an
+    // imported or hand-edited save exceeds the normal writer's history cap.
+    .slice(0, 16)
+    .map((record) => ({
+      ...record,
+      day: Math.max(0, Math.floor(Number(record.day) || 0)),
+      successChance: Math.max(0, Math.min(1, Number(record.successChance) || 0)),
+      cashRaised: Math.max(0, Number(record.cashRaised) || 0),
+      preMoneyValuation: Math.max(0, Number(record.preMoneyValuation) || 0),
+      postMoneyValuation: Math.max(0, Number(record.postMoneyValuation) || 0),
+      investorOwnership: Math.max(0, Math.min(1, Number(record.investorOwnership) || 0)),
+      cooldownUntilDay: Math.max(0, Math.floor(Number(record.cooldownUntilDay) || 0)),
+      outcome: record.outcome === "funded" ? ("funded" as const) : ("declined" as const),
+    }));
+  const deskCooldown = Number(capital.pitchCooldownUntilDay);
+  return {
+    ...capital,
+    pitchCooldownUntilDay: Number.isFinite(deskCooldown)
+      ? Math.max(0, Math.floor(deskCooldown))
+      : 0,
+    pitchModelCooldowns,
+    pitchHistory,
+  };
+}
+
+/**
+ * Migrate pre-supply-curve cloud pools without losing already signed capacity.
+ * Day-one legacy pools are reduced to the one-MW opening envelope; any active
+ * reservation is grandfathered so provider availability remains coherent.
+ */
+function normalizeCloudProviders(
+  providers: CloudProvider[],
+  contracts: ComputeContract[],
+  day: number,
+): CloudProvider[] {
+  return providers.map((provider) => {
+    const rawBaseline = Number(provider.baselinePf);
+    const baselineInput = Number.isFinite(rawBaseline)
+      ? Math.max(0, rawBaseline)
+      : 0;
+    const rawAvailable = Number(provider.availablePf);
+    const availableInput = Number.isFinite(rawAvailable)
+      ? Math.max(0, rawAvailable)
+      : baselineInput;
+    const launchInput = Number(provider.launchBaselinePf);
+    const launchCandidate =
+      Number.isFinite(launchInput) && launchInput > 0
+        ? launchInput
+        : baselineInput;
+    const launchBaselinePf = Math.max(
+      1,
+      day <= 1
+        ? Math.min(launchCandidate, CLOUD_OPENING_MAX_PF)
+        : launchCandidate,
+    );
+    const activeReservedPf = contracts
+      .filter(
+        (contract) =>
+          contract.providerId === provider.id &&
+          (contract.status === "active" || contract.status === "interrupted") &&
+          contract.kind !== "emergency" &&
+          contract.kind !== "rival_resale",
+      )
+      .reduce((sum, contract) => sum + Math.max(0, contract.pf), 0);
+    const openingBaseline =
+      day <= 1
+        ? Math.min(baselineInput, CLOUD_OPENING_MAX_PF)
+        : baselineInput;
+    const baselinePf = Math.max(openingBaseline, activeReservedPf);
+    const availablePf = Math.max(
+      0,
+      Math.min(availableInput, Math.max(0, baselinePf - activeReservedPf)),
+    );
+    return {
+      ...provider,
+      baselinePf,
+      launchBaselinePf: Math.min(launchBaselinePf, baselinePf),
+      maxBaselinePf: Math.max(
+        baselinePf,
+        Number.isFinite(provider.maxBaselinePf)
+          ? Math.max(0, provider.maxBaselinePf!)
+          : baselinePf,
+      ),
+      availablePf,
+    };
+  });
 }
 
 const LEGACY_PLAN_BASE_ALLOWANCE_MTOK_PER_MONTH = 0.6;
@@ -1053,6 +1177,10 @@ function restoreState(
     map,
     config: {
       ...state.config,
+      companyLogo: normalizeCompanyLogoSpec(
+        state.config.companyLogo,
+        state.config.companyMark ?? "orbit",
+      ),
       drivingSide: state.config.drivingSide === "right" ? "right" : "left",
     },
     transport:
@@ -1108,6 +1236,7 @@ function restoreState(
     ),
   }));
   restored.player.loans = ensureArray(restored.player.loans);
+  restored.player.capital = normalizeCapitalStack(restored.player.capital);
   restored.player.models = ensureArray(restored.player.models).map((model) =>
     normalizeModelComputeV2(model as Model),
   );
@@ -1391,6 +1520,10 @@ function restoreState(
   restored.player.trainingJob = restored.player.trainingJobs[0] ?? null;
   restored.player.pricing.plans = restored.player.pricing.plans.map((plan) => ({
     ...plan,
+    subscriberCap:
+      Number.isFinite(plan.subscriberCap) && (plan.subscriberCap ?? 0) > 0
+        ? Math.max(1, Math.floor(plan.subscriberCap!))
+        : undefined,
     steadyUsageTarget:
       plan.steadyUsageTarget ?? defaultSteadyPlanUsage(plan.pricePerMonth),
     dataCollectionRate: clampPlanDataCollectionRate(
@@ -1427,6 +1560,21 @@ function restoreState(
     .map((sample) => ({
       day: Math.floor(sample.day),
       pfPerMw: Math.max(0, sample.pfPerMw),
+      ...(Number.isFinite(sample.localPf)
+        ? { localPf: Math.max(0, sample.localPf!) }
+        : {}),
+      ...(Number.isFinite(sample.cloudPf)
+        ? { cloudPf: Math.max(0, sample.cloudPf!) }
+        : {}),
+      ...(Number.isFinite(sample.localMw)
+        ? { localMw: Math.max(0, sample.localMw!) }
+        : {}),
+      ...(Number.isFinite(sample.combinedEffectivePf)
+        ? { combinedEffectivePf: Math.max(0, sample.combinedEffectivePf!) }
+        : {}),
+      ...(Number.isFinite(sample.cloudEffectivePf)
+        ? { cloudEffectivePf: Math.max(0, sample.cloudEffectivePf!) }
+        : {}),
     }))
     .slice(-30);
   restored.rivals = (ensureArray(restored.rivals) as SimState["rivals"]).map(
@@ -1439,6 +1587,7 @@ function restoreState(
       }
       return {
         ...rival,
+        capital: normalizeCapitalStack(rival.capital),
         rackFleet: ensureArray<RackInstall>(rival.rackFleet).map((rack) => ({
           ...rack,
           facilityId:
@@ -1497,6 +1646,14 @@ function restoreState(
       };
     },
   );
+  if (restored.labs && typeof restored.labs === "object") {
+    restored.labs = Object.fromEntries(
+      Object.entries(restored.labs).map(([labId, lab]) => [
+        labId,
+        { ...lab, capital: normalizeCapitalStack(lab.capital) },
+      ]),
+    );
+  }
   restored.computeLeases = ensureArray(restored.computeLeases);
   restored.computeContracts = ensureArray(restored.computeContracts);
   restored.cityPowerContracts = ensureArray(restored.cityPowerContracts);
@@ -1738,6 +1895,16 @@ function restoreState(
     ...restored.player.pricing,
     serveThrottlePolicy:
       restored.player.pricing.serveThrottlePolicy ?? "balanced",
+    serveSlowdownLimit:
+      Number.isFinite(restored.player.pricing.serveSlowdownLimit)
+        ? Math.max(0, Math.min(1, restored.player.pricing.serveSlowdownLimit!))
+        : legacyServeControls(restored.player.pricing.serveThrottlePolicy)
+            .slowdownLimit ?? DEFAULT_SERVE_SLOWDOWN_LIMIT,
+    peakPricingPct:
+      Number.isFinite(restored.player.pricing.peakPricingPct)
+        ? Math.max(0, Math.min(100, restored.player.pricing.peakPricingPct!))
+        : legacyServeControls(restored.player.pricing.serveThrottlePolicy)
+            .peakPricingPct ?? DEFAULT_PEAK_PRICING_PCT,
   };
   restored.rivals = restored.rivals.map((rival) => ({
     ...rival,
@@ -1745,6 +1912,23 @@ function restoreState(
   }));
   restored.alerts = ensureArray(restored.alerts);
   restored.news = ensureArray(restored.news);
+  restored.feedEvents = ensureArray<WorldFeedEvent>(restored.feedEvents)
+    .filter(
+      (event) =>
+        event &&
+        typeof event.id === "string" &&
+        typeof event.title === "string" &&
+        typeof event.body === "string" &&
+        (event.category === "world" ||
+          event.category === "models" ||
+          event.category === "market" ||
+          event.category === "rivals"),
+    )
+    .map((event) => ({
+      ...event,
+      day: Math.max(0, Math.floor(Number(event.day) || 0)),
+    }))
+    .slice(0, 96);
   restored.activeEvents = ensureArray(restored.activeEvents);
   restored.financeHistory = ensureArray(restored.financeHistory);
   restored.financeMonthlyHistory = ensureArray(restored.financeMonthlyHistory);
@@ -1779,6 +1963,16 @@ function restoreState(
   };
   restored.playerLabId = restored.playerLabId || "player";
   restored.worldMarkets = restored.worldMarkets ?? createWorldMarkets();
+  const savedCloudProviders = ensureArray<CloudProvider>(
+    restored.worldMarkets.cloudProviders,
+  );
+  restored.worldMarkets.cloudProviders = normalizeCloudProviders(
+    savedCloudProviders.length > 0
+      ? savedCloudProviders
+      : createWorldMarkets().cloudProviders,
+    restored.computeContracts,
+    restored.day,
+  );
   // Older saves shipped with every auto-pause enabled and no UI to disable it.
   // Migrate that implicit behavior to the new opt-in preference model once.
   if (restored.config.campaignRules.autoPauseConfigured !== true) {

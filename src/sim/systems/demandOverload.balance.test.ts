@@ -14,6 +14,9 @@ import {
   strainSpeedFactor,
   surgePriceMultiplier,
   throttleAbsorbShare,
+  configuredAbsorbShare,
+  peakPricingDemandMultiplier,
+  slowdownAbsorbShare,
   throttleChurnScale,
   throttlePainScale,
 } from '../balance/serveThrottle'
@@ -89,6 +92,7 @@ function withReleasedModel(s: SimState, cap = 55): SimState {
     ...s,
     player: {
       ...s.player,
+      researchUnlocked: [...new Set([...s.player.researchUnlocked, 'opt_fp16'])],
       models: [
         {
           ...m,
@@ -108,6 +112,10 @@ function withReleasedModel(s: SimState, cap = 55): SimState {
         apiPricePerMTok: 3,
         apiPriceInPerMTok: 1,
         apiPriceOutPerMTok: 4,
+        apiServePrecisionByModel: {
+          ...s.player.pricing.apiServePrecisionByModel,
+          [m.id]: 'fp16',
+        },
       },
     },
   }
@@ -230,6 +238,30 @@ function run(
 }
 
 describe('throttle policy math', () => {
+  it('uses tunable slowdown headroom and collapses excessive peak demand', () => {
+    expect(slowdownAbsorbShare(0.2, 0)).toBe(0)
+    expect(slowdownAbsorbShare(0.2, 0.25)).toBe(1)
+    expect(slowdownAbsorbShare(0.5, 0.25)).toBeCloseTo(0.25)
+    expect(
+      configuredAbsorbShare(
+        { serveSlowdownLimit: 0.6, peakPricingPct: 0 },
+        0.5,
+      ),
+    ).toBeCloseTo(0.6)
+    expect(
+      configuredAbsorbShare(
+        {
+          serveThrottlePolicy: 'balanced',
+          serveSlowdownLimit: 0.25,
+          peakPricingPct: 0,
+        },
+        0.5,
+      ),
+    ).toBeCloseTo(0.25)
+    expect(peakPricingDemandMultiplier(1)).toBeCloseTo(1)
+    expect(peakPricingDemandMultiplier(2)).toBeLessThan(0.1)
+  })
+
   it('splits overload per policy', () => {
     expect(throttleAbsorbShare('shed', 0.4)).toBe(0)
     expect(throttleAbsorbShare('throttle', 0.4)).toBe(1)
@@ -248,6 +280,14 @@ describe('throttle policy math', () => {
     const cooling = nextSurgeLevel(level, 0, 'surge')
     expect(cooling).toBeLessThan(level)
     expect(nextSurgeLevel(level, 0.4, 'balanced')).toBeLessThan(level)
+  })
+
+  it('uses the configured slowdown headroom when pricing strained streams', () => {
+    const shedImmediately = nextSurgeLevel(0, 0.4, 'surge', 80, 0)
+    const slowEverything = nextSurgeLevel(0, 0.4, 'surge', 80, 1)
+
+    expect(shedImmediately).toBe(0)
+    expect(slowEverything).toBeGreaterThan(shedImmediately)
   })
 
   it('strain rises when throttling and heals with headroom', () => {
@@ -307,8 +347,14 @@ describe('overload policies in the market', () => {
     // Two days: before the shed-path pain EMA saturates at the cap.
     const balanced = run(overloadedBase('balanced'), 2, { pinBrandTrust: 58 })
     const shed = run(overloadedBase('shed'), 2, { pinBrandTrust: 58 })
-    expect(balanced.player.speedStrain ?? 0).toBeGreaterThan(0.02)
-    expect(balanced.player.servicePain).toBeLessThan(shed.player.servicePain)
+    // At extreme overload, 25% of *capacity* can be too little of total demand
+    // to move the strain EMA, but it must never be worse than immediate shed.
+    expect(balanced.player.speedStrain ?? 0).toBeGreaterThanOrEqual(
+      shed.player.speedStrain ?? 0,
+    )
+    expect(balanced.player.servicePain).toBeLessThanOrEqual(
+      shed.player.servicePain,
+    )
   })
 
   it('surge prices API up under load: fewer MTok, higher $/MTok, less churn than shed', () => {

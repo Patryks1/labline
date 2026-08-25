@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import {
   BellRinging,
   Buildings,
@@ -13,7 +13,8 @@ import { money, num, pct } from './format'
 import { COMMAND_VIEWS, type CommandViewId } from './navConfig'
 import { MeterBar, SegmentedTabs, StatRow } from './ui/kit'
 import { EmptyState, HudButton, StatusChip } from './ui/HudPrimitives'
-import { FeedPost } from './ui/FeedPost'
+import { classifyFeedLine, FeedPost, type FeedTone } from './ui/FeedPost'
+import type { SimState, WorldFeedCategory } from '../../sim/types'
 import { useUiStore } from '../../store/uiStore'
 import { selectFinanceDashboardReadouts } from './data/financeDashboardModel'
 import { FacilitiesIntelView } from './panels/command/FacilitiesIntelView'
@@ -26,8 +27,8 @@ export function sumChannelRows(
     mtok?: number
     users?: number
   }>,
-) {
-  return rows.reduce(
+): { revenue: number; cogs: number; mtok: number; users: number } {
+  return rows.reduce<{ revenue: number; cogs: number; mtok: number; users: number }>(
     (acc, row) => ({
       revenue: acc.revenue + row.revenue,
       cogs: acc.cogs + row.cogs,
@@ -446,10 +447,19 @@ function RivalsView({
   )
 }
 
-function FeedView() {
-  const state = useGameStore((s) => s.state)
-  const alerts = state.alerts.slice(0, 8)
-  const news = state.news.slice(0, 8)
+export function FeedView({ stateOverride }: { stateOverride?: SimState }) {
+  const liveState = useGameStore((s) => s.state)
+  const state = stateOverride ?? liveState
+  const campaignEpoch = useUiStore((store) => store.campaignEpoch)
+  const [selectedFilters, setSelectedFilters] = useState<Set<'all' | WorldFeedCategory>>(
+    () => new Set(['all']),
+  )
+  useEffect(() => {
+    setSelectedFilters(new Set(['all']))
+  }, [campaignEpoch])
+  const alerts = state.alerts.slice(0, 12)
+  const news = state.news.slice(0, 12)
+  const typedEvents = state.feedEvents ?? []
   const announcements = state.rivals
     .filter((rival) => rival.publicEstimate?.announcedProject)
     .slice(0, 3)
@@ -473,21 +483,66 @@ function FeedView() {
     const match = /^Day\s+(\d+):/i.exec(line)
     return match ? `D${match[1]}` : undefined
   }
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <div>
-          <p className="hud-eyebrow">World feed</p>
-          <div className="mt-0.5 text-sm font-semibold text-bone">Day {state.day}</div>
-        </div>
-        <StatusChip tone="serve">Live</StatusChip>
-      </div>
-
-      <div className="anim-stagger space-y-2">
-        {state.activeEvents.map((event, index) => (
+  const categoryForLegacyLine = (line: string): WorldFeedCategory => {
+    const kind = classifyFeedLine(line).kind
+    if (kind === 'rival') return 'rivals'
+    if (kind === 'you' || kind === 'bench' || kind === 'changelog') return 'models'
+    if (kind === 'ops') return 'market'
+    return 'world'
+  }
+  const visible = (category: WorldFeedCategory) =>
+    selectedFilters.has('all') || selectedFilters.has(category)
+  const toggleFilter = (filter: 'all' | WorldFeedCategory) => {
+    setSelectedFilters((current) => {
+      if (filter === 'all') return new Set(['all'])
+      const next = new Set(current)
+      next.delete('all')
+      if (next.has(filter)) next.delete(filter)
+      else next.add(filter)
+      return next.size > 0 ? next : new Set(['all'])
+    })
+  }
+  const toneForEvent = (tone?: string): FeedTone => {
+    if (tone === 'positive' || tone === 'warning' || tone === 'danger' || tone === 'research') return tone
+    return 'neutral'
+  }
+  type FeedCard = { id: string; category: WorldFeedCategory; day: number; order: number; content: ReactNode }
+  const cards: FeedCard[] = []
+  const seenCardKeys = new Set<string>()
+  const normalized = (value: string) => value.toLowerCase().replace(/\s+/g, ' ').trim()
+  const pushCard = (card: FeedCard, key = card.id) => {
+    if (seenCardKeys.has(key)) return
+    seenCardKeys.add(key)
+    cards.push(card)
+  }
+  const typedTransition = (line: string) => {
+    const text = normalized(line)
+    return typedEvents.some((event) => {
+      const title = normalized(event.title)
+      const body = normalized(event.body)
+      return text.includes(title) || (body.length > 20 && text.includes(body))
+    })
+  }
+  const activeTransition = (line: string) => {
+    const text = normalized(line)
+    return state.activeEvents.some((event) => text.includes(normalized(event.title)) || text.includes(normalized(event.body)))
+  }
+  let order = 0
+  for (const [index, event] of state.activeEvents.entries()) {
+    const hasTypedTwin = typedEvents.some(
+      (candidate) =>
+        candidate.category === 'world' &&
+        candidate.day === event.day &&
+        (candidate.title === event.title || candidate.body === event.body),
+    )
+    if (!hasTypedTwin) {
+      pushCard({
+        id: `active-${event.id}-${event.day}`,
+        category: 'world',
+        day: event.day,
+        order: order++,
+        content: (
           <FeedPost
-            key={`${event.id}-${event.day}`}
             {...profile('event', index)}
             dayLabel={`D${event.day}`}
             timeLabel={`${event.duration}d left`}
@@ -500,9 +555,41 @@ function FeedView() {
               </>
             }
           />
-        ))}
-
-        {announcements.map((entry) => (
+        ),
+      }, `world-event-${event.id}-${event.day}`)
+    }
+  }
+  for (const event of typedEvents) {
+    pushCard({
+      id: event.id,
+      category: event.category,
+      day: event.day,
+      order: order++,
+      content: (
+        <FeedPost
+          source={event.source ?? (event.category === 'models' ? 'Model Desk' : event.category === 'rivals' ? 'Company Watch' : event.category === 'market' ? 'Market Ledger' : 'World Desk')}
+          handle={event.source ? event.source.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) : undefined}
+          mark={event.category === 'models' ? 'MR' : event.category === 'rivals' ? 'RC' : event.category === 'market' ? 'MP' : 'WD'}
+          verified
+          dayLabel={`D${event.day}`}
+          tone={toneForEvent(event.tone)}
+          body={
+            <>
+              <strong className="text-bone">{event.title}</strong>
+              <span className="mt-1 block text-muted">{event.body}</span>
+            </>
+          }
+        />
+      ),
+    }, `typed-${event.id}`)
+  }
+  for (const entry of announcements) {
+      pushCard({
+        id: `announcement-${entry.id}`,
+        category: 'rivals',
+        day: state.day,
+        order: order++,
+        content: (
           <FeedPost
             key={entry.id}
             {...profile('rival', entry.id.length, entry.name)}
@@ -515,31 +602,107 @@ function FeedView() {
               </>
             }
           />
-        ))}
-
-        {alerts.map((alert, index) => (
+        ),
+      }, `rival-announcement-${entry.id}`)
+  }
+  for (const [index, alert] of alerts.entries()) {
+      const hasTypedTwin = typedTransition(alert.message)
+      if (hasTypedTwin) continue
+      pushCard({
+        id: `alert-${alert.id}`,
+        category: 'market',
+        day: alert.day,
+        order: order++,
+        content: (
           <FeedPost
-            key={alert.id}
             {...profile('ops', index)}
             dayLabel={`D${alert.day}`}
             tone={alert.severity === 'danger' ? 'danger' : alert.severity === 'warn' ? 'warning' : 'neutral'}
             body={alert.message}
           />
-        ))}
+        ),
+      }, `alert-${normalized(alert.message)}`)
+  }
+  for (const [index, line] of news.entries()) {
+    const category = categoryForLegacyLine(line)
+    if (typedTransition(line) || activeTransition(line) || alerts.some((alert) => normalized(line).includes(normalized(alert.message)))) continue
+    const label = newsDayLabel(line)
+    pushCard({
+      id: `news-${line}-${index}`,
+      category,
+      day: label ? Number(label.slice(1)) : state.day,
+      order: order++,
+      content: (
+        <FeedPost
+          {...profile('wire', index)}
+          dayLabel={label}
+          tone="neutral"
+          body={line}
+        />
+      ),
+    }, `news-${category}-${normalized(line)}`)
+  }
+  const allCards = cards.sort((a, b) => b.day - a.day || a.order - b.order || a.id.localeCompare(b.id))
+  const counts: Record<WorldFeedCategory, number> = allCards.reduce(
+    (result, card) => ({ ...result, [card.category]: result[card.category] + 1 }),
+    { world: 0, models: 0, market: 0, rivals: 0 },
+  )
+  const filterItems: Array<{ id: 'all' | WorldFeedCategory; label: string; count: number }> = [
+    { id: 'all', label: 'All', count: allCards.length },
+    { id: 'world', label: 'World', count: counts.world },
+    { id: 'models', label: 'Models / Research', count: counts.models },
+    { id: 'market', label: 'Market / Pricing', count: counts.market },
+    { id: 'rivals', label: 'Rivals / Company', count: counts.rivals },
+  ]
+  const sortedCards = allCards.filter((card) => visible(card.category))
 
-        {news.map((line, index) => (
-          <FeedPost
-            key={`${line}-${index}`}
-            {...profile('wire', index)}
-            dayLabel={newsDayLabel(line)}
-            tone="neutral"
-            body={line}
-          />
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <p className="hud-eyebrow">World feed</p>
+          <div className="mt-0.5 text-sm font-semibold text-bone">Day {state.day}</div>
+        </div>
+        <StatusChip tone="serve">Live</StatusChip>
+      </div>
+
+      <div className="space-y-1.5" role="group" aria-label="World feed filters">
+        <p className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">Filter feed</p>
+        <div className="flex flex-wrap gap-1.5">
+          {filterItems.map((filter) => {
+            const checked = selectedFilters.has(filter.id)
+            return (
+              <button
+                key={filter.id}
+                type="button"
+                role="checkbox"
+                aria-checked={checked}
+                onClick={() => toggleFilter(filter.id)}
+                className={`min-h-9 rounded-md border px-2 py-1 text-left text-[0.6875rem] transition ${
+                  checked
+                    ? 'border-mint/50 bg-mint/10 text-mint'
+                    : 'border-line/70 bg-panel-2/60 text-muted hover:border-line hover:text-bone'
+                }`}
+              >
+                <span>{filter.label}</span>
+                <span className="ml-1 font-mono tabular-nums opacity-75">{filter.count}</span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="anim-stagger space-y-2">
+        {sortedCards.map((card) => (
+          <div key={card.id}>{card.content}</div>
         ))}
       </div>
 
-      {alerts.length === 0 && news.length === 0 && state.activeEvents.length === 0 && announcements.length === 0 ? (
-        <EmptyState title="Quiet wire" description="No alerts or headlines yet." />
+      {sortedCards.length === 0 ? (
+        <EmptyState
+          title={selectedFilters.has('all') ? 'Quiet wire' : 'No matching stories'}
+          description={selectedFilters.has('all') ? 'Training, pricing, and world transitions will land here.' : 'Try All or another filter to widen the feed.'}
+        />
       ) : null}
     </div>
   )

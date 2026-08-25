@@ -33,7 +33,7 @@ function finishJob(state: SimState): SimState {
   const done = {
     ...job,
     progressPfDays: job.targetPfDays,
-    daysElapsed: Math.max(job.minCalendarDays, 30),
+    daysElapsed: Math.max(job.minCalendarDays ?? 0, 30),
     stage: "done" as const,
   };
   return {

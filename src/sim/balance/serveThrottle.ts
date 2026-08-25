@@ -1,4 +1,4 @@
-import type { ServeThrottlePolicy } from '../types'
+import type { ProductPricing, ServeThrottlePolicy } from '../types'
 import { planTokenSpeedDissatisfaction } from './tokenSpeed'
 
 /**
@@ -15,6 +15,60 @@ import { planTokenSpeedDissatisfaction } from './tokenSpeed'
  */
 
 const clamp01 = (n: number) => Math.max(0, Math.min(1, n))
+
+export const DEFAULT_SERVE_SLOWDOWN_LIMIT = 0.25
+export const DEFAULT_PEAK_PRICING_PCT = 0
+
+/**
+ * Translate the retired policy selector into the two continuous controls.
+ * Keeping this in one place makes raw legacy fixtures and normalized saves
+ * behave identically while new saves no longer need binary policy semantics.
+ */
+export function legacyServeControls(policy: ServeThrottlePolicy | undefined): {
+  slowdownLimit: number
+  peakPricingPct: number
+} {
+  switch (policy) {
+    case 'shed':
+      return { slowdownLimit: 0, peakPricingPct: 0 }
+    case 'throttle':
+      return { slowdownLimit: 1, peakPricingPct: 0 }
+    case 'surge':
+      return { slowdownLimit: DEFAULT_SERVE_SLOWDOWN_LIMIT, peakPricingPct: 80 }
+    case 'balanced':
+    default:
+      return {
+        slowdownLimit: DEFAULT_SERVE_SLOWDOWN_LIMIT,
+        peakPricingPct: DEFAULT_PEAK_PRICING_PCT,
+      }
+  }
+}
+
+/** Resolve explicit controls first, then preserve a legacy policy's behavior. */
+export function serveControls(pricing: Pick<ProductPricing, 'serveThrottlePolicy' | 'serveSlowdownLimit' | 'peakPricingPct'>): {
+  slowdownLimit: number
+  peakPricingPct: number
+} {
+  const legacy = legacyServeControls(pricing.serveThrottlePolicy)
+  // A pre-control fixture can be constructed by changing only the legacy
+  // policy on a fresh state (whose new fields carry the balanced defaults).
+  // Let that explicit legacy selector win in this one unambiguous case.
+  const legacySelectorOverridesDefaults =
+    pricing.serveThrottlePolicy != null &&
+    pricing.serveThrottlePolicy !== 'balanced' &&
+    pricing.serveSlowdownLimit === DEFAULT_SERVE_SLOWDOWN_LIMIT &&
+    (pricing.peakPricingPct ?? DEFAULT_PEAK_PRICING_PCT) ===
+      DEFAULT_PEAK_PRICING_PCT
+  if (legacySelectorOverridesDefaults) return legacy
+  return {
+    slowdownLimit: Number.isFinite(pricing.serveSlowdownLimit)
+      ? Math.max(0, Math.min(1, pricing.serveSlowdownLimit!))
+      : legacy.slowdownLimit,
+    peakPricingPct: Number.isFinite(pricing.peakPricingPct)
+      ? Math.max(0, Math.min(100, pricing.peakPricingPct!))
+      : legacy.peakPricingPct,
+  }
+}
 
 /**
  * Share of today's unserved demand that is absorbed as slowness rather than
@@ -36,6 +90,43 @@ export function throttleAbsorbShare(
     default:
       return Math.min(1, 0.25 / u)
   }
+}
+
+/**
+ * Share of today's unserved work that is slowed before it is shed, using the
+ * configured overload headroom. `slowdownLimit` is a fraction of capacity,
+ * not a fraction of already-unserved demand. Thus 0.25 reproduces the old
+ * balanced behavior around a 25% capacity oversubscription, while 0 sheds
+ * immediately and 1 keeps all excess in the slow-stream path.
+ */
+export function slowdownAbsorbShare(
+  unservedRatio: number,
+  slowdownLimit: number,
+): number {
+  const u = clamp01(unservedRatio)
+  const limit = clamp01(slowdownLimit)
+  if (u <= 1e-9 || limit <= 1e-9) return 0
+  // capacity / demand = 1 - unserved; compare the configured headroom to
+  // excess demand in the same units before converting to a share of excess.
+  return Math.min(1, (limit * Math.max(0, 1 - u)) / u)
+}
+
+/** Resolve the configured absorb curve while honoring policy-only legacy fixtures. */
+export function configuredAbsorbShare(
+  pricing: Pick<ProductPricing, 'serveThrottlePolicy' | 'serveSlowdownLimit' | 'peakPricingPct'>,
+  unservedRatio: number,
+): number {
+  const controls = serveControls(pricing)
+  const policy = pricing.serveThrottlePolicy
+  const legacyDefaults =
+    policy != null &&
+    policy !== 'balanced' &&
+    pricing.serveSlowdownLimit === DEFAULT_SERVE_SLOWDOWN_LIMIT &&
+    (pricing.peakPricingPct ?? DEFAULT_PEAK_PRICING_PCT) ===
+      DEFAULT_PEAK_PRICING_PCT
+  return legacyDefaults
+    ? throttleAbsorbShare(policy, unservedRatio)
+    : slowdownAbsorbShare(unservedRatio, controls.slowdownLimit)
 }
 
 /** EMA of stream slowness. Rises with absorbed overload, heals with headroom. */
@@ -91,15 +182,36 @@ export function throttleSpillScale(absorbShare: number): number {
 export function nextSurgeLevel(
   prev: number,
   unservedRatio: number,
-  policy: ServeThrottlePolicy,
+  policy: ServeThrottlePolicy = 'balanced',
+  peakPricingPct?: number,
+  slowdownLimit = DEFAULT_SERVE_SLOWDOWN_LIMIT,
 ): number {
-  if (policy !== 'surge') return Math.max(0, clamp01(prev) * 0.6 - 0.03)
-  return nextSpeedStrain(prev, unservedRatio, throttleAbsorbShare('balanced', unservedRatio))
+  const enabled =
+    peakPricingPct != null
+      ? Math.max(0, peakPricingPct) > 0
+      : policy === 'surge'
+  if (!enabled) return Math.max(0, clamp01(prev) * 0.6 - 0.03)
+  return nextSpeedStrain(
+    prev,
+    unservedRatio,
+    slowdownAbsorbShare(unservedRatio, slowdownLimit),
+  )
 }
 
-/** Posted API price multiplier: 1 + min(0.8, ema * 1.6). */
-export function surgePriceMultiplier(level: number): number {
-  return 1 + Math.min(0.8, Math.max(0, level) * 1.6)
+/** Posted API price multiplier with a configurable maximum uplift. */
+export function surgePriceMultiplier(level: number, peakPricingPct = 80): number {
+  const maxUplift = Math.max(0, Math.min(100, peakPricingPct)) / 100
+  return 1 + Math.min(maxUplift, Math.max(0, level) * maxUplift * 2)
+}
+
+/**
+ * Peak prices are a demand control as well as a revenue control. Once the
+ * posted uplift becomes excessive, API traffic collapses instead of leaving a
+ * misleading near-full demand signal in the market ledger.
+ */
+export function peakPricingDemandMultiplier(priceMultiplier: number): number {
+  const uplift = Math.max(0, Number.isFinite(priceMultiplier) ? priceMultiplier - 1 : 0)
+  return Math.max(0.005, Math.exp(-uplift * 3.2))
 }
 
 /** Small gouging-perception brand hit while a posted surge is live. */

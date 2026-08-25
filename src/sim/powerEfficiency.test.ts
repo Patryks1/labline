@@ -7,6 +7,7 @@ import {
   powerBalance,
   recordPowerEfficiencyDay,
 } from './systems/facilities'
+import { computeSnapshot } from './systems/compute'
 import { tickDay } from './tick'
 import { roundTripState } from './save'
 
@@ -113,6 +114,21 @@ describe('recordPowerEfficiencyDay', () => {
     const history = next.player.powerEfficiencyHistory ?? []
     expect(history).toHaveLength(1)
     expect(history[0]?.day).toBe(next.day)
+  })
+
+  it('keeps cloud PF out of the local MW denominator while retaining combined effective PF', () => {
+    const state = createGame(9_002)
+    const snap = computeSnapshot(state)
+    const sampled = recordPowerEfficiencyDay(state)
+    const sample = sampled.player.powerEfficiencyHistory?.[0]
+    expect(sample?.cloudPf).toBeCloseTo(snap.remoteFlopsPf, 8)
+    expect(sample?.combinedEffectivePf).toBeCloseTo(snap.effectiveFlopsPf, 8)
+    expect(sample?.cloudEffectivePf).toBeCloseTo(snap.remoteEffectiveFlopsPf, 8)
+    expect(sample?.pfPerMw).toBe(
+      snap.mwDemand > 1e-6
+        ? (snap.rawFlopsPf - snap.remoteFlopsPf) / snap.mwDemand
+        : 0,
+    )
   })
 })
 

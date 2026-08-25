@@ -577,7 +577,7 @@ export function RivalIntelPanel() {
                         </div>
                         <div className="mt-1 font-mono text-[0.8125rem] text-muted">
                           {num(planAllowanceMTokPerMonth(plan), 2)} MTok ·{" "}
-                          {plan.servePrecision ?? "fp16"}
+                          {plan.servePrecision ?? "fp32"}
                         </div>
                       </div>
                     ))}

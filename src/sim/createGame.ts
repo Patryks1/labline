@@ -6,6 +6,7 @@ import {
   buildGameConfig,
   defaultGameConfig,
   type AdvancedOverrides,
+  type CompanyLogoSpec,
   type CompanyMarkId,
   type DifficultyId,
   type GameConfig,
@@ -34,6 +35,7 @@ import type {
   SiteCapacity,
 } from './types'
 import { cityTalentCapacity, cityTalentInitial, emptyStaff } from './balance/staff'
+import { researchPodFromTemplate, starterResearchPodTemplates } from './balance/researchPods'
 import {
   getIndustryDataPack,
   GROUNDED_2026_ECONOMY_V3_PACK,
@@ -56,6 +58,7 @@ export interface CreateGameOpts {
   seed?: number
   labName?: string
   companyMark?: CompanyMarkId
+  companyLogo?: Partial<CompanyLogoSpec>
   difficulty?: DifficultyId
   advanced?: AdvancedOverrides
   /** Full config wins over difficulty/advanced when provided */
@@ -182,6 +185,7 @@ function toRunConfig(cfg: GameConfig): RunConfig {
   return {
     labName: cfg.labName,
     companyMark: cfg.companyMark,
+    companyLogo: cfg.companyLogo,
     difficulty: cfg.difficulty,
     mapWidth: cfg.mapWidth,
     mapHeight: cfg.mapHeight,
@@ -206,6 +210,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
     buildGameConfig({
       labName: opts.labName,
       companyMark: opts.companyMark,
+      companyLogo: opts.companyLogo,
       difficulty: opts.difficulty,
       seed: opts.seed ?? 42,
       advanced: opts.advanced,
@@ -331,50 +336,8 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       talent: 1,
       staff: emptyStaff(),
       starterHqGrant: true,
-      researchLeads: [
-        {
-          id: 'lead-mira-chen',
-          name: 'Dr. Mira Chen',
-          skills: { algorithms: 0.82, systems: 0.66, dataEvals: 0.72, leadership: 0.78 },
-          specialties: { reasoning: 0.88, math: 0.8, science: 0.72 },
-          traits: ['scaling intuition', 'patient mentor'],
-          reputation: 62,
-          morale: 78,
-          salaryPerDay: 3_400,
-        },
-        {
-          id: 'lead-jonah-reyes',
-          name: 'Jonah Reyes',
-          skills: { algorithms: 0.68, systems: 0.9, dataEvals: 0.7, leadership: 0.74 },
-          specialties: { code: 0.86, tools: 0.84, reasoning: 0.65 },
-          traits: ['systems optimizer', 'fast integrator'],
-          reputation: 59,
-          morale: 80,
-          salaryPerDay: 3_100,
-        },
-      ],
-      researchPods: [
-        {
-          id: 'pod-foundations',
-          name: 'Foundations Pod',
-          leadId: 'lead-mira-chen',
-          focus: 'scaling',
-          researchers: 0,
-          engineers: 0,
-          dataStaff: 0,
-          assignmentId: null,
-        },
-        {
-          id: 'pod-systems',
-          name: 'Systems Pod',
-          leadId: 'lead-jonah-reyes',
-          focus: 'systems',
-          researchers: 0,
-          engineers: 0,
-          dataStaff: 0,
-          assignmentId: null,
-        },
-      ],
+      researchLeads: starterResearchPodTemplates().map((template) => ({ ...template.lead })),
+      researchPods: starterResearchPodTemplates().map(researchPodFromTemplate),
       researchPrograms: [],
       trainingPrograms: [],
       cloudCredits: 3_000_000,
@@ -405,6 +368,8 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
         apiMarkupPct: 120,
         apiVsSubPriority: ECONOMY.defaultApiVsSubPriority,
         serveThrottlePolicy: 'balanced',
+        serveSlowdownLimit: 0.25,
+        peakPricingPct: 0,
         activeModelId: null,
         enterpriseContractBonus: 0,
         plans: defaultPlans(),
@@ -475,6 +440,9 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
         investorConfidence: 0.68,
         boardPressure: 0.18,
         founderControl: 0.78,
+        pitchCooldownUntilDay: 0,
+        pitchModelCooldowns: {},
+        pitchHistory: [],
         restructuring: { active: false, daysLeft: 0, stage: 'none' },
       },
     },
@@ -499,7 +467,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
         signedDay: 1,
         acceleratorGeneration: 2,
         supportedTrainingFormats: ['fp32', 'fp16_mixed', 'bf16_mixed', 'fp8_hybrid'],
-        supportedServePrecisions: ['fp16', 'bf16', 'fp8', 'int8', 'int4', 'ternary_1_58'],
+        supportedServePrecisions: ['fp32', 'fp16', 'bf16', 'fp8', 'int8', 'int4', 'ternary_1_58'],
       },
     ],
     computeListing: null,
@@ -548,6 +516,18 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
     ],
     news: [
       `Market open across ${map.cities?.length ?? 0} settlements in ${map.regions.length} metro regions. ${rivals.length} rivals already have footholds.`,
+    ],
+    feedEvents: [
+      {
+        id: 'feed-world-open-day-1',
+        day: 1,
+        category: 'world',
+        title: 'The market opens',
+        body: `${rivals.length} rivals already have footholds across ${map.cities?.length ?? 0} settlements. Build a model, then earn attention before the field moves.`,
+        source: 'World Desk',
+        tone: 'neutral',
+        kind: 'campaign_open',
+      },
     ],
     onboardingStep: 0,
     onboardingDismissed: false,

@@ -2,6 +2,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { RadarChart } from './RadarChart'
+import { SUITE_METRICS } from '../../../sim/balance/evaluationSuites'
 
 describe('RadarChart interaction contract', () => {
   it('keeps the legacy comparison prop and renders multiple comparison series', () => {
@@ -21,7 +22,10 @@ describe('RadarChart interaction contract', () => {
     expect(markup).toContain('Peer')
     expect(markup).toContain('role="button"')
     expect(markup).not.toContain("<button")
-    expect((markup.match(/role="button"/g) ?? []).length).toBe(10)
+    expect((markup.match(/role="button"/g) ?? []).length).toBe(SUITE_METRICS.language.length)
     expect(markup).toContain('aria-live="polite"')
+    expect(markup).toContain('text-anchor="middle"')
+    expect(markup).not.toContain('foreignObject')
+    expect(markup).toContain('min-w-0 flex-1')
   })
 })

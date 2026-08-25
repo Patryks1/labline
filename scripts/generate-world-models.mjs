@@ -31,6 +31,7 @@ const C = {
   wall: 0xe5d5b7, wall2: 0xc69c74, roof: 0x7a4b42, glass: 0x78a9bd,
   concrete: 0x9aa2a0, metal: 0x596872, dark: 0x303b42, accent: 0xe6a93d,
   red: 0xb84d45, blue: 0x407d9c, watercraft: 0xe8dfc7, rock: 0x74766f,
+  mass: 0xb8b4a8, trim: 0x5a4030, panel: 0x6a9bb8,
 }
 
 let nextCatalogId = 400
@@ -52,7 +53,7 @@ const definitions = [
   ], 'base', [1,1], lod => warehouse(lod)),
   ...catalog('facilities', [
     ['facility-small',100],['facility-medium',101],['facility-large',102],['headquarters',110],['solar-field',111],['grid-substation',112],['power-generation',113],['chip-fabrication',114],['cooling-campus',115],['gas-generation',116],['battery-yard',117],['office-campus',118],['headquarters-small',119],['headquarters-medium',120],['research-lab',121],'training-centre','network-operations','construction-shell','utility-plant','security-centre',
-  ], 'owner', [2,2], (lod, i) => i === 4 ? solarField(lod) : dataCentre(lod)),
+  ], 'base', [2,2], (lod, _i, key) => facilityModel(lod, key), { vary: false }),
   ...municipalLayouts.campuses.map(campus => model(
     'municipal', campus.key, campus.archetypeId, 'base', municipalLayouts.footprint,
     lod => municipalCampus(campus, lod),
@@ -75,11 +76,15 @@ function model(family, key, archetypeId, tintMode, footprint, build) {
   return { family, key, archetypeId, tintMode, footprint, build }
 }
 
-function catalog(family, specs, tintMode, footprint, buildBase) {
+function catalog(family, specs, tintMode, footprint, buildBase, opts = {}) {
+  const vary = opts.vary !== false
   return specs.map((spec, index) => {
     const [key, explicitId] = Array.isArray(spec) ? spec : [spec, undefined]
     const id = explicitId ?? nextCatalogId++
-    return model(family, key, id, tintMode, footprint, lod => varied(buildBase(lod, index), index, family, lod))
+    return model(family, key, id, tintMode, footprint, lod => {
+      const geometry = buildBase(lod, index, key)
+      return vary ? varied(geometry, index, family, lod) : geometry
+    })
   })
 }
 
@@ -174,16 +179,370 @@ function warehouse(lod) {
   if(lod==='near'){for(let i=-2;i<=2;i++)p.push(box([.13,.05,.6],[i*.19,.53,0],i%2?C.concrete:C.wall2,[0,0,i%2?.12:-.12]));p.push(box([.24,.14,.22],[.34,.07,-.48],C.red))}
   return merge(p)
 }
-function dataCentre(lod) {
-  if(lod==='far') return merge([box([1.45,.66,1.2],[0,.33,0],C.concrete),box([.35,1.02,.35],[.42,.51,.2],C.dark)])
-  const p=[box([1.5,.68,1.24],[0,.34,0],C.concrete),box([1.62,.12,1.34],[0,.06,0],C.dark),box([.38,1.08,.38],[.45,.54,.2],C.dark),box([.72,.16,.03],[-.25,.4,.635],C.glass)]
-  const units=lod==='near'?5:3;for(let i=0;i<units;i++)p.push(box([.18,.16,.18],[-.58+i*.29,.8,-.2],C.metal))
-  if(lod==='near'){for(let i=0;i<5;i++)p.push(box([.06,.23,.025],[-.55+i*.27,.2,.642],i===2?C.accent:C.dark));p.push(cyl(.025,.025,.5,8,[.45,1.33,.2],C.accent))}
+function hipRoof(w, d, h, pos, color = C.roof) {
+  return cone(Math.max(w, d) * 0.71, h, 4, pos, color, [0, Math.PI / 4, 0])
+}
+function civicDoor(x, y, z) {
+  return box([.14, .26, .03], [x, y, z], C.dark)
+}
+function civicWindow(x, y, z, w = .16, h = .12) {
+  return box([w, h, .025], [x, y, z], C.glass)
+}
+function civicChimney(x, y, z) {
+  return box([.07, .2, .07], [x, y, z], C.wall2)
+}
+
+function facilityModel(lod, key) {
+  switch (key) {
+    case 'headquarters-small': return hqCampus(lod, 's')
+    case 'headquarters-medium': return hqCampus(lod, 'm')
+    case 'headquarters': return hqCampus(lod, 'l')
+    case 'office-campus': return hqCampus(lod, 'office')
+    case 'facility-small': return dcCampus(lod, 's')
+    case 'facility-medium': return dcCampus(lod, 'm')
+    case 'facility-large': return dcCampus(lod, 'l')
+    case 'solar-field': return solarField(lod)
+    case 'grid-substation': return substationYard(lod)
+    case 'power-generation': return smrCampus(lod)
+    case 'chip-fabrication': return fabCampus(lod)
+    case 'cooling-campus': return coolingCampus(lod)
+    case 'gas-generation': return gasCampus(lod)
+    case 'battery-yard': return batteryYard(lod)
+    case 'research-lab': return labCampus(lod)
+    case 'training-centre': return trainingHall(lod)
+    case 'network-operations': return networkOps(lod)
+    case 'construction-shell': return constructionShell(lod)
+    case 'utility-plant': return utilityPlant(lod)
+    case 'security-centre': return securityCentre(lod)
+    default: return dcCampus(lod, 's')
+  }
+}
+
+function parapet(w, d, y, x = 0, z = 0, color = C.dark) {
+  return box([w, .07, d], [x, y, z], color)
+}
+function canopy(w, d, y, x, z) {
+  return box([w, .04, d], [x, y, z], C.trim)
+}
+
+/** Commercial office HQ — flat parapet, glass bands, canopy. Not a house. */
+function hqCampus(lod, size) {
+  if (size === 's') {
+    if (lod === 'far') return merge([box([.9, .36, .62], [0, .18, 0], C.wall), parapet(.94, .66, .39)])
+    const p = [
+      box([.92, .38, .64], [0, .19, 0], C.wall),
+      parapet(.96, .68, .41),
+      box([.62, .18, .03], [.08, .22, .335], C.glass),
+      civicDoor(-.32, .14, .335),
+      canopy(.36, .16, .32, -.22, .42),
+    ]
+    if (lod === 'near') {
+      p.push(box([.2, .1, .04], [.36, .28, .345], C.dark))
+      p.push(box([.9, .03, .2], [0, .02, .42], C.concrete))
+    }
+    return merge(p)
+  }
+  if (size === 'm') {
+    if (lod === 'far') return merge([
+      box([.7, .62, .5], [-.2, .31, -.16], C.wall),
+      box([.5, .62, .78], [.28, .31, .08], C.mass),
+      parapet(.74, .54, .65, -.2, -.16),
+    ])
+    const p = [
+      box([.72, .64, .52], [-.2, .32, -.16], C.wall),
+      parapet(.76, .56, .67, -.2, -.16),
+      box([.52, .64, .8], [.28, .32, .08], C.mass),
+      parapet(.56, .84, .67, .28, .08),
+      box([.5, .14, .03], [-.2, .48, .115], C.glass),
+      box([.5, .14, .03], [-.2, .22, .115], C.glass),
+      box([.03, .14, .48], [.555, .48, .08], C.glass),
+      civicDoor(-.32, .14, .115),
+      canopy(.32, .16, .32, -.28, .22),
+    ]
+    if (lod === 'near') {
+      p.push(box([.18, .12, .04], [.28, .5, .495], C.dark))
+      p.push(box([.28, .03, .28], [-.08, .02, .28], C.concrete))
+    }
+    return merge(p)
+  }
+  if (size === 'office') {
+    if (lod === 'far') return merge([box([1.05, .36, .62], [0, .18, 0], C.wall), parapet(1.1, .66, .39)])
+    const p = [
+      box([1.08, .38, .64], [0, .19, 0], C.wall),
+      parapet(1.12, .68, .41),
+      box([.78, .16, .03], [.08, .22, .335], C.glass),
+      civicDoor(-.4, .14, .335),
+      canopy(.4, .16, .32, -.32, .42),
+    ]
+    if (lod === 'near') p.push(box([.22, .1, .04], [.42, .28, .345], C.dark))
+    return merge(p)
+  }
+  if (lod === 'far') return merge([
+    box([1.05, .32, .9], [0, .16, 0], C.mass),
+    box([.7, .7, .55], [-.08, .67, -.08], C.wall),
+    parapet(.74, .59, 1.05, -.08, -.08),
+  ])
+  const p = [
+    box([1.08, .34, .92], [0, .17, 0], C.mass),
+    parapet(1.12, .96, .37),
+    box([.72, .72, .56], [-.08, .7, -.06], C.wall),
+    parapet(.76, .6, 1.09, -.08, -.06),
+    box([.42, .5, .7], [.42, .59, .12], C.wall2),
+    parapet(.46, .74, .87, .42, .12),
+    box([.56, .16, .03], [-.08, .86, .235], C.glass),
+    box([.56, .16, .03], [-.08, .52, .235], C.glass),
+    civicDoor(-.28, .14, .475),
+    canopy(.4, .18, .32, -.2, .56),
+  ]
+  if (lod === 'near') {
+    p.push(box([.24, .16, .06], [.42, .7, .5], C.dark))
+    p.push(box([.2, .1, .2], [-.42, .39, .42], C.concrete))
+    p.push(box([.16, .08, .16], [-.08, 1.16, -.06], C.metal))
+  }
   return merge(p)
 }
+
+function dcCampus(lod, size) {
+  if (size === 's') {
+    if (lod === 'far') return merge([box([1.05, .4, .7], [0, .2, 0], C.wall), box([1.1, .08, .76], [0, .44, 0], C.roof)])
+    const p = [
+      box([1.08, .42, .72], [0, .21, 0], C.wall),
+      box([1.14, .08, .78], [0, .46, 0], C.roof),
+      box([.28, .22, .2], [-.42, .12, .4], C.wall2),
+      box([.5, .1, .03], [.12, .26, .375], C.glass),
+    ]
+    if (lod === 'near') {
+      p.push(box([.16, .1, .14], [-.22, .56, -.1], C.metal), box([.16, .1, .14], [.12, .56, -.1], C.metal))
+      p.push(box([.2, .03, .16], [-.42, .03, .52], C.dark))
+    }
+    return merge(p)
+  }
+  if (size === 'm') {
+    if (lod === 'far') return merge([
+      box([.52, .48, .96], [-.28, .24, 0], C.wall),
+      box([.52, .4, .8], [.3, .2, .04], C.mass),
+    ])
+    const p = [
+      box([.54, .5, .98], [-.28, .25, 0], C.wall),
+      box([.58, .08, 1.04], [-.28, .54, 0], C.roof),
+      box([.54, .42, .82], [.32, .21, .04], C.mass),
+      box([.58, .08, .88], [.32, .46, .04], C.trim),
+      box([.36, .12, .03], [-.28, .28, .505], C.glass),
+    ]
+    if (lod === 'near') {
+      for (let i = 0; i < 3; i++) p.push(box([.14, .1, .14], [-.42 + i * .18, .64, -.2], C.metal))
+      p.push(box([.24, .2, .16], [.32, .12, .5], C.wall2))
+    }
+    return merge(p)
+  }
+  if (lod === 'far') return merge([
+    box([.7, .52, 1.05], [-.22, .26, 0], C.mass),
+    box([.48, .72, .48], [.38, .36, .16], C.concrete),
+  ])
+  const p = [
+    box([.72, .54, 1.08], [-.22, .27, 0], C.mass),
+    box([.76, .08, 1.14], [-.22, .58, 0], C.roof),
+    box([.5, .42, .7], [.4, .21, -.22], C.wall),
+    box([.54, .08, .76], [.4, .46, -.22], C.trim),
+    box([.36, .78, .36], [.42, .39, .32], C.concrete),
+    box([.4, .08, .4], [.42, .82, .32], C.dark),
+    box([.48, .12, .03], [-.22, .3, .555], C.glass),
+  ]
+  if (lod === 'near') {
+    for (let i = 0; i < 4; i++) p.push(box([.14, .1, .14], [-.48 + i * .2, .68, -.28], C.metal))
+    p.push(box([.28, .22, .18], [-.5, .12, .58], C.wall2))
+  }
+  return merge(p)
+}
+
 function solarField(lod) {
-  const p=[box([1.35,.05,1.1],[0,.025,0],C.dark)], rows=lod==='near'?3:lod==='mid'?2:1
-  for(let r=0;r<rows;r++){const z=(r-(rows-1)/2)*.34;p.push(box([1.05,.035,.25],[0,.23,z],C.glass,[-.28,0,0]));if(lod!=='far')for(let x=-1;x<=1;x++)p.push(cyl(.018,.018,.28,6,[x*.42,.13,z],C.metal))}
+  const p = [box([1.35, .05, 1.1], [0, .025, 0], C.dark), box([.28, .22, .22], [-.48, .12, .4], C.wall)]
+  const rows = lod === 'near' ? 3 : lod === 'mid' ? 2 : 1
+  for (let r = 0; r < rows; r++) {
+    const z = (r - (rows - 1) / 2) * .34
+    p.push(box([1.05, .035, .25], [.08, .23, z], C.panel, [-.28, 0, 0]))
+    if (lod !== 'far') for (let x = -1; x <= 1; x++) p.push(box([.04, .16, .04], [x * .42 + .08, .08, z], C.metal))
+  }
+  if (lod === 'near') p.push(box([.12, .1, .03], [-.48, .16, .52], C.dark), box([.18, .04, .18], [-.48, .25, .4], C.roof))
+  return merge(p)
+}
+
+function substationYard(lod) {
+  const p = [box([1.2, .05, 1.05], [0, .025, 0], C.dark), box([.36, .28, .32], [-.38, .16, .32], C.wall)]
+  if (lod === 'far') return merge([...p, box([.22, .32, .18], [.2, .18, -.1], C.metal)])
+  for (const x of [-.18, .12, .42]) p.push(box([.2, .26, .16], [x, .16, -.18], C.metal))
+  for (const x of [-.5, 0, .5]) p.push(box([.05, .42, .05], [x, .24, .46], C.concrete))
+  if (lod === 'near') {
+    p.push(box([1.05, .04, .04], [0, .42, .46], C.metal), box([.14, .08, .03], [-.38, .18, .49], C.dark))
+    p.push(hipRoof(.38, .34, .14, [-.38, .36, .32]))
+  }
+  return merge(p)
+}
+
+function smrCampus(lod) {
+  if (lod === 'far') return merge([
+    box([.7, .62, .7], [.18, .31, .08], C.mass),
+    box([.28, .72, .28], [-.38, .36, -.22], C.concrete),
+  ])
+  const p = [
+    box([.74, .64, .74], [.2, .32, .1], C.mass),
+    box([.78, .08, .78], [.2, .68, .1], C.concrete),
+    box([.3, .78, .3], [-.4, .39, -.24], C.concrete),
+    box([.3, .7, .3], [-.08, .35, -.28], C.concrete),
+    box([.48, .36, .34], [.38, .18, -.38], C.wall),
+    box([.52, .08, .38], [.38, .4, -.38], C.roof),
+  ]
+  if (lod === 'near') {
+    p.push(box([.16, .08, .16], [.2, .76, .1], C.dark), box([.12, .18, .03], [.38, .18, -.2], C.dark))
+    p.push(box([.18, .06, .18], [-.4, .82, -.24], C.metal), box([.18, .06, .18], [-.08, .74, -.28], C.metal))
+  }
+  return merge(p)
+}
+
+function fabCampus(lod) {
+  if (lod === 'far') return merge([box([1.2, .4, .72], [0, .2, 0], C.wall), box([.5, .22, .5], [.2, .5, 0], C.mass)])
+  const p = [
+    box([1.22, .42, .74], [0, .21, 0], C.wall),
+    box([1.28, .08, .8], [0, .46, 0], C.roof),
+    box([.52, .24, .52], [.18, .56, 0], C.mass),
+    box([.56, .06, .56], [.18, .7, 0], C.concrete),
+    box([.7, .12, .03], [-.16, .26, .385], C.glass),
+  ]
+  if (lod === 'near') {
+    p.push(box([.36, .28, .22], [-.48, .16, .42], C.wall2), box([.14, .1, .14], [-.3, .56, -.16], C.metal))
+    p.push(box([.14, .1, .14], [0, .56, -.16], C.metal))
+  }
+  return merge(p)
+}
+
+function coolingCampus(lod) {
+  const p = [box([1.15, .05, .95], [0, .025, 0], C.dark), box([.32, .26, .28], [.42, .14, .32], C.wall)]
+  for (const x of [-.38, 0, .38]) {
+    p.push(box([.28, .52, .28], [x, .28, -.12], C.concrete))
+    p.push(box([.3, .06, .3], [x, .56, -.12], C.metal))
+  }
+  if (lod === 'far') return merge(p)
+  p.push(box([.9, .06, .08], [0, .1, .18], C.metal))
+  if (lod === 'near') p.push(hipRoof(.34, .3, .12, [.42, .32, .32]), box([.1, .1, .03], [.42, .14, .47], C.dark))
+  return merge(p)
+}
+
+function gasCampus(lod) {
+  const p = [
+    box([.7, .38, .52], [-.28, .19, .16], C.wall),
+    box([.74, .08, .56], [-.28, .42, .16], C.roof),
+    box([.28, .32, .28], [.32, .16, -.16], C.metal),
+    box([.28, .26, .28], [.32, .13, .22], C.dark),
+  ]
+  if (lod === 'far') return merge(p)
+  p.push(box([.1, .58, .1], [.32, .42, -.16], C.concrete), civicDoor(-.28, .14, .435))
+  if (lod === 'near') {
+    p.push(box([.16, .1, .03], [-.08, .24, .435], C.glass), box([.12, .08, .12], [.32, .48, .22], C.metal))
+    p.push(civicChimney(-.5, .56, .16))
+  }
+  return merge(p)
+}
+
+function batteryYard(lod) {
+  const p = [box([1.2, .05, 1.0], [0, .025, 0], C.dark)]
+  const cols = lod === 'far' ? 2 : 3
+  const rows = lod === 'far' ? 1 : 2
+  for (let row = 0; row < rows; row++) for (let col = 0; col < cols; col++) {
+    p.push(box([.22, .24, .28], [-.4 + col * .32, .14, -.22 + row * .4], C.metal))
+  }
+  p.push(box([.28, .22, .22], [.46, .12, .36], C.wall))
+  if (lod === 'near') p.push(box([.18, .04, .18], [.46, .25, .36], C.roof), box([.08, .04, .04], [-.4, .28, -.06], C.accent))
+  return merge(p)
+}
+
+function labCampus(lod) {
+  if (lod === 'far') return merge([
+    box([.9, .42, .62], [-.08, .21, 0], C.wall),
+    box([.42, .32, .42], [.4, .16, .22], C.mass),
+    parapet(.94, .66, .45, -.08, 0),
+  ])
+  const p = [
+    box([.92, .44, .64], [-.08, .22, 0], C.wall),
+    parapet(.96, .68, .47, -.08, 0),
+    box([.44, .34, .44], [.42, .17, .22], C.mass),
+    parapet(.48, .48, .37, .42, .22),
+    civicDoor(-.2, .14, .335),
+    box([.56, .16, .03], [.08, .28, .335], C.glass),
+    canopy(.32, .14, .3, -.16, .42),
+  ]
+  if (lod === 'near') {
+    p.push(box([.18, .08, .18], [-.08, .56, 0], C.metal))
+    p.push(civicWindow(.42, .22, .455, .16, .12))
+  }
+  return merge(p)
+}
+
+function trainingHall(lod) {
+  if (lod === 'far') return merge([box([1.1, .36, .62], [0, .18, 0], C.wall), parapet(1.14, .66, .39)])
+  const p = [
+    box([1.12, .38, .64], [0, .19, 0], C.wall),
+    parapet(1.16, .68, .41),
+    civicDoor(-.36, .14, .335),
+    box([.78, .14, .03], [.12, .24, .335], C.glass),
+    canopy(.36, .14, .3, -.28, .42),
+  ]
+  if (lod === 'near') p.push(box([.16, .08, .16], [.36, .48, -.1], C.metal))
+  return merge(p)
+}
+
+function networkOps(lod) {
+  const p = [
+    box([.7, .36, .58], [0, .18, .08], C.wall),
+    parapet(.74, .62, .39, 0, .08),
+    box([.36, .08, .36], [0, .48, .08], C.metal),
+    box([.28, .04, .28], [0, .54, .08], C.mass),
+  ]
+  if (lod === 'far') return merge(p)
+  p.push(civicDoor(0, .14, .385), box([.2, .42, .08], [.28, .36, -.28], C.concrete))
+  if (lod === 'near') p.push(box([.32, .12, .03], [-.08, .24, .385], C.glass), box([.12, .12, .12], [.28, .62, -.28], C.metal))
+  return merge(p)
+}
+
+function constructionShell(lod) {
+  const p = [
+    box([1.05, .08, .9], [0, .04, 0], C.concrete),
+    box([.08, .46, .08], [-.44, .29, -.36], C.trim),
+    box([.08, .46, .08], [.44, .29, -.36], C.trim),
+    box([.08, .46, .08], [-.44, .29, .36], C.trim),
+    box([.08, .46, .08], [.44, .29, .36], C.trim),
+  ]
+  if (lod === 'far') return merge(p)
+  p.push(box([.96, .06, .06], [0, .5, -.36], C.wall2), box([.96, .06, .06], [0, .5, .36], C.wall2))
+  if (lod === 'near') {
+    p.push(box([.06, .06, .78], [-.44, .5, 0], C.wall2), box([.06, .06, .78], [.44, .5, 0], C.wall2))
+    p.push(box([.3, .22, .24], [-.1, .15, .1], C.wall))
+  }
+  return merge(p)
+}
+
+function utilityPlant(lod) {
+  const p = [
+    box([.55, .34, .48], [-.28, .17, .1], C.wall),
+    box([.58, .08, .52], [-.28, .38, .1], C.roof),
+    box([.3, .28, .3], [.3, .14, -.16], C.metal),
+    box([.3, .22, .3], [.3, .11, .22], C.dark),
+  ]
+  if (lod === 'far') return merge(p)
+  p.push(box([.1, .48, .1], [.3, .38, -.16], C.concrete), civicDoor(-.28, .14, .355))
+  if (lod === 'near') p.push(box([.16, .08, .03], [-.1, .22, .355], C.glass), civicChimney(-.46, .52, .1))
+  return merge(p)
+}
+
+function securityCentre(lod) {
+  const p = [
+    box([.72, .36, .56], [0, .18, 0], C.wall),
+    parapet(.76, .6, .39),
+    box([.08, .28, .08], [-.42, .14, .34], C.dark),
+    box([.08, .28, .08], [.42, .14, .34], C.dark),
+  ]
+  if (lod === 'far') return merge(p)
+  p.push(civicDoor(0, .14, .295), box([.5, .04, .04], [0, .26, .34], C.metal), canopy(.28, .12, .3, 0, .38))
+  if (lod === 'near') p.push(box([.4, .12, .03], [0, .24, .295], C.glass))
   return merge(p)
 }
 

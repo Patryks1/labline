@@ -16,6 +16,7 @@ import { resolvePlayerPowerMw } from './systems/map'
 import { onsiteGenerationUpkeepDay } from './systems/facilities'
 import { ECONOMY } from './balance/economy'
 import type { SimState, SiteCapacity } from './types'
+import { startResearchProgram } from './systems/researchPrograms'
 
 /** Give a bootstrapped lab for unit tests (player starts empty in real games). */
 function withCompute(s: SimState, racks = 64): SimState {
@@ -89,6 +90,77 @@ function withCompute(s: SimState, racks = 64): SimState {
 }
 
 describe('compute fabric', () => {
+  it('does not treat completed research history as an active compute duty', () => {
+    let state = withCompute(createGame(1001), 64)
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        staff: { researcher: 2, engineer: 2, data_processor: 2, ops: 0 },
+        allocation: { training: 0, inference: 0, research: 1 },
+      },
+    }
+    const idleResearchMw = computeSnapshot(state).mwBreakdown.research
+    const active = startResearchProgram(
+      state,
+      'sys_batching',
+      'pod-foundations',
+      0.5,
+    )
+    const activeResearchMw = computeSnapshot(active).mwBreakdown.research
+    const completed = {
+      ...active,
+      player: {
+        ...active.player,
+        researchPrograms: active.player.researchPrograms?.map((program) => ({
+          ...program,
+          phase: 'complete' as const,
+        })),
+      },
+    }
+
+    expect(activeResearchMw).toBeGreaterThan(idleResearchMw)
+    expect(computeSnapshot(completed).mwBreakdown.research).toBeCloseTo(
+      idleResearchMw,
+      12,
+    )
+  })
+
+  it('counts synthetic data generation as an active research compute duty', () => {
+    let state = withCompute(createGame(1002), 64)
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        allocation: { training: 0, inference: 0, research: 1 },
+        data: {
+          ...state.player.data,
+          synthQueue: [
+            {
+              id: 'synth-duty',
+              domain: 'chat',
+              modelId: 'teacher',
+              modelName: 'Teacher',
+              targetMTok: 0,
+              progressMTok: 0,
+              continuous: true,
+              researchShare: 0.3,
+              qualityTier: 'lq',
+            },
+          ],
+        },
+      },
+    }
+    const idle = withCompute(createGame(1002), 64)
+    idle.player.allocation = { training: 0, inference: 0, research: 1 }
+
+    expect(computeSnapshot(idle).mwBreakdown.research).toBe(0)
+    expect(computeSnapshot(state).mwBreakdown.research).toBeGreaterThan(
+      computeSnapshot(idle).mwBreakdown.research,
+    )
+    expect(computeSnapshot(state).pools.research).toBeGreaterThan(0)
+  })
+
   it('starts cloud-first — remote capacity but no owned chips or player buildings', () => {
     const g = createGame(1)
     const snap = computeSnapshot(g)

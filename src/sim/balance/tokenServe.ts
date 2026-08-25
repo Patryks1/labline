@@ -39,6 +39,7 @@ export const SERVE_EFF_CEILING = 2
  * (tests/UI). Never maintain a second divergent copy.
  */
 export const SERVE_PRECISION_COMPUTE_MULT = {
+  fp32: 2,
   fp16: 1,
   bf16: 1,
   fp8: 0.55,
@@ -52,9 +53,8 @@ export type ServingPrecision = ServePrecision
 
 /**
  * Precision inputs accept any deployable endpoint format plus the native
- * checkpoint precisions. FP32 is native-only: endpoints fall back to BF16
- * kernels, but its 4-byte weights and TF32-rate compute are real serving
- * costs, not a silent downcast.
+ * checkpoint precisions. FP32 stays fully deployable with 4-byte weights and
+ * TF32-rate compute rather than silently downcasting to BF16.
  */
 export type AnyServingPrecision = ServingPrecision | NativeWeightPrecision
 
@@ -202,7 +202,7 @@ export function familyServeMult(family: ModelFamily | string | undefined): numbe
 /**
  * Compute multiplier for a weight/serving precision.
  * Deployable formats share {@link SERVE_PRECISION_COMPUTE_MULT} with the live
- * planServeModifiers path. FP32 is native-only (TF32 ≈ half BF16 rate).
+ * planServeModifiers path. FP32 uses TF32-rate compute (≈ half BF16 rate).
  */
 export function precisionComputeMult(precision: AnyServingPrecision | undefined): number {
   if (precision === 'fp32') return 2
@@ -257,7 +257,7 @@ export interface NativeServingProfile {
   storageOverhead: number
   /** Inference work per token relative to BF16 native serving. */
   computeMult: number
-  /** Closest deployable endpoint format (FP32 natives run BF16 kernels). */
+  /** Default deployable endpoint format, including native FP32. */
   endpointPrecision: ServePrecision
 }
 
@@ -274,7 +274,7 @@ export function nativeServingProfile(
     bytesPerWeight: precisionBytesPerWeight(precision),
     storageOverhead: quantizationStorageOverhead(precision),
     computeMult: precisionComputeMult(precision),
-    endpointPrecision: precision === 'fp32' ? 'bf16' : precision,
+    endpointPrecision: precision,
   }
 }
 

@@ -155,6 +155,7 @@ interface UiPreferences extends AudioPreferences {
   computeNegotiations: Record<string, PersistedNegotiation>
   powerNegotiations: Record<string, PersistedNegotiation>
   campaignDecisionJobId: string | null
+  campaignEpoch: number
   setInterfaceScale: (scale: InterfaceScale) => void
   setRenderPreset: (preset: RenderPreset) => void
   setReducedMotion: (reduced: boolean) => void
@@ -180,6 +181,7 @@ interface UiPreferences extends AudioPreferences {
   clearNegotiations: () => void
   openCampaignDecision: (jobId: string) => void
   closeCampaignDecision: () => void
+  beginCampaign: () => void
 }
 
 export function powerNegotiationKey(cityId: string, mode: 'import' | 'export'): string {
@@ -257,6 +259,7 @@ export const useUiStore = create<UiPreferences>()(
       computeNegotiations: {},
       powerNegotiations: {},
       campaignDecisionJobId: null,
+      campaignEpoch: 0,
       ...DEFAULT_AUDIO_PREFERENCES,
       setInterfaceScale: (interfaceScale) => set({ interfaceScale }),
       setRenderPreset: (renderPreset) => set({ renderPreset }),
@@ -319,6 +322,7 @@ export const useUiStore = create<UiPreferences>()(
       clearNegotiations: () => set({ computeNegotiations: {}, powerNegotiations: {} }),
       openCampaignDecision: (campaignDecisionJobId) => set({ campaignDecisionJobId }),
       closeCampaignDecision: () => set({ campaignDecisionJobId: null }),
+      beginCampaign: () => set((state) => ({ campaignEpoch: state.campaignEpoch + 1 })),
     }),
     {
       name: 'labline-ui-v1',

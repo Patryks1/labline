@@ -81,6 +81,8 @@ describe('training data radar', () => {
     expect(markup).toContain('aria-label="Edit Code align"')
     expect(markup).not.toContain('aria-label="Edit Code verify"')
     expect(markup).toContain('data-readonly="true"')
+    expect(markup).toContain('data-freeze-base="false"')
+    expect(markup).toContain('data-radar-base="control"')
     expect(markup).not.toContain('Domain volume')
     expect(markup).not.toContain('Alignment overflow')
     expect(markup).not.toContain('Balance owned stock')
@@ -101,6 +103,26 @@ describe('training data radar', () => {
     expect(markup).not.toContain('data-radar-zone')
     expect(markup).not.toContain('aria-label="Recipe zone"')
     expect(markup).not.toContain('aria-label="Data phase"')
+  })
+
+  it('freezes the teal base on further-train so only Align is interactive', () => {
+    const markup = renderToStaticMarkup(
+      createElement(TrainingDataRadar, radarProps({ freezeBaseLayer: true })),
+    )
+
+    expect(markup).toContain('data-freeze-base="true"')
+    expect(markup).toContain('data-radar-base="ghost"')
+    expect(markup).toContain('Further-training mix radar. Base mix is read-only.')
+    expect(markup).not.toContain('aria-label="Code base volume"')
+    expect(markup).not.toContain('aria-label="Math base volume"')
+    expect(markup).not.toContain('aria-label="Edit Code base"')
+    expect(markup).not.toContain('aria-label="Edit Code base down"')
+    expect(markup).not.toContain('aria-label="Edit Code base up"')
+    expect(markup).toContain('aria-label="Code further-train volume"')
+    expect(markup).toContain('aria-label="Edit Code align"')
+    expect(markup).toContain('Already-trained mix, read-only')
+    expect(markup).toContain('>Base</strong>')
+    expect(markup).toContain('>Align</strong>')
   })
 
   it('hides the synthetic band until Synthetic Generators is unlocked', () => {

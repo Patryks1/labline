@@ -2,6 +2,7 @@ import { createRng } from '../rng'
 import type { LabId, SimState, WorldEvent } from '../types'
 import { SEGMENTS } from '../balance/economy'
 import { labIds, updateLab } from './labEngine'
+import { appendFeedEvents } from './feed'
 
 type EventTemplate = Omit<WorldEvent, 'day'>
 
@@ -358,7 +359,18 @@ function applyInstantEffects(state: SimState, event: WorldEvent): SimState {
       }
     }
   }
-  return next
+  return appendFeedEvents(next, [
+    {
+      id: `feed-world-event-${event.id}-${state.day}`,
+      day: state.day,
+      category: 'world',
+      title: event.title,
+      body: event.body,
+      source: 'World Desk',
+      tone: 'warning',
+      kind: 'world_event',
+    },
+  ])
 }
 
 /** Deterministically activate an authored event; useful for chains and scenarios. */

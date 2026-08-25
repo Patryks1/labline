@@ -40,6 +40,7 @@ import {
   normalizeModelEvaluations,
   suiteComposite,
 } from "../balance/evaluationSuites";
+import { appendFeedEvents, type FeedEventInput } from "./feed";
 
 /** Paid plans above this monthly price cannot retain product traffic as training data. */
 export const PAID_DATA_COLLECTION_PRICE_CAP = 50;
@@ -129,7 +130,7 @@ export function defaultPlans(): SubPlan[] {
       usageRate: null,
       modelIds: [],
       computePriority: 20,
-      servePrecision: "fp16",
+      servePrecision: "fp32",
       servePrecisionByModel: {},
       steadyUsageTarget: defaultSteadyPlanUsage(0),
       dataCollectionRate: defaultPlanDataCollectionRate(0),
@@ -146,7 +147,7 @@ export function defaultPlans(): SubPlan[] {
       usageRate: null,
       modelIds: [],
       computePriority: 55,
-      servePrecision: "fp16",
+      servePrecision: "fp32",
       servePrecisionByModel: {},
       steadyUsageTarget: defaultSteadyPlanUsage(20),
       dataCollectionRate: defaultPlanDataCollectionRate(20),
@@ -163,7 +164,7 @@ export function defaultPlans(): SubPlan[] {
       usageRate: null,
       modelIds: [],
       computePriority: 85,
-      servePrecision: "fp16",
+      servePrecision: "fp32",
       servePrecisionByModel: {},
       steadyUsageTarget: defaultSteadyPlanUsage(100),
       dataCollectionRate: defaultPlanDataCollectionRate(100),
@@ -180,7 +181,7 @@ export function defaultPlans(): SubPlan[] {
       usageRate: null,
       modelIds: [],
       computePriority: 95,
-      servePrecision: "fp16",
+      servePrecision: "fp32",
       servePrecisionByModel: {},
       steadyUsageTarget: defaultSteadyPlanUsage(200),
       dataCollectionRate: defaultPlanDataCollectionRate(200),
@@ -276,11 +277,13 @@ function appendPlanShock(
   ].slice(-12);
 }
 
-/** Which quant levels the lab can assign on plans. */
+/** Which serving formats the lab can assign on plans. */
 export function unlockedPlanPrecisions(
   unlocked: string[],
 ): PlanServePrecision[] {
-  const out: PlanServePrecision[] = ["fp16", "bf16"];
+  const out: PlanServePrecision[] = ["fp32"];
+  if (unlocked.includes("opt_fp16")) out.push("fp16");
+  if (unlocked.includes("opt_mixed")) out.push("bf16");
   if (unlocked.includes("sys_quant")) out.push("int8");
   if (unlocked.includes("sys_fp8")) out.push("fp8");
   if (unlocked.includes("sys_int4") || unlocked.includes("sys_fp8"))
@@ -295,12 +298,13 @@ export function clampServePrecision(
   unlocked: string[],
 ): PlanServePrecision {
   const allowed = unlockedPlanPrecisions(unlocked);
-  const want = p ?? "fp16";
+  const want = p ?? "fp32";
   if (allowed.includes(want)) return want;
   if ((want === "int4" || want === "nvfp4") && allowed.includes("int8"))
     return "int8";
   if (want === "fp8" && allowed.includes("bf16")) return "bf16";
-  return "fp16";
+  if (want === "bf16" && allowed.includes("fp16")) return "fp16";
+  return "fp32";
 }
 
 /** Research- and checkpoint-compatible formats shown for one plan model. */
@@ -323,7 +327,11 @@ export function clampModelServePrecision(
   const available = availablePlanPrecisionsForModel(model, unlocked);
   const clamped = clampServePrecision(precision, unlocked);
   if (available.includes(clamped)) return clamped;
-  return available.includes("bf16") ? "bf16" : "fp16";
+  return available.includes("bf16")
+    ? "bf16"
+    : available.includes("fp16")
+      ? "fp16"
+      : "fp32";
 }
 
 /** Resolve an individual roster model's format with legacy-save fallbacks. */
@@ -463,13 +471,13 @@ export function planServeModifiers(
     };
   }
   return {
-    precision: p === "bf16" ? "bf16" : "fp16",
-    computeMult: precisionComputeMult(p === "bf16" ? "bf16" : "fp16"),
+    precision: p === "fp32" ? "fp32" : p === "bf16" ? "bf16" : "fp16",
+    computeMult: precisionComputeMult(p),
     qualityMult: 1,
     capabilityDelta: 0,
     benchmarkDeltas: {},
     brandRisk: 0,
-    label: "Full precision",
+    label: p === "fp32" ? "FP32 full precision" : p === "bf16" ? "BF16 runtime" : "FP16 runtime",
   };
 }
 
@@ -878,11 +886,9 @@ export function createPlan(
     }),
     servePrecision: isFreePlan({
       pricePerMonth: input.pricePerMonth,
-    } as SubPlan)
-      ? unlockedPlanPrecisions(state.player.researchUnlocked).includes("int8")
-        ? "int8"
-        : "fp16"
-      : "fp16",
+    } as SubPlan) && unlockedPlanPrecisions(state.player.researchUnlocked).includes("int8")
+      ? "int8"
+      : clampServePrecision("fp16", state.player.researchUnlocked),
     servePrecisionByModel: {},
     steadyUsageTarget: defaultSteadyPlanUsage(input.pricePerMonth),
     dataCollectionRate: defaultPlanDataCollectionRate(input.pricePerMonth),
@@ -937,6 +943,7 @@ export function updatePlan(
   planId: string,
   patch: Partial<SubPlan>,
 ): SimState {
+  const pricingEvents: FeedEventInput[] = [];
   const plans = state.player.pricing.plans.map((p) => {
     if (p.id !== planId) return p;
     // The legacy advertised value is presentation only. It never derives or
@@ -990,7 +997,7 @@ export function updatePlan(
               patch.servePrecision,
               state.player.researchUnlocked,
             )
-          : (p.servePrecision ?? "fp16"),
+          : clampServePrecision(p.servePrecision, state.player.researchUnlocked),
       steadyUsageTarget:
         patch.steadyUsageTarget !== undefined
           ? Math.max(0.02, Math.min(0.9, patch.steadyUsageTarget))
@@ -1111,15 +1118,33 @@ export function updatePlan(
       });
     }
     next.demandShocks = shocks;
+    if (
+      patch.pricePerMonth !== undefined &&
+      Math.abs(next.pricePerMonth - p.pricePerMonth) > 1e-9
+    ) {
+      const direction = next.pricePerMonth > p.pricePerMonth ? "raises" : "cuts";
+      pricingEvents.push({
+        id: `feed-plan-price-${p.id}-${state.day}-${Math.round(next.pricePerMonth * 100)}`,
+        day: state.day,
+        category: "market",
+        title: `${state.player.name} ${direction} ${next.name} pricing`,
+        body: `${next.name} moved from $${p.pricePerMonth.toFixed(2)}/month to $${next.pricePerMonth.toFixed(2)}/month; subscriber demand and retention will re-price on the next market settlement.`,
+        source: state.player.name,
+        tone: next.pricePerMonth < p.pricePerMonth ? "positive" : "warning",
+        entityId: state.playerLabId,
+        kind: "player_plan_price_change",
+      });
+    }
     return next;
   });
-  return {
+  const nextState = {
     ...state,
     player: {
       ...state.player,
       pricing: { ...state.player.pricing, plans },
     },
   };
+  return appendFeedEvents(nextState, pricingEvents);
 }
 
 export function deletePlan(state: SimState, planId: string): SimState {

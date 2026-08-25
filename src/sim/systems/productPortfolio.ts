@@ -262,7 +262,7 @@ function productOffer(input: {
     pricing: input.pricing,
     delivery: input.delivery,
     capacityPriority: Math.max(0, Math.min(1, input.capacityPriority)),
-    servePrecision: input.plan?.servePrecision ?? 'fp16',
+    servePrecision: input.plan?.servePrecision ?? 'fp32',
     capability: input.primary.capability,
     reliability: input.primary.capabilities?.reliability ?? input.primary.quality.reliability,
     modalities: offerModalities(input.models),

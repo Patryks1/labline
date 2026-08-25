@@ -10,7 +10,7 @@ import {
   UsersThree,
   type Icon,
 } from '@phosphor-icons/react'
-import { BUILD_DEFS, buildingTotalCost, getBuildDef } from '../../sim/systems/map'
+import { BUILD_DEFS, buildingTotalCost, canPlaceBuilding, getBuildDef } from '../../sim/systems/map'
 import { ECONOMY } from '../../sim/balance/economy'
 import type { BuildableKind, BuildDef } from '../../sim/types'
 import { useGameStore } from '../../store/gameStore'
@@ -114,13 +114,14 @@ export function BuildPanel() {
     : selectedDef.mw ?? selectedDef.gen ?? 0
   const filtersActive = Boolean(query || buildCategory !== 'all')
   const canAfford = state.player.cash >= upfrontTotal
-  const canPlaceOnTile = !tile || tile.kind === 'empty'
+  const placementCheck = tile ? canPlaceBuilding(state, tile.x, tile.y, selectedDef.kind) : null
+  const canPlaceOnTile = !tile || placementCheck?.ok === true
   const blockers = [
     ...(!canAfford
       ? [{ text: `Need ${money(upfrontTotal - state.player.cash)} more cash`, tone: 'danger' as const }]
       : []),
-    ...(tile && tile.kind !== 'empty'
-      ? [{ text: 'Select open land for exact total & placement', tone: 'warning' as const }]
+    ...(tile && placementCheck && !placementCheck.ok
+      ? [{ text: placementCheck.reason ?? 'This parcel is not eligible for the selected blueprint.', tone: 'warning' as const }]
       : []),
   ]
 
@@ -133,7 +134,7 @@ export function BuildPanel() {
     <PanelScaffold
       eyebrow="Construction"
       title="Build"
-      description="Pick a blueprint, then place it on open land."
+      description="Pick a blueprint, then place it on an eligible parcel."
       actions={
         buildMode ? (
           <HudButton type="button" variant="ghost" onClick={() => setBuildMode(null)}>
@@ -147,7 +148,7 @@ export function BuildPanel() {
           <div className="flex items-center gap-2 rounded-lg border border-mint/35 bg-mint/10 px-3 py-2 text-[0.8125rem] text-mint">
             <LiveDot />
             <span className="min-w-0 truncate">
-              Placing {getBuildDef(buildMode).label} — hover map, click open land, Esc to exit.
+              Placing {getBuildDef(buildMode).label} — hover an eligible parcel, click to place, Esc to exit.
             </span>
           </div>
         ) : null}
@@ -227,7 +228,7 @@ export function BuildPanel() {
               }
             />
           ) : (
-            <CardGrid min="11rem" className="anim-stagger">
+            <CardGrid min="15rem" className="anim-stagger">
               {visibleDefs.map((definition) => {
                 const cost = Math.floor(definition.cash * economyMult)
                 const affordable = state.player.cash >= cost
@@ -341,13 +342,13 @@ export function BuildPanel() {
 
           <div className="mt-3 space-y-2 border-t border-line/50 pt-3">
             <div className="font-mono text-[0.6875rem] tabular-nums text-muted">
-              {tile?.kind === 'empty'
+              {tile && placementCheck?.ok
                 ? `${tile.name || 'Selected parcel'} · ${money(tile.landValue ?? 0)} land`
-                : 'Select open land for an exact total'}
+                : placementCheck?.reason ?? 'Select an eligible parcel for an exact total'}
             </div>
             <BlockerList items={blockers} />
             {!canPlaceOnTile && canAfford ? (
-              <MeterBar label="Parcel" value={0} detail="need empty land" tone="warning" />
+              <MeterBar label="Parcel" value={0} detail="not eligible for this blueprint" tone="warning" />
             ) : null}
           </div>
         </GameCard>

@@ -58,23 +58,25 @@ describe('ComputeMarketPanel', () => {
     const markup = renderToStaticMarkup(createElement(ComputeMarketPanel))
     expect(markup).toContain('Compute market')
     expect(markup).toContain('min-[400px]:grid-cols-[auto_minmax(0,1fr)]')
-    expect(markup).toContain('grid grid-cols-2 gap-1 font-mono text-[0.6875rem]')
+    expect(markup).toContain('data-testid="compute-quote-card"')
+    expect(markup).toContain('data-testid="compute-quote-cost-projection"')
+    expect(markup).toContain('data-testid="compute-quote-risk-projection"')
     expect(markup).not.toContain('sm:grid-cols-5')
   })
 
-  it('lets a contract use the provider\'s full open inventory instead of a 1 MW cap', () => {
+  it('shows the sub-megawatt opening inventory and its full open pool', () => {
     const state = createGame(6_408)
     const provider = state.worldMarkets.cloudProviders.find(
       (entry) => entry.id === 'cloud-northstar',
     )!
-    expect(maxCloudContractPf(provider.availablePf)).toBeGreaterThan(1_000)
+    expect(maxCloudContractPf(provider.availablePf)).toBeLessThanOrEqual(1_000)
     expect(defaultCloudContractPf(provider.availablePf)).toBeLessThanOrEqual(
       maxCloudContractPf(provider.availablePf),
     )
     useGameStore.setState({ state })
     const markup = renderToStaticMarkup(createElement(ComputeMarketPanel))
     const maxMw = Number(pfToMw(maxCloudContractPf(provider.availablePf)).toFixed(3))
-    expect(maxMw).toBeGreaterThan(1)
+    expect(maxMw).toBeLessThanOrEqual(1)
     expect(markup).toContain(`max="${maxMw}"`)
   })
 })
