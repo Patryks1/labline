@@ -912,6 +912,7 @@ export function ActiveTrainingCard({
         done ? (
           <EffortStudio
             subjectId={job.id}
+            live
             paramsB={job.targetParamsB}
             profile={
               job.productProfile ??

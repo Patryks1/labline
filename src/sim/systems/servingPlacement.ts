@@ -1,4 +1,4 @@
-import { estimateServingMemory } from "../balance/tokenServe";
+import { defaultServePrecisionForModel, estimateServingMemory } from "../balance/tokenServe";
 import { planExposedModelIds, soldApiRouters, releasedRouterMemberIds } from "../balance/modelRouter";
 import type {
   Model,
@@ -82,7 +82,10 @@ export function servingPrecisionForModel(
 ): ServePrecision {
   const candidates: ServePrecision[] = [
     ...(apiListed
-      ? [pricing.apiServePrecisionByModel?.[model.id] ?? "fp32"]
+      ? [
+          pricing.apiServePrecisionByModel?.[model.id] ??
+            defaultServePrecisionForModel(model),
+        ]
       : []),
     ...pricing.plans
       .filter(
@@ -93,8 +96,7 @@ export function servingPrecisionForModel(
       .map(
         (plan) =>
           plan.servePrecisionByModel?.[model.id] ??
-          plan.servePrecision ??
-          "fp32",
+          defaultServePrecisionForModel(model),
       ),
   ];
   return (
@@ -102,7 +104,7 @@ export function servingPrecisionForModel(
       (a, b) =>
         estimateServingMemory({ model, precision: b }).residentMemoryGb -
         estimateServingMemory({ model, precision: a }).residentMemoryGb,
-    )[0] ?? "fp32"
+    )[0] ?? defaultServePrecisionForModel(model)
   );
 }
 

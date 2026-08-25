@@ -241,9 +241,7 @@ export function researchProgramBlockReason(
     return `${method.name} needs ${need.researchers}/${need.engineers}/${need.dataStaff} HQ staff (working ${seated.researchers}/${seated.engineers}/${seated.dataStaff}).`;
   }
   if (state.player.cash <= 0) return `${method.name} needs cash runway.`;
-  const active = (state.player.researchPrograms ?? []).filter(
-    (candidate) => candidate.phase !== "complete",
-  );
+  const active = assignedResearchPrograms(state);
   const researchPool =
     computeSnapshot(state).pools.research * researchPoolForTech(state);
   const totalComputeShare = active.reduce(
@@ -415,10 +413,10 @@ function allocatePodForMethod(
   methodId: string,
 ): { pod?: ResearchPod; reason?: string } {
   const need = researchPodStaffRequirements(methodId);
-  const available = availableHqStaff(state, { exceptPodId: pod.id });
-  // Staff already sitting on this pod is excluded from `available`. Credit it
-  // so a just-freed team can pick up the next queued method even when gyms,
-  // safety, or corpus audits have reserved the leftover HQ pool.
+  // Leftover HQ already subtracts this pod's roster. Credit seated staff on
+  // top so gyms/audits cannot freeze a team that is already sitting here —
+  // without double-counting those same people as "available" again.
+  const available = availableHqStaff(state);
   const seated = {
     researchers: Math.max(0, pod.researchers),
     engineers: Math.max(0, pod.engineers),
@@ -465,6 +463,244 @@ function allocatePodForMethod(
   };
 }
 
+export function isResearchProgramAssigned(
+  state: SimState,
+  program: ResearchProgram,
+): boolean {
+  if (program.phase === "complete") return false;
+  const pod = (state.player.researchPods ?? []).find(
+    (candidate) => candidate.id === program.podId,
+  );
+  return pod?.assignmentId === program.id;
+}
+
+export function assignedResearchPrograms(state: SimState): ResearchProgram[] {
+  return (state.player.researchPrograms ?? []).filter((program) =>
+    isResearchProgramAssigned(state, program),
+  );
+}
+
+function moveMethodToQueueFront(
+  queue: readonly string[],
+  methodId: string,
+): string[] {
+  return [methodId, ...queue.filter((candidate) => candidate !== methodId)];
+}
+
+function ensureMethodQueued(
+  queue: readonly string[],
+  methodId: string,
+): string[] {
+  if (queue.includes(methodId)) return [...queue];
+  return [methodId, ...queue];
+}
+
+/**
+ * Staff, unlocks, and exclusive gates that make a method impossible for this
+ * pod right now. Cash, compute, and a legacy in-flight project are omitted —
+ * those are temporary and should not auto-skip the queue.
+ */
+export function researchMethodRunnableOnPod(
+  state: SimState,
+  pod: ResearchPod,
+  methodId: string,
+): { ok: true } | { ok: false; reason: string } {
+  let method: ResearchNodeDef;
+  try {
+    method = getResearchNode(methodId);
+  } catch {
+    return { ok: false, reason: "Unknown research method." };
+  }
+  if (state.player.researchUnlocked.includes(methodId)) {
+    return { ok: false, reason: `${method.name} is already integrated.` };
+  }
+  const lead = (state.player.researchLeads ?? []).find(
+    (candidate) => candidate.id === pod.leadId,
+  );
+  if (!lead) return { ok: false, reason: `${pod.name} needs a named lead.` };
+  const missing = method.prereqs.filter(
+    (id) => !state.player.researchUnlocked.includes(id),
+  );
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      reason: `Waiting on ${getResearchNode(missing[0]!).name}.`,
+    };
+  }
+  const conflict = methodConflictReason(state, method);
+  if (conflict) return { ok: false, reason: conflict };
+  const allocation = allocatePodForMethod(state, pod, methodId);
+  if (!allocation.pod) {
+    return {
+      ok: false,
+      reason: allocation.reason ?? `${pod.name} lacks staff.`,
+    };
+  }
+  return { ok: true };
+}
+
+function researchProgramHardBlockReason(
+  state: SimState,
+  program: ResearchProgram,
+): string | undefined {
+  if (program.phase === "complete") return undefined;
+  const runnable = (() => {
+    let method: ResearchNodeDef;
+    try {
+      method = getResearchNode(program.methodId);
+    } catch {
+      return "Unknown research method.";
+    }
+    const pod = (state.player.researchPods ?? []).find(
+      (candidate) => candidate.id === program.podId,
+    );
+    const lead = (state.player.researchLeads ?? []).find(
+      (candidate) => candidate.id === pod?.leadId,
+    );
+    if (!pod || !lead) return undefined;
+    const missing = method.prereqs.filter(
+      (id) => !state.player.researchUnlocked.includes(id),
+    );
+    if (missing.length > 0) {
+      return `Waiting on ${getResearchNode(missing[0]!).name}.`;
+    }
+    const exclusiveConflict = state.player.researchUnlocked.some((otherId) => {
+      if (otherId === method.id) return false;
+      const other = getResearchNode(otherId);
+      return (
+        method.exclusiveWith?.includes(otherId) === true ||
+        other.exclusiveWith?.includes(method.id) === true
+      );
+    });
+    if (exclusiveConflict) {
+      return `${method.name} conflicts with an integrated method.`;
+    }
+    const allocation = allocatePodForMethod(state, pod, program.methodId);
+    if (!allocation.pod) {
+      return allocation.reason ?? `${pod.name} lacks staff.`;
+    }
+    return undefined;
+  })();
+  return runnable;
+}
+
+function parkProgramToQueue(
+  state: SimState,
+  program: ResearchProgram,
+): SimState {
+  return {
+    ...state,
+    player: {
+      ...state.player,
+      researchPods: (state.player.researchPods ?? []).map((pod) =>
+        pod.assignmentId === program.id ? { ...pod, assignmentId: null } : pod,
+      ),
+      researchProgramQueue: ensureMethodQueued(
+        state.player.researchProgramQueue ?? [],
+        program.methodId,
+      ),
+    },
+  };
+}
+
+function nextRunnableQueuedMethod(
+  state: SimState,
+  pod: ResearchPod,
+  exceptMethodId?: string,
+): string | undefined {
+  return (state.player.researchProgramQueue ?? []).find((methodId) => {
+    if (methodId === exceptMethodId) return false;
+    return researchMethodRunnableOnPod(state, pod, methodId).ok;
+  });
+}
+
+/** Idle pod with queued work none of the current HQ roster can run. */
+export function researchPodQueueStallReason(
+  state: SimState,
+  pod: ResearchPod,
+): string | undefined {
+  if (pod.assignmentId) return undefined;
+  const queue = state.player.researchProgramQueue ?? [];
+  if (queue.length === 0) return undefined;
+  if (nextRunnableQueuedMethod(state, pod)) return undefined;
+  const first = queue[0];
+  if (!first) return undefined;
+  const blocked = researchMethodRunnableOnPod(state, pod, first);
+  if (!blocked.ok) {
+    return `No queued method this roster can run. ${blocked.reason}`;
+  }
+  return "No queued method this roster can run.";
+}
+
+function reconcileAssignedPodStaff(state: SimState): SimState {
+  let next = state;
+  let changed = false;
+  const pods = [...(next.player.researchPods ?? [])];
+  for (let index = 0; index < pods.length; index++) {
+    const pod = pods[index];
+    if (!pod?.assignmentId) continue;
+    const program = (next.player.researchPrograms ?? []).find(
+      (candidate) =>
+        candidate.id === pod.assignmentId && candidate.phase !== "complete",
+    );
+    if (!program) continue;
+    if (researchProgramHardBlockReason(next, program)) continue;
+    const allocation = allocatePodForMethod(next, pod, program.methodId);
+    if (!allocation.pod) continue;
+    if (
+      allocation.pod.researchers === pod.researchers &&
+      allocation.pod.engineers === pod.engineers &&
+      allocation.pod.dataStaff === pod.dataStaff
+    ) {
+      continue;
+    }
+    pods[index] = allocation.pod;
+    changed = true;
+    next = {
+      ...next,
+      player: { ...next.player, researchPods: pods },
+    };
+  }
+  return changed ? next : state;
+}
+
+function skipBlockedPodAssignments(state: SimState): SimState {
+  let next = reconcileAssignedPodStaff(state);
+  for (const pod of next.player.researchPods ?? []) {
+    if (!pod.assignmentId) continue;
+    const program = (next.player.researchPrograms ?? []).find(
+      (candidate) =>
+        candidate.id === pod.assignmentId && candidate.phase !== "complete",
+    );
+    if (!program) continue;
+    const hardBlock = researchProgramHardBlockReason(next, program);
+    if (!hardBlock) continue;
+    const fallback = nextRunnableQueuedMethod(next, pod, program.methodId);
+    if (!fallback) continue;
+    next = parkProgramToQueue(next, program);
+    next = {
+      ...next,
+      player: {
+        ...next.player,
+        researchProgramQueue: moveMethodToQueueFront(
+          next.player.researchProgramQueue ?? [],
+          fallback,
+        ),
+      },
+      alerts: [
+        {
+          id: `research-program-skip-${program.id}-${next.day}`,
+          day: next.day,
+          severity: "info" as const,
+          message: `${getResearchNode(program.methodId).name} is blocked (${hardBlock.replace(/\.$/, "")}). ${pod.name} picks up ${getResearchNode(fallback).name}.`,
+        },
+        ...next.alerts,
+      ].slice(0, 40),
+    };
+  }
+  return next;
+}
+
 function methodConflictReason(
   state: SimState,
   method: ResearchNodeDef,
@@ -508,12 +744,11 @@ export function startResearchProgram(
   if (state.player.researchUnlocked.includes(methodId)) {
     return withAlert(state, "warn", `${method.name} is already integrated.`);
   }
-  if (
-    (state.player.researchPrograms ?? []).some(
-      (program) =>
-        program.methodId === methodId && program.phase !== "complete",
-    )
-  ) {
+  const parked = (state.player.researchPrograms ?? []).find(
+    (program) =>
+      program.methodId === methodId && program.phase !== "complete",
+  );
+  if (parked && isResearchProgramAssigned(state, parked)) {
     return withAlert(
       state,
       "warn",
@@ -575,25 +810,31 @@ export function startResearchProgram(
     );
   }
 
-  const program: ResearchProgram = {
-    id: `program-${methodId}-${state.day}`,
-    methodId,
-    podId,
-    phase: "hypothesis",
-    evidence: [],
-    insightProgress: 0,
-    engineeringProgress: 0,
-    progressPfDays: 0,
-    daysSpent: 0,
-    effectsApplied: false,
-    computeShare: Math.max(0.05, Math.min(0.8, computeShare)),
-    disclosure: "secret",
-  };
+  const program: ResearchProgram = parked
+    ? { ...parked, podId }
+    : {
+        id: `program-${methodId}-${state.day}`,
+        methodId,
+        podId,
+        phase: "hypothesis",
+        evidence: [],
+        insightProgress: 0,
+        engineeringProgress: 0,
+        progressPfDays: 0,
+        daysSpent: 0,
+        effectsApplied: false,
+        computeShare: Math.max(0.05, Math.min(0.8, computeShare)),
+        disclosure: "secret",
+      };
   const started = {
     ...state,
     player: {
       ...state.player,
-      researchPrograms: [...(state.player.researchPrograms ?? []), program],
+      researchPrograms: parked
+        ? (state.player.researchPrograms ?? []).map((candidate) =>
+            candidate.id === program.id ? program : candidate,
+          )
+        : [...(state.player.researchPrograms ?? []), program],
       researchPods: (state.player.researchPods ?? []).map((candidate) =>
         candidate.id === podId
           ? { ...allocation.pod!, assignmentId: program.id }
@@ -634,7 +875,7 @@ export function queueResearchProgram(
   const programQueue = state.player.researchProgramQueue ?? [];
   if (programQueue.includes(methodId)) return state;
   const activeMethods = (state.player.researchPrograms ?? [])
-    .filter((program) => program.phase !== "complete")
+    .filter((program) => isResearchProgramAssigned(state, program))
     .map((program) => program.methodId);
   if (activeMethods.includes(methodId)) return state;
   const conflict = methodConflictReason(state, method);
@@ -678,23 +919,116 @@ export function dequeueResearchProgram(
   state: SimState,
   methodId: string,
 ): SimState {
-  return {
+  const program = (state.player.researchPrograms ?? []).find(
+    (candidate) =>
+      candidate.methodId === methodId && candidate.phase !== "complete",
+  );
+  const next = {
     ...state,
     player: {
       ...state.player,
       researchProgramQueue: (state.player.researchProgramQueue ?? []).filter(
         (candidate) => candidate !== methodId,
       ),
+      researchPrograms: program
+        ? (state.player.researchPrograms ?? []).filter(
+            (candidate) => candidate.id !== program.id,
+          )
+        : state.player.researchPrograms,
+      researchPods: program
+        ? (state.player.researchPods ?? []).map((pod) =>
+            pod.assignmentId === program.id
+              ? { ...pod, assignmentId: null }
+              : pod,
+          )
+        : state.player.researchPods,
     },
   };
+  if (!program) return next;
+  return assignQueuedPrograms(next, { announceBlocks: true });
+}
+
+/**
+ * Make a queued (or parked) method the active assignment on a pod.
+ * The previous in-flight method is parked back onto the queue, not deleted.
+ */
+export function setActiveResearchProgram(
+  state: SimState,
+  methodId: string,
+  podId?: string,
+): SimState {
+  let method: ResearchNodeDef;
+  try {
+    method = getResearchNode(methodId);
+  } catch {
+    return withAlert(state, "warn", "Unknown research method.");
+  }
+  const pods = state.player.researchPods ?? [];
+  const pod =
+    (podId ? pods.find((candidate) => candidate.id === podId) : undefined) ??
+    pods.find((candidate) => candidate.assignmentId) ??
+    pods[0];
+  if (!pod) return withAlert(state, "warn", "Research pod not found.");
+
+  const current = pod.assignmentId
+    ? (state.player.researchPrograms ?? []).find(
+        (program) => program.id === pod.assignmentId,
+      )
+    : undefined;
+  if (current?.methodId === methodId) return state;
+
+  const queued = (state.player.researchProgramQueue ?? []).includes(methodId);
+  const parked = (state.player.researchPrograms ?? []).find(
+    (program) =>
+      program.methodId === methodId &&
+      program.phase !== "complete" &&
+      !isResearchProgramAssigned(state, program),
+  );
+  if (!queued && !parked) {
+    return withAlert(
+      state,
+      "warn",
+      `${method.name} is not in the research queue.`,
+    );
+  }
+
+  const runnable = researchMethodRunnableOnPod(state, pod, methodId);
+  if (!runnable.ok) {
+    return withAlert(state, "warn", runnable.reason);
+  }
+
+  let next = current ? parkProgramToQueue(state, current) : state;
+  if (parked && !queued) {
+    next = {
+      ...next,
+      player: {
+        ...next.player,
+        researchProgramQueue: ensureMethodQueued(
+          next.player.researchProgramQueue ?? [],
+          methodId,
+        ),
+      },
+    };
+  }
+  next = {
+    ...next,
+    player: {
+      ...next.player,
+      researchProgramQueue: moveMethodToQueueFront(
+        next.player.researchProgramQueue ?? [],
+        methodId,
+      ),
+    },
+  };
+  return assignQueuedPrograms(next, { announceBlocks: true });
 }
 
 function assignQueuedPrograms(
   state: SimState,
   options?: { announceBlocks?: boolean },
 ): SimState {
-  let next = state;
-  let changed = false;
+  let next = skipBlockedPodAssignments(state);
+  let changed = next !== state;
   let lastBlocked: SimState | undefined;
   while (true) {
     const pods = (next.player.researchPods ?? []).filter(
@@ -717,9 +1051,11 @@ function assignQueuedPrograms(
       | undefined;
     for (const pod of pods) {
       for (const methodId of readyMethods) {
-        const before = (next.player.researchPrograms ?? []).length;
         const attempted = startResearchProgram(next, methodId, pod.id);
-        if ((attempted.player.researchPrograms ?? []).length > before) {
+        const assigned = attempted.player.researchPods?.find(
+          (candidate) => candidate.id === pod.id,
+        )?.assignmentId;
+        if (assigned) {
           assignment = { state: attempted, methodId };
           break;
         }
@@ -752,11 +1088,10 @@ function assignQueuedPrograms(
 
 function hasNewActiveProgram(before: SimState, after: SimState): boolean {
   const previous = new Set(
-    (before.player.researchPrograms ?? []).map((program) => program.id),
+    assignedResearchPrograms(before).map((program) => program.id),
   );
-  return (after.player.researchPrograms ?? []).some(
-    (program) =>
-      program.phase !== "complete" && !previous.has(program.id),
+  return assignedResearchPrograms(after).some(
+    (program) => !previous.has(program.id),
   );
 }
 
@@ -790,9 +1125,7 @@ export function tickResearchPrograms(state: SimState): SimState {
   if (hasNewActiveProgram(state, scheduled)) {
     return tickResearchPrograms(scheduled);
   }
-  const active = (scheduled.player.researchPrograms ?? []).filter(
-    (program) => program.phase !== "complete",
-  );
+  const active = assignedResearchPrograms(scheduled);
   if (active.length === 0) {
     return (scheduled.player.researchCashBurnToday ?? 0) === 0
       ? scheduled
@@ -823,6 +1156,9 @@ export function tickResearchPrograms(state: SimState): SimState {
       );
       if (!pod || !lead) {
         stallMessage = stallMessage ?? "Research pod lost its lead — reassign the program.";
+        return program;
+      }
+      if (pod.assignmentId !== program.id) {
         return program;
       }
       const method = getResearchNode(program.methodId);

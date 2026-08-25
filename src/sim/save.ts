@@ -88,6 +88,7 @@ import { migrateHqOfficeLayouts } from "./systems/hqOffice";
 import { ensureModelStudio } from "./balance/modelStudio";
 import {
   defaultEffortIdOf,
+  INSTANT_EFFORT_ID,
   migrateEffortRecipes,
 } from "./balance/modelProduct";
 import {
@@ -528,17 +529,24 @@ function normalizeCapitalStack(
     // Pitch records are stored newest-first. Keep the latest records when an
     // imported or hand-edited save exceeds the normal writer's history cap.
     .slice(0, 16)
-    .map((record) => ({
-      ...record,
-      day: Math.max(0, Math.floor(Number(record.day) || 0)),
-      successChance: Math.max(0, Math.min(1, Number(record.successChance) || 0)),
-      cashRaised: Math.max(0, Number(record.cashRaised) || 0),
-      preMoneyValuation: Math.max(0, Number(record.preMoneyValuation) || 0),
-      postMoneyValuation: Math.max(0, Number(record.postMoneyValuation) || 0),
-      investorOwnership: Math.max(0, Math.min(1, Number(record.investorOwnership) || 0)),
-      cooldownUntilDay: Math.max(0, Math.floor(Number(record.cooldownUntilDay) || 0)),
-      outcome: record.outcome === "funded" ? ("funded" as const) : ("declined" as const),
-    }));
+    .map((record) => {
+      const effortId =
+        typeof record.effortId === "string" && record.effortId.length > 0
+          ? record.effortId
+          : INSTANT_EFFORT_ID;
+      return {
+        ...record,
+        effortId,
+        day: Math.max(0, Math.floor(Number(record.day) || 0)),
+        successChance: Math.max(0, Math.min(1, Number(record.successChance) || 0)),
+        cashRaised: Math.max(0, Number(record.cashRaised) || 0),
+        preMoneyValuation: Math.max(0, Number(record.preMoneyValuation) || 0),
+        postMoneyValuation: Math.max(0, Number(record.postMoneyValuation) || 0),
+        investorOwnership: Math.max(0, Math.min(1, Number(record.investorOwnership) || 0)),
+        cooldownUntilDay: Math.max(0, Math.floor(Number(record.cooldownUntilDay) || 0)),
+        outcome: record.outcome === "funded" ? ("funded" as const) : ("declined" as const),
+      };
+    });
   const deskCooldown = Number(capital.pitchCooldownUntilDay);
   return {
     ...capital,
@@ -1524,6 +1532,7 @@ function restoreState(
       Number.isFinite(plan.subscriberCap) && (plan.subscriberCap ?? 0) > 0
         ? Math.max(1, Math.floor(plan.subscriberCap!))
         : undefined,
+    acceptingNew: plan.acceptingNew !== false,
     steadyUsageTarget:
       plan.steadyUsageTarget ?? defaultSteadyPlanUsage(plan.pricePerMonth),
     dataCollectionRate: clampPlanDataCollectionRate(
@@ -1905,6 +1914,8 @@ function restoreState(
         ? Math.max(0, Math.min(100, restored.player.pricing.peakPricingPct!))
         : legacyServeControls(restored.player.pricing.serveThrottlePolicy)
             .peakPricingPct ?? DEFAULT_PEAK_PRICING_PCT,
+    apiAcceptingNew: restored.player.pricing.apiAcceptingNew !== false,
+    subsAcceptingNew: restored.player.pricing.subsAcceptingNew !== false,
   };
   restored.rivals = restored.rivals.map((rival) => ({
     ...rival,

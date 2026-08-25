@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
 import { emptyBenchmarks } from '../balance/benchmarks'
-import type { Model } from '../types'
+import {
+  INSTANT_EFFORT_ID,
+  emptySpecializationFocus,
+  instantRecipe,
+} from '../balance/modelProduct'
+import type { EffortRecipe, Model, ModelProductProfile } from '../types'
 import {
   acceptInvestorPitch,
   acceptEquityOffer,
@@ -9,6 +14,8 @@ import {
   applyForLabDebt,
   bankingProducts,
   capitalSnapshot,
+  encodeInvestorPitchOptionId,
+  investorPitchOptions,
   investorPitchPreview,
   fundRivalForCampus,
   repayDebt,
@@ -57,6 +64,35 @@ function pitchModel(
     distilled: false,
     trainMode: 'pretrain',
     repeatedDataEpochs,
+  }
+}
+
+function trainedHead(
+  id: string,
+  name: string,
+  thinkingTokenMult: number,
+): EffortRecipe {
+  return {
+    id,
+    name,
+    kind: 'trained',
+    thinkingTokenMult,
+    trainPfDays: 20,
+    trainCash: 1,
+    trained: true,
+    quality: 1,
+    served: true,
+  }
+}
+
+function profileWithHeads(...heads: EffortRecipe[]): ModelProductProfile {
+  return {
+    lifecycle: 'reasoning',
+    focus: emptySpecializationFocus(),
+    personality: 40,
+    tokenEfficiency: 50,
+    effortRecipes: [instantRecipe(), ...heads],
+    defaultEffortId: INSTANT_EFFORT_ID,
   }
 }
 
@@ -142,6 +178,99 @@ describe('capital stack', () => {
     expect(strongPreview.cashRaised).toBeGreaterThan(weakPreview.cashRaised)
     expect(strongPreview.investorOwnership).toBeLessThan(weakPreview.investorOwnership)
     expect(weakPreview.overusePenalty).toBeGreaterThan(0.5)
+  })
+
+  it('lists Instant-only models as a single pitch option', () => {
+    const state = createGame(3202)
+    const model = {
+      ...pitchModel('solace-instant', 26),
+      name: 'Solace',
+      release: 'released' as const,
+      shipped: true,
+    }
+    const prepared = updateLab(state, state.playerLabId, (lab) => ({
+      ...lab,
+      models: [model],
+    }))
+    const options = investorPitchOptions(prepared)
+    expect(options).toHaveLength(1)
+    expect(options[0]).toMatchObject({
+      modelId: model.id,
+      effortId: INSTANT_EFFORT_ID,
+      effortName: 'Instant',
+      name: 'Solace',
+      label: 'Solace · cap 26 · released',
+    })
+    expect(options[0]?.label).not.toContain('Instant')
+  })
+
+  it('expands named thinking heads and prices Think/Deep above Instant', () => {
+    const state = createGame(3203)
+    const model = {
+      ...pitchModel('solace', 40),
+      name: 'Solace',
+      release: 'released' as const,
+      shipped: true,
+      productProfile: profileWithHeads(
+        trainedHead('medium', 'Think', 2.2),
+        trainedHead('high', 'Deep', 4.5),
+      ),
+    }
+    const prepared = updateLab(state, state.playerLabId, (lab) => ({
+      ...lab,
+      models: [model],
+    }))
+    const options = investorPitchOptions(prepared)
+    expect(options.map((option) => option.label)).toEqual([
+      expect.stringMatching(/^Solace-Deep · cap \d+ · released$/),
+      expect.stringMatching(/^Solace-Think · cap \d+ · released$/),
+      'Solace-Instant · cap 40 · released',
+    ])
+    const instant = options.find((option) => option.effortId === INSTANT_EFFORT_ID)!
+    const think = options.find((option) => option.effortName === 'Think')!
+    const deep = options.find((option) => option.effortName === 'Deep')!
+    expect(think.capability).toBeGreaterThan(instant.capability)
+    expect(deep.capability).toBeGreaterThan(think.capability)
+
+    const instantPreview = investorPitchPreview(prepared, instant.id)
+    const thinkPreview = investorPitchPreview(prepared, think.id)
+    const deepPreview = investorPitchPreview(prepared, deep.id)
+    expect(instantPreview.effortId).toBe(INSTANT_EFFORT_ID)
+    expect(thinkPreview.effortId).toBe('medium')
+    expect(thinkPreview.capability).toBeGreaterThan(instantPreview.capability)
+    expect(thinkPreview.successChance).toBeGreaterThan(instantPreview.successChance)
+    expect(thinkPreview.cashRaised).toBeGreaterThan(instantPreview.cashRaised)
+    expect(deepPreview.successChance).toBeGreaterThan(thinkPreview.successChance)
+    expect(deepPreview.cashRaised).toBeGreaterThan(thinkPreview.cashRaised)
+    expect(investorPitchPreview(prepared, model.id).id).toBe(
+      encodeInvestorPitchOptionId(model.id, INSTANT_EFFORT_ID),
+    )
+  })
+
+  it('persists the disclosed thinking head on a resolved pitch', () => {
+    const model = {
+      ...pitchModel('solace-think-pitch', 88),
+      name: 'Solace',
+      productProfile: profileWithHeads(trainedHead('medium', 'Think', 2.2)),
+    }
+    const optionId = encodeInvestorPitchOptionId(model.id, 'medium')
+    let funded: ReturnType<typeof createGame> | undefined
+    for (let seed = 3_280; seed < 3_360 && !funded; seed += 1) {
+      const state = createGame(seed)
+      const prepared = updateLab(state, state.playerLabId, (lab) => ({
+        ...lab,
+        models: [model],
+      }))
+      const resolved = acceptInvestorPitch(prepared, optionId)
+      const record = resolved.player.capital?.pitchHistory?.[0]
+      if (record?.outcome === 'funded') {
+        funded = resolved
+        expect(record.effortId).toBe('medium')
+        expect(record.modelName).toBe('Solace-Think')
+        expect(record.modelId).toBe(model.id)
+      }
+    }
+    expect(funded).toBeDefined()
   })
 
   it('resolves a seeded pitch into cash, cap-table dilution, and a cooldown', () => {

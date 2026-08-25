@@ -70,11 +70,17 @@ export function MetricTile({
 export function StatusChip({
   children,
   tone = 'neutral',
+  title,
 }: {
   children: ReactNode
   tone?: HudTone
+  title?: string
 }) {
-  return <span className={`status-chip status-chip--${tone}`}>{children}</span>
+  return (
+    <span className={`status-chip status-chip--${tone}`} title={title}>
+      {children}
+    </span>
+  )
 }
 
 function clampMeterValue(value: number) {

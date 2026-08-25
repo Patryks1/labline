@@ -16,6 +16,7 @@ import {
   throttleAbsorbShare,
   configuredAbsorbShare,
   peakPricingDemandMultiplier,
+  peakPricingRevenueFactor,
   slowdownAbsorbShare,
   throttleChurnScale,
   throttlePainScale,
@@ -216,12 +217,16 @@ function withPolicy(s: SimState, policy: ServeThrottlePolicy): SimState {
 function run(
   s: SimState,
   days: number,
-  opts?: { pinBrandTrust?: number; pinPain?: number },
+  opts?: { pinBrandTrust?: number; pinPain?: number; pinSurge?: number },
 ): SimState {
   for (let i = 0; i < days; i++) {
     s = tickMarket(s)
     s = { ...s, day: s.day + 1 }
-    if (opts?.pinBrandTrust != null || opts?.pinPain != null) {
+    if (
+      opts?.pinBrandTrust != null ||
+      opts?.pinPain != null ||
+      opts?.pinSurge != null
+    ) {
       s = {
         ...s,
         player: {
@@ -230,11 +235,32 @@ function run(
             ? { brandTrust: opts.pinBrandTrust }
             : {}),
           ...(opts.pinPain != null ? { servicePain: opts.pinPain } : {}),
+          ...(opts.pinSurge != null ? { apiSurgeLevel: opts.pinSurge } : {}),
         },
       }
     }
   }
   return s
+}
+
+function withPeak(
+  s: SimState,
+  peakPricingPct: number,
+  surgeLevel?: number,
+): SimState {
+  return {
+    ...s,
+    player: {
+      ...s.player,
+      ...(surgeLevel != null ? { apiSurgeLevel: surgeLevel } : {}),
+      pricing: {
+        ...s.player.pricing,
+        peakPricingPct,
+        serveThrottlePolicy: undefined,
+        serveSlowdownLimit: 0.25,
+      },
+    },
+  }
 }
 
 describe('throttle policy math', () => {
@@ -260,6 +286,10 @@ describe('throttle policy math', () => {
     ).toBeCloseTo(0.25)
     expect(peakPricingDemandMultiplier(1)).toBeCloseTo(1)
     expect(peakPricingDemandMultiplier(2)).toBeLessThan(0.1)
+    expect(peakPricingRevenueFactor(1.1)).toBeGreaterThan(1)
+    expect(peakPricingRevenueFactor(1.25)).toBeGreaterThan(1)
+    expect(peakPricingRevenueFactor(1.4)).toBeGreaterThan(1)
+    expect(peakPricingRevenueFactor(2)).toBeLessThan(0.15)
   })
 
   it('splits overload per policy', () => {
@@ -357,7 +387,7 @@ describe('overload policies in the market', () => {
     )
   })
 
-  it('surge prices API up under load: fewer MTok, higher $/MTok, less churn than shed', () => {
+  it('surge prices API up under load: higher $/MTok than shed', () => {
     const base = (policy: ServeThrottlePolicy) =>
       withPolicy(
         withRivalModels(withReleasedModel(withRacks(createGame(21), 96))),
@@ -366,19 +396,12 @@ describe('overload policies in the market', () => {
     const surge = run(base('surge'), 14, { pinBrandTrust: 58 })
     const shed = run(base('shed'), 14, { pinBrandTrust: 58 })
     expect(surge.lastMarket.apiSurgeMultiplier ?? 1).toBeGreaterThan(1.05)
-    expect(surge.lastMarket.apiDemandMTok ?? 0).toBeLessThan(
-      shed.lastMarket.apiDemandMTok ?? 0,
-    )
-    expect(surge.lastMarket.apiDayMTok).toBeLessThanOrEqual(
-      shed.lastMarket.apiDayMTok,
-    )
     const surgeYield =
       surge.lastMarket.apiDayRevenue /
       Math.max(0.01, surge.lastMarket.apiDayMTok)
     const shedYield =
       shed.lastMarket.apiDayRevenue / Math.max(0.01, shed.lastMarket.apiDayMTok)
     expect(surgeYield).toBeGreaterThan(shedYield)
-    expect(surge.player.servicePain).toBeLessThan(shed.player.servicePain)
     const subsOf = (s: SimState) =>
       s.lastMarket.planStats.reduce((sum, p) => sum + p.subscribers, 0)
     expect(subsOf(surge)).toBeGreaterThan(subsOf(shed))
@@ -476,5 +499,241 @@ describe('spillover to rivals', () => {
       )
       expect(total).toBeCloseTo(1, 6)
     }
+  })
+})
+
+describe('peak pricing raises API revenue under overload', () => {
+  const peakBase = () =>
+    withRivalModels(withReleasedModel(withRacks(createGame(34), 8)))
+
+  it('moderate surge increases apiDayRevenue vs shed and surfaces list vs peak', () => {
+    const shed = run(withPeak(peakBase(), 0), 12, { pinBrandTrust: 58 })
+    const modest = run(withPeak(peakBase(), 25, 0.8), 12, {
+      pinBrandTrust: 58,
+      pinSurge: 0.8,
+    })
+    expect(modest.lastMarket.apiSurgeMultiplier ?? 1).toBeGreaterThan(1.05)
+    expect(modest.lastMarket.apiDayRevenue).toBeGreaterThan(
+      shed.lastMarket.apiDayRevenue,
+    )
+    expect(modest.lastMarket.apiPeakPricePerMTok ?? 0).toBeGreaterThan(
+      modest.lastMarket.apiListPricePerMTok ?? 0,
+    )
+    expect(modest.lastMarket.apiPeakExtraRevenue ?? 0).toBeGreaterThan(0)
+  })
+
+  it('extreme peak still sheds API demand', () => {
+    const shed = run(withPeak(peakBase(), 0), 12, { pinBrandTrust: 58 })
+    const gouged = run(withPeak(peakBase(), 100, 1), 12, {
+      pinBrandTrust: 58,
+      pinSurge: 1,
+    })
+    expect(gouged.lastMarket.apiSurgeMultiplier ?? 1).toBeGreaterThan(1.8)
+    expect(gouged.lastMarket.apiDemandMTok ?? 0).toBeLessThan(
+      (shed.lastMarket.apiDemandMTok ?? 0) * 0.25,
+    )
+  })
+})
+
+describe('pause-new traffic', () => {
+  const paidSubs = (s: SimState) =>
+    s.lastMarket.planStats
+      .filter((plan) => !plan.isFree)
+      .reduce((sum, plan) => sum + plan.subscribers, 0)
+  const planSubs = (s: SimState, planId: string) =>
+    s.lastMarket.planStats.find((plan) => plan.planId === planId)?.subscribers ??
+    0
+
+  it('pause-new API freezes growth and keeps existing load', () => {
+    const established = run(
+      withoutPlans(
+        withRivalModels(withReleasedModel(withRacks(createGame(31), 256))),
+      ),
+      8,
+      { pinBrandTrust: 58, pinPain: 0 },
+    )
+    const priorDemand = established.lastMarket.apiDemandMTok ?? 0
+    expect(priorDemand).toBeGreaterThan(0.05)
+
+    const continued = run(established, 8, { pinBrandTrust: 58, pinPain: 0 })
+    const paused = run(
+      {
+        ...established,
+        player: {
+          ...established.player,
+          pricing: {
+            ...established.player.pricing,
+            apiAcceptingNew: false,
+          },
+        },
+      },
+      8,
+      { pinBrandTrust: 58, pinPain: 0 },
+    )
+
+    expect(paused.lastMarket.apiDemandMTok ?? 0).toBeLessThanOrEqual(
+      priorDemand * 1.05,
+    )
+    expect(paused.lastMarket.apiDemandMTok ?? 0).toBeGreaterThan(
+      priorDemand * 0.45,
+    )
+    expect(continued.lastMarket.apiDemandMTok ?? 0).toBeGreaterThan(
+      paused.lastMarket.apiDemandMTok ?? 0,
+    )
+    expect(
+      paused.feedEvents?.some((event) => event.kind === 'api_waitlist'),
+    ).toBe(true)
+  })
+
+  it('pause-new subs stops enrollment and grandfathers current seats', () => {
+    const established = run(
+      withRivalModels(withReleasedModel(withRacks(createGame(32), 4096))),
+      6,
+      { pinBrandTrust: 58, pinPain: 0 },
+    )
+    const priorPaid = paidSubs(established)
+    expect(priorPaid).toBeGreaterThan(10)
+
+    const pausedOnce = tickMarket({
+      ...established,
+      player: {
+        ...established.player,
+        pricing: {
+          ...established.player.pricing,
+          subsAcceptingNew: false,
+        },
+      },
+    })
+    expect(paidSubs(pausedOnce)).toBeGreaterThan(priorPaid * 0.8)
+    expect(pausedOnce.lastMarket.pausedNewSubscriptionSeats ?? 0).toBeGreaterThan(
+      0,
+    )
+
+    const continued = run(established, 8, { pinBrandTrust: 58, pinPain: 0 })
+    const paused = run(
+      {
+        ...established,
+        player: {
+          ...established.player,
+          pricing: {
+            ...established.player.pricing,
+            subsAcceptingNew: false,
+          },
+        },
+      },
+      8,
+      { pinBrandTrust: 58, pinPain: 0 },
+    )
+
+    expect(paidSubs(paused)).toBeLessThan(paidSubs(continued))
+    expect(paidSubs(paused)).toBeGreaterThan(0)
+    expect(
+      paused.feedEvents?.some((event) => event.kind === 'subs_closed_to_new'),
+    ).toBe(true)
+  })
+
+  it('per-plan pause-new freezes that plan only', () => {
+    const established = run(
+      withRivalModels(withReleasedModel(withRacks(createGame(33), 4096))),
+      6,
+      { pinBrandTrust: 58, pinPain: 0 },
+    )
+    const priorPlus = planSubs(established, 'plan-plus')
+    expect(priorPlus).toBeGreaterThan(10)
+
+    const pausedOnce = tickMarket({
+      ...established,
+      player: {
+        ...established.player,
+        pricing: {
+          ...established.player.pricing,
+          plans: established.player.pricing.plans.map((plan) =>
+            plan.id === 'plan-plus' ? { ...plan, acceptingNew: false } : plan,
+          ),
+        },
+      },
+    })
+    expect(planSubs(pausedOnce, 'plan-plus')).toBeGreaterThan(priorPlus * 0.8)
+
+    const pausedPlus = run(
+      {
+        ...established,
+        player: {
+          ...established.player,
+          pricing: {
+            ...established.player.pricing,
+            plans: established.player.pricing.plans.map((plan) =>
+              plan.id === 'plan-plus' ? { ...plan, acceptingNew: false } : plan,
+            ),
+          },
+        },
+      },
+      8,
+      { pinBrandTrust: 58, pinPain: 0 },
+    )
+    const continued = run(established, 8, { pinBrandTrust: 58, pinPain: 0 })
+
+    expect(planSubs(pausedPlus, 'plan-plus')).toBeLessThan(
+      planSubs(continued, 'plan-plus'),
+    )
+    expect(planSubs(pausedPlus, 'plan-plus')).toBeGreaterThan(0)
+    expect(
+      pausedPlus.feedEvents?.some(
+        (event) => event.kind === 'plan_closed_to_new',
+      ),
+    ).toBe(true)
+  })
+
+  it('pause-new burns less brand and pain than silent overload', () => {
+    const established = run(
+      withoutPlans(
+        withRivalModels(withReleasedModel(withRacks(createGame(35), 512))),
+      ),
+      2,
+    )
+    const accepting = run(established, 16)
+    const paused = run(
+      {
+        ...established,
+        player: {
+          ...established.player,
+          pricing: {
+            ...established.player.pricing,
+            apiAcceptingNew: false,
+            subsAcceptingNew: false,
+          },
+        },
+      },
+      16,
+    )
+    expect(paused.lastMarket.apiDemandMTok ?? 0).toBeLessThan(
+      accepting.lastMarket.apiDemandMTok ?? 0,
+    )
+    expect(paused.lastMarket.unservedRatio).toBeLessThan(
+      accepting.lastMarket.unservedRatio + 1e-6,
+    )
+    expect(paused.player.brandTrust).toBeGreaterThanOrEqual(
+      accepting.player.brandTrust,
+    )
+    expect(paused.player.servicePain).toBeLessThanOrEqual(
+      accepting.player.servicePain,
+    )
+  })
+
+  it('zero inference PF posts an outage feed event instead of staying silent', () => {
+    let empty = withReleasedModel(withRacks(createGame(36), 0))
+    empty = {
+      ...empty,
+      player: {
+        ...empty.player,
+        allocation: { training: 1, inference: 0, research: 0 },
+      },
+    }
+    empty = tickMarket(empty)
+    expect(empty.lastMarket.capacityPf).toBeLessThan(1e-6)
+    expect(empty.lastMarket.serveOutage).toBe(true)
+    expect(
+      empty.feedEvents?.some((event) => event.kind === 'serve_outage'),
+    ).toBe(true)
   })
 })

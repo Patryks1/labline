@@ -1,11 +1,17 @@
 import { useMemo, useState } from 'react'
-import type { BenchmarkSuiteId } from '../../../sim/types'
+import type { BenchmarkSuiteId, EffortRecipe, Model } from '../../../sim/types'
 import { formatParams } from '../../../sim/balance/training'
 import {
   EVALUATION_MARKETS,
   type BenchmarkMetricDef,
   type EvaluationMarket,
 } from '../../../sim/balance/evaluationSuites'
+import {
+  THINKING_TOKEN_MAX,
+  THINKING_TOKEN_MIN,
+  effortViewForRecipe,
+  migrateEffortRecipes,
+} from '../../../sim/balance/modelProduct'
 import type { collectLeaderboardModels } from '../../../sim/systems/rivals'
 import { num } from '../format'
 import {
@@ -34,6 +40,71 @@ const PIN_TONES = ['text-mint', 'text-muted', 'text-infer'] as const
 const MAX_PINS = PIN_TONES.length
 
 const keyFor = (row: LeaderboardRow) => `${row.labId}:${row.model.id}`
+
+export interface FrontierThinking {
+  instantCapability: number
+  /** Best trained-thinking capability, else Instant. */
+  peakCapability: number
+  /** Trained thinking budget, or null when the release has none. */
+  thinkingTokenMult: number | null
+  recipeName: string | null
+}
+
+function isTrainedThinking(recipe: EffortRecipe): boolean {
+  return recipe.kind === 'trained' && recipe.trained && recipe.thinkingTokenMult > 1
+}
+
+/** Peak trained thinking on a public release. Instant-only is an honest empty. */
+export function frontierThinkingFor(
+  model: Pick<Model, 'capability' | 'benchmarks' | 'productProfile'>,
+): FrontierThinking {
+  const instantCapability = model.capability
+  let best: { recipe: EffortRecipe; capability: number } | null = null
+  for (const recipe of migrateEffortRecipes(model.productProfile)) {
+    if (!isTrainedThinking(recipe)) continue
+    const view = effortViewForRecipe(model, recipe.id)
+    const capability = view?.capability ?? model.capability
+    const betterCap = best == null || capability > best.capability
+    const sameCapHeavier =
+      best != null &&
+      capability === best.capability &&
+      recipe.thinkingTokenMult > best.recipe.thinkingTokenMult
+    if (betterCap || sameCapHeavier) best = { recipe, capability }
+  }
+  return {
+    instantCapability,
+    peakCapability: best?.capability ?? instantCapability,
+    thinkingTokenMult: best?.recipe.thinkingTokenMult ?? null,
+    recipeName: best?.recipe.name ?? null,
+  }
+}
+
+/** Instant / missing thinking stays small; 1.4–8× maps onto the remaining radius. */
+export function thinkingPointRadius(thinkingTokenMult: number | null): number {
+  if (thinkingTokenMult == null || thinkingTokenMult <= 1) return 3.25
+  const span = THINKING_TOKEN_MAX - THINKING_TOKEN_MIN
+  const t = (thinkingTokenMult - THINKING_TOKEN_MIN) / Math.max(1e-9, span)
+  return Math.round((4.5 + Math.max(0, Math.min(1, t)) * 3.5) * 100) / 100
+}
+
+export function formatFrontierThinking(thinking: FrontierThinking): string {
+  if (thinking.thinkingTokenMult == null) return 'think —'
+  const name = thinking.recipeName?.trim()
+  return name
+    ? `think ${thinking.thinkingTokenMult.toFixed(1)}× ${name}`
+    : `think ${thinking.thinkingTokenMult.toFixed(1)}×`
+}
+
+export function formatFrontierReadout(
+  row: LeaderboardRow,
+  thinking: FrontierThinking,
+): string {
+  const cap =
+    thinking.thinkingTokenMult != null && thinking.peakCapability > thinking.instantCapability + 0.05
+      ? `cap ${num(thinking.instantCapability, 0)} → ${num(thinking.peakCapability, 0)}`
+      : `cap ${num(thinking.instantCapability, 0)}`
+  return `${cap} · ${formatFrontierThinking(thinking)} · ${formatParams(row.model.paramsB)} · D${row.model.releaseDay}`
+}
 
 /**
  * "Compare" tab for the Benchmarks panel: frontier progress chart per lab
@@ -64,6 +135,12 @@ export function BenchmarkCompareTab({
       entry.rows.push(row)
       byLab.set(row.labId, entry)
     }
+    for (const lab of byLab.values()) {
+      lab.rows.sort(
+        (a, b) =>
+          a.model.releaseDay - b.model.releaseDay || a.model.capability - b.model.capability,
+      )
+    }
     const ordered = [...byLab.values()].sort((a, b) =>
       a.id === 'player' ? -1 : b.id === 'player' ? 1 : a.name.localeCompare(b.name),
     )
@@ -83,7 +160,16 @@ export function BenchmarkCompareTab({
         id: lab.id,
         label: lab.name,
         color: lab.color,
-        points: lab.rows.map((row) => ({ x: row.model.releaseDay, y: row.model.capability })),
+        points: lab.rows.map((row) => {
+          const thinking = frontierThinkingFor(row.model)
+          return {
+            x: row.model.releaseDay,
+            y: thinking.peakCapability,
+            r: thinkingPointRadius(thinking.thinkingTokenMult),
+            detail: formatFrontierThinking(thinking),
+            id: `${row.labId}:${row.model.id}`,
+          }
+        }),
       })),
     [labs],
   )
@@ -154,8 +240,8 @@ export function BenchmarkCompareTab({
         ]}
       />
 
-      <GameCard eyebrow="Frontier" title="Capability over time" tone="mint">
-        <div className="mb-2 flex flex-wrap gap-1" role="group" aria-label="Toggle labs">
+      <GameCard eyebrow="Frontier" title="Cap + thinking over time" tone="mint">
+        <div className="mb-2 flex flex-wrap items-center gap-1" role="group" aria-label="Toggle labs">
           {labs.map((lab) => {
             const hidden = hiddenLabIds.includes(lab.id)
             return (
@@ -192,6 +278,16 @@ export function BenchmarkCompareTab({
               </button>
             )
           })}
+          <span
+            className="ml-auto inline-flex items-center gap-1.5 font-mono text-[0.625rem] tabular-nums text-muted"
+            title="Point size is thinking budget. Instant-only releases stay small."
+          >
+            <svg width="22" height="10" viewBox="0 0 22 10" aria-hidden className="text-muted">
+              <circle cx="4" cy="5" r="2.25" fill="currentColor" />
+              <circle cx="16" cy="5" r="4.25" fill="currentColor" />
+            </svg>
+            size = think ×
+          </span>
         </div>
         <div className="rounded-lg border border-line/70 bg-void/40 p-2">
           <LineChart
@@ -201,20 +297,27 @@ export function BenchmarkCompareTab({
             xLabel="Release day"
             yLabel="Cap"
             formatX={(value) => `D${Math.round(value)}`}
-            ariaLabel="Frontier progress: capability by release day"
+            ariaLabel="Frontier progress: capability and thinking by release day"
             onPinChange={setPinnedPoint}
             renderTooltip={(hover) => {
               const row = rowsByLab.get(hover.series.id)?.[hover.pointIndex]
               if (!row) return null
+              const thinking = frontierThinkingFor(row.model)
+              const cap =
+                thinking.thinkingTokenMult != null &&
+                thinking.peakCapability > thinking.instantCapability + 0.05
+                  ? `cap ${num(thinking.instantCapability, 0)} → ${num(thinking.peakCapability, 0)}`
+                  : `cap ${num(thinking.instantCapability, 0)}`
               return (
-                <span className="block max-w-[11rem]">
+                <span className="block max-w-[12rem]">
                   <span className="block truncate font-sans font-medium text-bone">
                     {row.model.name}
                   </span>
                   <span className="block truncate font-sans text-muted">{row.labName}</span>
-                  <span className="block text-bone">
-                    cap {num(row.model.capability, 0)} · {formatParams(row.model.paramsB)} · D
-                    {row.model.releaseDay}
+                  <span className="block text-bone">{cap}</span>
+                  <span className="block text-bone">{formatFrontierThinking(thinking)}</span>
+                  <span className="block text-muted">
+                    {formatParams(row.model.paramsB)} · D{row.model.releaseDay}
                   </span>
                 </span>
               )
@@ -227,8 +330,8 @@ export function BenchmarkCompareTab({
           className="mt-1.5 min-h-5 text-[0.6875rem] leading-snug text-muted"
         >
           {pinnedPoint && pinnedRow
-            ? `Pinned ${pinnedRow.model.name} · ${pinnedRow.labName} · cap ${num(pinnedRow.model.capability, 0)} · D${pinnedRow.model.releaseDay}`
-            : 'Hover or select a point to inspect it; click or tap to pin the readout.'}
+            ? `Pinned ${pinnedRow.model.name} · ${pinnedRow.labName} · ${formatFrontierReadout(pinnedRow, frontierThinkingFor(pinnedRow.model))}`
+            : 'Point size is thinking budget (— if none). Hover or select a point; click or tap to pin.'}
         </p>
       </GameCard>
 

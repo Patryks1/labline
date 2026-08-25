@@ -14,6 +14,10 @@ import {
 } from "./PlansPanel";
 import { effectiveApiPeerPricing, formatApiListPrice } from "./apiPriceUi";
 import {
+  PlanDissatisfactionStatusChip,
+  planDissatisfactionChipTitle,
+} from "./planDissatisfactionCopy";
+import {
   NEW_PLAN_SELECTOR_ID,
   PLANS_TAB_IDS,
   planSelectorOrder,
@@ -90,12 +94,14 @@ describe("PlansPanel mobile presentation", () => {
         entitlements: [
           {
             modelId: "mobile-plan-model",
+            effortId: "instant",
             name: "Pocket Aster",
             kind: "language",
             trafficShare: 1,
             blendedApiPricePerMTok: 0.8,
             includedMTokPerMonth: 24,
             tokensPerInteraction: 2_000,
+            tokenMult: 1,
             interactionsPerDay: 400,
             expectedUtilization: 0.72,
             apiEquivalentValuePerMonth: 19.2,
@@ -180,6 +186,94 @@ describe("PlansPanel navigation and capacity summary", () => {
     expect(PLANS_TAB_IDS).toEqual(["demand", "tiers", "api"]);
   });
 
+  it("renders per-model serve load and outage banner when provided", () => {
+    const state = createGame(9_908);
+    const ledger: ComputeLedger = {
+      day: 1,
+      labId: "player",
+      items: [],
+      requestedPfDays: 0,
+      admittedPfDays: 0,
+      servedPfDays: 0,
+      billedPfDays: 0,
+      capacityPfDays: 1,
+      reservedPfDays: 0,
+      backfilledPfDays: 0,
+    };
+    const serveLoad = {
+      allocatedPf: 10,
+      usedPf: 9,
+      idlePf: 1,
+      fill: 0.9,
+      apiUsedPf: 4,
+      subUsedPf: 5,
+      warn: false,
+      models: [
+        {
+          modelId: "m1",
+          name: "Alpha",
+          allocatedPf: 10,
+          usedPf: 9,
+          apiUsedPf: 4,
+          subUsedPf: 5,
+          idlePf: 1,
+          fill: 0.9,
+          warn: false,
+          unserved: false,
+          planMix: [],
+        },
+      ],
+    };
+    const markup = renderToStaticMarkup(
+      createElement(PlansCapacitySummary, {
+        apiServed: 12.4,
+        apiRequested: 16.8,
+        subServed: 7.2,
+        subRequested: 9.1,
+        apiPf: 3.4,
+        apiModelUsage: [],
+        stats: [],
+        ledger,
+        headroom: 0.25,
+        apiPriority: 0.68,
+        autoApiPriority: 0.7,
+        apiServeFraction: 0.74,
+        subscriptionServeFraction: 0.79,
+        apiBacklogMTok: 4.4,
+        subscriptionBacklogMTok: 1.9,
+        unservedRatio: 0.45,
+        onPriorityChange: () => undefined,
+        throttlePolicy: "balanced",
+        onThrottlePolicyChange: () => undefined,
+        apiLoad: 0.8,
+        subLoad: 0.6,
+        apiStrain: 0.1,
+        subStrain: 0.05,
+        serveLoad,
+        outageState: {
+          ...state,
+          lastMarket: {
+            ...state.lastMarket,
+            capacityPf: 0,
+            unservedRatio: 0.45,
+            playerDemandMTok: 10,
+            serveOutage: true,
+          },
+        },
+        onPauseApi: () => undefined,
+        onPauseSubs: () => undefined,
+        peakListPrice: 2,
+        peakPrice: 2.8,
+        peakExtraRevenue: 1200,
+      }),
+    );
+
+    expect(markup).toContain("data-testid=\"plans-serve-model-load\"");
+    expect(markup).toContain("Per-model serve load");
+    expect(markup).toContain("data-testid=\"serve-outage-banner\"");
+    expect(markup).toContain("data-testid=\"peak-pricing-strip\"");
+  });
+
   it("places the new-plan action after every existing plan", () => {
     expect(
       planSelectorOrder([{ id: "free" }, { id: "pro" }, { id: "max" }]),
@@ -209,5 +303,132 @@ describe("PlansPanel navigation and capacity summary", () => {
     );
     expect(markup).toContain("Plan usage / seat");
     expect(markup).toContain("include");
+  });
+
+  it("puts a concrete why-dissatisfied title on the FREE plan status chip", () => {
+    const markup = renderToStaticMarkup(
+      createElement(PlanDissatisfactionStatusChip, {
+        isFree: true,
+        dissatisfaction: 0.7432,
+        allowanceDissatisfaction: 0,
+        stabilityDissatisfaction: 0.58,
+        slownessDissatisfaction: 0.28,
+        serveFraction: 0.78,
+        serveOutage: false,
+        subSpeedStrain: 0.42,
+      }),
+    );
+
+    expect(markup).toContain("74.32% dissatisfied");
+    expect(markup).toContain('class="status-chip status-chip--danger"');
+    expect(markup).toContain(
+      "unsustainable subsidy · slow streams from overload (free users are less sensitive) · 22% of this plan unserved · weak brand patience",
+    );
+    expect(markup).not.toContain("peak");
+    expect(markup).not.toContain(
+      "Included usage is below what customers expect at this price and capability.",
+    );
+  });
+});
+
+describe("plan dissatisfaction chip copy", () => {
+  it("ranks settled causes and is honest about free-tier slowness sensitivity", () => {
+    const title = planDissatisfactionChipTitle({
+      isFree: true,
+      dissatisfaction: 0.7432,
+      allowanceDissatisfaction: 0,
+      stabilityDissatisfaction: 0.58,
+      slownessDissatisfaction: 0.28,
+      serveFraction: 0.78,
+      subSpeedStrain: 0.42,
+    });
+
+    expect(title).toBe(
+      "unsustainable subsidy · slow streams from overload (free users are less sensitive) · 22% of this plan unserved · weak brand patience",
+    );
+    expect(title).not.toMatch(/peak/i);
+  });
+
+  it("does not tell paid users they notice slowness less", () => {
+    const title = planDissatisfactionChipTitle({
+      isFree: false,
+      dissatisfaction: 0.41,
+      allowanceDissatisfaction: 0,
+      stabilityDissatisfaction: 0,
+      slownessDissatisfaction: 0.4,
+      subSpeedStrain: 0.5,
+    });
+
+    expect(title).toBe("slow streams from overload");
+    expect(title).not.toMatch(/free users/i);
+    expect(title).not.toMatch(/peak/i);
+  });
+
+  it("attributes token-speed slowness when overload strain is idle", () => {
+    expect(
+      planDissatisfactionChipTitle({
+        isFree: false,
+        dissatisfaction: 0.22,
+        slownessDissatisfaction: 0.22,
+        subSpeedStrain: 0,
+      }),
+    ).toBe("streams below 30 tok/s");
+  });
+
+  it("does not blame include when stats cleared allowance but slowness remains", () => {
+    const title = planDissatisfactionChipTitle({
+      isFree: true,
+      dissatisfaction: 0.31,
+      allowanceDissatisfaction: 0,
+      stabilityDissatisfaction: 0,
+      slownessDissatisfaction: 0.3,
+      subSpeedStrain: 0.2,
+      allowanceFallback: 0.4,
+      allowanceFallbackLabel: "Free users expect at least 1M tokens/month.",
+    });
+
+    expect(title).toContain("slow streams from overload");
+    expect(title).toContain("free users are less sensitive");
+    expect(title).not.toContain("Free users expect");
+    expect(title).not.toContain("include below");
+  });
+
+  it("names paid include and loss causes without inventing API peak price", () => {
+    const title = planDissatisfactionChipTitle({
+      isFree: false,
+      dissatisfaction: 0.62,
+      allowanceDissatisfaction: 0.4,
+      stabilityDissatisfaction: 0.35,
+      slownessDissatisfaction: 0,
+    });
+
+    expect(title).toBe(
+      "include below expected for this price · losing money / sub",
+    );
+    expect(title).not.toMatch(/peak/i);
+  });
+
+  it("surfaces recovered brand residual when operational mix cannot explain the total", () => {
+    const title = planDissatisfactionChipTitle({
+      isFree: true,
+      dissatisfaction: 0.5,
+      allowanceDissatisfaction: 0,
+      stabilityDissatisfaction: 0,
+      slownessDissatisfaction: 0.2,
+    });
+
+    expect(title).toContain("slow streams (free users are less sensitive)");
+    expect(title).toContain("weak brand patience");
+  });
+
+  it("falls back to allowance copy when plan stats have not settled", () => {
+    expect(
+      planDissatisfactionChipTitle({
+        isFree: true,
+        dissatisfaction: 0.4,
+        allowanceFallback: 0.4,
+        allowanceFallbackLabel: "Free users expect at least 1M tokens/month.",
+      }),
+    ).toBe("Free users expect at least 1M tokens/month.");
   });
 });

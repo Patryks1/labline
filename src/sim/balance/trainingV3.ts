@@ -37,6 +37,16 @@ import {
   modalityComputeMultiplier,
 } from './training'
 import { modelStackModifiers } from './modelStack'
+import {
+  DEFAULT_INPUT_SHARE,
+  estimateServingWorkload,
+  precisionComputeMult,
+} from './tokenServe'
+import {
+  DEFAULT_TRAINING_NUMERICS,
+  nativeWeightPrecisionForNumerics,
+  trainingFormatThroughput,
+} from './trainingPrecision'
 import { repeatEpochMultiplier } from './effectiveData'
 
 const DOMAIN_COUNT = 9
@@ -364,13 +374,33 @@ export function analyzeTrainingData(opts: {
 
 export function serviceProfileForModel(
   model: Pick<Model, 'paramsB' | 'activeParamsB' | 'family' | 'tokPerSecMult' | 'capability'> &
-    Partial<Pick<Model, 'backbone' | 'productPreset' | 'io' | 'modalities'>>,
+    Partial<
+      Pick<
+        Model,
+        | 'backbone'
+        | 'productPreset'
+        | 'io'
+        | 'modalities'
+        | 'nativeWeightPrecision'
+        | 'trainingNumerics'
+      >
+    >,
 ): ServiceProfile {
   const active =
     model.family === 'moe' || model.backbone === 'moe'
       ? Math.max(0.1, (model.activeParamsB ?? model.paramsB * 0.1) * 1.15)
       : Math.max(0.1, model.paramsB)
-  const baseTps = 128 * Math.pow(7 / active, 0.34) * Math.max(0.2, model.tokPerSecMult)
+  const nativePrecision =
+    model.nativeWeightPrecision ??
+    (model.trainingNumerics
+      ? nativeWeightPrecisionForNumerics(model.trainingNumerics)
+      : undefined)
+  const formatSpeed = 1 / Math.max(0.2, precisionComputeMult(nativePrecision))
+  const baseTps =
+    128 *
+    Math.pow(7 / active, 0.34) *
+    Math.max(0.2, model.tokPerSecMult) *
+    formatSpeed
   const preset = model.productPreset ?? presetFromFamily(model.family)
   const modalityEnabled = (modality: 'image' | 'audio' | 'video'): boolean =>
     model.modalities?.includes(modality) === true ||
@@ -483,6 +513,9 @@ export function forecastTrainingV3(opts: {
   researchMult?: number
   /** Research-earned headroom for deliberate compute-intensity. */
   overtrainCapBonus?: number
+  /** Advertised BF16-equivalent generation of the active training fleet. */
+  hardwareGeneration?: number
+  servingEfficiency?: number
 }): TrainingForecast {
   const family = familyFromSpec(opts.spec.backbone, opts.spec.productPreset)
   const stack = modelStackModifiers(opts.spec.modelStack ?? [], family)
@@ -564,6 +597,12 @@ export function forecastTrainingV3(opts: {
           precisionCeiling,
         )
       : studentExpectedCapability
+  const numerics = opts.spec.trainingNumerics ?? DEFAULT_TRAINING_NUMERICS
+  const nativePrecision = nativeWeightPrecisionForNumerics(numerics)
+  const usefulTrainPf =
+    Math.max(0, opts.trainPoolPf) *
+    trainingFormatThroughput(opts.hardwareGeneration ?? 1, numerics)
+  const paceFloor = opts.spec.paramsB >= 1_000 ? economics.minCalendarDays : 0
   const modelLike = {
     paramsB: opts.spec.paramsB,
     activeParamsB: opts.spec.activeParamsB,
@@ -571,13 +610,28 @@ export function forecastTrainingV3(opts: {
     backbone: opts.spec.backbone,
     tokPerSecMult: family === 'moe' ? 0.85 : family === 'omni' ? 0.35 : 0.75,
     capability: expectedCapability,
+    trainingNumerics: numerics,
+    nativeWeightPrecision: nativePrecision,
   }
+  const servePfPerMTok = estimateServingWorkload({
+    model: {
+      paramsB: opts.spec.paramsB,
+      activeParamsB: opts.spec.activeParamsB,
+      family,
+      inferCostMult: economics.precision.inferenceCostMultiplier,
+    },
+    inputMTok: DEFAULT_INPUT_SHARE,
+    outputMTok: 1 - DEFAULT_INPUT_SHARE,
+    precision: nativePrecision,
+    servingEfficiency: opts.servingEfficiency ?? 1,
+  }).effectivePfDays
   return {
     targetPfDays,
     powerMw: Math.max(0, opts.trainPowerMw ?? 0),
+    usefulTrainPf,
     etaDays:
-      opts.trainPoolPf > 0.001
-        ? Math.max(economics.minCalendarDays, Math.ceil(targetPfDays / opts.trainPoolPf))
+      usefulTrainPf > 0.001
+        ? Math.max(paceFloor, targetPfDays / usefulTrainPf)
         : Number.POSITIVE_INFINITY,
     minCalendarDays: economics.minCalendarDays,
     upfrontCash: economics.upfrontCash,
@@ -598,6 +652,8 @@ export function forecastTrainingV3(opts: {
     expectedCapability,
     interactiveTokPerSec:
       serviceProfileForModel(modelLike).interactiveTokPerSec * stack.speedMult,
+    servePfPerMTok,
+    servePrecision: nativePrecision,
     risk: analysis.risk,
     warnings: analysis.warnings,
     precision: economics.precision,

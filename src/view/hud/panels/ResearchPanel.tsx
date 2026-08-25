@@ -57,10 +57,13 @@ import {
   effectiveResearchPodStaff,
   openResearchPod,
   queueResearchProgram,
+  researchMethodRunnableOnPod,
   researchPodOpenStatus,
+  researchPodQueueStallReason,
   researchPodStaffAvailability,
   researchPodStaffRequirements,
   researchProgramBlockReason,
+  setActiveResearchProgram,
   setResearchPodStaff,
   startResearchProgram,
 } from "../../../sim/systems/researchPrograms";
@@ -170,7 +173,9 @@ export function ResearchPanel() {
   const selectedProgram = selectedId
     ? programs.find(
         (program) =>
-          program.methodId === selectedId && program.phase !== "complete",
+          program.methodId === selectedId &&
+          program.phase !== "complete" &&
+          pods.some((pod) => pod.assignmentId === program.id),
       )
     : undefined;
   const status = selectedId
@@ -187,7 +192,9 @@ export function ResearchPanel() {
       ? [
           ...queue,
           ...programs
-            .filter((program) => program.phase !== "complete")
+            .filter((program) =>
+              pods.some((pod) => pod.assignmentId === program.id),
+            )
             .map((program) => program.methodId),
         ]
       : [...legacyQueue, ...(active ? [active.nodeId] : [])];
@@ -241,8 +248,8 @@ export function ResearchPanel() {
     centerResearchNode(nextId);
   };
 
-  const activePrograms = programs.filter(
-    (program) => program.phase !== "complete",
+  const activePrograms = programs.filter((program) =>
+    pods.some((pod) => pod.assignmentId === program.id),
   );
   const unlockedCount = state.player.researchUnlocked.length;
   const staff = playerStaff(state);
@@ -368,23 +375,18 @@ export function ResearchPanel() {
                     eyebrow="Queued"
                     title={`${queue.length} waiting`}
                     tone="research"
+                    pad={false}
                   >
-                    <div className="anim-stagger flex flex-wrap gap-1.5">
-                      {queue.map((id) => (
-                        <HudButton
-                          key={id}
-                          type="button"
-                          variant="ghost"
-                          className="min-h-11 rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[0.75rem] text-bone hover:border-research/50"
-                          onClick={() => {
-                            setSelectedId(id);
-                            centerResearchNode(id);
-                          }}
-                        >
-                          {getResearchNode(id).name}
-                        </HudButton>
-                      ))}
-                    </div>
+                    <ResearchProgramQueue
+                      state={state}
+                      queue={queue}
+                      selectedPodId={selectedPodId}
+                      onSelectMethod={(id) => {
+                        setSelectedId(id);
+                        centerResearchNode(id);
+                      }}
+                      apply={apply}
+                    />
                   </GameCard>
                 )}
               </>
@@ -623,7 +625,8 @@ export function ResearchPanel() {
                   const program = programs.find(
                     (candidate) =>
                       candidate.methodId === n.id &&
-                      candidate.phase !== "complete",
+                      candidate.phase !== "complete" &&
+                      pods.some((pod) => pod.assignmentId === candidate.id),
                   );
                   const st = program
                     ? ("active" as const)
@@ -793,6 +796,73 @@ export function ResearchPanel() {
   );
 }
 
+export function ResearchProgramQueue({
+  state,
+  queue,
+  selectedPodId,
+  onSelectMethod,
+  apply,
+}: {
+  state: SimState;
+  queue: string[];
+  selectedPodId: string;
+  onSelectMethod: (id: string) => void;
+  apply: (next: SimState) => void;
+}) {
+  const pods = state.player.researchPods ?? [];
+  const targetPod =
+    pods.find((pod) => pod.id === selectedPodId) ??
+    pods.find((pod) => pod.assignmentId) ??
+    pods[0];
+  return (
+    <ul className="research-queue-list">
+      {queue.map((id) => {
+        const method = getResearchNode(id);
+        const runnable = targetPod
+          ? researchMethodRunnableOnPod(state, targetPod, id)
+          : { ok: false as const, reason: "Research pod not found." };
+        return (
+          <li key={id} className="research-queue-row">
+            <HudButton
+              type="button"
+              variant="ghost"
+              className="research-queue-name"
+              onClick={() => onSelectMethod(id)}
+            >
+              {method.name}
+            </HudButton>
+            <div className="research-queue-actions">
+              <HudButton
+                type="button"
+                variant="ghost"
+                className="research-queue-action"
+                disabled={!runnable.ok}
+                disabledReason={runnable.ok ? undefined : runnable.reason}
+                aria-label={`Set ${method.name} as active research`}
+                onClick={() =>
+                  apply(setActiveResearchProgram(state, id, targetPod?.id))
+                }
+              >
+                Active
+              </HudButton>
+              <HudButton
+                type="button"
+                variant="ghost"
+                className="research-queue-action"
+                aria-label={`Unqueue ${method.name}`}
+                title="Unqueue"
+                onClick={() => apply(dequeueResearchProgram(state, id))}
+              >
+                <Trash aria-hidden="true" size="0.8rem" weight="bold" />
+              </HudButton>
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 function ResearchPodRoster({
   state,
   selectedPodId,
@@ -823,7 +893,7 @@ function ResearchPodRoster({
           const seated = effectiveResearchPodStaff(state, pod);
           const blockReason = program
             ? researchProgramBlockReason(state, program)
-            : undefined;
+            : researchPodQueueStallReason(state, pod);
           return (
             <GameCard
               key={pod.id}
@@ -851,13 +921,27 @@ function ResearchPodRoster({
                   </span>
                 </p>
                 {program ? (
-                  <MeterBar
-                    label={getResearchNode(program.methodId).name}
-                    value={progress}
-                    detail={`${Math.round(progress * 100)}%`}
-                    tone="research"
-                    live
-                  />
+                  <div className="space-y-1">
+                    <MeterBar
+                      label={getResearchNode(program.methodId).name}
+                      value={progress}
+                      detail={`${Math.round(progress * 100)}%`}
+                      tone="research"
+                      live
+                    />
+                    <HudButton
+                      type="button"
+                      variant="ghost"
+                      className="research-queue-action !w-full"
+                      aria-label={`Unqueue ${getResearchNode(program.methodId).name}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        apply(dequeueResearchProgram(state, program.methodId));
+                      }}
+                    >
+                      Unqueue
+                    </HudButton>
+                  </div>
                 ) : null}
                 {blockReason ? (
                   <p
@@ -1150,7 +1234,16 @@ function ResearchMethodDetail({
             className={buttonClass}
             onClick={() => apply(dequeueResearchProgram(state, selected.id))}
           >
-            Remove from queue
+            Unqueue
+          </HudButton>
+        ) : null}
+        {usesPodPrograms && status === "active" && selectedProgram ? (
+          <HudButton
+            variant="ghost"
+            className={buttonClass}
+            onClick={() => apply(dequeueResearchProgram(state, selected.id))}
+          >
+            Unqueue
           </HudButton>
         ) : null}
 

@@ -13,11 +13,14 @@ import {
   tickResearch,
 } from './research'
 import {
+  assignedResearchPrograms,
+  dequeueResearchProgram,
   researchPodStaffAvailability,
   openResearchPod,
   publishMethod,
   queueResearchProgram,
   researchProgramBlockReason,
+  setActiveResearchProgram,
   setResearchPodStaff,
   startResearchProgram,
   tickResearchPrograms,
@@ -650,5 +653,126 @@ describe('research programs and pods', () => {
     const ticked = tickResearchPrograms({ ...state, day: state.day + 1 })
     expect(ticked.player.researchPrograms![0]?.progressPfDays ?? 0).toBe(before)
     expect(ticked.player.researchPrograms![0]?.phase).toBe('pilot')
+  })
+
+  it('skips a blocked in-flight method and starts the next eligible queued method', () => {
+    let state = staffed(createGame(640), 6, 4, 4)
+    state = withFoundationsRoster(state, 6, 4, 4)
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        researchUnlocked: [
+          ...new Set([
+            ...state.player.researchUnlocked,
+            'data_synth',
+            'data_eval',
+          ]),
+        ],
+      },
+    }
+    const blocked: NonNullable<SimState['player']['researchPrograms']>[number] = {
+      id: 'program-data_self_train-stuck',
+      methodId: 'data_self_train',
+      podId: 'pod-foundations',
+      phase: 'hypothesis',
+      evidence: [],
+      insightProgress: 0,
+      engineeringProgress: 0,
+      progressPfDays: 0,
+      daysSpent: 0,
+      effectsApplied: false,
+      computeShare: 0.25,
+      disclosure: 'secret',
+    }
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        researchPrograms: [blocked],
+        researchProgramQueue: ['sys_batching'],
+        researchPods: (state.player.researchPods ?? []).map((pod) =>
+          pod.id === 'pod-foundations'
+            ? { ...pod, assignmentId: blocked.id }
+            : pod,
+        ),
+      },
+    }
+
+    const ticked = tickResearchPrograms({ ...state, day: state.day + 1 })
+    const active = assignedResearchPrograms(ticked)
+    expect(active).toHaveLength(1)
+    expect(active[0]?.methodId).toBe('sys_batching')
+    expect(ticked.player.researchProgramQueue).toContain('data_self_train')
+    expect(ticked.player.researchProgramQueue).not.toContain('sys_batching')
+    expect(
+      ticked.player.researchPods?.find((pod) => pod.id === 'pod-foundations')
+        ?.assignmentId,
+    ).toBe(active[0]?.id)
+    expect(
+      ticked.player.researchPrograms?.some(
+        (program) =>
+          program.methodId === 'data_self_train' && program.phase !== 'complete',
+      ),
+    ).toBe(true)
+  })
+
+  it('does not start Self-Training Loops on a 6/4/4 HQ roster', () => {
+    let state = staffed(createGame(641), 6, 4, 4)
+    state = withFoundationsRoster(state, 6, 4, 4)
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        researchUnlocked: [
+          ...new Set([
+            ...state.player.researchUnlocked,
+            'data_synth',
+            'data_eval',
+          ]),
+        ],
+      },
+    }
+    state = queueResearchProgram(state, 'data_self_train')
+    state = queueResearchProgram(state, 'sys_batching')
+    expect(assignedResearchPrograms(state).map((program) => program.methodId)).toEqual([
+      'sys_batching',
+    ])
+    expect(state.player.researchProgramQueue).toContain('data_self_train')
+  })
+
+  it('unqueues the active method and starts the next available queued method', () => {
+    let state = staffed(createGame(642), 6, 4, 4)
+    state = queueResearchProgram(state, 'sys_batching')
+    state = queueResearchProgram(state, 'opt_checkpoint')
+    expect(assignedResearchPrograms(state)[0]?.methodId).toBe('sys_batching')
+    expect(state.player.researchProgramQueue).toContain('opt_checkpoint')
+
+    const next = dequeueResearchProgram(state, 'sys_batching')
+    expect(assignedResearchPrograms(next)[0]?.methodId).toBe('opt_checkpoint')
+    expect(next.player.researchProgramQueue).not.toContain('sys_batching')
+    expect(
+      next.player.researchPrograms?.some(
+        (program) => program.methodId === 'sys_batching' && program.phase !== 'complete',
+      ),
+    ).toBe(false)
+    expect(
+      next.player.researchPods?.find((pod) => pod.id === 'pod-foundations')
+        ?.assignmentId,
+    ).toBe(assignedResearchPrograms(next)[0]?.id)
+  })
+
+  it('sets a specific queued method as the active research', () => {
+    let state = staffed(createGame(643), 6, 4, 4)
+    state = queueResearchProgram(state, 'sys_batching')
+    state = queueResearchProgram(state, 'opt_checkpoint')
+    const switched = setActiveResearchProgram(
+      state,
+      'opt_checkpoint',
+      'pod-foundations',
+    )
+    expect(assignedResearchPrograms(switched)[0]?.methodId).toBe('opt_checkpoint')
+    expect(switched.player.researchProgramQueue).toContain('sys_batching')
+    expect(switched.player.researchProgramQueue).not.toContain('opt_checkpoint')
   })
 })

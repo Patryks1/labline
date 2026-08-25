@@ -67,6 +67,7 @@ import {
   throttleChurnScale,
   throttlePainScale,
   throttleSpillScale,
+  isInferenceOutage,
 } from "../balance/serveThrottle";
 import {
   TOKEN_SPEED_BRAND_THRESHOLD,
@@ -135,7 +136,13 @@ import {
   planSubsidyRatio,
   planDemandShockMultiplier,
   rivalNearestValueRatio,
+  isApiAcceptingNew,
+  isPlanAcceptingNew,
+  apiWaitlistFeedEvent,
+  subsClosedFeedEvent,
+  planClosedFeedEvent,
 } from "./plans";
+import { appendFeedEvents, type FeedEventInput } from "./feed";
 import {
   apiQualityCompetitivenessMultiplier,
   offerUtility,
@@ -1939,6 +1946,23 @@ export function tickMarket(state: SimState): SimState {
     sharesByLab[k] = (sharesByLab[k] ?? 0) / shareSum;
   }
 
+  // Pause-new API: keep yesterday's intensity; refused demand stays off the
+  // ledger so it cannot generate timeout/unserved pain.
+  let pausedNewApiMTok = 0;
+  if (!isApiAcceptingNew(state.player.pricing)) {
+    const priorApi = Math.max(0, state.lastMarket.apiDemandMTok ?? 0);
+    if (playerApiMTok > priorApi + 1e-12) {
+      const scale = priorApi / playerApiMTok;
+      pausedNewApiMTok = playerApiMTok - priorApi;
+      playerApiMTok = priorApi;
+      playerApiUsers *= scale;
+      for (const demand of demandByOffer.values()) {
+        if (demand.offer.labId !== "player") continue;
+        demand.apiMTok *= scale;
+      }
+    }
+  }
+
   // --- Split subscribers across custom plans ---
   const enabledPlans = state.player.pricing.plans.filter((p) => p.enabled);
   const freePlanOn = enabledPlans.some((p) => isFreePlan(p));
@@ -2364,11 +2388,12 @@ export function tickMarket(state: SimState): SimState {
   }
 
   const buckets: PlanBucket[] = rawBuckets.map((b) => {
-    // Enrollment caps are applied only after all demand shaping, plan
-    // migration, pyramid rules, and seat stickiness. A lowered cap does not
-    // evict existing seats in one tick: the prior enrolled cohort is
-    // grandfathered until natural demand/churn moves it below the cap. New
-    // demand cannot grow beyond that retained cohort while the cap is active.
+    // Enrollment caps and pause-new are applied only after demand shaping,
+    // plan migration, pyramid rules, and seat stickiness. A lowered cap does
+    // not evict existing seats in one tick: the prior enrolled cohort is
+    // grandfathered until natural demand/churn moves it below the cap. Pause-
+    // new freezes at that retained cohort so refused signups never hit the
+    // serving ledger.
     const demandSubscribers = Math.max(0, b.subscribers);
     const configuredCap =
       Number.isFinite(b.plan.subscriberCap) && (b.plan.subscriberCap ?? 0) > 0
@@ -2377,13 +2402,18 @@ export function tickMarket(state: SimState): SimState {
     const priorSubscribers =
       state.lastMarket.planStats.find((stat) => stat.planId === b.plan.id)
         ?.subscribers ?? 0;
-    const subscribers =
-      configuredCap == null
-        ? demandSubscribers
-        : Math.min(
-            demandSubscribers,
-            Math.max(configuredCap, Math.max(0, priorSubscribers)),
-          );
+    const acceptingNew = isPlanAcceptingNew(state.player.pricing, b.plan);
+    let maxAdmitted = demandSubscribers;
+    if (configuredCap != null) {
+      maxAdmitted = Math.min(
+        maxAdmitted,
+        Math.max(configuredCap, Math.max(0, priorSubscribers)),
+      );
+    }
+    if (!acceptingNew) {
+      maxAdmitted = Math.min(maxAdmitted, Math.max(0, priorSubscribers));
+    }
+    const subscribers = maxAdmitted;
     const grandfatheredSubscribers =
       configuredCap == null
         ? 0
@@ -2771,6 +2801,7 @@ export function tickMarket(state: SimState): SimState {
 
   let blockedSubscriptionSeats = 0;
   let capBlockedSubscriptionSeats = 0;
+  let pausedNewSubscriptionSeats = 0;
   const rawPlanStats = buckets.map((b) => {
     const free = isFreePlan(b.plan);
     const planServeFrac = planServeFractions.get(b.plan.id) ?? 1;
@@ -2784,6 +2815,12 @@ export function tickMarket(state: SimState): SimState {
     const kept = retainedAfterChurn;
     blockedSubscriptionSeats += retainedAfterChurn * (1 - planServeFrac);
     capBlockedSubscriptionSeats += Math.max(0, b.demandSubscribers - b.subscribers);
+    if (!isPlanAcceptingNew(state.player.pricing, b.plan)) {
+      pausedNewSubscriptionSeats += Math.max(
+        0,
+        b.demandSubscribers - b.subscribers,
+      );
+    }
     const planRows = computeLedger.rows.filter(
       (row) => computeWorkMeta.get(row.id)?.planId === b.plan.id,
     );
@@ -3805,86 +3842,139 @@ export function tickMarket(state: SimState): SimState {
   const liveTam = settledSegments.reduce((s, d) => s + d.size, 0);
   const marketAdoption = liveTam / baseTam;
 
-  return {
-    ...state,
-    segments: settledSegments,
-    rivals,
-    news,
-    player: {
-      ...state.player,
-      models: modelsWithEconomics,
-      cash,
-      brandTrust: brand,
-      servicePain,
-      speedStrain,
-      apiSpeedStrain,
-      subSpeedStrain,
-      apiSurgeLevel,
-      enterpriseContracts,
-      finance,
+  const apiListPricePerMTok = modelApiPrice(
+    state,
+    bestPlayerModel(state)?.id ?? null,
+  );
+  const postedSurge = postedApiSurgeMultiplier(state);
+  const apiPeakPricePerMTok = apiListPricePerMTok * postedSurge;
+  const apiPeakExtraRevenue =
+    postedSurge > 1 + 1e-9
+      ? Math.max(0, apiRevenue * (1 - 1 / postedSurge))
+      : 0;
+  const serveOutage =
+    isInferenceOutage(capacityPf, unservedRatio) && playerDemandMTok > 0.05;
+
+  const pauseFeed: FeedEventInput[] = [];
+  if (serveOutage) {
+    pauseFeed.push({
+      id: "feed-serve-outage",
+      day: state.day,
+      category: "market",
+      title:
+        capacityPf <= 1e-6 ? "Inference outage" : "Coverage outage",
+      body:
+        capacityPf <= 1e-6
+          ? `${state.player.name} has no inference PF on the floor; existing traffic is unserved until racks come back.`
+          : `${state.player.name} cannot admit ${(unservedRatio * 100).toFixed(0)}% of demand; pause new traffic or expand Serve.`,
+      source: state.player.name,
+      tone: "danger",
+      entityId: state.playerLabId,
+      kind: "serve_outage",
+    });
+  }
+  if (!isApiAcceptingNew(state.player.pricing)) {
+    pauseFeed.push(apiWaitlistFeedEvent(state));
+  }
+  if (state.player.pricing.subsAcceptingNew === false) {
+    pauseFeed.push(subsClosedFeedEvent(state));
+  } else {
+    for (const plan of enabledPlans) {
+      if (plan.acceptingNew === false) {
+        pauseFeed.push(planClosedFeedEvent(state, plan));
+      }
+    }
+  }
+
+  return appendFeedEvents(
+    {
+      ...state,
+      segments: settledSegments,
+      rivals,
+      news,
+      player: {
+        ...state.player,
+        models: modelsWithEconomics,
+        cash,
+        brandTrust: brand,
+        servicePain,
+        speedStrain,
+        apiSpeedStrain,
+        subSpeedStrain,
+        apiSurgeLevel,
+        enterpriseContracts,
+        finance,
+      },
+      lastMarket: {
+        demandModelVersion: DEMAND_MODEL_VERSION,
+        sharesByLab,
+        demandMTok: totalDemandMTok,
+        playerDemandMTok,
+        servedMTok,
+        unservedRatio,
+        latencyScore: campusLatency,
+        effectiveLatencyScore,
+        servicePain,
+        speedStrain,
+        apiSpeedStrain,
+        subSpeedStrain,
+        apiSurgeLevel,
+        apiSurgeMultiplier,
+        apiListPricePerMTok,
+        apiPeakPricePerMTok,
+        apiPeakExtraRevenue,
+        serveOutage,
+        pausedNewApiMTok,
+        pausedNewSubscriptionSeats,
+        apiLoad,
+        subLoad,
+        overflowMTok,
+        trickledMTok,
+        planStats,
+        servedMTokByPlanId: Object.fromEntries(
+          planStats.map((stat) => [stat.planId, stat.dayMTok]),
+        ),
+        servedFreeMTok: planStats
+          .filter((stat) => stat.isFree)
+          .reduce((sum, stat) => sum + stat.dayMTok, 0),
+        servedPaidMTok: planStats
+          .filter((stat) => !stat.isFree)
+          .reduce((sum, stat) => sum + stat.dayMTok, 0),
+        apiSubscribers: playerApiUsers * serveFracApi,
+        apiDemandMTok: playerApiMTok,
+        apiDayMTok: apiServed,
+        apiDayRevenue: apiRevenue,
+        apiDayDirectCogs: apiDirectCogs,
+        apiDayAllocatedOps: apiAllocatedOps,
+        apiDayCogs: apiCogs,
+        apiModelUsage,
+        capacityMTok,
+        demandPf,
+        servedPf,
+        capacityPf,
+        marginalPerMTok,
+        modelFinance,
+        industryDemandMTok: totalDemandMTok,
+        industryServedMTok,
+        marketAdoption,
+        marketTaskIntensity: taskIntensityMultiple,
+        /** 0–1 inference reserved for API under constraint */
+        apiVsSubPriority: apiPrio,
+        apiServeFrac: serveFracApi,
+        subServeFrac: serveFracSub,
+        apiPoolPf,
+        subPoolPf,
+        capacitySalesCapped,
+        blockedApiMTok: Math.max(0, playerApiMTok - apiServed),
+        blockedSubscriptionSeats,
+        capBlockedSubscriptionSeats,
+        capacityProductRevenueCeiling,
+        computeLedger: reconciledComputeLedger,
+      },
+      financeHistory,
+      planStatsHistory,
+      alerts,
     },
-    lastMarket: {
-      demandModelVersion: DEMAND_MODEL_VERSION,
-      sharesByLab,
-      demandMTok: totalDemandMTok,
-      playerDemandMTok,
-      servedMTok,
-      unservedRatio,
-      latencyScore: campusLatency,
-      effectiveLatencyScore,
-      servicePain,
-      speedStrain,
-      apiSpeedStrain,
-      subSpeedStrain,
-      apiSurgeLevel,
-      apiSurgeMultiplier,
-      apiLoad,
-      subLoad,
-      overflowMTok,
-      trickledMTok,
-      planStats,
-      servedMTokByPlanId: Object.fromEntries(
-        planStats.map((stat) => [stat.planId, stat.dayMTok]),
-      ),
-      servedFreeMTok: planStats
-        .filter((stat) => stat.isFree)
-        .reduce((sum, stat) => sum + stat.dayMTok, 0),
-      servedPaidMTok: planStats
-        .filter((stat) => !stat.isFree)
-        .reduce((sum, stat) => sum + stat.dayMTok, 0),
-      apiSubscribers: playerApiUsers * serveFracApi,
-      apiDemandMTok: playerApiMTok,
-      apiDayMTok: apiServed,
-      apiDayRevenue: apiRevenue,
-      apiDayDirectCogs: apiDirectCogs,
-      apiDayAllocatedOps: apiAllocatedOps,
-      apiDayCogs: apiCogs,
-      apiModelUsage,
-      capacityMTok,
-      demandPf,
-      servedPf,
-      capacityPf,
-      marginalPerMTok,
-      modelFinance,
-      industryDemandMTok: totalDemandMTok,
-      industryServedMTok,
-      marketAdoption,
-      marketTaskIntensity: taskIntensityMultiple,
-      /** 0–1 inference reserved for API under constraint */
-      apiVsSubPriority: apiPrio,
-      apiServeFrac: serveFracApi,
-      subServeFrac: serveFracSub,
-      apiPoolPf,
-      subPoolPf,
-      capacitySalesCapped,
-      blockedApiMTok: Math.max(0, playerApiMTok - apiServed),
-      blockedSubscriptionSeats,
-      capBlockedSubscriptionSeats,
-      capacityProductRevenueCeiling,
-      computeLedger: reconciledComputeLedger,
-    },
-    financeHistory,
-    planStatsHistory,
-    alerts,
-  };
+    pauseFeed,
+  );
 }

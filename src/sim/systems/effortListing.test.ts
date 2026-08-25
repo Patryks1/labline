@@ -4,6 +4,7 @@ import { INSTANT_EFFORT_ID, migrateEffortRecipes } from "../balance/modelProduct
 import { isCommerciallyOffered, isLivePublicModel } from "../modelRelease";
 import type { SimState } from "../types";
 import {
+  applyEffortHeadTick,
   listReleasedModel,
   releaseFromJob,
   startEffortTraining,
@@ -65,14 +66,24 @@ describe("named effort heads and go-to-market listing", () => {
       trainPfDays: 12,
     });
     const recipes = migrateEffortRecipes(state.player.trainingJob?.productProfile);
-    const trained = recipes.find((recipe) => recipe.name === "Deep Think");
-    expect(trained?.kind).toBe("trained");
-    expect(trained?.thinkingTokenMult).toBe(4);
+    const started = recipes.find((recipe) => recipe.name === "Deep Think");
+    expect(started?.kind).toBe("trained");
+    expect(started?.thinkingTokenMult).toBe(4);
+    expect(started?.trainComputeShare).toBeGreaterThan(0);
+    expect(started?.targetPfDays).toBeGreaterThan(0);
+    expect(started?.trained).toBe(false);
+
+    let working = state.player.trainingJob!;
+    for (let day = 0; day < 24; day += 1) {
+      working = applyEffortHeadTick(state, working, 10, day).job;
+    }
+    const trained = migrateEffortRecipes(working.productProfile).find(
+      (recipe) => recipe.name === "Deep Think",
+    );
+    expect(trained?.trained).toBe(true);
     expect(trained?.quality).toBeGreaterThan(0);
     expect(trained?.served).toBe(true);
-    expect(state.player.trainingJob?.productProfile?.defaultEffortId).toBe(
-      trained?.id,
-    );
+    expect(working.productProfile?.defaultEffortId).toBe(trained?.id);
   });
 
   it("keeps a released model off demand until listing is confirmed", () => {

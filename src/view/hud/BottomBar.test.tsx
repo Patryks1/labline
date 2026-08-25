@@ -3,12 +3,57 @@ import { fileURLToPath } from 'node:url'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
+import { buildScaledModel } from '../../sim/balance/modelBuild'
+import { createGame } from '../../sim/createGame'
+import { useGameStore } from '../../store/gameStore'
 import { BottomBar } from './BottomBar'
 
 const css = readFileSync(fileURLToPath(new URL('../../index.css', import.meta.url)), 'utf8')
 
+function withOutageState() {
+  const base = createGame(9_510)
+  const model = {
+    ...buildScaledModel({
+      id: 'outage-model',
+      name: 'Outage',
+      paramsB: 7,
+      family: 'dense',
+      day: 1,
+      dataCoverage: 30,
+      dataQuality: 75,
+    }),
+    capability: 60,
+    release: 'released' as const,
+    shipped: true,
+    commerciallyOffered: true,
+  }
+  useGameStore.setState({
+    state: {
+      ...base,
+      player: {
+        ...base.player,
+        models: [model],
+        pricing: {
+          ...base.player.pricing,
+          activeModelId: model.id,
+          apiModelIds: [model.id],
+        },
+      },
+      lastMarket: {
+        ...base.lastMarket,
+        capacityPf: 0,
+        servedPf: 0,
+        unservedRatio: 0.55,
+        playerDemandMTok: 12,
+        serveOutage: true,
+      },
+    },
+  })
+}
+
 describe('BottomBar operations overflow', () => {
   it('keeps glass on a sibling surface so pool flyouts are not clipped', () => {
+    useGameStore.setState({ state: createGame(9_511) })
     const markup = renderToStaticMarkup(createElement(BottomBar))
 
     expect(markup).toContain('operations-panel__surface hud-surface')
@@ -20,6 +65,23 @@ describe('BottomBar operations overflow', () => {
     expect(markup).toContain('operations-telemetry__actions')
     expect(markup).toContain('title="Hover for breakdown"')
     expect(markup).not.toContain('role="tooltip"')
+  })
+
+  it('renders live pool load bars under allocation sliders', () => {
+    useGameStore.setState({ state: createGame(9_512) })
+    const markup = renderToStaticMarkup(createElement(BottomBar))
+    expect(markup).toContain('data-testid="pool-load-train"')
+    expect(markup).toContain('data-testid="pool-load-serve"')
+    expect(markup).toContain('data-testid="pool-load-research"')
+    expect(markup).toContain('role="progressbar"')
+  })
+
+  it('shows serve outage banner with pause controls when inference is down', () => {
+    withOutageState()
+    const markup = renderToStaticMarkup(createElement(BottomBar))
+    expect(markup).toContain('data-testid="serve-outage-banner"')
+    expect(markup).toContain('data-testid="pause-new-api"')
+    expect(markup).toContain('data-testid="pause-new-subs"')
   })
 
   it('does not clip the telemetry row as a single nowrap overflow box', () => {

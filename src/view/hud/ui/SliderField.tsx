@@ -32,8 +32,8 @@ export function SliderField({
   hoverContent?: ReactNode
   /** Info mark without rendering an inline tooltip (host can lift the flyout). */
   hint?: boolean
-  /** Secondary mono line under the label (e.g. PF · util) */
-  sublabel?: string
+  /** Secondary line under the label — live PF bar or mono stats */
+  sublabel?: ReactNode
 }) {
   const pct = max > min ? ((value - min) / (max - min)) * 100 : 0
   return (
@@ -57,14 +57,9 @@ export function SliderField({
         </span>
         <span className={`shrink-0 font-mono ${accentClass}`}>{format(value)}</span>
       </div>
-      {sublabel && (
-        <div
-          className="mb-0.5 truncate font-mono text-[0.6875rem] leading-tight text-muted/90"
-          title={sublabel}
-        >
-          {sublabel}
-        </div>
-      )}
+      {sublabel != null ? (
+        <div className="mb-0.5 min-w-0">{sublabel}</div>
+      ) : null}
       <div className="relative h-1.5 overflow-hidden rounded-full bg-void">
         <div
           className={`absolute inset-y-0 left-0 ${colorClass} opacity-90`}

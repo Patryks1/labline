@@ -1,18 +1,32 @@
 /**
  * Live breakdown of where Train / Serve / Research PF goes and how full each pool is.
- * Pure read of SimState + computeSnapshot — for HUD tooltips.
+ * Pure read of SimState + computeSnapshot — for HUD tooltips and live fill bars.
  */
 import { ECONOMY } from '../balance/economy'
 import {
   familyServeMult,
   inferenceCapacityMTok,
+  inferencePfDemand,
   pfPerMTokForModel,
   sizeTokMult,
 } from '../balance/serveCompute'
+import {
+  planExposedModelIds,
+  releasedRouterMemberIds,
+  soldApiRouters,
+} from '../balance/modelRouter'
 import { gymResearchReservationShare } from '../balance/modelStudio'
 import { getResearchNode } from '../balance/research'
 import { formatParams } from '../balance/training'
-import type { SimState } from '../types'
+import { defaultServePrecisionForModel } from '../balance/tokenServe'
+import type {
+  Model,
+  PlanDayStats,
+  PlanModelUsage,
+  ServePrecision,
+  SimState,
+  SubPlan,
+} from '../types'
 import { isLivePublicModel } from '../modelRelease'
 import { computeSnapshot, normalizeAllocation, type ComputeSnapshot } from './compute'
 import { estimateResearchRate, researchPfTarget } from './research'
@@ -21,7 +35,14 @@ import {
   ensureLabData,
   researchPoolForTech,
 } from './data'
+import { planComputePriority, planModelTrafficMix } from './plans'
+import {
+  hostedServingModels,
+  servingPrecisionForModel,
+} from './servingPlacement'
 import { playerStaff } from './staff'
+import { assignedResearchPrograms } from './researchPrograms'
+import { playerTrainingJobs, playerTrainingResourcePlan } from './training'
 import { serveInfraCost } from '../balance/pricing'
 import { energyPriceForState } from './map'
 
@@ -47,9 +68,9 @@ export interface PoolBreakdown {
   allocShare: number
   /**
    * How hard the pool is working:
-   * - serve: demand / capacity (can exceed 1)
-   * - train: 1 if job running, 0 idle
-   * - research: 1 if progressing, 0 stalled/idle
+   * - serve: used PF / allocated inference PF (can exceed 1)
+   * - train: assigned train/safety occupancy / train pool (not format-derated burn)
+   * - research: research consumers / research pool
    */
   utilization: number
   utilizationLabel: string
@@ -66,6 +87,89 @@ export interface ComputeBreakdown {
   train: PoolBreakdown
   serve: PoolBreakdown
   research: PoolBreakdown
+  /** Live allocated-vs-used fills for HUD bars (same tick as lastMarket). */
+  load: ComputeLoadView
+}
+
+/** Channel that contributed used PF on a live listed model. */
+export type ServeMixKind = 'api' | 'plan'
+
+/** Hover-ready plan/API mix for one model's used (or allocated) sub/API PF. */
+export interface ServePlanMixEntry {
+  kind: ServeMixKind
+  /** Plan id when kind is `plan`. */
+  planId?: string
+  name: string
+  /** Current subscribers (plans only). */
+  subscribers?: number
+  /** Served API MTok today (API channel only). */
+  apiMTok?: number
+  usedPf: number
+  /**
+   * This plan's share of the model's subscription PF (0–1).
+   * API rows use share of the model's used PF that is API.
+   */
+  shareOfModelSubPf: number
+  precision: ServePrecision
+}
+
+export interface ServeModelLoadRow {
+  modelId: string
+  name: string
+  /** This model's reserved share of the inference pool. */
+  allocatedPf: number
+  usedPf: number
+  apiUsedPf: number
+  subUsedPf: number
+  idlePf: number
+  /** used / allocated; can exceed 1 when traffic outruns the reservation. */
+  fill: number
+  warn: boolean
+  unserved: boolean
+  planMix: ServePlanMixEntry[]
+}
+
+export interface ServePoolLoad {
+  /** Inference PF reserved today (`lastMarket.capacityPf`, else the serve pool). */
+  allocatedPf: number
+  /** PF actually served (`lastMarket.servedPf`, else MTok × pfPerMTok). */
+  usedPf: number
+  idlePf: number
+  fill: number
+  apiUsedPf: number
+  subUsedPf: number
+  warn: boolean
+  models: ServeModelLoadRow[]
+}
+
+export type TrainLoadConsumerKind = 'train' | 'safety'
+
+export interface TrainLoadConsumer {
+  id: string
+  name: string
+  kind: TrainLoadConsumerKind
+  /** Raw train-pool PF assigned to this job (occupancy). */
+  usedPf: number
+  /** Format/hardware-derated useful burn from that assignment. */
+  usefulPf: number
+  share: number
+}
+
+export interface TrainPoolLoad {
+  poolPf: number
+  /** Raw PF assigned to active train/safety jobs. */
+  usedPf: number
+  /** Useful PF after training-format throughput. */
+  usefulPf: number
+  idlePf: number
+  fill: number
+  jobs: TrainLoadConsumer[]
+}
+
+export interface ComputeLoadView {
+  serve: ServePoolLoad
+  train: TrainPoolLoad
+  research: ResearchComputeUsage
 }
 
 /** Live consumers of the shared research PF pool (tree/pods, data, gyms, safety). */
@@ -110,8 +214,7 @@ const RESEARCH_SLICE_META: Record<
 function treeResearchActive(state: SimState): boolean {
   return (
     Boolean(state.player.activeResearch) ||
-    (state.player.researchPrograms?.some((program) => program.phase !== 'complete') ??
-      false)
+    assignedResearchPrograms(state).length > 0
   )
 }
 
@@ -170,6 +273,508 @@ export function researchComputeUsage(
   }
 }
 
+function finiteNonNeg(n: number | undefined): number {
+  return Number.isFinite(n) ? Math.max(0, n as number) : 0
+}
+
+function fallbackServeModel(state: SimState): Model | undefined {
+  const live = state.player.models.filter(isLivePublicModel)
+  return (
+    live.find((model) => model.id === state.player.pricing.activeModelId) ??
+    [...live].sort((a, b) => b.capability - a.capability)[0]
+  )
+}
+
+function listedApiModelIds(state: SimState): Set<string> {
+  const publicIds = new Set(
+    state.player.models.filter(isLivePublicModel).map((model) => model.id),
+  )
+  const fallback = fallbackServeModel(state)
+  const apiIds = new Set(
+    (
+      state.player.pricing.apiModelIds ?? (fallback ? [fallback.id] : [])
+    ).filter((id) => publicIds.has(id)),
+  )
+  for (const router of soldApiRouters({
+    apiRouterIds: state.player.pricing.apiRouterIds,
+    apiModelIds: state.player.pricing.apiModelIds,
+    activeModelRouterId: state.player.activeModelRouterId,
+    routers: state.player.modelRouters,
+    models: state.player.models,
+  })) {
+    for (const id of releasedRouterMemberIds(router, state.player.models)) {
+      if (publicIds.has(id)) apiIds.add(id)
+    }
+  }
+  return apiIds
+}
+
+function listedSubscriptionModelIds(state: SimState): Set<string> {
+  const publicIds = new Set(
+    state.player.models.filter(isLivePublicModel).map((model) => model.id),
+  )
+  const ids = new Set<string>()
+  for (const plan of state.player.pricing.plans) {
+    if (!plan.enabled) continue
+    for (const id of planExposedModelIds(
+      plan,
+      state.player.models,
+      state.player.modelRouters,
+    )) {
+      if (publicIds.has(id)) ids.add(id)
+    }
+  }
+  if (ids.size === 0) {
+    const fallback = fallbackServeModel(state)
+    if (fallback) ids.add(fallback.id)
+  }
+  return ids
+}
+
+function usagePf(
+  usage: Pick<PlanModelUsage, 'dayInferPf' | 'dayMTok'> | undefined,
+  model: Model | undefined,
+  servingEfficiency: number,
+): number {
+  if (!usage) return 0
+  if (finiteNonNeg(usage.dayInferPf) > 1e-12) return finiteNonNeg(usage.dayInferPf)
+  if (finiteNonNeg(usage.dayMTok) > 1e-12 && model) {
+    return inferencePfDemand(usage.dayMTok, model, servingEfficiency)
+  }
+  return finiteNonNeg(usage.dayInferPf)
+}
+
+function mtokToPf(
+  mtok: number,
+  model: Model | undefined,
+  servingEfficiency: number,
+): number {
+  if (mtok <= 1e-12) return 0
+  if (model) return inferencePfDemand(mtok, model, servingEfficiency)
+  return (
+    mtok *
+    pfPerMTokForModel(
+      { paramsB: 7, activeParamsB: 7, family: 'dense', inferCostMult: 1 },
+      servingEfficiency,
+    )
+  )
+}
+
+function modelById(state: SimState, id: string): Model | undefined {
+  return state.player.models.find((model) => model.id === id)
+}
+
+function planPrecision(plan: SubPlan, model: Model): ServePrecision {
+  return (
+    plan.servePrecisionByModel?.[model.id] ??
+    defaultServePrecisionForModel(model)
+  )
+}
+
+function addAlloc(target: Map<string, number>, id: string, pf: number) {
+  if (pf <= 1e-15) return
+  target.set(id, (target.get(id) ?? 0) + pf)
+}
+
+function splitPoolByPfWeights(
+  poolPf: number,
+  items: readonly { id: string; weight: number }[],
+): Map<string, number> {
+  const out = new Map<string, number>()
+  const total = items.reduce((sum, item) => sum + Math.max(0, item.weight), 0)
+  if (poolPf <= 1e-15 || items.length === 0) return out
+  if (total <= 1e-15) {
+    const each = poolPf / items.length
+    for (const item of items) addAlloc(out, item.id, each)
+    return out
+  }
+  for (const item of items) {
+    addAlloc(out, item.id, poolPf * (Math.max(0, item.weight) / total))
+  }
+  return out
+}
+
+function mergeAlloc(
+  into: Map<string, number>,
+  from: Map<string, number>,
+) {
+  for (const [id, pf] of from) addAlloc(into, id, pf)
+}
+
+/** Train/safety PF currently occupying the train pool (raw assigned, not format burn). */
+export function trainPoolLoad(
+  state: SimState,
+  snap: ComputeSnapshot = computeSnapshot(state),
+): TrainPoolLoad {
+  const poolPf = Math.max(0, snap.pools.training)
+  const resources = playerTrainingResourcePlan(state, snap)
+  const jobs: TrainLoadConsumer[] = []
+  for (const job of playerTrainingJobs(state)) {
+    const active =
+      !job.paused &&
+      !job.failed &&
+      !job.pendingCampaignEvent &&
+      (job.computePriority ?? 50) > 0
+    const allocation = resources.jobs[job.id]
+    const usedPf = active ? finiteNonNeg(allocation?.rawPf) : 0
+    const usefulPf = active ? finiteNonNeg(allocation?.effectivePf) : 0
+    if (!active && usedPf <= 1e-12) continue
+    jobs.push({
+      id: job.id,
+      name: job.name || `Training ${formatParams(job.targetParamsB)}`,
+      kind: 'train',
+      usedPf,
+      usefulPf,
+      share: 0,
+    })
+  }
+  const campaign = state.player.safetyCampaign
+  if (campaign) {
+    jobs.push({
+      id: campaign.id,
+      name: `${campaign.modelName ?? campaign.modelId} safety`,
+      kind: 'safety',
+      usedPf: finiteNonNeg(resources.safetyCampaign?.rawPf),
+      usefulPf: finiteNonNeg(resources.safetyCampaign?.effectivePf),
+      share: 0,
+    })
+  }
+  const usedPf = jobs.reduce((sum, job) => sum + job.usedPf, 0)
+  const usefulPf = jobs.reduce((sum, job) => sum + job.usefulPf, 0)
+  const shareDenom = usedPf > 1e-12 ? usedPf : poolPf
+  for (const job of jobs) {
+    job.share = shareDenom > 1e-12 ? job.usedPf / shareDenom : 0
+  }
+  return {
+    poolPf,
+    usedPf,
+    usefulPf,
+    idlePf: Math.max(0, poolPf - usedPf),
+    fill: poolPf > 1e-9 ? usedPf / poolPf : usedPf > 1e-12 ? 1 : 0,
+    jobs,
+  }
+}
+
+/**
+ * Serve allocated vs used, including per-model rows and hover mix.
+ * Numbers come from lastMarket + placement/mix already computed this tick.
+ */
+export function servePoolLoad(
+  state: SimState,
+  snap: ComputeSnapshot = computeSnapshot(state),
+): ServePoolLoad {
+  const lm = state.lastMarket
+  const serveEff = state.player.servingEfficiency
+  const hosted = hostedServingModels({
+    models: state.player.models,
+    pricing: state.player.pricing,
+    modelRouters: state.player.modelRouters,
+    activeModelRouterId: state.player.activeModelRouterId,
+  })
+  const fallback = fallbackServeModel(state)
+  const allocatedPf = (() => {
+    const cap = finiteNonNeg(lm.capacityPf)
+    if (cap > 1e-12) return cap
+    const pool = Math.max(0, snap.pools.inference)
+    if (pool > 1e-12) return pool
+    return mtokToPf(finiteNonNeg(lm.capacityMTok), fallback, serveEff)
+  })()
+
+  const apiUsages = lm.apiModelUsage ?? []
+  const planStats = lm.planStats ?? []
+  const apiUsedFromUsage = apiUsages.reduce(
+    (sum, usage) =>
+      sum + usagePf(usage, modelById(state, usage.modelId), serveEff),
+    0,
+  )
+  const subUsedFromUsage = planStats.reduce((sum, plan) => {
+    const rows = plan.modelUsage ?? []
+    if (rows.length > 0) {
+      return (
+        sum +
+        rows.reduce(
+          (inner, usage) =>
+            inner + usagePf(usage, modelById(state, usage.modelId), serveEff),
+          0,
+        )
+      )
+    }
+    return sum + usagePf(
+      { dayInferPf: plan.dayInferPf, dayMTok: plan.dayMTok },
+      fallback,
+      serveEff,
+    )
+  }, 0)
+
+  const usedPf = (() => {
+    const served = lm.servedPf
+    if (served != null && Number.isFinite(served) && served > 1e-12) return served
+    if (apiUsedFromUsage + subUsedFromUsage > 1e-12) {
+      return apiUsedFromUsage + subUsedFromUsage
+    }
+    return mtokToPf(finiteNonNeg(lm.servedMTok), fallback, serveEff)
+  })()
+
+  let apiUsedPf = apiUsedFromUsage
+  let subUsedPf = subUsedFromUsage
+  if (apiUsedPf + subUsedPf <= 1e-12 && usedPf > 1e-12) {
+    const apiM = finiteNonNeg(lm.apiDayMTok)
+    const subM = planStats.reduce((sum, plan) => sum + finiteNonNeg(plan.dayMTok), 0)
+    const tokenTotal = apiM + subM
+    if (tokenTotal > 1e-12) {
+      apiUsedPf = usedPf * (apiM / tokenTotal)
+      subUsedPf = usedPf * (subM / tokenTotal)
+    } else {
+      const apiPrio =
+        lm.apiVsSubPriority ??
+        state.player.pricing.apiVsSubPriority ??
+        ECONOMY.defaultApiVsSubPriority
+      apiUsedPf = usedPf * apiPrio
+      subUsedPf = usedPf * (1 - apiPrio)
+    }
+  } else if (usedPf > 1e-12 && apiUsedPf + subUsedPf > 1e-12) {
+    const raw = apiUsedPf + subUsedPf
+    apiUsedPf = usedPf * (apiUsedPf / raw)
+    subUsedPf = usedPf * (subUsedPf / raw)
+  }
+
+  const apiPrio = Math.max(
+    0,
+    Math.min(
+      1,
+      lm.apiVsSubPriority ??
+        state.player.pricing.apiVsSubPriority ??
+        ECONOMY.defaultApiVsSubPriority ??
+        0.68,
+    ),
+  )
+  const apiPoolPf = finiteNonNeg(lm.apiPoolPf) > 1e-12
+    ? finiteNonNeg(lm.apiPoolPf)
+    : allocatedPf * apiPrio
+  const subPoolPf = finiteNonNeg(lm.subPoolPf) > 1e-12
+    ? finiteNonNeg(lm.subPoolPf)
+    : allocatedPf * (1 - apiPrio)
+
+  const apiIds = listedApiModelIds(state)
+  const subIds = listedSubscriptionModelIds(state)
+  const allocatedByModel = new Map<string, number>()
+
+  const apiHosted = hosted.filter((model) => apiIds.has(model.id))
+  mergeAlloc(
+    allocatedByModel,
+    splitPoolByPfWeights(
+      apiPoolPf,
+      apiHosted.map((model) => ({
+        id: model.id,
+        weight: Math.max(1e-6, inferencePfDemand(1, model, serveEff)),
+      })),
+    ),
+  )
+
+  const enabledPlans = state.player.pricing.plans.filter((plan) => plan.enabled)
+  const planLanes = enabledPlans.map((plan) => {
+    const mix = planModelTrafficMix(state, plan)
+    return {
+      plan,
+      mix,
+      priority: mix.length > 0 ? planComputePriority(plan) : 0,
+    }
+  })
+  const planPriorityTotal = planLanes.reduce((sum, lane) => sum + lane.priority, 0)
+  if (planPriorityTotal > 1e-12 && subPoolPf > 1e-15) {
+    for (const lane of planLanes) {
+      if (lane.mix.length === 0 || lane.priority <= 0) continue
+      const planShare = lane.priority / planPriorityTotal
+      const weights = lane.mix.map((part) => ({
+        id: part.model.id,
+        weight: Math.max(
+          1e-9,
+          inferencePfDemand(part.share, part.model, serveEff),
+        ),
+      }))
+      mergeAlloc(
+        allocatedByModel,
+        splitPoolByPfWeights(subPoolPf * planShare, weights),
+      )
+    }
+  } else {
+    const subHosted = hosted.filter((model) => subIds.has(model.id))
+    mergeAlloc(
+      allocatedByModel,
+      splitPoolByPfWeights(
+        subPoolPf,
+        subHosted.map((model) => ({
+          id: model.id,
+          weight: Math.max(1e-6, inferencePfDemand(1, model, serveEff)),
+        })),
+      ),
+    )
+  }
+
+  const models: ServeModelLoadRow[] = hosted.map((model) => {
+    const apiUsage = apiUsages.find((usage) => usage.modelId === model.id)
+    const apiUsed = usagePf(apiUsage, model, serveEff)
+    const planUsedRows: {
+      plan: PlanDayStats
+      configured?: SubPlan
+      usage?: PlanModelUsage
+      usedPf: number
+    }[] = []
+    for (const plan of planStats) {
+      const configured = enabledPlans.find((item) => item.id === plan.planId)
+      const usage = plan.modelUsage?.find((row) => row.modelId === model.id)
+      const used = usage
+        ? usagePf(usage, model, serveEff)
+        : plan.modelUsage == null &&
+            (configured
+              ? planExposedModelIds(
+                  configured,
+                  state.player.models,
+                  state.player.modelRouters,
+                ).includes(model.id)
+              : false)
+          ? usagePf(
+              { dayInferPf: plan.dayInferPf, dayMTok: plan.dayMTok },
+              model,
+              serveEff,
+            )
+          : 0
+      const mixHit = configured
+        ? planModelTrafficMix(state, configured).some((part) => part.model.id === model.id)
+        : false
+      if (usage || used > 1e-12 || mixHit) {
+        planUsedRows.push({ plan, configured, usage, usedPf: used })
+      }
+    }
+    for (const plan of enabledPlans) {
+      if (planUsedRows.some((row) => row.plan.planId === plan.id)) continue
+      const mix = planModelTrafficMix(state, plan)
+      if (!mix.some((part) => part.model.id === model.id)) continue
+      planUsedRows.push({
+        plan: {
+          planId: plan.id,
+          name: plan.name,
+          subscribers: 0,
+          dayRevenue: 0,
+          dayCogs: 0,
+          allocatedComputeCostDay: 0,
+          dayMTok: 0,
+          dayInferPf: 0,
+          computePfPerSubscriber: 0,
+          costPerSubDay: 0,
+          marginPerSubMonth: 0,
+          isFree: plan.pricePerMonth <= 0,
+          usageRate: 0,
+        },
+        configured: plan,
+        usedPf: 0,
+      })
+    }
+
+    const subUsed = planUsedRows.reduce((sum, row) => sum + row.usedPf, 0)
+    const used = apiUsed + subUsed
+    const allocated = allocatedByModel.get(model.id) ?? 0
+    const fill = allocated > 1e-9 ? used / allocated : used > 1e-12 ? 2 : 0
+    const unserved = used > allocated + 1e-9 && (allocated > 1e-12 || used > 1e-12)
+
+    const planMix: ServePlanMixEntry[] = []
+    if (apiIds.has(model.id) || apiUsed > 1e-12) {
+      planMix.push({
+        kind: 'api',
+        name: 'API',
+        apiMTok: apiUsage?.dayMTok ?? 0,
+        usedPf: apiUsed,
+        shareOfModelSubPf: used > 1e-12 ? apiUsed / used : 0,
+        precision:
+          state.player.pricing.apiServePrecisionByModel?.[model.id] ??
+          servingPrecisionForModel(
+            state.player.pricing,
+            model,
+            true,
+            state.player.modelRouters,
+          ),
+      })
+    }
+    const idleSubWeight = planUsedRows.reduce((sum, row) => {
+      const mixShare = row.configured
+        ? (planModelTrafficMix(state, row.configured).find(
+            (part) => part.model.id === model.id,
+          )?.share ?? 0)
+        : 0
+      return (
+        sum +
+        mixShare *
+          planComputePriority(row.configured ?? { pricePerMonth: 0, computePriority: 50 })
+      )
+    }, 0)
+    for (const row of planUsedRows) {
+      const mixShare = row.configured
+        ? (planModelTrafficMix(state, row.configured).find(
+            (part) => part.model.id === model.id,
+          )?.share ?? 0)
+        : 0
+      const shareOfModelSubPf =
+        subUsed > 1e-12
+          ? row.usedPf / subUsed
+          : idleSubWeight > 1e-12
+            ? (mixShare *
+                planComputePriority(
+                  row.configured ?? { pricePerMonth: 0, computePriority: 50 },
+                )) /
+              idleSubWeight
+            : mixShare
+      planMix.push({
+        kind: 'plan',
+        planId: row.plan.planId,
+        name: row.plan.name,
+        subscribers: row.plan.subscribers,
+        usedPf: row.usedPf,
+        shareOfModelSubPf,
+        precision: row.configured
+          ? planPrecision(row.configured, model)
+          : defaultServePrecisionForModel(model),
+      })
+    }
+
+    return {
+      modelId: model.id,
+      name: model.name,
+      allocatedPf: allocated,
+      usedPf: used,
+      apiUsedPf: apiUsed,
+      subUsedPf: subUsed,
+      idlePf: Math.max(0, allocated - used),
+      fill,
+      warn: unserved,
+      unserved,
+      planMix,
+    }
+  })
+
+  const fill = allocatedPf > 1e-9 ? usedPf / allocatedPf : usedPf > 1e-12 ? 2 : 0
+  return {
+    allocatedPf,
+    usedPf,
+    idlePf: Math.max(0, allocatedPf - usedPf),
+    fill,
+    apiUsedPf,
+    subUsedPf,
+    warn: fill > 1.02,
+    models,
+  }
+}
+
+export function computeLoadView(
+  state: SimState,
+  snap: ComputeSnapshot = computeSnapshot(state),
+): ComputeLoadView {
+  return {
+    serve: servePoolLoad(state, snap),
+    train: trainPoolLoad(state, snap),
+    research: researchComputeUsage(state, snap),
+  }
+}
+
 function fmtPf(n: number): string {
   if (!Number.isFinite(n)) return '—'
   if (Math.abs(n) >= 100) return n.toFixed(0)
@@ -195,10 +800,11 @@ export function buildComputeBreakdown(state: SimState): ComputeBreakdown {
   const rawPf = snap.rawFlopsPf
   const effectivePf = snap.effectiveFlopsPf
   const fleetYield = rawPf > 1e-9 ? effectivePf / rawPf : 0
+  const load = computeLoadView(state, snap)
 
-  const train = buildTrainBreakdown(state, snap, alloc.training)
-  const serve = buildServeBreakdown(state, snap, alloc.inference)
-  const research = buildResearchBreakdown(state, snap, alloc.research)
+  const train = buildTrainBreakdown(state, snap, alloc.training, load.train)
+  const serve = buildServeBreakdown(state, snap, alloc.inference, load.serve)
+  const research = buildResearchBreakdown(state, alloc.research, load.research)
 
   return {
     snap,
@@ -208,6 +814,7 @@ export function buildComputeBreakdown(state: SimState): ComputeBreakdown {
     train,
     serve,
     research,
+    load,
   }
 }
 
@@ -215,6 +822,7 @@ function buildTrainBreakdown(
   state: SimState,
   snap: ComputeSnapshot,
   allocShare: number,
+  load: TrainPoolLoad,
 ): PoolBreakdown {
   const poolPf = snap.pools.training
   const powerMw = snap.mwBreakdown.training
@@ -237,8 +845,21 @@ function buildTrainBreakdown(
       value: `${fmtPf(poolPf)} PF`,
     },
     {
+      label: 'In use',
+      value: `${fmtPf(load.usedPf)} / ${fmtPf(poolPf)} PF`,
+      bar: poolPf > 1e-9 ? Math.min(1, load.fill) : 0,
+    },
+    {
+      label: 'Useful burn',
+      value: `${fmtPf(load.usefulPf)} PF`,
+      muted: load.usefulPf + 1e-9 < load.usedPf,
+    },
+    {
       label: 'Power draw',
-      value: `${powerMw.toFixed(3)} MW`,
+      value:
+        powerMw <= 1e-6 && load.usedPf > 1e-9
+          ? 'Cloud-powered (0.000 MW campus)'
+          : `${powerMw.toFixed(3)} MW`,
     },
     {
       label: 'Allocation',
@@ -257,7 +878,7 @@ function buildTrainBreakdown(
     },
   ]
 
-  let utilization = 0
+  let utilization = load.fill
   let utilizationLabel = 'Idle'
   let summary = 'No training job — train PF is idle.'
 
@@ -266,10 +887,14 @@ function buildTrainBreakdown(
       (sum, entry) => sum + Math.max(0, entry.targetPfDays - entry.progressPfDays),
       0,
     )
-    const burn = poolPf
+    const burn = load.usefulPf
     const daysLeft = burn > 1e-6 ? totalRemaining / burn : Infinity
-    utilization = 1
-    utilizationLabel = activeJobs.length > 1 ? `${activeJobs.length} jobs` : 'In use'
+    utilizationLabel =
+      load.usedPf <= 1e-9
+        ? 'Stalled'
+        : activeJobs.length > 1
+          ? `${activeJobs.length} jobs`
+          : 'In use'
     const headline = job
       ? `Training ${formatParams(job.targetParamsB)}`
       : 'Safety campaign running'
@@ -300,6 +925,25 @@ function buildTrainBreakdown(
       lines.push({
         label: 'Safety campaign',
         value: state.player.safetyCampaign.modelId,
+        muted: true,
+      })
+    }
+    if (load.jobs.length > 0) {
+      for (const consumer of load.jobs) {
+        lines.push({
+          label: consumer.kind === 'safety' ? 'Safety' : consumer.name,
+          value:
+            consumer.usefulPf + 1e-9 < consumer.usedPf
+              ? `${fmtPf(consumer.usedPf)} PF occ · ${fmtPf(consumer.usefulPf)} useful · ${pct01(consumer.share)}`
+              : `${fmtPf(consumer.usedPf)} PF · ${pct01(consumer.share)}`,
+          bar: Math.min(1, consumer.share),
+        })
+      }
+    }
+    if (load.idlePf > 0.001) {
+      lines.push({
+        label: 'Idle',
+        value: `${fmtPf(load.idlePf)} PF`,
         muted: true,
       })
     }
@@ -338,6 +982,7 @@ function buildServeBreakdown(
   state: SimState,
   snap: ComputeSnapshot,
   allocShare: number,
+  load: ServePoolLoad,
 ): PoolBreakdown {
   const poolPf = snap.pools.inference
   const powerMw = snap.mwBreakdown.inference
@@ -352,7 +997,7 @@ function buildServeBreakdown(
       ? inferenceCapacityMTok(snap, model, state.player.servingEfficiency, allocShare)
       : lm.capacityMTok ?? 0
   const demandM = lm.playerDemandMTok ?? 0
-  const util = liveCap > 1e-9 ? demandM / liveCap : demandM > 0 ? 2 : 0
+  const util = load.fill
   const utilClamped = Math.min(1, util)
 
   const pfPer =
@@ -387,6 +1032,16 @@ function buildServeBreakdown(
   const hwTps = snap.chipCount * snap.avgTokPerSecPerChip
   const lines: BreakdownLine[] = [
     {
+      label: 'Used / allocated',
+      value: `${fmtPf(load.usedPf)} / ${fmtPf(load.allocatedPf)} PF`,
+      bar: utilClamped,
+      warn: load.warn,
+    },
+    {
+      label: 'API vs subs used',
+      value: `${fmtPf(load.apiUsedPf)} · ${fmtPf(load.subUsedPf)} PF`,
+    },
+    {
       label: 'Token Cap',
       value: `${fmtMTok(liveCap)} MTok/d`,
     },
@@ -397,8 +1052,8 @@ function buildServeBreakdown(
     {
       label: 'Demand / Cap',
       value: `${fmtMTok(demandM)} / ${fmtMTok(liveCap)} MTok`,
-      bar: utilClamped,
-      warn: util > 1.02,
+      bar: liveCap > 1e-9 ? Math.min(1, demandM / liveCap) : 0,
+      warn: liveCap > 1e-9 ? demandM / liveCap > 1.02 : demandM > 0,
     },
     {
       label: 'Pool utilization',
@@ -464,6 +1119,14 @@ function buildServeBreakdown(
     })
   }
 
+  if (load.idlePf > 0.001 && !load.warn) {
+    lines.push({
+      label: 'Idle',
+      value: `${fmtPf(load.idlePf)} PF`,
+      muted: true,
+    })
+  }
+
   if ((lm.unservedRatio ?? 0) > 0.01) {
     lines.push({
       label: 'Unserved',
@@ -477,10 +1140,12 @@ function buildServeBreakdown(
     util > 1.05 ? 'Overloaded' : util > 0.85 ? 'Busy' : util > 0.15 ? 'Partial' : 'Idle'
   const summary =
     util > 1.05
-      ? `Demand exceeds token Cap by ${pct01(util - 1)} — raise Serve %, racks, or ship a smaller model.`
+      ? `Served PF exceeds the inference pool by ${pct01(util - 1)} — unserved / queued traffic.`
       : util > 0.15
-        ? `Serving uses ~${pct01(utilClamped)} of token Cap (racks × model).`
-        : 'Little traffic — token Cap is mostly headroom.'
+        ? `Serving uses ~${pct01(utilClamped)} of allocated inference PF.`
+        : load.idlePf > 0.001
+          ? `Idle ${fmtPf(load.idlePf)} PF — allocated serve headroom.`
+          : 'Little traffic — inference PF is mostly headroom.'
 
   return {
     id: 'inference',
@@ -497,16 +1162,13 @@ function buildServeBreakdown(
 
 function buildResearchBreakdown(
   state: SimState,
-  snap: ComputeSnapshot,
   allocShare: number,
+  usage: ResearchComputeUsage,
 ): PoolBreakdown {
-  const usage = researchComputeUsage(state, snap)
   const poolPf = usage.poolPf
   const powerMw = usage.powerMw
   const job = state.player.activeResearch
-  const programs = (state.player.researchPrograms ?? []).filter(
-    (program) => program.phase !== 'complete',
-  )
+  const programs = assignedResearchPrograms(state)
   const staff = playerStaff(state)
   const lines: BreakdownLine[] = [
     {

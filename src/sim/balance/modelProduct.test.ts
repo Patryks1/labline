@@ -13,6 +13,8 @@ import {
   foundationDataWeights,
   highestPostTrainStage,
   INSTANT_EFFORT_ID,
+  allocateEffortHeadPf,
+  instantRecipe,
   migrateEffortRecipes,
   personalityEngagement,
   planPersonalityDissatisfaction,
@@ -268,6 +270,91 @@ describe("model product profile", () => {
     expect(
       serveTokenMultiplierForRecipe({ thinkingTokenMult: 8 }, 50),
     ).toBeGreaterThan(4);
+  });
+
+  it("makes capability-biased heads costlier and stronger than efficiency-biased heads", () => {
+    const benches = {
+      mmlu: 40,
+      coding: 40,
+      math: 40,
+      vision: 10,
+      law: 20,
+      health: 20,
+      science: 40,
+      multilingual: 30,
+      agents: 30,
+      safety: 50,
+      personality: 22,
+    };
+    const capable = applyEffortLiftFromRecipe(40, benches, {
+      kind: "trained",
+      trained: true,
+      thinkingTokenMult: 4.5,
+      quality: 0.85,
+      capabilityBias: 1,
+    });
+    const efficient = applyEffortLiftFromRecipe(40, benches, {
+      kind: "trained",
+      trained: true,
+      thinkingTokenMult: 4.5,
+      quality: 0.85,
+      capabilityBias: 0,
+    });
+    expect(capable.capability).toBeGreaterThan(efficient.capability + 1.5);
+    const capableCost = serveTokenMultiplierForRecipe(
+      { kind: "trained", thinkingTokenMult: 4.5, capabilityBias: 1 },
+      50,
+    );
+    const efficientCost = serveTokenMultiplierForRecipe(
+      { kind: "trained", thinkingTokenMult: 4.5, capabilityBias: 0 },
+      50,
+    );
+    expect(capableCost).toBeGreaterThan(efficientCost * 2.5);
+  });
+
+  it("keeps Instant free to serve regardless of capability bias", () => {
+    const capable = serveTokenMultiplierForRecipe(
+      { kind: "instant", thinkingTokenMult: 1, capabilityBias: 1 },
+      50,
+    );
+    const efficient = serveTokenMultiplierForRecipe(
+      { kind: "instant", thinkingTokenMult: 1, capabilityBias: 0 },
+      50,
+    );
+    expect(capable).toBeCloseTo(efficient);
+    expect(capable).toBeLessThan(
+      serveTokenMultiplierForRecipe(
+        { kind: "trained", thinkingTokenMult: 4.5, capabilityBias: 0.5 },
+        50,
+      ),
+    );
+  });
+
+  it("splits Train PF across heads without draining the whole pool", () => {
+    const { remainderPf, byId } = allocateEffortHeadPf(
+      [
+        {
+          ...instantRecipe(),
+          trainComputeShare: 0.4,
+        },
+        {
+          id: "high",
+          name: "Deep",
+          kind: "trained",
+          thinkingTokenMult: 4.5,
+          trainPfDays: 0,
+          trainCash: 0,
+          trained: true,
+          quality: 0.7,
+          served: true,
+          trainComputeShare: 0.1,
+        },
+      ],
+      10,
+    );
+    expect(byId[INSTANT_EFFORT_ID]).toBeCloseTo(4);
+    expect(byId.high).toBeCloseTo(1);
+    expect(remainderPf).toBeCloseTo(5);
   });
 
   it("quotes Instant benches at 1× tokens and trained recipes at their thinking budget", () => {

@@ -2,9 +2,10 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { createGame } from "../../../sim/createGame";
+import { queueResearchProgram } from "../../../sim/systems/researchPrograms";
 import { researchComputeUsage } from "../../../sim/systems/computeBreakdown";
 import { useGameStore } from "../../../store/gameStore";
-import { ResearchPanel, researchPoolTileDetail, researchPoolTileValue } from "./ResearchPanel";
+import { ResearchPanel, ResearchProgramQueue, researchPoolTileDetail, researchPoolTileValue } from "./ResearchPanel";
 import {
   RESEARCH_TREE_DEFAULT_ZOOM,
   researchCanvasFitScale,
@@ -162,6 +163,46 @@ describe("ResearchPanel mobile presentation", () => {
     ]);
     expect(related).toEqual(expected);
     expect(related.size).toBeLessThan(layout.nodes.length / 4);
+  });
+
+  it("exposes unqueue and set-active controls on queued methods", () => {
+    let state = createGame(7_230);
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        cash: Math.max(state.player.cash, 10_000_000),
+        staff: {
+          ...(state.player.staff ?? {
+            researcher: 0,
+            engineer: 0,
+            data_processor: 0,
+            ops: 0,
+          }),
+          researcher: 6,
+          engineer: 4,
+          data_processor: 4,
+        },
+      },
+    };
+    state = queueResearchProgram(state, "sys_batching");
+    state = queueResearchProgram(state, "opt_checkpoint");
+    const queue = state.player.researchProgramQueue ?? [];
+
+    const markup = renderToStaticMarkup(
+      createElement(ResearchProgramQueue, {
+        state,
+        queue,
+        selectedPodId: "pod-foundations",
+        onSelectMethod: () => {},
+        apply: () => {},
+      }),
+    );
+
+    expect(queue).toContain("opt_checkpoint");
+    expect(markup).toContain("Set Activation Checkpointing as active research");
+    expect(markup).toContain("Unqueue Activation Checkpointing");
+    expect(markup).toContain("research-queue-row");
   });
 });
 

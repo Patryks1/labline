@@ -150,9 +150,13 @@ export const TREE_RESEARCH_POOL_FLOOR = 0.15;
 function treeResearchActive(state: SimState): boolean {
   return (
     Boolean(state.player.activeResearch) ||
-    (state.player.researchPrograms?.some(
-      (program) => program.phase !== "complete",
-    ) ??
+    (state.player.researchPrograms?.some((program) => {
+      if (program.phase === "complete") return false;
+      const pod = (state.player.researchPods ?? []).find(
+        (candidate) => candidate.id === program.podId,
+      );
+      return pod?.assignmentId === program.id;
+    }) ??
       false)
   );
 }

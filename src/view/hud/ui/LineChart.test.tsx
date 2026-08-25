@@ -27,4 +27,29 @@ describe('LineChart interaction contract', () => {
     expect(markup).toContain('aria-live="polite"')
     expect(markup).toContain('Validation loss. No point selected.')
   })
+
+  it('uses per-point radius and detail in the accessible label', () => {
+    const markup = renderToStaticMarkup(
+      createElement(LineChart, {
+        series: [
+          {
+            id: 'frontier',
+            label: 'Labline',
+            color: 'var(--color-mint)',
+            points: [
+              { x: 1, y: 40, r: 3.25, detail: 'think —' },
+              { x: 12, y: 72, r: 6.5, detail: 'think 4.0× Think' },
+            ],
+          },
+        ],
+        ariaLabel: 'Frontier progress: capability and thinking by release day',
+      }),
+    )
+
+    expect(markup).toContain('r="3.25"')
+    expect(markup).toContain('r="6.5"')
+    expect(markup).toContain('data-point-detail="think —"')
+    expect(markup).toContain('data-point-detail="think 4.0× Think"')
+    expect(markup).toContain('aria-label="Labline, 12, 72, think 4.0× Think"')
+  })
 })

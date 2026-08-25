@@ -311,6 +311,10 @@ export function buildScaledModel(opts: BuildScaledModelOpts): Model {
     modalities,
     tokPerSecMult: opts.tokPerSecMult ?? (moe ? 0.9 : 0.7),
     capability,
+    trainingNumerics: opts.trainingNumerics,
+    nativeWeightPrecision: opts.trainingNumerics
+      ? nativeWeightPrecisionForNumerics(opts.trainingNumerics)
+      : undefined,
   });
 
   return normalizeModelEvaluations({

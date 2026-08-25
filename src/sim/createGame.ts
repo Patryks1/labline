@@ -370,6 +370,8 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
         serveThrottlePolicy: 'balanced',
         serveSlowdownLimit: 0.25,
         peakPricingPct: 0,
+        apiAcceptingNew: true,
+        subsAcceptingNew: true,
         activeModelId: null,
         enterpriseContractBonus: 0,
         plans: defaultPlans(),

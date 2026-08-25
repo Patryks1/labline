@@ -266,6 +266,19 @@ export interface EffortRecipe {
   /** 0–1: how much of the thinking budget is useful work. */
   quality: number;
   served: boolean;
+  /**
+   * 0 = efficiency (cheaper tokens, less cap), 1 = capability (much costlier
+   * tokens, more cap). Instant ignores this for serve cost.
+   */
+  capabilityBias?: number;
+  /** Slice of the active job's Train PF allocated to this head (0–0.45). */
+  trainComputeShare?: number;
+  /** PF received by this head across continue/finetune passes. */
+  progressPfDays?: number;
+  /** PF target for the current training pass. */
+  targetPfDays?: number;
+  /** Live observed loss while this head is receiving compute. */
+  loss?: number;
 }
 
 export interface EffortBoard {
@@ -289,6 +302,9 @@ export interface EffortTrainProgress {
   progressPfDays: number;
   targetPfDays: number;
   cashSunk: number;
+  loss?: number;
+  capabilityBias?: number;
+  trainComputeShare?: number;
 }
 
 export interface ModelProductProfile {
@@ -2324,6 +2340,13 @@ export interface PlanModalityRoute {
   precision: ServePrecision;
 }
 
+/** Plan-local enablement and quantization for one thinking head. */
+export interface PlanEffortPolicy {
+  enabled: boolean;
+  /** Serving format for this head. Missing uses the model's plan precision. */
+  precision?: PlanServePrecision;
+}
+
 export interface PlanDemandShock {
   id: string;
   kind: "launch" | "upgrade" | "removal" | "quantization";
@@ -2377,6 +2400,12 @@ export interface SubPlan {
    * `servePrecision` remains as the legacy/default value for older saves.
    */
   servePrecisionByModel?: Record<string, PlanServePrecision>;
+  /**
+   * Per-model thinking heads this plan exposes. Missing model/effort entries
+   * inherit globally served recipes at {@link servePrecisionByModel}.
+   * Instant stays available when every explicit head is turned off.
+   */
+  effortPolicyByModel?: Record<string, Record<string, PlanEffortPolicy>>;
   /** Compute-v2 primary/fallback routing by native product modality. */
   modalityRoutes?: Partial<Record<ModelIOModality, PlanModalityRoute>>;
   /** Persistent novelty/trust shocks; deterministic decay is evaluated by day. */
@@ -2390,6 +2419,12 @@ export interface SubPlan {
   dataCollectionRate?: number;
   enabled: boolean;
   subscriberCap?: number;
+  /**
+   * When false, stop new enrollment and grandfather current subscribers.
+   * Only meaningful while {@link ProductPricing.subsAcceptingNew} is on.
+   * Default true (missing on older saves).
+   */
+  acceptingNew?: boolean;
 }
 
 export interface PlanDayStats {
@@ -2508,6 +2543,16 @@ export interface ProductPricing {
   serveSlowdownLimit?: number;
   /** Maximum temporary API peak-price uplift while the pool is overloaded. */
   peakPricingPct?: number;
+  /**
+   * When false, freeze new API adopter growth; existing API intensity remains.
+   * Default true. Missing on older saves.
+   */
+  apiAcceptingNew?: boolean;
+  /**
+   * Master enrollment switch for every plan. Per-plan {@link SubPlan.acceptingNew}
+   * only applies while this is on. Default true.
+   */
+  subsAcceptingNew?: boolean;
   /** Public models currently listed as simultaneous API endpoints. */
   apiModelIds?: string[];
   /**
@@ -2878,14 +2923,25 @@ export interface EquityOffer {
   expiresDay: number;
   /** Optional model-backed origin for an investor pitch. */
   modelId?: string;
+  /** Disclosed thinking head (`instant`, `medium` / Think, `high` / Deep, or a custom recipe id). */
+  effortId?: string;
 }
 
 export type InvestorPitchOutcome = "funded" | "declined";
+
+/** Select value for a model-backed pitch: weights plus disclosed thinking head. */
+export interface InvestorPitchTarget {
+  modelId: string;
+  /** Effort recipe id. Instant is always `instant`. */
+  effortId: string;
+}
 
 /** Persisted result of a model-backed investor conversation. */
 export interface InvestorPitchRecord {
   id: string;
   modelId: string;
+  /** Thinking head disclosed in this conversation. Missing in legacy saves → Instant. */
+  effortId?: string;
   modelName: string;
   investorName: string;
   day: number;
@@ -3495,6 +3551,8 @@ export interface TrainingForecast {
   targetPfDays: number;
   /** Physical fleet draw at the planned training allocation. */
   powerMw: number;
+  /** Useful training PF after the selected compute format's hardware multiplier. */
+  usefulTrainPf?: number;
   etaDays: number;
   minCalendarDays: number;
   upfrontCash: number;
@@ -3515,6 +3573,9 @@ export interface TrainingForecast {
   modalityComputeMult: number;
   expectedCapability: number;
   interactiveTokPerSec: number;
+  /** PF-days per MTok at the recipe's native serve precision. */
+  servePfPerMTok?: number;
+  servePrecision?: NativeWeightPrecision;
   risk: "low" | "medium" | "high";
   warnings: string[];
   /** Composed precision assumptions for quote presentation. */
@@ -4277,6 +4338,18 @@ export interface SimState {
     apiSurgeLevel?: number;
     /** Effective API list-price multiplier from surge policy. */
     apiSurgeMultiplier?: number;
+    /** Blended public list $/MTok before peak uplift. */
+    apiListPricePerMTok?: number;
+    /** Posted peak $/MTok (list × surge multiplier). */
+    apiPeakPricePerMTok?: number;
+    /** Settled API revenue above the list-price bill for today's tokens. */
+    apiPeakExtraRevenue?: number;
+    /** Inference pool is empty or coverage cannot admit demand. */
+    serveOutage?: boolean;
+    /** New API MTok refused today because pause-new is on. */
+    pausedNewApiMTok?: number;
+    /** New plan seats refused today because pause-new is on. */
+    pausedNewSubscriptionSeats?: number;
     planStats: PlanDayStats[];
     /** Served subscription MTok today keyed by plan id. */
     servedMTokByPlanId?: Record<string, number>;

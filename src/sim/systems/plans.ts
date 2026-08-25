@@ -7,22 +7,32 @@ import {
   modelBlendedPublicApiPrice,
   type CommercialModelKind,
 } from "../balance/pricing";
-import { precisionComputeMult } from "../balance/tokenServe";
+import { defaultServePrecisionForModel, precisionComputeMult } from "../balance/tokenServe";
 import type {
   BenchmarkId,
+  EffortRecipe,
   Model,
   ModelIOModality,
   PlanDemandShock,
   PlanDayStats,
+  PlanEffortPolicy,
   PlanModalityRoute,
   PlanServePrecision,
+  ProductPricing,
   SegmentId,
   SimState,
   SubPlan,
 } from "../types";
 import { isCommerciallyOffered, isLivePublicModel } from "../modelRelease";
 import { agedMarketView } from "../balance/modelAging";
-import { planPersonalityDissatisfaction } from "../balance/modelProduct";
+import {
+  INSTANT_EFFORT_ID,
+  defaultEffortIdOf,
+  instantRecipe,
+  migrateEffortRecipes,
+  planPersonalityDissatisfaction,
+  serveTokenMultiplierForRecipe,
+} from "../balance/modelProduct";
 import {
   customerBandForPrice,
   expectedUtilizationRange,
@@ -137,6 +147,7 @@ export function defaultPlans(): SubPlan[] {
       modalityRoutes: {},
       demandShocks: [],
       enabled: true,
+      acceptingNew: true,
     },
     {
       id: "plan-plus",
@@ -154,6 +165,7 @@ export function defaultPlans(): SubPlan[] {
       modalityRoutes: {},
       demandShocks: [],
       enabled: true,
+      acceptingNew: true,
     },
     {
       id: "plan-pro",
@@ -171,6 +183,7 @@ export function defaultPlans(): SubPlan[] {
       modalityRoutes: {},
       demandShocks: [],
       enabled: true,
+      acceptingNew: true,
     },
     {
       id: "plan-max",
@@ -188,6 +201,7 @@ export function defaultPlans(): SubPlan[] {
       modalityRoutes: {},
       demandShocks: [],
       enabled: true,
+      acceptingNew: true,
     },
   ];
 }
@@ -347,7 +361,7 @@ export function planModelServePrecision(
     model,
     plan.servePrecisionByModel?.[model.id] ??
       legacyRoute?.precision ??
-      plan.servePrecision,
+      defaultServePrecisionForModel(model),
     unlocked,
   );
 }
@@ -491,7 +505,7 @@ export function modelForServePrecision(
     precision === "ternary_1_58" &&
     model.trainingNumerics?.nativeWeightFormat !== "ternary_1_58"
       ? "fp16"
-      : precision;
+      : (precision ?? defaultServePrecisionForModel(model));
   const m = planServeModifiers(requested, unlocked);
   return {
     ...model,
@@ -813,6 +827,92 @@ export function isFreePlan(plan: SubPlan): boolean {
   return plan.pricePerMonth <= 0;
 }
 
+/** Default true: missing or undefined still accepts new API callers. */
+export function isApiAcceptingNew(
+  pricing: Pick<ProductPricing, "apiAcceptingNew">,
+): boolean {
+  return pricing.apiAcceptingNew !== false;
+}
+
+/** Default true: missing or undefined still enrolls new subscribers. */
+export function isSubsAcceptingNew(
+  pricing: Pick<ProductPricing, "subsAcceptingNew">,
+): boolean {
+  return pricing.subsAcceptingNew !== false;
+}
+
+/**
+ * Per-plan enrollment. Master {@link isSubsAcceptingNew} wins; a plan-level
+ * false only matters while the master switch is on.
+ */
+export function isPlanAcceptingNew(
+  pricing: Pick<ProductPricing, "subsAcceptingNew">,
+  plan: Pick<SubPlan, "acceptingNew">,
+): boolean {
+  return isSubsAcceptingNew(pricing) && plan.acceptingNew !== false;
+}
+
+export function apiWaitlistFeedEvent(state: SimState): FeedEventInput {
+  return {
+    id: "feed-pause-api",
+    day: state.day,
+    category: "market",
+    title: "API waitlist",
+    body: `${state.player.name} paused new API traffic; existing callers keep their current intensity.`,
+    source: state.player.name,
+    tone: "warning",
+    entityId: state.playerLabId,
+    kind: "api_waitlist",
+  };
+}
+
+export function subsClosedFeedEvent(state: SimState): FeedEventInput {
+  return {
+    id: "feed-pause-subs",
+    day: state.day,
+    category: "market",
+    title: "Plans closed to new",
+    body: `${state.player.name} paused new subscription enrollment; current subscribers stay on their plans.`,
+    source: state.player.name,
+    tone: "warning",
+    entityId: state.playerLabId,
+    kind: "subs_closed_to_new",
+  };
+}
+
+export function planClosedFeedEvent(
+  state: SimState,
+  plan: Pick<SubPlan, "id" | "name">,
+): FeedEventInput {
+  return {
+    id: `feed-pause-plan-${plan.id}`,
+    day: state.day,
+    category: "market",
+    title: `${plan.name} closed to new`,
+    body: `${plan.name} is waitlisted for new signups; existing members keep their seats.`,
+    source: state.player.name,
+    tone: "warning",
+    entityId: state.playerLabId,
+    kind: "plan_closed_to_new",
+  };
+}
+
+/** Feed cards when HUD toggles pause-new via setPricing. */
+export function pricingPauseFeedEvents(
+  state: SimState,
+  prev: ProductPricing,
+  next: ProductPricing,
+): FeedEventInput[] {
+  const events: FeedEventInput[] = [];
+  if (isApiAcceptingNew(prev) && !isApiAcceptingNew(next)) {
+    events.push(apiWaitlistFeedEvent(state));
+  }
+  if (isSubsAcceptingNew(prev) && !isSubsAcceptingNew(next)) {
+    events.push(subsClosedFeedEvent(state));
+  }
+  return events;
+}
+
 /** Plan usage mult: 0.025× (0.5 MTok/mo floor) → 500× (enterprise power seats). */
 export function clampMultiplier(n: number): number {
   if (!Number.isFinite(n)) return 1;
@@ -895,6 +995,7 @@ export function createPlan(
     modalityRoutes: {},
     demandShocks: [],
     enabled: true,
+    acceptingNew: true,
   };
   plan.servePrecisionByModel = normalizedPlanModelPrecisions(state, plan);
   plan.modalityRoutes = normalizedPlanRoutes(state, plan);
@@ -1135,6 +1236,9 @@ export function updatePlan(
         kind: "player_plan_price_change",
       });
     }
+    if (p.acceptingNew !== false && next.acceptingNew === false) {
+      pricingEvents.push(planClosedFeedEvent(state, next));
+    }
     return next;
   });
   const nextState = {
@@ -1186,7 +1290,7 @@ export function attachModelToEmptyPlans(
     const precision = model
       ? clampModelServePrecision(
           model,
-          p.servePrecision,
+          defaultServePrecisionForModel(model),
           state.player.researchUnlocked,
         )
       : clampServePrecision(p.servePrecision, state.player.researchUnlocked);
@@ -1303,16 +1407,20 @@ export function planEffectiveAllowanceMTokPerMonth(
 
 export interface PlanModelEntitlement {
   modelId: string;
+  /** Thinking head id (`instant`, `medium`, …). */
+  effortId: string;
   name: string;
   kind: CommercialModelKind;
-  /** Share of the plan's traffic routed to this model. */
+  /** Share of the plan's traffic routed to this model × effort head. */
   trafficShare: number;
   /** Blended public API list price: input × expected input share + output × expected output share. */
   blendedApiPricePerMTok: number;
-  /** Fixed plan MTok allocated to this model by its routing share. */
+  /** Fixed plan MTok allocated to this model×effort by routing and effort mix. */
   includedMTokPerMonth: number;
-  /** Expected tokens per interaction for this model's workload. */
+  /** Expected tokens per interaction for this workload × thinking multiplier. */
   tokensPerInteraction: number;
+  /** Serve-time token multiplier vs a 1× Instant budget. */
+  tokenMult: number;
   /** Approximate daily interactions = included tokens ÷ interaction size ÷ 30. */
   interactionsPerDay: number;
   /** Band-based expected allowance utilization for the plan. */
@@ -1324,9 +1432,102 @@ export interface PlanModelEntitlement {
 }
 
 /**
- * Per-model allocation table for a plan. A fixed plan entitlement is divided
- * by the actual routing mix; expensive models consume more PF but cannot make
- * the allowance disappear when their public API price changes.
+ * Display name for an entitlement row. Instant-only (or single enabled head)
+ * keeps the bare model name; otherwise `Lumen-Instant` / `Lumen-Think`.
+ */
+export function planEffortEntitlementDisplayName(
+  modelName: string,
+  recipe: Pick<EffortRecipe, "kind" | "name">,
+  enabledRecipeCount: number,
+): string {
+  if (enabledRecipeCount <= 1) return modelName;
+  const suffix =
+    recipe.kind === "instant" ? "Instant" : recipe.name.trim() || "Think";
+  const needle = `-${suffix}`;
+  if (modelName.toLowerCase().endsWith(needle.toLowerCase())) return modelName;
+  return `${modelName}${needle}`;
+}
+
+/**
+ * Request-mix shares across enabled thinking heads. Matches
+ * {@link servedEffortTokenMultiplier}: default head 55%, remainder split 45%.
+ */
+export function effortRecipeRequestShares(
+  recipes: readonly EffortRecipe[],
+  defaultId: string,
+): Record<string, number> {
+  const shares: Record<string, number> = {};
+  if (recipes.length === 0) return shares;
+  if (recipes.length === 1) {
+    shares[recipes[0]!.id] = 1;
+    return shares;
+  }
+  const fallback =
+    recipes.find((recipe) => recipe.id === defaultId) ?? recipes[0]!;
+  const remainder = recipes.filter((recipe) => recipe.id !== fallback.id);
+  shares[fallback.id] = 0.55;
+  const each = 0.45 / remainder.length;
+  for (const recipe of remainder) shares[recipe.id] = each;
+  return shares;
+}
+
+/**
+ * Thinking heads this plan exposes for a model. Honors
+ * {@link SubPlan.effortPolicyByModel}; missing entries inherit globally
+ * served/trained recipes. Instant remains when every explicit head is off.
+ */
+export function planEnabledEffortRecipes(
+  plan: SubPlan,
+  model: Model,
+): EffortRecipe[] {
+  const recipes = migrateEffortRecipes(model.productProfile);
+  const globalServed = recipes.filter(
+    (recipe) => recipe.served && recipe.trained,
+  );
+  const global =
+    globalServed.length > 0
+      ? globalServed
+      : recipes.filter((recipe) => recipe.id === INSTANT_EFFORT_ID);
+
+  const policyMap: Record<string, PlanEffortPolicy> | undefined =
+    plan.effortPolicyByModel?.[model.id];
+  if (!policyMap) {
+    return global.length > 0 ? global : [instantRecipe()];
+  }
+
+  const byId = new Map(recipes.map((recipe) => [recipe.id, recipe]));
+  const enabled: EffortRecipe[] = [];
+  const seen = new Set<string>();
+
+  for (const recipe of global) {
+    const policy = policyMap[recipe.id];
+    if (policy != null && !policy.enabled) continue;
+    enabled.push(recipe);
+    seen.add(recipe.id);
+  }
+
+  for (const [effortId, policy] of Object.entries(policyMap)) {
+    if (!policy.enabled || seen.has(effortId)) continue;
+    const recipe = byId.get(effortId);
+    if (!recipe?.trained) continue;
+    enabled.push(recipe);
+    seen.add(effortId);
+  }
+
+  if (enabled.length === 0) {
+    return [
+      byId.get(INSTANT_EFFORT_ID) ??
+        recipes.find((recipe) => recipe.kind === "instant") ??
+        instantRecipe(),
+    ];
+  }
+  return enabled;
+}
+
+/**
+ * Per-model×thinking-level allocation table for a plan. A fixed plan
+ * entitlement is divided by the routing mix, then by enabled effort heads;
+ * deeper heads burn more tokens per message (same $/MTok unit price).
  */
 export function planModelEntitlements(
   state: SimState,
@@ -1345,33 +1546,59 @@ export function planModelEntitlements(
   );
   const [low, high] = expectedUtilizationRange(plan.pricePerMonth);
   const expectedUtilization = low + (high - low) * sota;
-  return mix.map((lane) => {
+  const rows: PlanModelEntitlement[] = [];
+
+  for (const lane of mix) {
     const blended = modelBlendedPublicApiPrice(
       state.player.pricing,
       lane.model,
     );
-    const included = planModelEntitlementMTok(plan, blended) * lane.share;
+    const modelIncluded =
+      planModelEntitlementMTok(plan, blended) * lane.share;
     const kind = commercialModelKind(lane.model);
-    const tokensPerInteraction = avgTokensPerInteraction(kind);
+    const baseTokens = avgTokensPerInteraction(kind);
     const rawCostPerMTok = opts?.rawCostPerMTok?.(lane.model);
-    return {
-      modelId: lane.model.id,
-      name: lane.model.name,
-      kind,
-      trafficShare: lane.share,
-      blendedApiPricePerMTok: blended,
-      includedMTokPerMonth: included,
-      tokensPerInteraction,
-      interactionsPerDay:
-        (included * 1_000_000) / tokensPerInteraction / ECONOMY.daysPerMonth,
-      expectedUtilization,
-      apiEquivalentValuePerMonth: included * blended,
-      rawServingCostPerMonth:
-        rawCostPerMTok != null
-          ? included * expectedUtilization * Math.max(0, rawCostPerMTok)
-          : null,
-    };
-  });
+    const efficiency = lane.model.productProfile?.tokenEfficiency ?? 50;
+    const efforts = planEnabledEffortRecipes(plan, lane.model);
+    const defaultId = defaultEffortIdOf(lane.model.productProfile);
+    const requestShares = effortRecipeRequestShares(efforts, defaultId);
+
+    for (const recipe of efforts) {
+      const requestShare = requestShares[recipe.id] ?? 0;
+      if (requestShare <= 0) continue;
+      const tokenMult = serveTokenMultiplierForRecipe(recipe, efficiency);
+      const tokensPerInteraction = baseTokens * tokenMult;
+      const included = modelIncluded * requestShare;
+      const trafficShare = lane.share * requestShare;
+      rows.push({
+        modelId: lane.model.id,
+        effortId: recipe.id,
+        name: planEffortEntitlementDisplayName(
+          lane.model.name,
+          recipe,
+          efforts.length,
+        ),
+        kind,
+        trafficShare,
+        blendedApiPricePerMTok: blended,
+        includedMTokPerMonth: included,
+        tokensPerInteraction,
+        tokenMult,
+        interactionsPerDay:
+          (included * 1_000_000) /
+          tokensPerInteraction /
+          ECONOMY.daysPerMonth,
+        expectedUtilization,
+        apiEquivalentValuePerMonth: included * blended,
+        rawServingCostPerMonth:
+          rawCostPerMTok != null
+            ? included * expectedUtilization * Math.max(0, rawCostPerMTok)
+            : null,
+      });
+    }
+  }
+
+  return rows;
 }
 
 /** £500+ tiers must advertise at least this multiple of price in API value. */

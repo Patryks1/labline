@@ -27,7 +27,7 @@ import {
   buyBackEquity,
   capitalSnapshot,
   equityBuybackQuote,
-  investorPitchModels,
+  investorPitchOptions,
   investorPitchPreview,
   repayDebt as repayTypedDebt,
   requestEquityOffers,
@@ -156,15 +156,15 @@ export function OrgPanel({
   >(workspace === "marketing" ? "marketing" : workspace === "capital" ? "funding" : "staff");
   const [capitalView, setCapitalView] = useState<CapitalView>("ownership");
   const [buybackPct, setBuybackPct] = useState(1);
-  const pitchModels = useMemo(() => investorPitchModels(state), [state]);
-  const [pitchModelId, setPitchModelId] = useState<string | null>(null);
+  const pitchOptions = useMemo(() => investorPitchOptions(state), [state]);
+  const [pitchOptionId, setPitchOptionId] = useState<string | null>(null);
   const capital = useMemo(() => capitalSnapshot(state), [state]);
   const equityOffers = useMemo(() => requestEquityOffers(state), [state]);
-  const selectedPitchModelId = pitchModels.some((model) => model.id === pitchModelId)
-    ? pitchModelId
-    : pitchModels[0]?.id ?? null;
-  const pitchPreview = selectedPitchModelId
-    ? investorPitchPreview(state, selectedPitchModelId)
+  const selectedPitchOptionId = pitchOptions.some((option) => option.id === pitchOptionId)
+    ? pitchOptionId
+    : pitchOptions[0]?.id ?? null;
+  const pitchPreview = selectedPitchOptionId
+    ? investorPitchPreview(state, selectedPitchOptionId)
     : null;
   const bankProducts = useMemo(() => bankingProducts(state), [state]);
   const featuredBankProducts = bankProducts.filter((product) =>
@@ -219,8 +219,8 @@ export function OrgPanel({
   }, [maxDraw, minDraw]);
 
   useEffect(() => {
-    if (pitchModelId !== selectedPitchModelId) setPitchModelId(selectedPitchModelId);
-  }, [pitchModelId, selectedPitchModelId]);
+    if (pitchOptionId !== selectedPitchOptionId) setPitchOptionId(selectedPitchOptionId);
+  }, [pitchOptionId, selectedPitchOptionId]);
 
   const clampedDraw =
     maxDraw < minDraw ? 0 : Math.min(maxDraw, Math.max(minDraw, customAmt));
@@ -642,15 +642,15 @@ export function OrgPanel({
                       </h4>
                       <p className="mt-0.5 text-[0.625rem] leading-4 text-muted">
                         Internal checkpoints and released models can unlock a
-                        model-backed raise. Capability, reliability, and data
-                        freshness change the odds and dilution.
+                        model-backed raise. Capability, reliability, thinking
+                        level, and data freshness change the odds and dilution.
                       </p>
                     </div>
                     <span className="shrink-0 font-mono text-[0.625rem] uppercase tracking-wider text-mint">
                       seeded desk
                     </span>
                   </div>
-                  {pitchModels.length === 0 ? (
+                  {pitchOptions.length === 0 ? (
                     <p className="rounded border border-line/60 bg-void/35 px-2 py-1.5 text-[0.6875rem] text-muted">
                       Keep an internal checkpoint or release a model before
                       opening an investor conversation.
@@ -662,14 +662,14 @@ export function OrgPanel({
                       </label>
                       <HudSelect
                         id="investor-pitch-model"
-                        value={selectedPitchModelId ?? ""}
-                        onChange={(event) => setPitchModelId(event.target.value)}
+                        value={selectedPitchOptionId ?? ""}
+                        onChange={(event) => setPitchOptionId(event.target.value)}
                         className="min-h-11 w-full rounded border border-line bg-void/60 px-2 text-[0.75rem] text-bone sm:min-h-0"
                         aria-label="Model to pitch to investors"
                       >
-                        {pitchModels.map((model) => (
-                          <option key={model.id} value={model.id} className="bg-void">
-                            {model.name} · cap {model.capability.toFixed(0)} · {model.release === "released" || model.shipped ? "released" : "internal"}
+                        {pitchOptions.map((option) => (
+                          <option key={option.id} value={option.id} className="bg-void">
+                            {option.label}
                           </option>
                         ))}
                       </HudSelect>
@@ -693,7 +693,7 @@ export function OrgPanel({
                             type="button"
                             variant="primary"
                             disabled={!pitchPreview.eligible}
-                            onClick={() => setState(acceptInvestorPitch(state, pitchPreview.modelId))}
+                            onClick={() => setState(acceptInvestorPitch(state, pitchPreview.id))}
                             className="min-h-11 w-full rounded bg-mint/20 px-2 py-1.5 font-mono text-[0.6875rem] text-mint disabled:opacity-35 sm:min-h-0"
                             title={pitchPreview.eligible ? "Resolve the seeded investor pitch" : pitchPreview.reason}
                           >

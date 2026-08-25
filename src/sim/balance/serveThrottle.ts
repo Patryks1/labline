@@ -205,13 +205,36 @@ export function surgePriceMultiplier(level: number, peakPricingPct = 80): number
 }
 
 /**
- * Peak prices are a demand control as well as a revenue control. Once the
- * posted uplift becomes excessive, API traffic collapses instead of leaving a
- * misleading near-full demand signal in the market ledger.
+ * Peak prices are a demand control as well as a revenue control.
+ *
+ * Modest surge (+10–40%) must reduce volume *less* than the price uplift so
+ * API-day revenue rises under overload. A steep term only bites near the
+ * +100% cap, where gouging still collapses traffic instead of leaving a
+ * misleading full-demand ledger.
  */
 export function peakPricingDemandMultiplier(priceMultiplier: number): number {
   const uplift = Math.max(0, Number.isFinite(priceMultiplier) ? priceMultiplier - 1 : 0)
-  return Math.max(0.005, Math.exp(-uplift * 3.2))
+  return Math.max(
+    0.005,
+    Math.exp(-uplift * 0.35 - Math.pow(uplift, 4) * 5),
+  )
+}
+
+/** Posted price × remaining volume. >1 means the surge raises API revenue. */
+export function peakPricingRevenueFactor(priceMultiplier: number): number {
+  return (
+    Math.max(0, Number.isFinite(priceMultiplier) ? priceMultiplier : 0) *
+    peakPricingDemandMultiplier(priceMultiplier)
+  )
+}
+
+/** True when the inference pool is empty or coverage cannot admit demand. */
+export function isInferenceOutage(
+  capacityPf: number,
+  unservedRatio: number,
+): boolean {
+  if (!Number.isFinite(capacityPf) || capacityPf <= 1e-6) return true
+  return Number.isFinite(unservedRatio) && unservedRatio >= 0.4
 }
 
 /** Small gouging-perception brand hit while a posted surge is live. */

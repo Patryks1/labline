@@ -25,6 +25,8 @@ import type {
   SpecializationFocus,
   ReasoningEffort,
   ModelProductProfile,
+  EffortRecipe,
+  EffortTrainProgress,
 } from "../types";
 import {
   gymUnlocked,
@@ -303,15 +305,23 @@ import {
   productProfileFromModel,
   withServedRecipe,
   withDefaultRecipe,
+  withEffortRecipePatch,
   migrateEffortRecipes,
   INSTANT_EFFORT_ID,
   MAX_TRAINED_EFFORTS,
+  DEFAULT_EFFORT_HEAD_SHARE,
   clampThinkingTokenMult,
+  clampCapabilityBias,
+  clampEffortTrainShare,
   effortTrainTargetPfDays,
   effortQualityFromTrain,
+  effortFundedPfFromQuality,
   effortCashCost,
   effortReasoningUnlocked,
   gymQualityByKind,
+  allocateEffortHeadPf,
+  normalizeEffortRecipe,
+  defaultEffortIdOf,
 } from "../balance/modelProduct";
 import { normalizeModelEvaluations } from "../balance/evaluationSuites";
 import {
@@ -2606,6 +2616,12 @@ export function startTraining(
     minimumDevices: Math.max(1, Math.ceil(needVram / 80)),
     preemptible: true,
     failed: false,
+    // Continue / branch jobs must carry effort heads from the base checkpoint
+    // so Think/Deep (and custom heads) stay served and trainable.
+    productProfile:
+      mode === "continue"
+        ? cloneProductProfileForContinue(continuationBase?.productProfile)
+        : undefined,
     lossHistory: [
       {
         day: state.day,
@@ -4159,6 +4175,9 @@ export function recoverFailedPostTrainFromCheckpoint(
     recoveryCheckpointId: checkpoint.id,
     recoveryChildJobId: undefined,
     parentCheckpointId: checkpoint.id,
+    productProfile:
+      cloneProductProfileForContinue(checkpoint.model.productProfile) ??
+      failedJob.productProfile,
     benchmarkSnapshots: [],
     pendingBenchmark: undefined,
     benchmarkSequence: 0,
@@ -4864,31 +4883,75 @@ export function deleteModel(state: SimState, modelId: string): SimState {
   };
 }
 
+function cloneProductProfileForContinue(
+  profile: ModelProductProfile | undefined,
+): ModelProductProfile | undefined {
+  if (!profile) return undefined;
+  const recipes = migrateEffortRecipes(profile).map((recipe) => ({ ...recipe }));
+  return {
+    ...profile,
+    focus: { ...profile.focus },
+    effortRecipes: recipes,
+    effortPolicies: profile.effortPolicies?.map((policy) => ({ ...policy })),
+    servedEfforts: profile.servedEfforts
+      ? [...profile.servedEfforts]
+      : undefined,
+    defaultEffortId: defaultEffortIdOf({ ...profile, effortRecipes: recipes }),
+  };
+}
+
+function continueBaseProductProfile(
+  state: SimState,
+  job: TrainingJob,
+): ModelProductProfile | undefined {
+  if (!job.continueFromId && !job.parentCheckpointId) return undefined;
+  const fromModel = job.continueFromId
+    ? state.player.models.find((model) => model.id === job.continueFromId)
+    : undefined;
+  if (fromModel?.productProfile) return fromModel.productProfile;
+  const checkpoints = state.player.trainingCheckpoints ?? [];
+  if (job.parentCheckpointId) {
+    const byId = checkpoints.find(
+      (candidate) => candidate.id === job.parentCheckpointId,
+    );
+    if (byId?.model.productProfile) return byId.model.productProfile;
+  }
+  if (job.continueFromId) {
+    const byModelId = checkpoints.find(
+      (candidate) => candidate.model.id === job.continueFromId,
+    );
+    if (byModelId?.model.productProfile) return byModelId.model.productProfile;
+  }
+  return undefined;
+}
+
 function productProfileForJob(
   state: SimState,
   job: TrainingJob,
 ): ModelProductProfile {
-  return (
-    job.productProfile ??
-    buildModelProductProfile({
-      lifecycle: job.lifecycle,
-      focus: job.specializationFocus,
-      branchDirection: job.branchDirection,
-      postTrain: job.postTrain,
-      completedPostTrainStages: job.completedPostTrainStages,
-      postTrainStageEffectiveness: job.postTrainStageEffectiveness,
-      chatShare: job.dataPlan?.weights?.chat ?? 0,
-      chatQuality: job.dataQualityUsed ?? 50,
-      gyms: state.player.postTrainGyms,
-      stackIds: job.modelStack,
-      researchUnlocked: state.player.researchUnlocked,
-      family: job.family,
-      backbone: job.backbone,
-      reasoningEnabled: job.completedPostTrainStages?.includes("process"),
-      outcomeSeed: job.outcomeSeed,
-      existing: job.productProfile,
-    })
+  if (job.productProfile) return job.productProfile;
+  const inherited = cloneProductProfileForContinue(
+    continueBaseProductProfile(state, job),
   );
+  if (inherited) return inherited;
+  return buildModelProductProfile({
+    lifecycle: job.lifecycle,
+    focus: job.specializationFocus,
+    branchDirection: job.branchDirection,
+    postTrain: job.postTrain,
+    completedPostTrainStages: job.completedPostTrainStages,
+    postTrainStageEffectiveness: job.postTrainStageEffectiveness,
+    chatShare: job.dataPlan?.weights?.chat ?? 0,
+    chatQuality: job.dataQualityUsed ?? 50,
+    gyms: state.player.postTrainGyms,
+    stackIds: job.modelStack,
+    researchUnlocked: state.player.researchUnlocked,
+    family: job.family,
+    backbone: job.backbone,
+    reasoningEnabled: job.completedPostTrainStages?.includes("process"),
+    outcomeSeed: job.outcomeSeed,
+    existing: job.productProfile,
+  });
 }
 
 export function setDefaultEffort(
@@ -4914,25 +4977,103 @@ export function setServedEffort(
   );
 }
 
-export function startEffortTraining(
+export type StartEffortTrainingRequest = {
+  id: string;
+  name?: string;
+  thinkingTokenMult?: number;
+  trainPfDays?: number;
+  recipeId?: string;
+  capabilityBias?: number;
+  trainComputeShare?: number;
+};
+
+export function setEffortHeadComputeShare(
   state: SimState,
-  request: {
-    id: string;
-    name: string;
-    thinkingTokenMult: number;
-    trainPfDays?: number;
-  },
+  id: string,
+  recipeId: string,
+  share: number,
 ): SimState {
-  if (!effortReasoningUnlocked(state.player.researchUnlocked)) {
+  const jobs = playerTrainingJobs(state);
+  const job = jobs.find((candidate) => candidate.id === id);
+  const model = state.player.models.find((candidate) => candidate.id === id);
+  if (!job && !model) return withAlert(state, "warn", "Model not found.");
+  if (
+    recipeId !== INSTANT_EFFORT_ID &&
+    !effortReasoningUnlocked(state.player.researchUnlocked)
+  ) {
     return withAlert(
       state,
       "warn",
       "Process Reward research is required to train extra effort heads.",
     );
   }
-  const name = request.name.trim().slice(0, 24);
-  if (!name) return withAlert(state, "warn", "Name the effort head.");
-  const thinkingTokenMult = clampThinkingTokenMult(request.thinkingTokenMult);
+  const paramsB = job?.targetParamsB ?? model?.paramsB ?? 1;
+  const gymQuality = gymQualityByKind(state.player.postTrainGyms, "math");
+  const nextShare = clampEffortTrainShare(share);
+  return patchProductProfile(state, id, (profile) => {
+    const recipes = migrateEffortRecipes(profile);
+    const recipe = recipes.find((item) => item.id === recipeId);
+    if (!recipe) return profile;
+    const required = effortTrainTargetPfDays({
+      paramsB,
+      thinkingTokenMult:
+        recipe.kind === "instant" ? 1 : recipe.thinkingTokenMult,
+      gymQuality,
+      researchUnlocked: state.player.researchUnlocked,
+    });
+    return withEffortRecipePatch(profile, recipeId, {
+      trainComputeShare: nextShare,
+      targetPfDays:
+        nextShare > 0
+          ? Math.max(recipe.targetPfDays ?? 0, required)
+          : recipe.targetPfDays ?? 0,
+    });
+  });
+}
+
+export function setEffortHeadCapabilityBias(
+  state: SimState,
+  id: string,
+  recipeId: string,
+  bias: number,
+): SimState {
+  const jobs = playerTrainingJobs(state);
+  const job = jobs.find((candidate) => candidate.id === id);
+  const model = state.player.models.find((candidate) => candidate.id === id);
+  if (!job && !model) return withAlert(state, "warn", "Model not found.");
+  if (
+    recipeId !== INSTANT_EFFORT_ID &&
+    !effortReasoningUnlocked(state.player.researchUnlocked)
+  ) {
+    return withAlert(
+      state,
+      "warn",
+      "Process Reward research is required to train extra effort heads.",
+    );
+  }
+  return patchProductProfile(state, id, (profile) =>
+    withEffortRecipePatch(profile, recipeId, {
+      capabilityBias: clampCapabilityBias(bias),
+    }),
+  );
+}
+
+export function startEffortTraining(
+  state: SimState,
+  request: StartEffortTrainingRequest,
+): SimState {
+  const continueId = request.recipeId?.trim();
+  const continuingInstant = continueId === INSTANT_EFFORT_ID;
+  if (
+    !continuingInstant &&
+    !effortReasoningUnlocked(state.player.researchUnlocked)
+  ) {
+    return withAlert(
+      state,
+      "warn",
+      "Process Reward research is required to train extra effort heads.",
+    );
+  }
   const jobs = playerTrainingJobs(state);
   const job = jobs.find((candidate) => candidate.id === request.id);
   const model = state.player.models.find((candidate) => candidate.id === request.id);
@@ -4948,9 +5089,30 @@ export function startEffortTraining(
       : null;
   if (!profile) return withAlert(state, "warn", "Model not found.");
   const recipes = migrateEffortRecipes(profile);
-  if (recipes.filter((recipe) => recipe.kind === "trained").length >= MAX_TRAINED_EFFORTS) {
+  const existing = continueId
+    ? recipes.find((recipe) => recipe.id === continueId)
+    : undefined;
+  if (continueId && !existing) {
+    return withAlert(state, "warn", "Effort head not found.");
+  }
+  const name = (request.name ?? existing?.name ?? "").trim().slice(0, 24);
+  if (!name) return withAlert(state, "warn", "Name the effort head.");
+  if (
+    !existing &&
+    recipes.filter((recipe) => recipe.kind === "trained").length >=
+      MAX_TRAINED_EFFORTS
+  ) {
     return withAlert(state, "warn", "At most three trained effort heads.");
   }
+  const thinkingTokenMult =
+    existing?.kind === "instant"
+      ? 1
+      : clampThinkingTokenMult(
+          request.thinkingTokenMult ?? existing?.thinkingTokenMult ?? 2.2,
+        );
+  const capabilityBias = clampCapabilityBias(
+    request.capabilityBias ?? existing?.capabilityBias,
+  );
   const gymQuality = gymQualityByKind(state.player.postTrainGyms, "math");
   const required = effortTrainTargetPfDays({
     paramsB,
@@ -4967,25 +5129,91 @@ export function startEffortTraining(
       `Need $${cash.toLocaleString("en-US")} to train ${name}.`,
     );
   }
-  const recipeId = seededId("effort", state.seed, request.id, name, String(thinkingTokenMult));
-  const nextRecipe = {
+  const liveOnJob = Boolean(job);
+  const priorShare = existing?.trainComputeShare ?? 0;
+  const share = clampEffortTrainShare(
+    request.trainComputeShare != null
+      ? request.trainComputeShare
+      : priorShare > 0
+        ? priorShare
+        : DEFAULT_EFFORT_HEAD_SHARE,
+  );
+  const charged = chargeExpense(state, cash, "training");
+  if (existing) {
+    const priorFunded =
+      existing.kind === "instant"
+        ? existing.trainPfDays
+        : Math.max(
+            existing.trainPfDays,
+            effortFundedPfFromQuality(existing.quality, required),
+          );
+    const nextTarget = (existing.targetPfDays ?? 0) + funded;
+    const nextTrainPf = liveOnJob ? existing.trainPfDays : priorFunded + funded;
+    // Off-job continue applies funded PF immediately; live jobs accrue via ticks.
+    const nextProgress = liveOnJob
+      ? (existing.progressPfDays ?? 0)
+      : Math.max(existing.progressPfDays ?? 0, nextTrainPf);
+    const nextRecipe = normalizeEffortRecipe({
+      ...existing,
+      name,
+      thinkingTokenMult,
+      capabilityBias,
+      trainComputeShare: Math.max(share, existing.trainComputeShare ?? 0),
+      trainCash: existing.trainCash + cash,
+      targetPfDays: nextTarget,
+      trainPfDays: nextTrainPf,
+      progressPfDays: nextProgress,
+      quality:
+        existing.kind === "instant"
+          ? existing.quality
+          : liveOnJob
+            ? existing.quality
+            : effortQualityFromTrain(priorFunded + funded, required),
+      trained: existing.kind === "instant" ? true : liveOnJob ? existing.trained : true,
+      served: existing.served || !liveOnJob,
+    });
+    return patchProductProfile(charged, request.id, (current) => {
+      // Preserve every other head (Think / Deep / custom) untouched.
+      const nextRecipes = migrateEffortRecipes(current).map((recipe) =>
+        recipe.id === existing.id ? nextRecipe : recipe,
+      );
+      return {
+        ...current,
+        effortRecipes: nextRecipes,
+        defaultEffortId:
+          nextRecipe.trained && nextRecipe.kind !== "instant"
+            ? nextRecipe.id
+            : current.defaultEffortId,
+      };
+    });
+  }
+  const recipeId = seededId(
+    "effort",
+    state.seed,
+    request.id,
+    name,
+    String(thinkingTokenMult),
+  );
+  const nextRecipe = normalizeEffortRecipe({
     id: recipeId,
     name,
-    kind: "trained" as const,
+    kind: "trained",
     thinkingTokenMult,
-    trainPfDays: funded,
+    capabilityBias,
+    trainComputeShare: share,
+    trainPfDays: liveOnJob ? 0 : funded,
     trainCash: cash,
-    trained: true,
-    quality: effortQualityFromTrain(funded, required),
-    served: true,
-  };
-  const nextProfile = {
-    ...profile,
-    effortRecipes: [...recipes, nextRecipe],
-    defaultEffortId: recipeId,
-  };
-  const charged = chargeExpense(state, cash, "training");
-  return patchProductProfile(charged, request.id, () => nextProfile);
+    trained: !liveOnJob,
+    quality: liveOnJob ? 0 : effortQualityFromTrain(funded, required),
+    served: !liveOnJob,
+    progressPfDays: 0,
+    targetPfDays: funded,
+  });
+  return patchProductProfile(charged, request.id, (current) => ({
+    ...current,
+    effortRecipes: [...migrateEffortRecipes(current), nextRecipe],
+    defaultEffortId: nextRecipe.trained ? recipeId : current.defaultEffortId,
+  }));
 }
 
 export function listReleasedModel(
@@ -6095,6 +6323,11 @@ function buildModelFromJob(
   const listBlend = Math.round(blendApiPrice(listIn, listOut) * 1000) / 1000;
 
   const productPreset = job.productPreset ?? presetFromFamily(family);
+  const finalNumerics =
+    job.trainingNumerics ?? job.numerics ?? continueBase?.trainingNumerics;
+  const nativeWeightPrecision = finalNumerics
+    ? nativeWeightPrecisionForNumerics(finalNumerics)
+    : continueBase?.nativeWeightPrecision;
   const serviceProfile = serviceProfileForModel({
     paramsB,
     activeParamsB,
@@ -6105,6 +6338,8 @@ function buildModelFromJob(
     modalities,
     tokPerSecMult,
     capability,
+    trainingNumerics: finalNumerics,
+    nativeWeightPrecision,
   });
   const capabilities = deriveModelCapabilities({
     finalCapability: capability,
@@ -6120,11 +6355,6 @@ function buildModelFromJob(
     modalityMaturity: maturity,
   });
 
-  const finalNumerics =
-    job.trainingNumerics ?? job.numerics ?? continueBase?.trainingNumerics;
-  const nativeWeightPrecision = finalNumerics
-    ? nativeWeightPrecisionForNumerics(finalNumerics)
-    : continueBase?.nativeWeightPrecision;
   const sourceRevision = continueBase?.revision ?? 1;
   const modelId = `model-${state.day}-${job.id}`;
   const lineageId =
@@ -6333,6 +6563,121 @@ function beginReadyLinkedPostTrain(state: SimState): SimState {
   return next;
 }
 
+function effortHeadLoss(
+  job: TrainingJob,
+  recipe: EffortRecipe,
+  progress: number,
+  day: number,
+): number {
+  return trainingLoss(
+    {
+      ...job,
+      id: `${job.id}::effort::${recipe.id}`,
+      targetParamsB:
+        job.targetParamsB *
+        (recipe.kind === "instant"
+          ? 0.55
+          : 0.35 + Math.max(1, recipe.thinkingTokenMult) * 0.12),
+    },
+    recipe.kind === "instant" ? "base" : "process",
+    progress,
+    day,
+    recipe.loss,
+  );
+}
+
+function effortTrainSnapshot(recipe: EffortRecipe): EffortTrainProgress {
+  return {
+    recipeId: recipe.id,
+    name: recipe.name,
+    thinkingTokenMult: recipe.thinkingTokenMult,
+    progressPfDays: recipe.progressPfDays ?? 0,
+    targetPfDays: recipe.targetPfDays ?? 0,
+    cashSunk: recipe.trainCash,
+    loss: recipe.loss,
+    capabilityBias: recipe.capabilityBias,
+    trainComputeShare: recipe.trainComputeShare,
+  };
+}
+
+export function applyEffortHeadTick(
+  state: SimState,
+  job: TrainingJob,
+  allocatedPf: number,
+  day: number,
+): { job: TrainingJob; remainderPf: number } {
+  if (allocatedPf <= 1e-12) return { job, remainderPf: allocatedPf };
+  const profile = productProfileForJob(state, job);
+  const recipes = migrateEffortRecipes(profile);
+  const { remainderPf, byId } = allocateEffortHeadPf(recipes, allocatedPf);
+  const gymQuality = gymQualityByKind(state.player.postTrainGyms, "math");
+  let changed = false;
+  let defaultEffortId = profile.defaultEffortId;
+  const nextRecipes = recipes.map((recipe) => {
+    const pf = byId[recipe.id] ?? 0;
+    if (pf <= 1e-12) return recipe;
+    changed = true;
+    const thinkingTokenMult =
+      recipe.kind === "instant" ? 1 : recipe.thinkingTokenMult;
+    const required = effortTrainTargetPfDays({
+      paramsB: job.targetParamsB,
+      thinkingTokenMult,
+      gymQuality,
+      researchUnlocked: state.player.researchUnlocked,
+    });
+    const priorFunded =
+      recipe.kind === "instant"
+        ? recipe.trainPfDays
+        : Math.max(
+            recipe.trainPfDays,
+            effortFundedPfFromQuality(recipe.quality, required),
+          );
+    const funded = priorFunded + pf;
+    const progressPfDays = (recipe.progressPfDays ?? 0) + pf;
+    const targetPfDays = Math.max(recipe.targetPfDays ?? 0, required);
+    const quality =
+      recipe.kind === "instant"
+        ? recipe.quality
+        : effortQualityFromTrain(funded, required);
+    const trained =
+      recipe.kind === "instant" || recipe.trained || quality > 0.08;
+    const becameTrained = !recipe.trained && trained && recipe.kind !== "instant";
+    if (becameTrained) defaultEffortId = recipe.id;
+    const loss = effortHeadLoss(
+      job,
+      { ...recipe, trainPfDays: funded, progressPfDays, targetPfDays, quality },
+      progressPfDays / Math.max(1e-9, targetPfDays),
+      day,
+    );
+    return normalizeEffortRecipe({
+      ...recipe,
+      trainPfDays: funded,
+      progressPfDays,
+      targetPfDays,
+      quality,
+      trained,
+      served: becameTrained
+        ? true
+        : trained
+          ? recipe.served || recipe.kind === "instant"
+          : recipe.served,
+      loss,
+    });
+  });
+  if (!changed) return { job, remainderPf: allocatedPf };
+  const inflight = nextRecipes.find(
+    (recipe) => clampEffortTrainShare(recipe.trainComputeShare) > 1e-9,
+  );
+  return {
+    remainderPf,
+    job: {
+      ...job,
+      productProfile: { ...profile, effortRecipes: nextRecipes, defaultEffortId },
+      effortTrain: inflight ? effortTrainSnapshot(inflight) : undefined,
+    },
+  };
+}
+
 export function tickTraining(state: SimState): SimState {
   state = beginReadyLinkedPostTrain(state);
   const jobs = playerTrainingJobs(state);
@@ -6434,10 +6779,6 @@ export function tickTraining(state: SimState): SimState {
     const resource = resources.jobs[job.id];
     const trainPool = resource?.effectivePf ?? 0;
     const allocatedPf = active ? Math.max(0, trainPool) : 0;
-    const usefulBasePf = Math.min(
-      allocatedPf,
-      pacedTrainingPfPerDay(job.targetPfDays, job.minCalendarDays),
-    );
     const telemetry = (
       progressPfDays = job.progressPfDays,
       elapsed = daysElapsed,
@@ -6463,18 +6804,6 @@ export function tickTraining(state: SimState): SimState {
         (job.economics?.trainingCostAccrued ?? 0) +
         (active ? (job.cashBurnPerDay ?? 0) : 0),
     };
-    const proposedBaseProgress = Math.min(
-      job.targetPfDays,
-      job.progressPfDays + usefulBasePf,
-    );
-    const imminentCampaignMilestone =
-      job.postTrain === "none" && job.progressPfDays < job.targetPfDays
-        ? crossedTrainingCampaignMilestone(
-            job,
-            job.progressPfDays / Math.max(1e-9, job.targetPfDays),
-            proposedBaseProgress / Math.max(1e-9, job.targetPfDays),
-          )
-        : null;
     const stallReason = job.paused
       ? "Paused"
       : trainPool <= 1e-9
@@ -6507,31 +6836,54 @@ export function tickTraining(state: SimState): SimState {
         stallReason,
       };
     }
-    if (job.progressPfDays < job.targetPfDays) {
+    const headed = applyEffortHeadTick(state, job, allocatedPf, state.day);
+    const working = headed.job;
+    const remainderPf = headed.remainderPf;
+    const usefulBasePf = Math.min(
+      remainderPf,
+      pacedTrainingPfPerDay(working.targetPfDays, working.minCalendarDays),
+    );
+    const proposedBaseProgress = Math.min(
+      working.targetPfDays,
+      working.progressPfDays + usefulBasePf,
+    );
+    const imminentCampaignMilestone =
+      working.postTrain === "none" &&
+      working.progressPfDays < working.targetPfDays
+        ? crossedTrainingCampaignMilestone(
+            working,
+            working.progressPfDays / Math.max(1e-9, working.targetPfDays),
+            proposedBaseProgress / Math.max(1e-9, working.targetPfDays),
+          )
+        : null;
+    if (working.progressPfDays < working.targetPfDays) {
       const nextProgress = proposedBaseProgress;
       const campaignMilestone = imminentCampaignMilestone;
-      const baseFailurePlan = trainingStageFailurePlan(job, "base");
-      const failureProgress = job.targetPfDays * baseFailurePlan.atFraction;
+      const baseFailurePlan = trainingStageFailurePlan(working, "base");
+      const failureProgress = working.targetPfDays * baseFailurePlan.atFraction;
       const crossesFailure =
         baseFailurePlan.willFail &&
-        job.progressPfDays < failureProgress &&
+        working.progressPfDays < failureProgress &&
         nextProgress >= failureProgress;
       const campaignProgress = campaignMilestone
-        ? Math.min(nextProgress, job.targetPfDays * campaignMilestone.milestone)
+        ? Math.min(
+            nextProgress,
+            working.targetPfDays * campaignMilestone.milestone,
+          )
         : Number.POSITIVE_INFINITY;
       // A destructive crossing wins if it occurs before (or exactly at) a
       // campaign decision. Large daily allocations cannot skip the failure.
       if (crossesFailure && failureProgress <= campaignProgress + 1e-9) {
-        const consumedPf = Math.max(0, failureProgress - job.progressPfDays);
+        const consumedPf = Math.max(0, failureProgress - working.progressPfDays);
         return failTrainingJob(
           {
-            ...job,
+            ...working,
             ...telemetry(failureProgress, daysElapsed, consumedPf),
             economics,
             daysElapsed,
             progressPfDays: failureProgress,
             lossHistory: appendLossPoint(
-              job,
+              working,
               "base",
               baseFailurePlan.atFraction,
               state.day,
@@ -6548,37 +6900,37 @@ export function tickTraining(state: SimState): SimState {
         // and only meters the compute consumed before the checkpoint.
         const checkpointProgress = Math.min(
           nextProgress,
-          job.targetPfDays * campaignMilestone.milestone,
+          working.targetPfDays * campaignMilestone.milestone,
         );
         const checkpointCompute = Math.max(
           0,
-          checkpointProgress - job.progressPfDays,
+          checkpointProgress - working.progressPfDays,
         );
         const event = createTrainingCampaignEvent(
-          job,
+          working,
           campaignMilestone.milestone,
           campaignMilestone.index,
           state.day,
         );
         tickAlerts.push({
-          id: `train-campaign-${job.id}-${campaignMilestone.index}`,
+          id: `train-campaign-${working.id}-${campaignMilestone.index}`,
           day: state.day,
           severity: event.severity === "opportunity" ? "info" : "warn",
-          message: `${job.name}: ${event.title}. Craft an intervention within 5 days. Weights are not saved unless you snapshot or roll back.`,
+          message: `${working.name}: ${event.title}. Craft an intervention within 5 days. Weights are not saved unless you snapshot or roll back.`,
         });
         return {
-          ...job,
+          ...working,
           ...telemetry(checkpointProgress, daysElapsed, checkpointCompute),
           economics,
           daysElapsed,
           progressPfDays: checkpointProgress,
           pendingCampaignEvent: event,
           campaignMilestonesReached: [
-            ...(job.campaignMilestonesReached ?? []),
+            ...(working.campaignMilestonesReached ?? []),
             campaignMilestone.milestone,
           ],
           lossHistory: appendLossPoint(
-            job,
+            working,
             "base",
             campaignMilestone.milestone,
             state.day,
@@ -6586,43 +6938,43 @@ export function tickTraining(state: SimState): SimState {
         };
       }
       return {
-        ...job,
+        ...working,
         ...telemetry(nextProgress, daysElapsed, usefulBasePf),
         economics,
         daysElapsed,
         stallReason,
         progressPfDays: nextProgress,
         lossHistory: appendLossPoint(
-          job,
+          working,
           "base",
-          nextProgress / Math.max(1e-9, job.targetPfDays),
+          nextProgress / Math.max(1e-9, working.targetPfDays),
           state.day,
         ),
       };
     }
     if (
-      job.postTrain !== "none" &&
-      job.postTrainProgress + 1e-9 < job.postTrainTarget
+      working.postTrain !== "none" &&
+      working.postTrainProgress + 1e-9 < working.postTrainTarget
     ) {
-      const postTrainStage = job.postTrain;
+      const postTrainStage = working.postTrain;
       // New stage selections persist this plan immediately. Legacy in-flight
       // saves get one deterministic plan here and keep it on every return.
       const postTrainRiskPlan =
-        job.postTrainRiskPlan?.stage === postTrainStage
-          ? job.postTrainRiskPlan
+        working.postTrainRiskPlan?.stage === postTrainStage
+          ? working.postTrainRiskPlan
           : createPostTrainRiskPlan(
-              job,
+              working,
               postTrainStage,
               state.player.researchUnlocked,
               state.player.models,
               state.day,
-              job.postTrainProgress / Math.max(1e-9, job.postTrainTarget),
+              working.postTrainProgress / Math.max(1e-9, working.postTrainTarget),
             );
-      const postTrainJob: TrainingJob = { ...job, postTrainRiskPlan };
+      const postTrainJob: TrainingJob = { ...working, postTrainRiskPlan };
       const postTrainDaysElapsed = (postTrainJob.postTrainDaysElapsed ?? 0) + 1;
       const nextProgress = Math.min(
         postTrainJob.postTrainTarget,
-        postTrainJob.postTrainProgress + Math.max(0, trainPool),
+        postTrainJob.postTrainProgress + Math.max(0, remainderPf),
       );
       const stageCompleted =
         nextProgress + 1e-9 >= postTrainJob.postTrainTarget;
@@ -6663,7 +7015,7 @@ export function tickTraining(state: SimState): SimState {
         return failTrainingJob(
           {
             ...postTrainJob,
-            ...telemetry(job.progressPfDays, daysElapsed, consumedPf),
+            ...telemetry(working.progressPfDays, daysElapsed, consumedPf),
             economics,
             daysElapsed,
             postTrainProgress: failureProgress,
@@ -6724,25 +7076,25 @@ export function tickTraining(state: SimState): SimState {
     // allocated PF into the same weights. fundedTrainingMaturity() converts
     // this cumulative spend into sharply diminishing gains at finalization and
     // clamps them inside the architecture's hard capability wall.
-    if (active && trainPool > 1e-9) {
-      const nextProgress = job.progressPfDays + Math.max(0, trainPool);
+    if (active && remainderPf > 1e-9) {
+      const nextProgress = working.progressPfDays + Math.max(0, remainderPf);
       return {
-        ...job,
+        ...working,
         ...telemetry(nextProgress),
         economics,
         daysElapsed,
         progressPfDays: nextProgress,
         stallReason: null,
         lossHistory: appendLossPoint(
-          job,
+          working,
           "base",
-          nextProgress / Math.max(1e-9, job.targetPfDays),
+          nextProgress / Math.max(1e-9, working.targetPfDays),
           state.day,
         ),
       };
     }
     return {
-      ...job,
+      ...working,
       ...telemetry(),
       economics,
       daysElapsed,

@@ -5,7 +5,7 @@ import { isDcKind, isDcAnchor } from "./map";
  * Giant models → memory-heavy (weights dominate; FLOPS scales sublinearly).
  */
 import { getRackSku } from "../balance/rackSkus";
-import { estimateServingMemory } from "../balance/tokenServe";
+import { defaultServePrecisionForModel, estimateServingMemory, precisionComputeMult } from "../balance/tokenServe";
 import type { Model, ServePrecision, SimState } from "../types";
 import { fleetStats, resolveRackSku } from "./racks";
 import { orderRacksIntoDc } from "./dcRacks";
@@ -172,7 +172,7 @@ export function modelHostNeed(
   m: Model,
   opts?: { precision?: ServePrecision; concurrentRequests?: number; contextTokens?: number },
 ): ModelHostNeed {
-  const precision = opts?.precision ?? "fp32";
+  const precision = opts?.precision ?? defaultServePrecisionForModel(m);
   const memory = estimateServingMemory({
     model: m,
     precision,
@@ -206,6 +206,7 @@ export function modelHostNeed(
     activeB *
     0.45 *
     Math.max(0.5, m.inferCostMult ?? 1) *
+    precisionComputeMult(precision) *
     (isMoe ? 0.92 : 1);
 
   let note: string;

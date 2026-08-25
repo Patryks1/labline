@@ -5,10 +5,21 @@ import {
   buildComputeBreakdown,
   type PoolBreakdown,
 } from '../../sim/systems/computeBreakdown'
+import {
+  isApiAcceptingNew,
+  isSubsAcceptingNew,
+} from '../../sim/systems/plans'
 import { useGameStore } from '../../store/gameStore'
 import { computeSnapshot, inferenceTokensPerDay } from '../../sim/tick'
 import { mw, num, pct, pf, pfLong } from './format'
 import { SliderField } from './ui/SliderField'
+import {
+  PoolLoadBar,
+  ResearchLoadConsumerList,
+  ServeModelLoadList,
+  ServeOutageBanner,
+  TrainLoadConsumerList,
+} from './ui/ComputeLoadBars'
 import {
   COMPUTE_ALLOCATION_MIN,
   rebalanceComputeAllocation,
@@ -25,6 +36,7 @@ export function BottomBar() {
   const setAllocation = useGameStore((s) => s.setAllocation)
   const autoBalanceHosting = useGameStore((s) => s.autoBalanceHosting)
   const setPanel = useGameStore((s) => s.setPanel)
+  const setPricing = useGameStore((s) => s.setPricing)
   const snap = computeSnapshot(state)
   const cap = inferenceTokensPerDay(state, snap)
   const a = state.player.allocation
@@ -47,8 +59,54 @@ export function BottomBar() {
     setAllocation(rebalanceComputeAllocation(a, key, v))
   }
 
-  const poolSub = (p: PoolBreakdown) =>
-    `${pf(p.poolPf)} · ${mw(p.powerMw)} · ${p.utilizationLabel} ${pct(Math.min(1, p.utilization))}`
+  const poolLoadSublabel = (pool: HoveredPool) => {
+    const load = breakdown.load
+    if (pool === 'train') {
+      return (
+        <PoolLoadBar
+          pool="train"
+          fill={load.train.fill}
+          powerMw={breakdown.train.powerMw}
+          idlePf={load.train.idlePf}
+          usedPf={load.train.usedPf}
+          poolPf={load.train.poolPf}
+          live={load.train.usedPf > 1e-9}
+        />
+      )
+    }
+    if (pool === 'serve') {
+      const apiShare =
+        load.serve.usedPf > 1e-12 ? load.serve.apiUsedPf / load.serve.usedPf : 0
+      return (
+        <PoolLoadBar
+          pool="serve"
+          fill={load.serve.fill}
+          warn={load.serve.warn}
+          apiShare={apiShare}
+          powerMw={breakdown.serve.powerMw}
+          idlePf={load.serve.idlePf}
+          usedPf={load.serve.usedPf}
+          poolPf={load.serve.allocatedPf}
+          live={load.serve.usedPf > 1e-9}
+        />
+      )
+    }
+    const researchFill =
+      load.research.poolPf > 1e-9
+        ? load.research.usedPf / load.research.poolPf
+        : 0
+    return (
+      <PoolLoadBar
+        pool="research"
+        fill={researchFill}
+        powerMw={load.research.powerMw}
+        idlePf={load.research.idlePf}
+        usedPf={load.research.usedPf}
+        poolPf={load.research.poolPf}
+        live={load.research.usedPf > 1e-9}
+      />
+    )
+  }
 
   const servedRatio = state.lastMarket.playerDemandMTok > 0
     ? Math.min(1, state.lastMarket.servedMTok / state.lastMarket.playerDemandMTok)
@@ -87,6 +145,8 @@ export function BottomBar() {
         >
           <PoolTooltip
             pool={hoveredBreakdown}
+            poolKind={hoveredPool}
+            load={breakdown.load}
             accent={
               hoveredPool === 'train'
                 ? 'text-train'
@@ -175,6 +235,20 @@ export function BottomBar() {
           onMouseLeave={() => setHoveredPool(null)}
           onBlurCapture={leaveAllocation}
         >
+          <ServeOutageBanner
+            state={state}
+            className="pointer-events-auto col-span-3 mb-0.5"
+            onPauseApi={() =>
+              setPricing({
+                apiAcceptingNew: !isApiAcceptingNew(state.player.pricing),
+              })
+            }
+            onPauseSubs={() =>
+              setPricing({
+                subsAcceptingNew: !isSubsAcceptingNew(state.player.pricing),
+              })
+            }
+          />
           <AllocationSlot pool="train" onHover={hoverPool}>
             <SliderField
               label="Train"
@@ -185,7 +259,7 @@ export function BottomBar() {
               colorClass="bg-train"
               accentClass="text-train"
               format={(v) => pct(v)}
-              sublabel={poolSub(breakdown.train)}
+              sublabel={poolLoadSublabel('train')}
               hint
             />
           </AllocationSlot>
@@ -199,7 +273,7 @@ export function BottomBar() {
               colorClass="bg-infer"
               accentClass="text-infer"
               format={(v) => pct(v)}
-              sublabel={poolSub(breakdown.serve)}
+              sublabel={poolLoadSublabel('serve')}
               hint
             />
           </AllocationSlot>
@@ -213,7 +287,7 @@ export function BottomBar() {
               colorClass="bg-research"
               accentClass="text-research"
               format={(v) => pct(v)}
-              sublabel={poolSub(breakdown.research)}
+              sublabel={poolLoadSublabel('research')}
               hint
             />
           </AllocationSlot>
@@ -284,35 +358,94 @@ function AllocationSlot({
   )
 }
 
-function PoolTooltip({ pool, accent }: { pool: PoolBreakdown; accent: string }) {
+function PoolTooltip({
+  pool,
+  poolKind,
+  load,
+  accent,
+}: {
+  pool: PoolBreakdown
+  poolKind: HoveredPool
+  load: ReturnType<typeof buildComputeBreakdown>['load']
+  accent: string
+}) {
   const blocker =
     pool.lines.find((line) => line.warn)?.value ??
     (pool.utilizationLabel === 'Idle' || pool.utilizationLabel === 'Stalled'
       ? pool.summary
       : null)
 
+  let consumerPanel: ReactNode = null
+  if (poolKind === 'serve') {
+    consumerPanel = (
+      <div className="mt-2 border-t border-line/50 pt-2">
+        <p className="text-[0.6875rem] font-semibold uppercase tracking-wide text-muted">
+          Per-model load
+        </p>
+        <div className="mt-1.5 max-h-48 overflow-y-auto">
+          <ServeModelLoadList models={load.serve.models} live={load.serve.usedPf > 1e-9} />
+        </div>
+      </div>
+    )
+  } else if (poolKind === 'train') {
+    consumerPanel = (
+      <div className="mt-2 border-t border-line/50 pt-2">
+        <p className="text-[0.6875rem] font-semibold uppercase tracking-wide text-muted">
+          Train consumers
+        </p>
+        <div className="mt-1">
+          <TrainLoadConsumerList jobs={load.train.jobs} />
+        </div>
+      </div>
+    )
+  } else {
+    consumerPanel = (
+      <div className="mt-2 border-t border-line/50 pt-2">
+        <p className="text-[0.6875rem] font-semibold uppercase tracking-wide text-muted">
+          Research consumers
+        </p>
+        <div className="mt-1">
+          <ResearchLoadConsumerList slices={load.research.slices} />
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <div className="space-y-1.5 text-left">
+    <div className="max-w-[min(22rem,calc(100vw-2rem))] space-y-1.5 text-left">
       <div className={`text-[0.8125rem] font-semibold ${accent}`}>{pool.title}</div>
       <div className="flex items-baseline justify-between gap-3 font-mono text-[0.75rem]">
         <span className="text-muted">Allocation</span>
         <span className="text-bone">{pct(pool.allocShare)}</span>
       </div>
       <div className="flex items-baseline justify-between gap-3 font-mono text-[0.75rem]">
-        <span className="text-muted">Effective work</span>
-        <span className="text-bone">{pf(pool.poolPf)} · {pool.utilizationLabel}</span>
+        <span className="text-muted">Used / pool</span>
+        <span className="text-bone">
+          {poolKind === 'serve'
+            ? `${pf(load.serve.usedPf)} / ${pf(load.serve.allocatedPf)}`
+            : poolKind === 'train'
+              ? `${pf(load.train.usedPf)} / ${pf(load.train.poolPf)}`
+              : `${pf(load.research.usedPf)} / ${pf(load.research.poolPf)}`}
+        </span>
       </div>
       <div className="flex items-baseline justify-between gap-3 font-mono text-[0.75rem]">
         <span className="text-muted">Power draw</span>
-        <span className="text-bone">{mw(pool.powerMw)}</span>
+        <span className="text-bone">
+          {poolKind !== 'serve' &&
+          pool.powerMw <= 1e-6 &&
+          (poolKind === 'train' ? load.train.usedPf : load.research.usedPf) > 1e-9
+            ? 'Cloud-powered'
+            : mw(pool.powerMw)}
+        </span>
       </div>
       {blocker ? (
         <p className="rounded-md border border-amber/30 bg-amber/10 px-2 py-1 text-[0.6875rem] leading-snug text-amber">
           {blocker}
         </p>
       ) : (
-        <p className="text-[0.6875rem] leading-snug text-muted">No blockers.</p>
+        <p className="text-[0.6875rem] leading-snug text-muted">{pool.summary}</p>
       )}
+      {consumerPanel}
     </div>
   )
 }

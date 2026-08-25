@@ -32,6 +32,12 @@ import {
   type PlanAudienceReview,
 } from './planReviews'
 import {
+  expandLeaderboardEffortRows,
+  leaderboardEffortRowKey,
+  leaderboardMetricCostTitle,
+  rankLeaderboardEffortRows,
+} from '../data/benchmarkLeaderboard'
+import {
   benchmarkMetricsForSuite,
   publicBenchmarkScore,
 } from '../data/benchmarkViewModel'
@@ -61,20 +67,29 @@ export function BenchmarksPanel() {
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null)
   const [tab, setTab] = useState<BenchTab>('leaderboard')
 
-  const rows = useMemo(() => {
+  const suiteId = suiteForEvaluationMarket(market)
+  const metrics = benchmarkMetricsForSuite(suiteId)
+  const snap = useMemo(() => computeSnapshot(state), [state])
+
+  const boardModels = useMemo(() => {
     const all = collectLeaderboardModels(state)
-    const marketModels = all.filter((row) =>
+    return all.filter((row) =>
       evaluationMarketsForModel(row.model).includes(market),
     )
-    const suite = suiteForEvaluationMarket(market)
-    return sortId === 'cap'
-      ? marketModels
-      : [...marketModels].sort((a, b) => {
-          const sa = publicBenchmarkScore(a.model, suite, sortId) ?? 0
-          const sb = publicBenchmarkScore(b.model, suite, sortId) ?? 0
-          return sb - sa
-        })
-  }, [state, sortId, market])
+  }, [state, market])
+
+  const rows = useMemo(
+    () =>
+      rankLeaderboardEffortRows(
+        expandLeaderboardEffortRows(boardModels, {
+          suiteId,
+          unitUsdPerMTokFor: (row) =>
+            modelUsdBase(state, snap, row.model, row.isPlayer),
+        }),
+        sortId,
+      ),
+    [boardModels, sortId, suiteId, state, snap],
+  )
 
   const internalRows = useMemo(() => {
     const jobs = playerTrainingJobs(state).filter((job) => !job.failed)
@@ -111,9 +126,6 @@ export function BenchmarksPanel() {
     return [...training, ...internal]
   }, [state, market])
 
-  const suiteId = suiteForEvaluationMarket(market)
-  const metrics = benchmarkMetricsForSuite(suiteId)
-  const snap = useMemo(() => computeSnapshot(state), [state])
   const visible = showAll ? rows : rows.slice(0, PAGE)
   const effortColumns = useMemo(
     () =>
@@ -136,18 +148,18 @@ export function BenchmarksPanel() {
     for (const d of metrics) {
       let best = -1
       for (const r of rows) {
-        const s = publicBenchmarkScore(r.model, suiteId, d.id) ?? 0
+        const s = r.scores[d.id] ?? 0
         if (s > best) best = s
       }
       map[d.id] = best
     }
     return map
-  }, [rows, metrics, suiteId])
+  }, [rows, metrics])
 
   const playerBest = useMemo(() => {
     let best = 0
     for (const r of rows) {
-      if (r.isPlayer && r.model.capability > best) best = r.model.capability
+      if (r.isPlayer && r.capability > best) best = r.capability
     }
     return best
   }, [rows])
@@ -155,7 +167,7 @@ export function BenchmarksPanel() {
   const rivalBest = useMemo(() => {
     let best = 0
     for (const r of rows) {
-      if (!r.isPlayer && r.model.capability > best) best = r.model.capability
+      if (!r.isPlayer && r.capability > best) best = r.capability
     }
     return best
   }, [rows])
@@ -166,9 +178,7 @@ export function BenchmarksPanel() {
     let best = 0
     for (const r of rows) {
       if (!r.isPlayer) continue
-      const scores = metrics.map(
-        (d) => publicBenchmarkScore(r.model, suiteId, d.id) ?? 0,
-      )
+      const scores = metrics.map((d) => r.scores[d.id] ?? 0)
       const avg =
         scores.length === 0
           ? 0
@@ -176,7 +186,7 @@ export function BenchmarksPanel() {
       if (avg > best) best = avg
     }
     return best
-  }, [rows, metrics, suiteId])
+  }, [rows, metrics])
 
   const activeAudits = useMemo(() => {
     const day = state.day
@@ -213,7 +223,7 @@ export function BenchmarksPanel() {
     <PanelScaffold
       eyebrow="Evals"
       title="Benchmarks"
-      description="Public field scores. Training snapshots stay on Internal. Voice is personality, not capability."
+      description="Public field scores. One row per thinking level. Training snapshots stay on Internal. Voice is personality, not capability."
     >
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <MetricTile
@@ -347,9 +357,12 @@ export function BenchmarksPanel() {
             <div className="flex flex-wrap items-center gap-2 text-[0.6875rem] text-muted">
               <StatusChip tone="positive">PUBLIC</StatusChip>
               <span>
-                Released models and live routers. A dash means that axis was
-                not measured. Voice is how pleasant the model is to talk to —
-                it does not raise capability.
+                Each row is one thinking level (Solace-Think, Solace-Deep).
+                Instant/Think/Deep share the same $/MTok list price; Think and
+                Deep spend more tokens per query. Knowledge, Code, Reasoning,
+                Science, and Agents lift with thinking when that recipe is
+                trained — other axes stay at the model score. Voice is
+                personality, not capability.
               </span>
             </div>
 
@@ -416,7 +429,24 @@ export function BenchmarksPanel() {
                     <th className="px-1.5 py-2">Lab</th>
                     <th className="px-1.5 py-2">Size</th>
                     <th className="px-1.5 py-2">Cap</th>
-                    <EffortColumnHeaders columns={effortColumns} />
+                    <th
+                      className="px-1 py-2 text-center"
+                      title="Thinking recipe for this row"
+                    >
+                      Think
+                    </th>
+                    <th
+                      className="px-1 py-2 text-center"
+                      title="Serve-time tokens vs Instant. Think/Deep traces are longer; list price stays the same."
+                    >
+                      Tokens
+                    </th>
+                    <th
+                      className="px-1 py-2 text-center"
+                      title="List price per million tokens. Same unit price for Instant, Think, and Deep."
+                    >
+                      $/MTok
+                    </th>
                     {metrics.map((d) => (
                       <th
                         key={d.id}
@@ -434,7 +464,7 @@ export function BenchmarksPanel() {
                     const rank = i + 1
                     return (
                       <tr
-                        key={`${r.labId}-${r.model.id}`}
+                        key={leaderboardEffortRowKey(r)}
                         className={`border-b border-line/60 ${
                           r.isPlayer
                             ? 'bg-mint/5'
@@ -449,7 +479,7 @@ export function BenchmarksPanel() {
                         <td className="sticky left-6 z-10 max-w-[180px] bg-inherit px-2 py-1.5 font-medium text-bone">
                           <span className="flex min-w-0 items-center gap-1">
                             <span className="min-w-0 truncate">
-                              {r.model.name}
+                              {r.displayName}
                             </span>
                             {r.isPlayer && (
                               <StatusChip tone="positive">you</StatusChip>
@@ -473,27 +503,45 @@ export function BenchmarksPanel() {
                         <td className="px-1.5 py-1.5 font-mono tabular-nums text-muted">
                           {formatParams(r.model.paramsB)}
                         </td>
-                        <td className="px-1.5 py-1.5 font-mono tabular-nums text-bone">
-                          {num(r.model.capability, 0)}
+                        <td
+                          className="px-1.5 py-1.5 font-mono tabular-nums text-bone"
+                          title={leaderboardMetricCostTitle(r, {
+                            id: 'cap',
+                            label: 'Capability',
+                          })}
+                        >
+                          {num(r.capability, 0)}
                         </td>
-                        <EffortBoardCells
-                          boards={effortBoardsFor(
-                            r.model,
-                            modelUsdBase(state, snap, r.model, r.isPlayer),
-                          )}
-                          columns={effortColumns}
-                        />
+                        <td
+                          className="px-1 py-1.5 text-center font-mono text-muted"
+                          title={`${r.recipeName} · ${r.tokenMult.toFixed(1)}× tokens`}
+                        >
+                          {r.recipeName}
+                        </td>
+                        <td
+                          className="px-1 py-1.5 text-center font-mono tabular-nums text-muted"
+                          title={`${r.tokenMult.toFixed(1)}× tokens vs Instant. Total $ for a run can rise with longer traces.`}
+                        >
+                          {r.tokenMult.toFixed(1)}×
+                        </td>
+                        <td
+                          className="px-1 py-1.5 text-center font-mono tabular-nums text-muted"
+                          title="List price per million tokens — not a Deep premium."
+                        >
+                          {r.usdPerMTok != null ? money(r.usdPerMTok) : '—'}
+                        </td>
                         {metrics.map((d) => {
-                          const s =
-                            publicBenchmarkScore(r.model, suiteId, d.id) ?? 0
+                          const s = r.scores[d.id] ?? 0
                           const isLead =
                             s >= (leaders[d.id] ?? 0) - 0.05 && s > 1
+                          const costTitle = leaderboardMetricCostTitle(r, d)
                           return (
                             <td
                               key={d.id}
                               className={`px-1 py-1.5 text-center font-mono tabular-nums ${
                                 isLead ? 'text-mint' : 'text-muted'
                               }`}
+                              title={s > 0 ? costTitle : 'Not measured'}
                             >
                               {s > 0 ? (
                                 s.toFixed(0)
@@ -549,7 +597,7 @@ export function BenchmarksPanel() {
           />
         ) : tab === 'compare' ? (
           <BenchmarkCompareTab
-            rows={rows}
+            rows={boardModels}
             suiteId={suiteId}
             metrics={metrics}
             market={market}

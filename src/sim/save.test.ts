@@ -136,6 +136,37 @@ describe("save / load v13", () => {
     expect(restored.player.capital?.pitchHistory?.map((record) => record.id)).toEqual(
       Array.from({ length: 16 }, (_: unknown, index: number) => `pitch-${index}`),
     );
+    expect(restored.player.capital?.pitchHistory?.every((record) => record.effortId === "instant")).toBe(
+      true,
+    );
+  });
+
+  it("round-trips a disclosed thinking head on investor pitches", () => {
+    const state = createGame(10_017);
+    const file = JSON.parse(serializeSave(buildSaveFile(state, "1")));
+    file.state.player.capital.pitchHistory = [
+      {
+        id: "pitch-solace-medium-12",
+        modelId: "solace",
+        effortId: "medium",
+        modelName: "Solace-Think",
+        investorName: "Horizon Compute Fund",
+        day: 12,
+        outcome: "funded",
+        successChance: 0.61,
+        cashRaised: 18_000_000,
+        preMoneyValuation: 90_000_000,
+        postMoneyValuation: 108_000_000,
+        investorOwnership: 0.167,
+        cooldownUntilDay: 42,
+      },
+    ];
+    const restored = parseSave(JSON.stringify(file)).state;
+    expect(restored.player.capital?.pitchHistory?.[0]).toMatchObject({
+      modelId: "solace",
+      effortId: "medium",
+      modelName: "Solace-Think",
+    });
   });
 
   it("caps partially migrated oversized day-one cloud launch pools", () => {
@@ -608,6 +639,22 @@ describe("save / load v13", () => {
         plan.includedMTokPerMonth! * blended,
         5,
       );
+    }
+  });
+
+  it("defaults pause-new serving flags on for legacy saves", () => {
+    const state = createGame({ seed: 10_041, difficulty: "easy" });
+    const legacy = JSON.parse(serializeSave(buildSaveFile(state, "1")));
+    delete legacy.state.player.pricing.apiAcceptingNew;
+    delete legacy.state.player.pricing.subsAcceptingNew;
+    for (const plan of legacy.state.player.pricing.plans) {
+      delete plan.acceptingNew;
+    }
+    const restored = parseSave(JSON.stringify(legacy)).state;
+    expect(restored.player.pricing.apiAcceptingNew).toBe(true);
+    expect(restored.player.pricing.subsAcceptingNew).toBe(true);
+    for (const plan of restored.player.pricing.plans) {
+      expect(plan.acceptingNew).toBe(true);
     }
   });
 

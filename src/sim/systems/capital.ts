@@ -2,7 +2,9 @@ import type {
   CapitalStack,
   DebtInstrument,
   DebtInstrumentKind,
+  EffortRecipe,
   EquityOffer,
+  InvestorPitchTarget,
   LabId,
   Model,
   InvestorPitchRecord,
@@ -17,6 +19,13 @@ import {
 import { isLivePublicModel } from '../modelRelease'
 import { isDcKind } from './map'
 import { facilityAnchorTiles } from './worldAccess'
+import {
+  effortViewForRecipe,
+  INSTANT_EFFORT_ID,
+  instantRecipe,
+  migrateEffortRecipes,
+  peakServedCapability,
+} from '../balance/modelProduct'
 
 const DAY_COUNT = 365
 
@@ -162,7 +171,11 @@ const INVESTOR_PITCH_HISTORY_LIMIT = 16
 
 /** A non-mutating model-backed term sheet shown in Finances → Capital. */
 export interface InvestorPitchPreview {
+  /** Select value: `modelId::effortId`. Bare model ids still decode as Instant. */
+  id: string
   modelId: string
+  effortId: string
+  effortName: string
   modelName: string
   eligible: boolean
   reason?: string
@@ -181,6 +194,58 @@ export interface InvestorPitchPreview {
   confidenceRequired: number
   cooldownUntilDay: number
   expiresDay: number
+}
+
+/** Dropdown row for disclosing a checkpoint at a specific thinking level. */
+export interface InvestorPitchOption {
+  id: string
+  modelId: string
+  effortId: string
+  effortName: string
+  name: string
+  label: string
+  capability: number
+  release: Model['release']
+  shipped: boolean
+}
+
+const PITCH_OPTION_SEP = '::'
+
+export function encodeInvestorPitchOptionId(
+  modelId: string,
+  effortId: string = INSTANT_EFFORT_ID,
+): string {
+  return `${modelId}${PITCH_OPTION_SEP}${effortId}`
+}
+
+export function decodeInvestorPitchOptionId(
+  optionId: string,
+): InvestorPitchTarget {
+  const sep = optionId.lastIndexOf(PITCH_OPTION_SEP)
+  if (sep <= 0) {
+    return { modelId: optionId, effortId: INSTANT_EFFORT_ID }
+  }
+  const effortId = optionId.slice(sep + PITCH_OPTION_SEP.length)
+  return {
+    modelId: optionId.slice(0, sep),
+    effortId: effortId.length > 0 ? effortId : INSTANT_EFFORT_ID,
+  }
+}
+
+function trainedPitchRecipes(model: Model): EffortRecipe[] {
+  const recipes = migrateEffortRecipes(model.productProfile).filter(
+    (recipe) => recipe.trained,
+  )
+  return recipes.length > 0 ? recipes : [instantRecipe()]
+}
+
+function pitchDisclosureName(
+  model: Model,
+  recipe: Pick<EffortRecipe, 'name' | 'kind'>,
+  hasNamedHeads: boolean,
+): string {
+  if (!hasNamedHeads) return model.name
+  return `${model.name}-${recipe.name}`
 }
 
 function modelsForLab(state: SimState, labId: LabId): Model[] {
@@ -222,6 +287,41 @@ export function eligibleInvestorPitchModels(
   )
 }
 
+/** One dropdown row per trained thinking head. Instant-only models stay a single option. */
+export function investorPitchOptions(
+  state: SimState,
+  labId: LabId = state.playerLabId,
+): InvestorPitchOption[] {
+  const options: InvestorPitchOption[] = []
+  for (const model of investorPitchModels(state, labId)) {
+    const recipes = trainedPitchRecipes(model)
+    const hasNamedHeads = recipes.some((recipe) => recipe.kind !== 'instant')
+    for (const recipe of recipes) {
+      const view = effortViewForRecipe(model, recipe.id)
+      const capability = view?.capability ?? model.capability
+      const name = pitchDisclosureName(model, recipe, hasNamedHeads)
+      const released = model.release === 'released' || Boolean(model.shipped)
+      options.push({
+        id: encodeInvestorPitchOptionId(model.id, recipe.id),
+        modelId: model.id,
+        effortId: recipe.id,
+        effortName: recipe.name,
+        name,
+        label: `${name} · cap ${capability.toFixed(0)} · ${released ? 'released' : 'internal'}`,
+        capability,
+        release: model.release,
+        shipped: Boolean(model.shipped),
+      })
+    }
+  }
+  return options.toSorted(
+    (a, b) =>
+      b.capability - a.capability ||
+      a.modelId.localeCompare(b.modelId) ||
+      a.effortId.localeCompare(b.effortId),
+  )
+}
+
 function pitchModelOverusePenalty(model: Model): number {
   const repeatedEpochs = Math.max(0, (model.repeatedDataEpochs ?? 1) - 1)
   const benchmarkOverfit = Math.max(0, model.benchmarkOverfit ?? 0)
@@ -241,11 +341,11 @@ function pitchFrontierCapability(state: SimState): number {
   const capabilities = [
     ...state.player.models
       .filter((model) => isLivePublicModel(model))
-      .map((model) => model.capability),
+      .map((model) => peakServedCapability(model)),
     ...state.rivals.flatMap((rival) =>
       rival.models
         .filter((model) => isLivePublicModel(model))
-        .map((model) => model.capability),
+        .map((model) => peakServedCapability(model)),
     ),
   ].filter((value) => Number.isFinite(value) && value > 0)
   return Math.max(50, ...capabilities)
@@ -263,24 +363,36 @@ function roundedMillion(value: number): number {
 
 function ineligiblePitchPreview(
   state: SimState,
-  modelId: string,
+  optionId: string,
   reason: string,
   labId: LabId,
 ): InvestorPitchPreview {
-  const model = modelsForLab(state, labId).find((candidate) => candidate.id === modelId)
-  const capability = Math.max(0, model?.capability ?? 0)
+  const target = decodeInvestorPitchOptionId(optionId)
+  const model = modelsForLab(state, labId).find((candidate) => candidate.id === target.modelId)
+  const recipes = model ? trainedPitchRecipes(model) : []
+  const hasNamedHeads = recipes.some((recipe) => recipe.kind !== 'instant')
+  const recipe =
+    recipes.find((item) => item.id === target.effortId) ??
+    (target.effortId === INSTANT_EFFORT_ID ? instantRecipe() : undefined)
+  const view = model ? effortViewForRecipe(model, target.effortId) : null
+  const capability = Math.max(0, view?.capability ?? model?.capability ?? 0)
   const frontier = pitchFrontierCapability(state)
   const lab = capitalLabView(state, labId)
   const capital = capitalFor(state, labId)
   return {
-    modelId,
-    modelName: model?.name ?? 'Unknown model',
+    id: encodeInvestorPitchOptionId(target.modelId, target.effortId),
+    modelId: target.modelId,
+    effortId: target.effortId,
+    effortName: recipe?.name ?? 'Instant',
+    modelName: model
+      ? pitchDisclosureName(model, recipe ?? instantRecipe(), hasNamedHeads)
+      : 'Unknown model',
     eligible: false,
     reason,
     investorName: 'Investor desk',
     capability,
     frontierCapability: frontier,
-    capabilityScore: clamp(capability / frontier, 0, 1.2),
+    capabilityScore: clamp(capability / Math.max(1, frontier), 0, 1.2),
     qualityScore: 0,
     overusePenalty: model ? pitchModelOverusePenalty(model) : 0,
     successChance: 0,
@@ -301,15 +413,36 @@ function ineligiblePitchPreview(
 /**
  * Build a transparent model-backed investor pitch. This is deliberately pure:
  * previews never consume the seeded roll, cash, or a pitch cooldown.
+ * `optionId` is `modelId::effortId`; a bare model id still decodes as Instant.
  */
 export function investorPitchPreview(
   state: SimState,
-  modelId: string,
+  optionId: string,
   labId: LabId = state.playerLabId,
 ): InvestorPitchPreview {
-  const model = investorPitchModels(state, labId).find((candidate) => candidate.id === modelId)
+  const target = decodeInvestorPitchOptionId(optionId)
+  const encodedId = encodeInvestorPitchOptionId(target.modelId, target.effortId)
+  const model = investorPitchModels(state, labId).find(
+    (candidate) => candidate.id === target.modelId,
+  )
   if (!model) {
-    return ineligiblePitchPreview(state, modelId, 'Choose an internal or released model first.', labId)
+    return ineligiblePitchPreview(
+      state,
+      encodedId,
+      'Choose an internal or released model first.',
+      labId,
+    )
+  }
+  const recipes = trainedPitchRecipes(model)
+  const recipe = recipes.find((item) => item.id === target.effortId)
+  const view = effortViewForRecipe(model, target.effortId)
+  if (!recipe || !view) {
+    return ineligiblePitchPreview(
+      state,
+      encodedId,
+      'That thinking level is not trained on this model.',
+      labId,
+    )
   }
   const capital = capitalFor(state, labId)
   const deskCooldown = Math.max(0, Math.floor(capital.pitchCooldownUntilDay ?? 0))
@@ -318,14 +451,14 @@ export function investorPitchPreview(
   if (state.day < cooldownUntilDay) {
     return ineligiblePitchPreview(
       state,
-      modelId,
+      encodedId,
       `Investor desk is cooling down until day ${cooldownUntilDay}.`,
       labId,
     )
   }
 
   const frontierCapability = pitchFrontierCapability(state)
-  const capability = Math.max(0, model.capability)
+  const capability = Math.max(0, view.capability)
   const capabilityScore = clamp(capability / frontierCapability, 0, 1.2)
   const quality = model.quality
   const qualityScore = clamp(
@@ -372,9 +505,13 @@ export function investorPitchPreview(
   const optionPoolTopUp = clamp(0.005 + overusePenalty * 0.045 + (1 - strength) * 0.02, 0, 0.08)
   const confidenceRequired = clamp(0.62 - strength * 0.22 + overusePenalty * 0.1, 0.3, 0.78)
   const eligible = confidence >= confidenceRequired
+  const hasNamedHeads = recipes.some((item) => item.kind !== 'instant')
   return {
+    id: encodedId,
     modelId: model.id,
-    modelName: model.name,
+    effortId: recipe.id,
+    effortName: recipe.name,
+    modelName: pitchDisclosureName(model, recipe, hasNamedHeads),
     eligible,
     reason: eligible
       ? undefined
@@ -426,13 +563,13 @@ function withPitchRecord(
   })
 }
 
-/** Resolve a model-backed pitch using a stable (seed, day, model) roll. */
+/** Resolve a model-backed pitch using a stable (seed, day, model, thinking head) roll. */
 export function acceptInvestorPitch(
   state: SimState,
-  modelId: string,
+  optionId: string,
   labId: LabId = state.playerLabId,
 ): SimState {
-  const preview = investorPitchPreview(state, modelId, labId)
+  const preview = investorPitchPreview(state, optionId, labId)
   const notify = (next: SimState, severity: 'info' | 'warn', message: string) =>
     labId === state.playerLabId
       ? pushAlert(next, severity, message)
@@ -443,12 +580,20 @@ export function acceptInvestorPitch(
   if (!preview.eligible) {
     return notify(state, 'warn', preview.reason ?? 'That model is not ready for an investor pitch.')
   }
-  const roll = createRng(hashSeed(state.seed, state.day, modelId, 'investor-pitch-v1')).next()
+  const rollSeed =
+    preview.effortId === INSTANT_EFFORT_ID
+      ? hashSeed(state.seed, state.day, preview.modelId, 'investor-pitch-v1')
+      : hashSeed(state.seed, state.day, preview.modelId, preview.effortId, 'investor-pitch-v1')
+  const roll = createRng(rollSeed).next()
   const funded = roll < preview.successChance
   const cooldownUntilDay = state.day + INVESTOR_PITCH_COOLDOWN_DAYS
   const record: InvestorPitchRecord = {
-    id: `pitch-${modelId}-${state.day}`,
-    modelId,
+    id:
+      preview.effortId === INSTANT_EFFORT_ID
+        ? `pitch-${preview.modelId}-${state.day}`
+        : `pitch-${preview.modelId}-${preview.effortId}-${state.day}`,
+    modelId: preview.modelId,
+    effortId: preview.effortId,
     modelName: preview.modelName,
     investorName: preview.investorName,
     day: state.day,
@@ -480,7 +625,8 @@ export function acceptInvestorPitch(
   }
   const offer: EquityOffer = {
     id: record.id,
-    modelId,
+    modelId: preview.modelId,
+    effortId: preview.effortId,
     investorName: preview.investorName,
     cashRaised: preview.cashRaised,
     preMoneyValuation: preview.preMoneyValuation,

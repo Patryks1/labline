@@ -26,6 +26,10 @@ export interface LineChartPoint {
   y: number
   /** Optional stable domain id. The source index is used when omitted. */
   id?: string
+  /** Optional marker radius in px. Selected points grow slightly from this base. */
+  r?: number
+  /** Extra accessible detail, appended to the default point label. */
+  detail?: string
 }
 
 export interface LineChartSeries {
@@ -55,12 +59,19 @@ type PreparedSeries = Omit<LineChartSeries, 'points'> & {
   points: Array<PreparedChartDatum & LineChartPoint>
 }
 
+function pointRadius(point: LineChartPoint, compact: boolean, selected: boolean) {
+  const base = point.r ?? (compact ? 3.25 : 3.5)
+  const next = selected ? base + 1.25 : base
+  return Math.max(2.25, Math.min(9, next))
+}
+
 function pointLabel(
   hover: LineChartHover,
   formatX: (value: number) => string,
   formatY: (value: number) => string,
 ) {
-  return `${hover.series.label}, ${formatX(hover.point.x)}, ${formatY(hover.point.y)}`
+  const base = `${hover.series.label}, ${formatX(hover.point.x)}, ${formatY(hover.point.y)}`
+  return hover.point.detail ? `${base}, ${hover.point.detail}` : base
 }
 
 export function LineChart({
@@ -381,7 +392,8 @@ export function LineChart({
                             key={`${entry.id}-${point.id}`}
                             cx={pointHover.left}
                             cy={pointHover.top}
-                            r={selected ? 5 : compact ? 3.25 : 3.5}
+                            r={pointRadius(point, compact, selected)}
+                            data-point-detail={point.detail}
                             fill={selected ? 'var(--color-bone)' : entry.color}
                             stroke="var(--color-void)"
                             strokeWidth="1.25"

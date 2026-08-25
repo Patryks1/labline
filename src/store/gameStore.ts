@@ -36,6 +36,8 @@ import {
   setDefaultEffort,
   setServedEffort,
   startEffortTraining,
+  setEffortHeadComputeShare,
+  setEffortHeadCapabilityBias,
   listReleasedModel,
   resolveTrainingCampaignEvent,
   resolvePostTrainPhase,
@@ -155,8 +157,10 @@ import {
   createPlan,
   deletePlan,
   MAX_PLANS,
+  pricingPauseFeedEvents,
   updatePlan,
 } from "../sim/systems/plans";
+import { appendFeedEvents } from "../sim/systems/feed";
 import {
   deleteSaveSlot,
   listSaveSlots,
@@ -430,10 +434,23 @@ interface GameStore {
   setServedEffort: (id: string, effort: string, served: boolean) => void;
   startEffortTraining: (request: {
     id: string;
-    name: string;
-    thinkingTokenMult: number;
+    name?: string;
+    thinkingTokenMult?: number;
     trainPfDays?: number;
+    recipeId?: string;
+    capabilityBias?: number;
+    trainComputeShare?: number;
   }) => void;
+  setEffortHeadComputeShare: (
+    id: string,
+    recipeId: string,
+    share: number,
+  ) => void;
+  setEffortHeadCapabilityBias: (
+    id: string,
+    recipeId: string,
+    bias: number,
+  ) => void;
   listReleasedModel: (request: {
     modelId: string;
     sell: boolean;
@@ -1301,6 +1318,14 @@ export const useGameStore = create<GameStore>((rawSet, get) => {
     set((st) => ({ state: setServedEffort(st.state, id, effort, served) })),
   startEffortTraining: (request) =>
     set((st) => ({ state: startEffortTraining(st.state, request) })),
+  setEffortHeadComputeShare: (id, recipeId, share) =>
+    set((st) => ({
+      state: setEffortHeadComputeShare(st.state, id, recipeId, share),
+    })),
+  setEffortHeadCapabilityBias: (id, recipeId, bias) =>
+    set((st) => ({
+      state: setEffortHeadCapabilityBias(st.state, id, recipeId, bias),
+    })),
   listReleasedModel: (request) =>
     set((st) => ({ state: listReleasedModel(st.state, request) })),
   setModelApiInOut: (id, priceIn, priceOut) =>
@@ -1429,10 +1454,13 @@ export const useGameStore = create<GameStore>((rawSet, get) => {
         });
       }
       return {
-        state: {
-          ...st.state,
-          player: { ...st.state.player, pricing: next, models },
-        },
+        state: appendFeedEvents(
+          {
+            ...st.state,
+            player: { ...st.state.player, pricing: next, models },
+          },
+          pricingPauseFeedEvents(st.state, st.state.player.pricing, next),
+        ),
       };
     }),
 

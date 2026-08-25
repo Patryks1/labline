@@ -34,8 +34,10 @@ import {
 import {
   DEFAULT_TRAINING_NUMERICS,
   estimateTrainingMemoryGb,
+  nativeWeightPrecisionForNumerics,
   supportsTrainingFormat,
   TRAINING_PRECISION_PROFILES,
+  trainingFormatThroughput,
   trainingNumericsEconomicsProfile,
 } from "../../../sim/balance/trainingPrecision";
 import {
@@ -731,6 +733,27 @@ export function ModelsPanel({
         teacherCapability: distillTeacher?.capability,
         researchMult: trainingResearchMult,
         overtrainCapBonus: researchEffects.overtrainCapBonus,
+        hardwareGeneration: Math.max(
+          1,
+          ...(state.player.rackFleet ?? [])
+            .filter((rack) => rack.status === "live" && rack.count > 0)
+            .map(
+              (rack) =>
+                resolveRackSku(rack.skuId, state.player.rackDesigns ?? [])
+                  .accelerator?.generation ?? 1,
+            ),
+          ...state.computeContracts
+            .filter(
+              (contract) =>
+                contract.buyerLabId === state.playerLabId &&
+                contract.status === "active" &&
+                contract.pf > 0 &&
+                (contract.availableDay == null ||
+                  state.day >= contract.availableDay),
+            )
+            .map((contract) => contract.acceleratorGeneration ?? 1),
+        ),
+        servingEfficiency: state.player.servingEfficiency,
       }),
     [
       modelIteration.name,
@@ -754,6 +777,12 @@ export function ModelsPanel({
       snap.pools.training,
       snap.mwForecast.training,
       teachers,
+      state.player.servingEfficiency,
+      state.player.rackFleet,
+      state.player.rackDesigns,
+      state.computeContracts,
+      state.playerLabId,
+      state.day,
     ],
   );
   const dataGuidance = trainingForecast.dataGuidance
@@ -894,11 +923,11 @@ export function ModelsPanel({
   const dailyCost = trainingForecast.cashBurnPerDay;
   const upfront = trainingForecast.upfrontCash;
   const daysEst = trainingForecast.etaDays;
-  const hostWeightFormat = trainingFormat.includes("fp32")
-    ? "fp32"
-    : trainingFormat.includes("fp8") || trainingFormat.includes("nvfp4")
-      ? "int8"
-      : "fp16";
+  const hostWeightFormat = nativeWeightPrecisionForNumerics({
+    computeFormat: trainingFormat,
+    nativeWeightFormat,
+    recipeVersion: 1,
+  });
   const hostRamGb = modelVramGb(
     trainParamsB,
     activeParamsB,
@@ -2511,7 +2540,12 @@ export function ModelsPanel({
                                         unlocked.includes("opt_checkpoint"),
                                     },
                                   );
-                                  const optionTradeoff = `quality ${(optionEconomics.qualityCeilingMultiplier * 100).toFixed(2)}% · risk ${optionEconomics.stabilityRisk >= 0.1 || optionEconomics.lossVolatilityMultiplier >= 1.5 ? "high" : optionEconomics.stabilityRisk > 0.02 || optionEconomics.lossVolatilityMultiplier > 1.1 ? "medium" : "low"} · compute ${optionEconomics.trainingWorkMultiplier.toFixed(2)}× · HBM ${num(optionMemory.requiredHbmGb, 2)} GB · cost ${optionEconomics.upfrontCashMultiplier.toFixed(2)}×/${optionEconomics.dailyCashMultiplier.toFixed(2)}×`;
+                                  const optionThroughput =
+                                    trainingFormatThroughput(
+                                      Math.max(1, maxHardwareGeneration),
+                                      optionNumerics,
+                                    );
+                                  const optionTradeoff = `train ${optionThroughput.toFixed(2)}× PF · work ${optionEconomics.trainingWorkMultiplier.toFixed(2)}× · quality ${(optionEconomics.qualityCeilingMultiplier * 100).toFixed(2)}% · risk ${optionEconomics.stabilityRisk >= 0.1 || optionEconomics.lossVolatilityMultiplier >= 1.5 ? "high" : optionEconomics.stabilityRisk > 0.02 || optionEconomics.lossVolatilityMultiplier > 1.1 ? "medium" : "low"} · HBM ${num(optionMemory.requiredHbmGb, 2)} GB · cost ${optionEconomics.upfrontCashMultiplier.toFixed(2)}×/${optionEconomics.dailyCashMultiplier.toFixed(2)}×`;
                                   return (
                                     <option
                                       key={option.value}
@@ -2600,35 +2634,48 @@ export function ModelsPanel({
                               </span>
                             </div>
                             <div className="mt-1.5 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-                              <span className="rounded border border-line/50 bg-panel-2/60 px-1.5 py-1 font-mono text-[0.625rem] text-muted">
-                                Work{" "}
+                              <span
+                                className="rounded border border-line/50 bg-panel-2/60 px-1.5 py-1 font-mono text-[0.625rem] text-muted"
+                                data-preview="train-eta"
+                              >
+                                Train{" "}
                                 <strong className="text-bone">
-                                  {numericsEconomics.trainingWorkMultiplier.toFixed(
-                                    2,
-                                  )}
-                                  ×
+                                  {daysEst === Infinity
+                                    ? "no pool"
+                                    : daysEst >= 10
+                                      ? `${daysEst.toFixed(0)}d`
+                                      : `${daysEst.toFixed(1)}d`}
+                                </strong>
+                              </span>
+                              <span
+                                className="rounded border border-line/50 bg-panel-2/60 px-1.5 py-1 font-mono text-[0.625rem] text-muted"
+                                data-preview="host-tps"
+                              >
+                                Host{" "}
+                                <strong className="text-bone">
+                                  {trainingForecast.interactiveTokPerSec.toFixed(
+                                    1,
+                                  )}{" "}
+                                  tok/s
+                                </strong>
+                              </span>
+                              <span
+                                className="rounded border border-line/50 bg-panel-2/60 px-1.5 py-1 font-mono text-[0.625rem] text-muted"
+                                data-preview="token-pf"
+                              >
+                                Tokens{" "}
+                                <strong className="text-bone">
+                                  {num(
+                                    trainingForecast.servePfPerMTok ?? 0,
+                                    3,
+                                  )}{" "}
+                                  PF/MTok
                                 </strong>
                               </span>
                               <span className="rounded border border-line/50 bg-panel-2/60 px-1.5 py-1 font-mono text-[0.625rem] text-muted">
                                 HBM{" "}
                                 <strong className="text-bone">
                                   {num(trainingMemory.requiredHbmGb, 2)} GB
-                                </strong>
-                              </span>
-                              <span className="rounded border border-line/50 bg-panel-2/60 px-1.5 py-1 font-mono text-[0.625rem] text-muted">
-                                Host{" "}
-                                <strong className="text-bone">
-                                  {num(trainingMemory.requiredSystemRamGb, 2)}{" "}
-                                  GB
-                                </strong>
-                              </span>
-                              <span className="rounded border border-line/50 bg-panel-2/60 px-1.5 py-1 font-mono text-[0.625rem] text-muted">
-                                Setup{" "}
-                                <strong className="text-bone">
-                                  {numericsEconomics.upfrontCashMultiplier.toFixed(
-                                    2,
-                                  )}
-                                  ×
                                 </strong>
                               </span>
                             </div>

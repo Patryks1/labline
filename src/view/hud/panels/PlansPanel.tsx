@@ -51,6 +51,7 @@ import {
   MAX_PLANS,
 } from "../../../sim/systems/plans";
 import type { PlanOfferingBreadth } from "../../../sim/systems/plans";
+import { defaultServePrecisionForModel } from "../../../sim/balance/tokenServe";
 import { useGameStore } from "../../../store/gameStore";
 import {
   selectCompanyModels,
@@ -90,6 +91,8 @@ import {
   normalizeModelRouters,
 } from "../../../sim/balance/modelStudio";
 import { computeSnapshot } from "../../../sim/tick";
+import { buildComputeBreakdown } from "../../../sim/systems/computeBreakdown";
+import { isSubsAcceptingNew, isPlanAcceptingNew, isApiAcceptingNew } from "../../../sim/systems/plans";
 import { ResearchUnlockLink } from "../ui/ResearchUnlockLink";
 import {
   EmptyState,
@@ -101,8 +104,16 @@ import {
   StatusChip,
 } from "../ui/HudPrimitives";
 import { GameCard, MeterBar, SegmentedTabs, StatRow } from "../ui/kit";
+import {
+  PeakPricingStrip,
+  ServeModelLoadBar,
+  ServeModelLoadList,
+  ServeOutageBanner,
+  channelLoadsFromServePool,
+} from "../ui/ComputeLoadBars";
 import { LineChart, type LineChartSeries } from "../ui/LineChart";
 import { effectiveApiPeerPricing, formatApiListPrice } from "./apiPriceUi";
+import { PlanDissatisfactionStatusChip } from "./planDissatisfactionCopy";
 import { buildFinanceDashboardModel } from "../data/financeDashboardModel";
 import {
   NEW_PLAN_SELECTOR_ID,
@@ -250,6 +261,18 @@ export function PlansPanel() {
   const routers = normalizeModelRouters(playerCompany.ops.modelRouters);
   const pricing = playerCompany.ops.pricing;
   const snap = computeSnapshot(state);
+  const serveLoad = useMemo(() => buildComputeBreakdown(state).load.serve, [state]);
+  const apiPoolPf =
+    state.lastMarket.apiPoolPf ??
+    serveLoad.allocatedPf * (pricing.apiVsSubPriority ?? 0.68);
+  const subPoolPf =
+    state.lastMarket.subPoolPf ??
+    serveLoad.allocatedPf * (1 - (pricing.apiVsSubPriority ?? 0.68));
+  const derivedChannelLoads = channelLoadsFromServePool(
+    serveLoad,
+    apiPoolPf,
+    subPoolPf,
+  );
   const energyPrice = energyPriceForState(state);
   const infra = serveInfraCost(state, snap, energyPrice);
   const apiRequested = state.lastMarket.apiDemandMTok ?? 0;
@@ -358,7 +381,9 @@ export function PlansPanel() {
 
   const modelFinance = state.lastMarket.modelFinance ?? [];
   const apiCostEstimates = models.map((model) => {
-    const precision = pricing.apiServePrecisionByModel?.[model.id] ?? "fp32";
+    const precision =
+      pricing.apiServePrecisionByModel?.[model.id] ??
+      defaultServePrecisionForModel(model);
     const servedModel = modelForServePrecision(
       model,
       precision,
@@ -476,8 +501,19 @@ export function PlansPanel() {
         onPeakPricingPctChange={(peakPricingPct) =>
           setPricing({ peakPricingPct, serveThrottlePolicy: undefined })
         }
-        apiLoad={state.lastMarket.apiLoad ?? 0}
-        subLoad={state.lastMarket.subLoad ?? 0}
+        apiLoad={derivedChannelLoads.apiLoad}
+        subLoad={derivedChannelLoads.subLoad}
+        serveLoad={serveLoad}
+        onPauseApi={() =>
+          setPricing({ apiAcceptingNew: !isApiAcceptingNew(pricing) })
+        }
+        onPauseSubs={() =>
+          setPricing({ subsAcceptingNew: !isSubsAcceptingNew(pricing) })
+        }
+        peakListPrice={state.lastMarket.apiListPricePerMTok}
+        peakPrice={state.lastMarket.apiPeakPricePerMTok}
+        peakExtraRevenue={state.lastMarket.apiPeakExtraRevenue}
+        outageState={state}
         apiStrain={state.lastMarket.apiSpeedStrain ?? 0}
         subStrain={state.lastMarket.subSpeedStrain ?? 0}
       />
@@ -770,7 +806,7 @@ export function PlansPanel() {
                   const hostingFloorBlended = parts.reduce((sum, part) => {
                     const precision =
                       pricing.apiServePrecisionByModel?.[part.model.id] ??
-                      "fp32";
+                      defaultServePrecisionForModel(part.model);
                     const served = modelForServePrecision(
                       part.model,
                       precision,
@@ -916,7 +952,8 @@ export function PlansPanel() {
                   const isApiLive = apiModelIds.includes(m.id);
                   const viaRouter = routedApiMemberIds.has(m.id);
                   const apiPrecision =
-                    pricing.apiServePrecisionByModel?.[m.id] ?? "fp32";
+                    pricing.apiServePrecisionByModel?.[m.id] ??
+                    defaultServePrecisionForModel(m);
                   const apiPrecisionOptions = unlockedPlanPrecisions(
                     playerCompany.research.unlocked,
                   );
@@ -1126,6 +1163,20 @@ export function PlansPanel() {
                             cap {apiServedModel.capability.toFixed(2)}
                           </StatusChip>
                         </div>
+
+                        {(() => {
+                          const modelLoad = serveLoad.models.find(
+                            (row) => row.modelId === m.id,
+                          );
+                          return modelLoad ? (
+                            <div className="mt-2" data-testid={`api-model-serve-load-${m.id}`}>
+                              <ServeModelLoadBar
+                                row={modelLoad}
+                                live={(fin?.dayApiMTok ?? 0) > 0}
+                              />
+                            </div>
+                          ) : null;
+                        })()}
 
                         <div className="mt-2 grid gap-1.5 sm:grid-cols-3">
                           <UsageCell
@@ -1416,6 +1467,13 @@ export function PlansCapacitySummary({
   subLoad,
   apiStrain,
   subStrain,
+  serveLoad,
+  onPauseApi,
+  onPauseSubs,
+  peakListPrice,
+  peakPrice,
+  peakExtraRevenue,
+  outageState,
 }: {
   apiServed: number;
   apiRequested: number;
@@ -1445,6 +1503,13 @@ export function PlansCapacitySummary({
   subLoad: number;
   apiStrain: number;
   subStrain: number;
+  serveLoad?: import("../../../sim/systems/computeBreakdown").ServePoolLoad;
+  onPauseApi?: () => void;
+  onPauseSubs?: () => void;
+  peakListPrice?: number;
+  peakPrice?: number;
+  peakExtraRevenue?: number;
+  outageState?: import("../../../sim/types").SimState;
 }) {
   const totalRequested = apiRequested + subRequested;
   const totalBacklog = apiBacklogMTok + subscriptionBacklogMTok;
@@ -1487,11 +1552,25 @@ export function PlansCapacitySummary({
               Channel demand and serving health stay visible while you edit
               plans or API pricing.
             </p>
+            <PeakPricingStrip
+              listPrice={peakListPrice}
+              peakPrice={peakPrice}
+              extraRevenue={peakExtraRevenue}
+              className="mt-1"
+            />
           </div>
           <StatusChip tone={unservedRatio > 0.1 ? "warning" : "positive"}>
             {pct(serveRatio)} served
           </StatusChip>
         </div>
+        {outageState && onPauseApi && onPauseSubs ? (
+          <ServeOutageBanner
+            state={outageState}
+            onPauseApi={onPauseApi}
+            onPauseSubs={onPauseSubs}
+            className="mt-2"
+          />
+        ) : null}
       </div>
 
       <div className="grid min-w-0 grid-cols-2 gap-px bg-line/40 sm:grid-cols-4">
@@ -1522,6 +1601,22 @@ export function PlansCapacitySummary({
       </div>
 
       <div className="min-w-0 border-t border-line/50 bg-void/25 px-2 pb-2">
+        {serveLoad ? (
+          <div
+            className="border-b border-line/50 px-1 py-2"
+            data-testid="plans-serve-model-load"
+          >
+            <p className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+              Per-model serve load
+            </p>
+            <div className="mt-1.5">
+              <ServeModelLoadList
+                models={serveLoad.models}
+                live={serveLoad.usedPf > 1e-9}
+              />
+            </div>
+          </div>
+        ) : null}
         <ComputeAllocationChart
           apiMTok={apiServed}
           apiPf={apiPf}
@@ -3137,7 +3232,7 @@ export function PlanEntitlementBreakdown({
       >
         {entitlements.map((row) => (
           <div
-            key={row.modelId}
+            key={`${row.modelId}:${row.effortId}`}
             className="rounded-md border border-line/45 bg-panel-2/55 px-2 py-1.5 font-mono text-[0.6875rem]"
           >
             <div className="flex items-center justify-between gap-2">
@@ -3177,7 +3272,10 @@ export function PlanEntitlementBreakdown({
           </thead>
           <tbody>
             {entitlements.map((row) => (
-              <tr key={row.modelId} className="border-t border-line/40">
+              <tr
+                key={`${row.modelId}:${row.effortId}`}
+                className="border-t border-line/40"
+              >
                 <td className="max-w-[8rem] truncate py-1 pr-2 text-bone">
                   {row.name}
                   <span className="text-muted">
@@ -3383,19 +3481,18 @@ function PlanCard({
         {marginBad && !free ? (
           <StatusChip tone="danger">Losing money / sub</StatusChip>
         ) : null}
-        {dissatisfaction > 0.05 ? (
-          <StatusChip tone="danger">
-            <span
-              title={
-                allowanceExpectation.dissatisfaction > 0
-                  ? "Included usage is below what customers expect at this price and capability."
-                  : "Reliability or available compute is reducing satisfaction."
-              }
-            >
-              {pct(dissatisfaction)} dissatisfied
-            </span>
-          </StatusChip>
-        ) : null}
+        <PlanDissatisfactionStatusChip
+          isFree={free}
+          dissatisfaction={dissatisfaction}
+          allowanceDissatisfaction={stats?.allowanceDissatisfaction}
+          stabilityDissatisfaction={stats?.stabilityDissatisfaction}
+          slownessDissatisfaction={stats?.slownessDissatisfaction}
+          serveFraction={stats?.serveFraction}
+          serveOutage={simState.lastMarket.serveOutage === true}
+          subSpeedStrain={simState.lastMarket.subSpeedStrain}
+          allowanceFallback={allowanceExpectation.dissatisfaction}
+          allowanceFallbackLabel={allowanceExpectation.label}
+        />
         <button
           type="button"
           role="switch"
@@ -3412,6 +3509,31 @@ function PlanCard({
           <span className="plan-live-switch__indicator" aria-hidden="true" />
           <span>{plan.enabled ? "Live" : "Paused"}</span>
         </button>
+        {plan.enabled && isSubsAcceptingNew(simState.player.pricing) ? (
+          <button
+            type="button"
+            role="switch"
+            aria-checked={isPlanAcceptingNew(simState.player.pricing, plan)}
+            aria-label={`${plan.name} ${isPlanAcceptingNew(simState.player.pricing, plan) ? "accepting new subscribers" : "closed to new subscribers"}`}
+            data-testid={`plan-accepting-new-${plan.id}`}
+            onClick={() =>
+              onChange({
+                acceptingNew: !isPlanAcceptingNew(simState.player.pricing, plan),
+              })
+            }
+            className={`flex min-h-11 shrink-0 items-center gap-2 rounded-md border px-2.5 text-[0.75rem] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/70 ${
+              isPlanAcceptingNew(simState.player.pricing, plan)
+                ? "border-line/70 bg-panel-2 text-bone hover:border-mint/35"
+                : "border-amber/45 bg-amber/10 text-amber hover:bg-amber/15"
+            }`}
+          >
+            <span>
+              {isPlanAcceptingNew(simState.player.pricing, plan)
+                ? "Open to new"
+                : "Closed to new"}
+            </span>
+          </button>
+        ) : null}
       </div>
 
       {/* Live KPIs — the things you glance at */}

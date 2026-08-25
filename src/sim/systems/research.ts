@@ -335,9 +335,13 @@ export function canStartNow(
     return { ok: false, reason: "Research already in progress" };
   }
   if (
-    (state.player.researchPrograms ?? []).some(
-      (program) => program.phase !== "complete",
-    )
+    (state.player.researchPrograms ?? []).some((program) => {
+      if (program.phase === "complete") return false;
+      const pod = (state.player.researchPods ?? []).find(
+        (candidate) => candidate.id === program.podId,
+      );
+      return pod?.assignmentId === program.id;
+    })
   ) {
     return {
       ok: false,
@@ -674,9 +678,13 @@ export function tickResearch(state: SimState): SimState {
   // exclusive authorities. Direct callers get the same protection as tickDay.
   if (
     !state.player.activeResearch &&
-    (state.player.researchPrograms ?? []).some(
-      (program) => program.phase !== "complete",
-    )
+    (state.player.researchPrograms ?? []).some((program) => {
+      if (program.phase === "complete") return false;
+      const pod = (state.player.researchPods ?? []).find(
+        (candidate) => candidate.id === program.podId,
+      );
+      return pod?.assignmentId === program.id;
+    })
   ) {
     return state;
   }

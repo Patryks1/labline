@@ -2,6 +2,7 @@ import type {
   BenchmarkScores,
   DataDomain,
   EffortBoard,
+  EffortKind,
   EffortRecipe,
   Model,
   ModelLifecycle,
@@ -228,6 +229,10 @@ export const INSTANT_EFFORT_ID = "instant";
 export const MAX_TRAINED_EFFORTS = 3;
 export const THINKING_TOKEN_MIN = 1.4;
 export const THINKING_TOKEN_MAX = 8;
+export const EFFORT_HEAD_SHARE_MAX = 0.45;
+export const EFFORT_HEAD_POOL_CAP = 0.8;
+export const EFFORT_CAPABILITY_BIAS_DEFAULT = 0.5;
+export const DEFAULT_EFFORT_HEAD_SHARE = 0.2;
 
 export const EFFORT_OUTPUT_TOKEN_MULT: Record<ReasoningEffort, number> = {
   low: 1,
@@ -255,6 +260,81 @@ export const REASONING_EFFORTS: readonly ReasoningEffort[] = [
   "high",
 ];
 
+export function clampCapabilityBias(value: number | undefined): number {
+  if (value == null || !Number.isFinite(value)) {
+    return EFFORT_CAPABILITY_BIAS_DEFAULT;
+  }
+  return Math.max(0, Math.min(1, value));
+}
+
+export function clampEffortTrainShare(value: number | undefined): number {
+  if (value == null || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(EFFORT_HEAD_SHARE_MAX, value));
+}
+
+/** Serve-cost multiplier. 0.5 is cost-neutral; capability is a massive markup. */
+export function effortServeCostScale(
+  capabilityBias: number | undefined,
+): number {
+  return Math.pow(3.4, 2 * clampCapabilityBias(capabilityBias) - 1);
+}
+
+export function effortCapabilityScale(
+  capabilityBias: number | undefined,
+): number {
+  return 0.74 + 0.52 * clampCapabilityBias(capabilityBias);
+}
+
+export function effortFundedPfFromQuality(
+  quality: number,
+  requiredPfDays: number,
+): number {
+  const q = clampUnit(quality);
+  if (q <= 0) return 0;
+  if (q >= 0.999) return Math.max(1, requiredPfDays) * 4;
+  return Math.max(0, (-Math.log(1 - q) * Math.max(1, requiredPfDays)) / 1.6);
+}
+
+export function allocateEffortHeadPf(
+  recipes: readonly EffortRecipe[],
+  allocatedPf: number,
+): { remainderPf: number; byId: Record<string, number> } {
+  const pf = Math.max(0, allocatedPf);
+  const shares: Record<string, number> = {};
+  let totalShare = 0;
+  for (const recipe of recipes) {
+    const share = clampEffortTrainShare(recipe.trainComputeShare);
+    shares[recipe.id] = share;
+    totalShare += share;
+  }
+  const scale =
+    totalShare > EFFORT_HEAD_POOL_CAP && totalShare > 0
+      ? EFFORT_HEAD_POOL_CAP / totalShare
+      : 1;
+  const byId: Record<string, number> = {};
+  let used = 0;
+  for (const recipe of recipes) {
+    const headPf = pf * (shares[recipe.id] ?? 0) * scale;
+    byId[recipe.id] = headPf;
+    used += headPf;
+  }
+  return { remainderPf: Math.max(0, pf - used), byId };
+}
+
+export function normalizeEffortRecipe(recipe: EffortRecipe): EffortRecipe {
+  return {
+    ...recipe,
+    capabilityBias: clampCapabilityBias(recipe.capabilityBias),
+    trainComputeShare: clampEffortTrainShare(recipe.trainComputeShare),
+    progressPfDays: Math.max(0, recipe.progressPfDays ?? 0),
+    targetPfDays: Math.max(0, recipe.targetPfDays ?? 0),
+    loss:
+      recipe.loss != null && Number.isFinite(recipe.loss)
+        ? recipe.loss
+        : undefined,
+  };
+}
+
 export function instantRecipe(): EffortRecipe {
   return {
     id: INSTANT_EFFORT_ID,
@@ -266,6 +346,10 @@ export function instantRecipe(): EffortRecipe {
     trained: true,
     quality: 1,
     served: true,
+    capabilityBias: EFFORT_CAPABILITY_BIAS_DEFAULT,
+    trainComputeShare: 0,
+    progressPfDays: 0,
+    targetPfDays: 0,
   };
 }
 
@@ -278,27 +362,42 @@ export function migrateEffortRecipes(
     );
     return hasInstant
       ? profile.effortRecipes.map((recipe) =>
-          recipe.kind === "instant" || recipe.id === INSTANT_EFFORT_ID
-            ? { ...instantRecipe(), ...recipe, id: INSTANT_EFFORT_ID, kind: "instant", trained: true, thinkingTokenMult: 1 }
-            : recipe,
+          normalizeEffortRecipe(
+            recipe.kind === "instant" || recipe.id === INSTANT_EFFORT_ID
+              ? {
+                  ...instantRecipe(),
+                  ...recipe,
+                  id: INSTANT_EFFORT_ID,
+                  kind: "instant",
+                  trained: true,
+                  thinkingTokenMult: 1,
+                }
+              : recipe,
+          ),
         )
-      : [instantRecipe(), ...profile.effortRecipes];
+      : [instantRecipe(), ...profile.effortRecipes.map(normalizeEffortRecipe)];
   }
   const recipes: EffortRecipe[] = [instantRecipe()];
   const served = new Set(profile?.servedEfforts ?? ["low"]);
   for (const policy of profile?.effortPolicies ?? []) {
     if (policy.level === "low" || !policy.trained) continue;
-    recipes.push({
-      id: policy.level,
-      name: policy.level === "medium" ? "Think" : "Deep",
-      kind: "trained",
-      thinkingTokenMult: EFFORT_OUTPUT_TOKEN_MULT[policy.level],
-      trainPfDays: 0,
-      trainCash: 0,
-      trained: true,
-      quality: clampUnit(policy.quality),
-      served: served.has(policy.level),
-    });
+    recipes.push(
+      normalizeEffortRecipe({
+        id: policy.level,
+        name: policy.level === "medium" ? "Think" : "Deep",
+        kind: "trained",
+        thinkingTokenMult: EFFORT_OUTPUT_TOKEN_MULT[policy.level],
+        trainPfDays: 0,
+        trainCash: 0,
+        trained: true,
+        quality: clampUnit(policy.quality),
+        served: served.has(policy.level),
+        capabilityBias: EFFORT_CAPABILITY_BIAS_DEFAULT,
+        trainComputeShare: 0,
+        progressPfDays: 0,
+        targetPfDays: 0,
+      }),
+    );
   }
   const instant = recipes.find((recipe) => recipe.id === INSTANT_EFFORT_ID);
   if (instant) {
@@ -444,10 +543,15 @@ export function efficiencyTokenFactor(tokenEfficiency: number): number {
 }
 
 export function serveTokenMultiplierForRecipe(
-  recipe: Pick<EffortRecipe, "thinkingTokenMult">,
+  recipe: Pick<EffortRecipe, "thinkingTokenMult"> &
+    Partial<Pick<EffortRecipe, "kind" | "capabilityBias">>,
   tokenEfficiency: number,
 ): number {
-  return Math.max(1, recipe.thinkingTokenMult) / efficiencyTokenFactor(tokenEfficiency);
+  const base =
+    Math.max(1, recipe.thinkingTokenMult) /
+    efficiencyTokenFactor(tokenEfficiency);
+  if (recipe.kind === "instant") return Math.max(1, base);
+  return Math.max(1, base * effortServeCostScale(recipe.capabilityBias));
 }
 
 export function serveTokenMultiplier(
@@ -547,15 +651,43 @@ const HARD_BENCHES: readonly (keyof BenchmarkScores)[] = [
 export function applyEffortLiftFromRecipe(
   capability: number,
   benches: BenchmarkScores,
-  recipe: Pick<EffortRecipe, "kind" | "trained" | "thinkingTokenMult" | "quality">,
+  recipe: Pick<
+    EffortRecipe,
+    "kind" | "trained" | "thinkingTokenMult" | "quality"
+  > &
+    Partial<
+      Pick<EffortRecipe, "capabilityBias" | "trainPfDays" | "targetPfDays">
+    >,
 ): { capability: number; benchmarks: BenchmarkScores } {
-  if (!recipe.trained || recipe.kind === "instant") {
+  if (!recipe.trained && recipe.kind !== "instant") {
     return { capability, benchmarks: { ...benches } };
+  }
+  const bias = clampCapabilityBias(recipe.capabilityBias);
+  const capScale = effortCapabilityScale(bias);
+  if (recipe.kind === "instant") {
+    const funded = Math.max(0, recipe.trainPfDays ?? 0);
+    if (funded <= 1e-9) {
+      return { capability, benchmarks: { ...benches } };
+    }
+    const required = Math.max(1, recipe.targetPfDays ?? funded);
+    const extra = effortQualityFromTrain(funded, required);
+    const capLift = 3.6 * extra * capScale;
+    const benchLift = 3.1 * extra * capScale;
+    const next = { ...benches };
+    for (const id of HARD_BENCHES) {
+      next[id] = clamp(next[id] + benchLift);
+    }
+    next.mmlu = clamp(next.mmlu + benchLift * 0.45);
+    next.personality = benches.personality;
+    return {
+      capability: clamp(capability + capLift),
+      benchmarks: next,
+    };
   }
   const quality = clampUnit(recipe.quality);
   const usefulMult = 1 + (Math.max(1, recipe.thinkingTokenMult) - 1) * quality;
-  const capLift = 7.2 * Math.log2(Math.max(1, usefulMult)) * quality;
-  const benchLift = 6.4 * Math.log2(Math.max(1, usefulMult)) * quality;
+  const capLift = 7.2 * Math.log2(Math.max(1, usefulMult)) * quality * capScale;
+  const benchLift = 6.4 * Math.log2(Math.max(1, usefulMult)) * quality * capScale;
   const next = { ...benches };
   for (const id of HARD_BENCHES) {
     next[id] = clamp(next[id] + benchLift);
@@ -708,6 +840,73 @@ export function withServedEffort(
   return withServedRecipe(profile, id, served);
 }
 
+export function withEffortRecipePatch(
+  profile: ModelProductProfile,
+  recipeId: string,
+  patch: Partial<EffortRecipe>,
+): ModelProductProfile {
+  const recipes = migrateEffortRecipes(profile).map((recipe) =>
+    recipe.id === recipeId
+      ? normalizeEffortRecipe({ ...recipe, ...patch, id: recipe.id })
+      : recipe,
+  );
+  if (!recipes.some((recipe) => recipe.id === recipeId)) return profile;
+  return { ...profile, effortRecipes: recipes };
+}
+
+export function previewEffortRecipe(input: {
+  recipe: Pick<
+    EffortRecipe,
+    "kind" | "trained" | "thinkingTokenMult" | "quality"
+  > &
+    Partial<
+      Pick<EffortRecipe, "capabilityBias" | "trainPfDays" | "targetPfDays">
+    >;
+  tokenEfficiency: number;
+  baseCapability: number;
+  benches?: BenchmarkScores;
+}): {
+  tokenMult: number;
+  capability: number;
+  capDelta: number;
+  costScale: number;
+  capScale: number;
+} {
+  const benches = input.benches ?? {
+    mmlu: input.baseCapability,
+    coding: input.baseCapability,
+    math: input.baseCapability,
+    vision: 0,
+    law: 0,
+    health: 0,
+    science: input.baseCapability,
+    multilingual: 0,
+    agents: input.baseCapability,
+    safety: 0,
+    personality: 0,
+  };
+  const lifted = applyEffortLiftFromRecipe(
+    input.baseCapability,
+    benches,
+    input.recipe,
+  );
+  const tokenMult = serveTokenMultiplierForRecipe(
+    input.recipe,
+    input.tokenEfficiency,
+  );
+  const costScale =
+    input.recipe.kind === "instant"
+      ? 1
+      : effortServeCostScale(input.recipe.capabilityBias);
+  return {
+    tokenMult,
+    capability: lifted.capability,
+    capDelta: lifted.capability - input.baseCapability,
+    costScale,
+    capScale: effortCapabilityScale(input.recipe.capabilityBias),
+  };
+}
+
 export function effortEconomics(
   recipe: EffortRecipe,
   tokenEfficiency: number,
@@ -737,12 +936,16 @@ export function quoteEffortTraining(input: {
   trainPfDays?: number;
   gymQuality?: number;
   researchUnlocked?: readonly string[];
+  capabilityBias?: number;
+  kind?: EffortKind;
 }): {
   thinkingTokenMult: number;
   requiredPfDays: number;
   fundedPfDays: number;
   quality: number;
   cash: number;
+  costScale: number;
+  capScale: number;
 } {
   const thinkingTokenMult = clampThinkingTokenMult(input.thinkingTokenMult);
   const requiredPfDays = effortTrainTargetPfDays({
@@ -752,6 +955,7 @@ export function quoteEffortTraining(input: {
     researchUnlocked: input.researchUnlocked,
   });
   const fundedPfDays = Math.max(1, input.trainPfDays ?? requiredPfDays);
+  const capabilityBias = clampCapabilityBias(input.capabilityBias);
   return {
     thinkingTokenMult,
     requiredPfDays,
@@ -761,6 +965,9 @@ export function quoteEffortTraining(input: {
       Math.min(fundedPfDays, requiredPfDays * 1.4),
       input.paramsB,
     ),
+    costScale:
+      input.kind === "instant" ? 1 : effortServeCostScale(capabilityBias),
+    capScale: effortCapabilityScale(capabilityBias),
   };
 }
 

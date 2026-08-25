@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
-import type { ModelProductProfile } from "../../../../sim/types";
+import type { EffortRecipe, ModelProductProfile } from "../../../../sim/types";
 import {
+  DEFAULT_EFFORT_HEAD_SHARE,
+  EFFORT_HEAD_SHARE_MAX,
   EFFORT_UNLOCK_RESEARCH,
   MAX_TRAINED_EFFORTS,
   THINKING_TOKEN_MAX,
@@ -10,6 +12,7 @@ import {
   effortReasoningUnlocked,
   gymQualityByKind,
   migrateEffortRecipes,
+  previewEffortRecipe,
   quoteEffortTraining,
   serveTokenMultiplierForRecipe,
   trainedEffortCount,
@@ -20,11 +23,34 @@ import { HudButton, HudInput, StatusChip } from "../../ui/HudPrimitives";
 import { ResearchUnlockLink } from "../../ui/ResearchUnlockLink";
 import { SliderField } from "../../ui/SliderField";
 
+function biasLabel(bias: number): string {
+  if (bias < 0.35) return "efficient";
+  if (bias > 0.65) return "capable";
+  return "balanced";
+}
+
+function dummyBenches(baseCap: number, personality: number) {
+  return {
+    mmlu: baseCap,
+    coding: baseCap,
+    math: baseCap,
+    vision: 0,
+    law: 0,
+    health: 0,
+    science: baseCap,
+    multilingual: 0,
+    agents: baseCap,
+    safety: 0,
+    personality,
+  };
+}
+
 export function EffortStudio({
   subjectId,
   profile,
   capability,
   paramsB = 1,
+  live = false,
   onDefault,
   onToggleServe,
 }: {
@@ -32,6 +58,7 @@ export function EffortStudio({
   profile: ModelProductProfile;
   capability?: number;
   paramsB?: number;
+  live?: boolean;
   onDefault?: (recipeId: string) => void;
   onToggleServe?: (recipeId: string, served: boolean) => void;
 }) {
@@ -40,6 +67,8 @@ export function EffortStudio({
   const startEffort = useGameStore((s) => s.startEffortTraining);
   const setDefault = useGameStore((s) => s.setDefaultEffort);
   const setServed = useGameStore((s) => s.setServedEffort);
+  const setShare = useGameStore((s) => s.setEffortHeadComputeShare);
+  const setBias = useGameStore((s) => s.setEffortHeadCapabilityBias);
   const recipes = migrateEffortRecipes(profile);
   const defaultId = defaultEffortIdOf(profile);
   const unlocked = effortReasoningUnlocked(researchUnlocked);
@@ -48,6 +77,7 @@ export function EffortStudio({
   const [name, setName] = useState("Think");
   const [thinking, setThinking] = useState(2.2);
   const [trainPf, setTrainPf] = useState<number | null>(null);
+  const [newBias, setNewBias] = useState(0.5);
 
   const quote = useMemo(
     () =>
@@ -57,8 +87,26 @@ export function EffortStudio({
         trainPfDays: trainPf ?? undefined,
         gymQuality: gymQualityByKind(gyms, "math"),
         researchUnlocked,
+        capabilityBias: newBias,
+        kind: "trained",
       }),
-    [gyms, paramsB, researchUnlocked, thinking, trainPf],
+    [gyms, newBias, paramsB, researchUnlocked, thinking, trainPf],
+  );
+  const newPreview = useMemo(
+    () =>
+      previewEffortRecipe({
+        recipe: {
+          kind: "trained",
+          trained: true,
+          thinkingTokenMult: thinking,
+          quality: quote.quality,
+          capabilityBias: newBias,
+        },
+        tokenEfficiency: profile.tokenEfficiency,
+        baseCapability: baseCap,
+        benches: dummyBenches(baseCap, profile.personality),
+      }),
+    [baseCap, newBias, profile.personality, profile.tokenEfficiency, quote.quality, thinking],
   );
 
   return (
@@ -68,95 +116,48 @@ export function EffortStudio({
     >
       <p className="hud-eyebrow">Effort heads</p>
       <p className="mt-1 text-[0.6875rem] leading-5 text-muted">
-        Instant is always free. Train named heads with a thinking budget and
-        the compute that makes those tokens worth it.
+        Instant is always free to serve. Split Train PF across heads, watch
+        loss, and slide each toward capability (costly) or efficiency (cheaper
+        tokens).
       </p>
       <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
-        {recipes.map((recipe) => {
-          const tokens = serveTokenMultiplierForRecipe(
-            recipe,
-            profile.tokenEfficiency,
-          );
-          const lifted =
-            baseCap > 0
-              ? applyEffortLiftFromRecipe(
-                  baseCap,
-                  {
-                    mmlu: baseCap,
-                    coding: baseCap,
-                    math: baseCap,
-                    vision: 0,
-                    law: 0,
-                    health: 0,
-                    science: baseCap,
-                    multilingual: 0,
-                    agents: baseCap,
-                    safety: 0,
-                    personality: profile.personality,
-                  },
-                  recipe,
-                )
-              : null;
-          const isDefault = defaultId === recipe.id;
-          return (
-            <div
-              key={recipe.id}
-              className={`rounded-md border p-2 ${
-                recipe.served
-                  ? "border-mint/50 bg-mint/10"
-                  : "border-line/60 bg-void/40"
-              }`}
-            >
-              <span className="flex items-center justify-between gap-1">
-                <strong className="truncate text-[0.75rem] text-bone">
-                  {recipe.name}
-                </strong>
-                {isDefault ? (
-                  <StatusChip tone="positive">default</StatusChip>
-                ) : recipe.served ? (
-                  <StatusChip tone="research">serving</StatusChip>
-                ) : recipe.kind === "instant" ? (
-                  <StatusChip tone="neutral">instant</StatusChip>
-                ) : null}
-              </span>
-              <p className="mt-1 font-mono text-[0.625rem] text-muted">
-                {lifted && baseCap > 0
-                  ? `cap ${Math.round(lifted.capability)} · `
-                  : null}
-                {tokens.toFixed(1)}× tokens
-              </p>
-              <div className="mt-1.5 flex flex-col gap-1">
-                <HudButton
-                  type="button"
-                  variant="ghost"
-                  className="!min-h-8 !px-2 !text-[0.625rem]"
-                  disabled={!recipe.trained}
-                  onClick={() =>
-                    onToggleServe
-                      ? onToggleServe(recipe.id, !recipe.served)
-                      : setServed(subjectId, recipe.id, !recipe.served)
-                  }
-                >
-                  {recipe.served ? "Stop serving" : "Serve"}
-                </HudButton>
-                {recipe.served && !isDefault ? (
-                  <HudButton
-                    type="button"
-                    variant="ghost"
-                    className="!min-h-8 !px-2 !text-[0.625rem]"
-                    onClick={() =>
-                      onDefault
-                        ? onDefault(recipe.id)
-                        : setDefault(subjectId, recipe.id)
-                    }
-                  >
-                    Make default
-                  </HudButton>
-                ) : null}
-              </div>
-            </div>
-          );
-        })}
+        {recipes.map((recipe) => (
+          <EffortHeadCard
+            key={recipe.id}
+            recipe={recipe}
+            profile={profile}
+            baseCap={baseCap}
+            paramsB={paramsB}
+            isDefault={defaultId === recipe.id}
+            live={live}
+            unlocked={unlocked || recipe.kind === "instant"}
+            onToggleServe={() =>
+              onToggleServe
+                ? onToggleServe(recipe.id, !recipe.served)
+                : setServed(subjectId, recipe.id, !recipe.served)
+            }
+            onDefault={() =>
+              onDefault
+                ? onDefault(recipe.id)
+                : setDefault(subjectId, recipe.id)
+            }
+            onShare={(share) => setShare(subjectId, recipe.id, share)}
+            onBias={(bias) => setBias(subjectId, recipe.id, bias)}
+            onContinue={() =>
+              startEffort({
+                id: subjectId,
+                recipeId: recipe.id,
+                name: recipe.name,
+                thinkingTokenMult: recipe.thinkingTokenMult,
+                capabilityBias: recipe.capabilityBias,
+                trainComputeShare: Math.max(
+                  recipe.trainComputeShare ?? 0,
+                  DEFAULT_EFFORT_HEAD_SHARE,
+                ),
+              })
+            }
+          />
+        ))}
       </div>
 
       <div className="mt-3 rounded-md border border-line/50 bg-void/40 p-2">
@@ -203,8 +204,23 @@ export function EffortStudio({
               sublabel={`${(quote.quality * 100).toFixed(0)}% quality · ${money(quote.cash)}`}
               onChange={setTrainPf}
             />
+            <SliderField
+              label="Efficiency vs capability"
+              value={newBias}
+              min={0}
+              max={1}
+              step={0.05}
+              format={biasLabel}
+              sublabel={`${newPreview.tokenMult.toFixed(1)}× tokens · cap ${
+                baseCap > 0
+                  ? `${Math.round(newPreview.capability)} (${newPreview.capDelta >= 0 ? "+" : ""}${Math.round(newPreview.capDelta)})`
+                  : "—"
+              }`}
+              onChange={setNewBias}
+            />
             <p className="font-mono text-[0.625rem] text-muted">
-              Underfunding still spends the thinking tokens at serve time.
+              Capability multiplies serve cost. Efficiency cheapens tokens for
+              less lift. Instant stays free.
             </p>
             <HudButton
               type="button"
@@ -216,6 +232,8 @@ export function EffortStudio({
                   name,
                   thinkingTokenMult: thinking,
                   trainPfDays: trainPf ?? quote.requiredPfDays,
+                  capabilityBias: newBias,
+                  trainComputeShare: DEFAULT_EFFORT_HEAD_SHARE,
                 })
               }
             >
@@ -223,6 +241,183 @@ export function EffortStudio({
             </HudButton>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function EffortHeadCard({
+  recipe,
+  profile,
+  baseCap,
+  paramsB,
+  isDefault,
+  live,
+  unlocked,
+  onToggleServe,
+  onDefault,
+  onShare,
+  onBias,
+  onContinue,
+}: {
+  recipe: EffortRecipe;
+  profile: ModelProductProfile;
+  baseCap: number;
+  paramsB: number;
+  isDefault: boolean;
+  live: boolean;
+  unlocked: boolean;
+  onToggleServe: () => void;
+  onDefault: () => void;
+  onShare: (share: number) => void;
+  onBias: (bias: number) => void;
+  onContinue: () => void;
+}) {
+  const gyms = useGameStore((s) => s.state.player.postTrainGyms);
+  const researchUnlocked = useGameStore((s) => s.state.player.researchUnlocked);
+  const tokens = serveTokenMultiplierForRecipe(recipe, profile.tokenEfficiency);
+  const benches = dummyBenches(baseCap, profile.personality);
+  const lifted =
+    baseCap > 0
+      ? applyEffortLiftFromRecipe(baseCap, benches, recipe)
+      : null;
+  const bias = recipe.capabilityBias ?? 0.5;
+  const share = recipe.trainComputeShare ?? 0;
+  const preview = previewEffortRecipe({
+    recipe: { ...recipe, capabilityBias: bias },
+    tokenEfficiency: profile.tokenEfficiency,
+    baseCapability: baseCap,
+    benches,
+  });
+  const continueQuote = quoteEffortTraining({
+    paramsB,
+    thinkingTokenMult: recipe.kind === "instant" ? 1.4 : recipe.thinkingTokenMult,
+    gymQuality: gymQualityByKind(gyms, "math"),
+    researchUnlocked,
+    capabilityBias: bias,
+    kind: recipe.kind,
+  });
+  const training =
+    share > 0 && (recipe.progressPfDays ?? 0) < (recipe.targetPfDays ?? 0);
+  const freeServe = recipe.kind === "instant";
+
+  return (
+    <div
+      className={`rounded-md border p-2 ${
+        recipe.served
+          ? "border-mint/50 bg-mint/10"
+          : "border-line/60 bg-void/40"
+      }`}
+      data-effort-head={recipe.id}
+    >
+      <span className="flex items-center justify-between gap-1">
+        <strong className="truncate text-[0.75rem] text-bone">
+          {recipe.name}
+        </strong>
+        {isDefault ? (
+          <StatusChip tone="positive">default</StatusChip>
+        ) : recipe.served ? (
+          <StatusChip tone="research">serving</StatusChip>
+        ) : training ? (
+          <StatusChip tone="neutral">training</StatusChip>
+        ) : recipe.kind === "instant" ? (
+          <StatusChip tone="neutral">instant</StatusChip>
+        ) : null}
+      </span>
+      <p
+        className="mt-1 font-mono text-[0.625rem] text-muted"
+        data-effort-stats="true"
+      >
+        {lifted && baseCap > 0 ? `cap ${Math.round(lifted.capability)} · ` : null}
+        {freeServe ? "free · " : null}
+        {tokens.toFixed(1)}× tokens
+        {recipe.loss != null ? ` · loss ${recipe.loss.toFixed(2)}` : null}
+      </p>
+      {training || (recipe.progressPfDays ?? 0) > 0 ? (
+        <p className="font-mono text-[0.625rem] text-muted" data-effort-progress="true">
+          {(recipe.progressPfDays ?? 0).toFixed(1)} /{" "}
+          {Math.max(0.1, recipe.targetPfDays ?? 0).toFixed(1)} PF
+          {live ? " of Train pool" : ""}
+        </p>
+      ) : null}
+      {unlocked ? (
+        <div className="mt-1.5 space-y-1.5">
+          <SliderField
+            label="Train PF share"
+            value={share}
+            min={0}
+            max={EFFORT_HEAD_SHARE_MAX}
+            step={0.01}
+            format={(value) => `${Math.round(value * 100)}%`}
+            sublabel={
+              live
+                ? "Slice of this job's Train PF"
+                : "Applies on the next training run"
+            }
+            onChange={onShare}
+          />
+          <SliderField
+            label="Efficiency vs capability"
+            value={bias}
+            min={0}
+            max={1}
+            step={0.05}
+            format={biasLabel}
+            sublabel={
+              freeServe
+                ? `free to serve · cap ${
+                    baseCap > 0
+                      ? `${Math.round(preview.capability)} (${preview.capDelta >= 0 ? "+" : ""}${Math.round(preview.capDelta)})`
+                      : "—"
+                  }`
+                : `${preview.tokenMult.toFixed(1)}× tokens · cap ${
+                    baseCap > 0
+                      ? `${Math.round(preview.capability)} (${preview.capDelta >= 0 ? "+" : ""}${Math.round(preview.capDelta)})`
+                      : "—"
+                  }`
+            }
+            onChange={onBias}
+          />
+        </div>
+      ) : recipe.kind !== "instant" ? (
+        <ResearchUnlockLink
+          className="mt-1.5"
+          compact
+          nodeId={EFFORT_UNLOCK_RESEARCH}
+          label="Unlock training"
+        />
+      ) : null}
+      <div className="mt-1.5 flex flex-col gap-1">
+        <HudButton
+          type="button"
+          variant="ghost"
+          className="!min-h-8 !px-2 !text-[0.625rem]"
+          disabled={!recipe.trained}
+          onClick={onToggleServe}
+        >
+          {recipe.served ? "Stop serving" : "Serve"}
+        </HudButton>
+        {recipe.served && !isDefault ? (
+          <HudButton
+            type="button"
+            variant="ghost"
+            className="!min-h-8 !px-2 !text-[0.625rem]"
+            onClick={onDefault}
+          >
+            Make default
+          </HudButton>
+        ) : null}
+        {unlocked ? (
+          <HudButton
+            type="button"
+            variant="ghost"
+            className="!min-h-8 !px-2 !text-[0.625rem]"
+            data-effort-continue={recipe.id}
+            onClick={onContinue}
+          >
+            Continue train · {money(continueQuote.cash)}
+          </HudButton>
+        ) : null}
       </div>
     </div>
   );
