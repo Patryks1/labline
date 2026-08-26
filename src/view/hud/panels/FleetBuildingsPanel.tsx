@@ -125,8 +125,9 @@ export function FleetBuildingsPanel() {
       eyebrow="Fleet"
       title="Buildings"
       description="HQs, labs, halls, and plants you own."
+      mobileDescription="Manage sites and construction."
       actions={
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
           <HudButton type="button" variant="ghost" onClick={() => setPanel('org')}>
             People
           </HudButton>
@@ -136,62 +137,74 @@ export function FleetBuildingsPanel() {
         </div>
       }
     >
-      <div className="space-y-3">
+      <div className="min-w-0 touch-pan-y space-y-3">
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <MetricTile label="Facilities" value={String(live.length)} tone="positive" />
           <MetricTile
             label="Building"
             value={String(constructing.length)}
+            mobilePriority={constructing.length > 0 ? 'primary' : 'secondary'}
             tone={constructing.length > 0 ? 'warning' : 'neutral'}
           />
           <MetricTile
             label="HQ desks"
             value={`${staffTotal(staff)}/${hqCap}`}
+            mobilePriority="secondary"
             tone={hqCap > 0 ? 'positive' : 'neutral'}
           />
-          <MetricTile label="Researchers" value={String(staff.researcher)} tone="research" />
+          <MetricTile
+            label="Researchers"
+            value={String(staff.researcher)}
+            mobilePriority="secondary"
+            tone="research"
+          />
         </div>
 
         {constructing.length > 0 ? (
           <GameCard eyebrow="Construction" title="Under construction" tone="train" live>
-            <div className="anim-stagger space-y-2">
+            <div
+              className="anim-stagger panel-scroll -mx-1 flex snap-x snap-mandatory gap-2 overflow-x-auto overscroll-x-contain px-1 pb-1 touch-pan-x touch-pan-y min-[1181px]:mx-0 min-[1181px]:block min-[1181px]:space-y-2 min-[1181px]:overflow-visible min-[1181px]:px-0 min-[1181px]:pb-0"
+              role="region"
+              aria-label="Buildings under construction; swipe horizontally to browse on touch screens"
+            >
               {constructing.map((t) => {
                 const left = Math.max(0, t.buildingTarget - t.buildingProgress)
                 const pct = t.buildingProgress / Math.max(1, t.buildingTarget)
                 return (
-                  <BuildingRow
-                    key={`c-${t.x}-${t.y}`}
-                    tile={t}
-                    active={selKey === `${t.x},${t.y}`}
-                    badge={`${left}d left`}
-                    badgeTone="warning"
-                  >
-                    <MeterBar
-                      label={
-                        <span className="inline-flex items-center gap-1.5">
-                          <LiveDot className="text-amber" />
-                          {kindLabel(t.kind)}
-                        </span>
-                      }
-                      value={pct}
-                      detail={`D${t.buildingProgress}/${t.buildingTarget}`}
-                      tone="train"
-                      live
-                    />
-                    <div className="mt-1.5 font-mono text-[0.75rem] tabular-nums text-muted">
-                      {t.rackCapacity > 0 ? `${t.rackCapacity} bays` : null}
-                      {isHqKind(t.kind)
-                        ? ` · ${getBuildDef(t.kind === 'office' ? 'hq' : (t.kind as never)).staffCap ?? '—'} desks`
-                        : ''}
-                    </div>
-                    <div
-                      className="mt-1.5"
-                      data-building-row-control="true"
-                      onClick={(e) => e.stopPropagation()}
+                  <div key={`c-${t.x}-${t.y}`} className="w-[88%] shrink-0 snap-start min-[1181px]:w-auto">
+                    <BuildingRow
+                      tile={t}
+                      active={selKey === `${t.x},${t.y}`}
+                      badge={`${left}d left`}
+                      badgeTone="warning"
                     >
-                      <BuildingDisposeButtons x={t.x} y={t.y} constructing compact />
-                    </div>
-                  </BuildingRow>
+                      <MeterBar
+                        label={
+                          <span className="inline-flex items-center gap-1.5">
+                            <LiveDot className="text-amber" />
+                            {kindLabel(t.kind)}
+                          </span>
+                        }
+                        value={pct}
+                        detail={`D${t.buildingProgress}/${t.buildingTarget}`}
+                        tone="train"
+                        live
+                      />
+                      <div className="mt-1.5 break-words font-mono text-[0.75rem] tabular-nums text-muted">
+                        {t.rackCapacity > 0 ? `${t.rackCapacity} bays` : null}
+                        {isHqKind(t.kind)
+                          ? ` · ${getBuildDef(t.kind === 'office' ? 'hq' : (t.kind as never)).staffCap ?? '—'} desks`
+                          : ''}
+                      </div>
+                      <div
+                        className="mt-1.5"
+                        data-building-row-control="true"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <BuildingDisposeButtons x={t.x} y={t.y} constructing compact />
+                      </div>
+                    </BuildingRow>
+                  </div>
                 )
               })}
             </div>
@@ -243,13 +256,22 @@ export function FleetBuildingsPanel() {
         )}
 
         {hqCap > 0 ? (
-          <GameCard eyebrow="People" title="Staff roster">
-            <div className="grid grid-cols-2 gap-x-3">
+          <details className="group rounded-lg border border-line/70 bg-panel-2/45">
+            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5 marker:hidden">
+              <span>
+                <span className="hud-eyebrow block">People</span>
+                <strong className="mt-0.5 block text-sm text-bone">Staff roster</strong>
+              </span>
+              <span className="shrink-0 font-mono text-[0.75rem] tabular-nums text-bone">
+                {staffTotal(staff)}/{hqCap}
+              </span>
+            </summary>
+            <div className="grid grid-cols-2 gap-x-3 border-t border-line/60 px-3 py-2">
               {(Object.keys(STAFF_LABELS) as (keyof typeof STAFF_LABELS)[]).map((role) => (
                 <StatRow key={role} label={STAFF_LABELS[role]} value={staff[role]} />
               ))}
             </div>
-          </GameCard>
+          </details>
         ) : null}
       </div>
     </PanelScaffold>
@@ -267,7 +289,7 @@ function BuildingDetail({
     const cap = getBuildDef(tile.kind === 'office' ? 'hq' : (tile.kind as never)).staffCap ?? 12
     const levelBonus = Math.max(0, tile.level - 1) * 4
     return (
-      <div className="mt-0.5 font-mono text-[0.75rem] tabular-nums text-muted">
+      <div className="mt-0.5 break-words font-mono text-[0.75rem] leading-relaxed tabular-nums text-muted">
         L{tile.level} · up to {cap + levelBonus} desks · opex {money(displayedFacilityOpex(tile))}/d
         {staffResearchers > 0 ? ` · ${staffResearchers} researchers` : ''}
       </div>
@@ -275,14 +297,14 @@ function BuildingDetail({
   }
   if (tile.kind === 'lab') {
     return (
-      <div className="mt-0.5 font-mono text-[0.75rem] tabular-nums text-muted">
+      <div className="mt-0.5 break-words font-mono text-[0.75rem] leading-relaxed tabular-nums text-muted">
         L{tile.level} · research boost · opex {money(displayedFacilityOpex(tile))}/d
       </div>
     )
   }
   if (isDcKind(tile.kind)) {
     return (
-      <div className="mt-0.5 font-mono text-[0.75rem] tabular-nums text-muted">
+      <div className="mt-0.5 break-words font-mono text-[0.75rem] leading-relaxed tabular-nums text-muted">
         L{tile.level} · {tile.racksUsed}/{tile.rackCapacity} bays
         {tile.powered === false ? ' · DOWN' : ''} · opex {money(displayedFacilityOpex(tile))}/d
       </div>
@@ -290,7 +312,7 @@ function BuildingDetail({
   }
   if (tile.mwCapacity > 0 || tile.mwGeneration > 0) {
     return (
-      <div className="mt-0.5 font-mono text-[0.75rem] tabular-nums text-muted">
+      <div className="mt-0.5 break-words font-mono text-[0.75rem] leading-relaxed tabular-nums text-muted">
         L{tile.level}
         {tile.mwCapacity > 0 ? ` · ${num(tile.mwCapacity, 1)} MW grid` : ''}
         {tile.mwGeneration > 0 ? ` · ${num(tile.mwGeneration, 1)} MW gen` : ''}
@@ -300,7 +322,7 @@ function BuildingDetail({
     )
   }
   return (
-    <div className="mt-0.5 font-mono text-[0.75rem] tabular-nums text-muted">
+    <div className="mt-0.5 break-words font-mono text-[0.75rem] leading-relaxed tabular-nums text-muted">
       L{tile.level}
       {tile.opexPerDay > 0 ? ` · opex ${money(displayedFacilityOpex(tile))}/d` : ''}
     </div>
@@ -335,7 +357,7 @@ export function BuildingRow({
           event.preventDefault()
         }
       }}
-      className={`hover-lift w-full cursor-pointer rounded-lg border px-3 py-2 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/50 ${
+      className={`hover-lift min-w-0 w-full touch-manipulation cursor-pointer rounded-lg border px-2.5 py-2 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/50 sm:px-3 ${
         active ? 'border-mint/50 bg-mint/10' : 'border-line/70 bg-panel-2/70 hover:border-mint/30'
       }`}
     >

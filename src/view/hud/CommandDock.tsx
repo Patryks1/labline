@@ -88,7 +88,10 @@ export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boole
           ))}
         </aside>
       ) : (
-        <aside className="command-dock command-dock--expanded hud-surface pointer-events-auto relative m-2 ml-1 flex h-[calc(100%-1rem)] min-w-0 flex-col overflow-hidden rounded-lg">
+        <aside
+          className="command-dock command-dock--expanded hud-surface pointer-events-auto relative m-2 ml-1 flex h-[calc(100%-1rem)] min-w-0 flex-col overflow-hidden rounded-lg"
+          data-mobile-sheet="intel"
+        >
           <div className="relative z-10 flex items-center gap-1.5 border-b border-line/60 px-2 py-2">
             <div className="min-w-0 flex-1">
               <SegmentedTabs
@@ -117,7 +120,10 @@ export function CommandDock({ forceCollapsed = false }: { forceCollapsed?: boole
             </button>
           </div>
 
-          <div className="panel-scroll relative z-10 min-h-0 flex-1 overflow-y-auto p-3">
+          <div
+            className="panel-scroll relative z-10 min-h-0 flex-1 overflow-y-auto p-3"
+            data-shell-scroll-container="true"
+          >
             <div key={view} className="panel-swap">
               {view === 'pnl' && <PnlView onOpenStats={() => setPanel('stats')} />}
               {view === 'sites' && <FacilitiesIntelView />}
@@ -173,8 +179,8 @@ function PnlView({ onOpenStats }: { onOpenStats: () => void }) {
   const dayNet = current.net
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-start justify-between gap-2">
+    <div className="space-y-3" data-mobile-density="summary-first">
+      <div className="flex items-start justify-between gap-2" data-mobile-priority="primary">
         <div className="min-w-0">
           <p className="hud-eyebrow">Today</p>
           <div
@@ -185,12 +191,18 @@ function PnlView({ onOpenStats }: { onOpenStats: () => void }) {
             {money(dayNet)}
           </div>
         </div>
-        <HudButton type="button" variant="ghost" onClick={onOpenStats} className="shrink-0">
+        <HudButton
+          type="button"
+          variant="ghost"
+          onClick={onOpenStats}
+          className="shrink-0"
+          data-mobile-priority="tertiary"
+        >
           Full intel
         </HudButton>
       </div>
 
-      <div className="space-y-1">
+      <div className="space-y-1" data-mobile-priority="primary">
         <StatRow label="Revenue" value={money(revenue.total)} tone="positive" />
         <StatRow label="Product COGS" value={money(-costs.productCogs)} tone="danger" />
         <StatRow label="Operations" value={money(-costs.operatingCashOut)} tone="danger" />
@@ -198,7 +210,7 @@ function PnlView({ onOpenStats }: { onOpenStats: () => void }) {
         <StatRow label="Cash" value={money(current.cash)} tone={current.cash < 2e6 ? 'danger' : 'neutral'} />
       </div>
 
-      <div className="anim-stagger space-y-2">
+      <div className="anim-stagger space-y-2" data-mobile-priority="secondary">
         <ChannelBreakdown
           label="API"
           revenue={apiLedger.revenue + enterpriseApiRevenue}

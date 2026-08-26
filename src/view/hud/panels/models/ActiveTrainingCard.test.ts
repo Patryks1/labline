@@ -1,4 +1,4 @@
-import { createElement } from "react";
+import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { TrainingJob } from "../../../../sim/types";
@@ -39,7 +39,12 @@ function trainingJob(patch: Partial<TrainingJob> = {}): TrainingJob {
   };
 }
 
-function markup(job: TrainingJob): string {
+function markup(
+  job: TrainingJob,
+  extras: Partial<
+    Pick<ComponentProps<typeof ActiveTrainingCard>, "onSetLabs" | "gyms">
+  > = {},
+): string {
   return renderToStaticMarkup(
     createElement(ActiveTrainingCard, {
       job,
@@ -58,6 +63,7 @@ function markup(job: TrainingJob): string {
       onBranchCheckpoint: vi.fn(),
       onRecoverFromCheckpoint: vi.fn(),
       onSelectPostTrain: vi.fn(),
+      ...extras,
     }),
   );
 }
@@ -146,9 +152,77 @@ describe("ActiveTrainingCard direct checkpoint actions", () => {
     );
 
     expect(rendered).toContain("sticky bottom-0");
+    expect(rendered).toContain('data-mobile-actions="sticky-grid"');
+    expect(rendered).toContain("xl:static");
+    expect(rendered).not.toContain("lg:static");
+    expect(rendered).not.toContain("sm:static");
+    expect(rendered).toContain("min-[560px]:grid-cols-3");
+    expect(rendered).toContain("[&amp;_.hud-button]:!min-h-11");
     expect(rendered).toContain("Frozen corpus evidence");
     expect(rendered).toContain("<details");
     expect(rendered).toContain("Dense transformer frontier");
+    expect(rendered).toContain('data-run-telemetry-disclosure="true"');
+    expect(rendered).toContain('data-shell-gesture-ignore="true"');
+  });
+
+  it("keeps every advanced section closed on a fully instrumented completed run", () => {
+    const rendered = markup(
+      trainingJob({
+        progressPfDays: 120,
+        computePriority: 0,
+        economics: {
+          setupCost: 1_000,
+          dataCost: 2_000,
+          trainingCostAccrued: 3_000,
+        },
+        dataEvidence: {
+          effectiveTrainingValue: 0.82,
+          effectiveQuality: 0.79,
+          effectiveDiversity: 0.76,
+          effectiveFreshness: 0.71,
+          humanAnchorShare: 0.9,
+          contaminationRisk: 0.08,
+          rightsRisk: 0.04,
+          syntheticShare: 0.12,
+          syntheticGenerationDepth: 0,
+        },
+        productProfile: {
+          lifecycle: "foundation",
+          focus: {
+            coding: 0,
+            science: 0,
+            research: 0,
+            personality: 0,
+            chat: 0,
+          },
+          personality: 0,
+          tokenEfficiency: 1,
+          effortRecipes: [
+            {
+              id: "instant",
+              name: "Instant",
+              kind: "instant",
+              thinkingTokenMult: 1,
+              trainPfDays: 0,
+              trainCash: 0,
+              trained: true,
+              quality: 1,
+              served: true,
+            },
+          ],
+          defaultEffortId: "instant",
+        },
+      }),
+      { onSetLabs: vi.fn(), gyms: [] },
+    );
+
+    expect(rendered).toContain('data-run-gyms-disclosure="true"');
+    expect(rendered).toContain('data-run-telemetry-disclosure="true"');
+    expect(rendered).toContain('data-specialize-disclosure="true"');
+    expect(rendered).toContain('data-effort-studio="true"');
+    expect(rendered).toContain("min-[560px]:grid-cols-3");
+    expect(rendered).toContain("[&amp;_.hud-button]:!min-h-11");
+    expect(rendered).not.toMatch(/<details[^>]*\sopen(?:=|\s|>)/);
   });
 
   it("keeps failed runs limited to deletion", () => {

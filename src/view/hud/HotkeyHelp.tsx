@@ -30,7 +30,10 @@ export function HotkeyHelp() {
       closeLabel="Close hotkey help"
       maxWidthClass="max-w-md"
     >
-      <dl className="space-y-1.5">
+      <div className="rounded-lg border border-mint/25 bg-mint/5 p-3 text-[0.8125rem] leading-relaxed text-muted sm:hidden [@media(max-height:540px)]:block">
+        Drag or pinch the map, swipe the workspace handle sideways, and pull sheets down to close. Tap <strong className="text-bone">More</strong> for every panel.
+      </div>
+      <dl className="hidden space-y-1.5 sm:block [@media(max-height:540px)]:hidden">
         {HOTKEY_ROWS.map((r) => (
           <div
             key={r.keys}

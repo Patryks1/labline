@@ -2,11 +2,14 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  EmptyState,
   HudButton,
   HudInput,
   HudRange,
   HudSelect,
   HudState,
+  MetricTile,
+  PanelScaffold,
   ProgressBar,
 } from './HudPrimitives'
 import { BlockerList, GameCard, MeterBar, SegmentedTabs } from './kit'
@@ -61,6 +64,8 @@ describe('HUD streamline primitives', () => {
     expect(markup).toContain('aria-pressed="true"')
     expect(markup).toContain('data-interactive="true"')
     expect(markup).toContain('data-selected="true"')
+    expect(markup).toContain('data-mobile-card="true"')
+    expect(markup).toContain('data-mobile-priority="primary"')
   })
 
   it('keeps single-level tabs keyboard-addressable and optionally linked to panels', () => {
@@ -84,6 +89,45 @@ describe('HUD streamline primitives', () => {
     expect(markup).toContain('tabindex="0"')
     expect(markup).toContain('tabindex="-1"')
     expect(markup).toContain('disabled=""')
+    expect(markup).toContain('aria-orientation="horizontal"')
+    expect(markup).toContain('class="seg-tabs hud-tab-row"')
+    expect(markup).toContain('data-mobile-scroll="true"')
+    expect(markup).toContain('data-swipe-ignore="true"')
+  })
+
+  it('exposes concise mobile copy without replacing desktop detail semantics', () => {
+    const markup = renderToStaticMarkup(
+      createElement(
+        'div',
+        null,
+        <PanelScaffold
+          title="Models"
+          description="A longer desktop explanation of the model workspace."
+          mobileDescription="Train and ship models."
+        >
+          <span>Workspace</span>
+        </PanelScaffold>,
+        createElement(MetricTile, {
+          label: 'Revenue',
+          value: '$2.4m',
+          detail: 'Trailing seven-day token revenue',
+          mobileSummary: '7-day tokens',
+          mobilePriority: 'secondary',
+        }),
+        createElement(EmptyState, {
+          title: 'No jobs',
+          description: 'Start training to create the first checkpoint in this lab.',
+          mobileDescription: 'Start a training job.',
+        }),
+      ),
+    )
+
+    expect(markup).toContain('hud-section__header hud-section-header')
+    expect(markup).toContain('data-mobile-section="true"')
+    expect(markup).toContain('hud-description hud-mobile-detail')
+    expect(markup).toContain('hud-description hud-mobile-summary')
+    expect(markup).toContain('data-mobile-priority="secondary"')
+    expect((markup.match(/hud-mobile-summary/g) ?? []).length).toBe(3)
   })
 
   it('announces dynamic blockers only when live mode is requested', () => {

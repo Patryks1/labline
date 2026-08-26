@@ -136,7 +136,10 @@ export function ApiCostSummary({
   requestedMTok: number;
 }) {
   return (
-    <div className="grid gap-2 sm:grid-cols-3">
+    <div
+      className="grid grid-cols-2 gap-2 lg:grid-cols-3"
+      data-mobile-summary="api-economics"
+    >
       <MetricTile
         label="Estimated cost / 1M tokens"
         value={money(estimatedCostPerMTok)}
@@ -147,12 +150,15 @@ export function ApiCostSummary({
         label="API models"
         value={String(modelCount)}
         detail={`${liveModelCount} live endpoints`}
+        mobilePriority="secondary"
       />
-      <MetricTile
-        label="API traffic / day"
-        value={`${num(servedMTok)} MTok`}
-        detail={`${num(requestedMTok)} MTok requested`}
-      />
+      <div className="col-span-2 lg:col-span-1">
+        <MetricTile
+          label="API traffic / day"
+          value={`${num(servedMTok)} MTok`}
+          detail={`${num(requestedMTok)} MTok requested`}
+        />
+      </div>
     </div>
   );
 }
@@ -429,6 +435,7 @@ export function PlansPanel() {
       eyebrow="Commercial"
       title="Plans"
       description="Tiers, API, and capacity."
+      mobileDescription="Price tiers, API, and serving health."
     >
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <MetricTile
@@ -1224,7 +1231,7 @@ export function PlansPanel() {
                             <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
                               {apiServeMods.label} · PF ×
                               {apiServeMods.computeMult.toFixed(2)} · cap{" "}
-                              {apiServedModel.capability.toFixed(2)}
+                              {apiServedModel.capability.toFixed(2)} · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span>
                             </span>
                           </summary>
                           <div className="border-t border-line/40 px-2.5 pb-2.5 pt-2">
@@ -1368,63 +1375,75 @@ export function PlansPanel() {
                             />
                           </label>
                         </div>
-                        {comparablePeers.length > 0 ? (
-                          <div
-                            className="mt-2 rounded-md border border-line/50 bg-void/30 px-2 py-1.5"
-                            data-testid={`api-comparable-peers-${m.id}`}
-                          >
-                            <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
-                              Similar capability on market
-                            </div>
-                            <ul className="mt-1 space-y-0.5">
-                              {comparablePeers.map((peer) => (
-                                <li
-                                  key={`${peer.name}-${peer.capability}`}
-                                  className="flex items-center justify-between gap-2 font-mono text-[0.6875rem] tabular-nums"
-                                >
-                                  <span className="min-w-0 truncate text-bone">
-                                    {peer.name}
-                                  </span>
-                                  <span className="shrink-0 text-muted">
-                                    cap {peer.capability.toFixed(0)}
-                                  </span>
-                                  <span className="shrink-0 text-bone">
-                                    ${formatApiListPrice(peer.price)}/M
-                                  </span>
-                                  <span
-                                    className={`shrink-0 uppercase tracking-[0.08em] ${
-                                      peer.position === "cheaper"
-                                        ? "text-mint"
-                                        : peer.position === "premium"
-                                          ? "text-amber"
-                                          : "text-muted"
-                                    }`}
-                                  >
-                                    {peer.position}
-                                  </span>
-                                </li>
-                              ))}
-                            </ul>
+                        <details
+                          className="group mt-2 overflow-hidden rounded-md border border-line/50 bg-void/30"
+                          data-testid={`api-pricing-context-${m.id}`}
+                        >
+                          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 marker:hidden lg:min-h-0">
+                            <span className="text-[0.75rem] font-medium text-bone">
+                              Market &amp; cost context
+                            </span>
+                            <span className="shrink-0 font-mono text-[0.6875rem] text-muted">
+                              {comparablePeers.length} peer{comparablePeers.length === 1 ? "" : "s"} · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span>
+                            </span>
+                          </summary>
+                          <div className="border-t border-line/40 px-2.5 pb-2.5 pt-2">
+                            {comparablePeers.length > 0 ? (
+                              <div data-testid={`api-comparable-peers-${m.id}`}>
+                                <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+                                  Similar capability on market
+                                </div>
+                                <ul className="mt-1 space-y-0.5">
+                                  {comparablePeers.map((peer) => (
+                                    <li
+                                      key={`${peer.name}-${peer.capability}`}
+                                      className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-2 font-mono text-[0.6875rem] tabular-nums min-[420px]:grid-cols-[minmax(0,1fr)_auto_auto_auto]"
+                                    >
+                                      <span className="min-w-0 truncate text-bone">
+                                        {peer.name}
+                                      </span>
+                                      <span className="shrink-0 text-bone">
+                                        ${formatApiListPrice(peer.price)}/M
+                                      </span>
+                                      <span className="text-muted min-[420px]:shrink-0">
+                                        cap {peer.capability.toFixed(0)}
+                                      </span>
+                                      <span
+                                        className={`text-right uppercase tracking-[0.08em] min-[420px]:shrink-0 ${
+                                          peer.position === "cheaper"
+                                            ? "text-mint"
+                                            : peer.position === "premium"
+                                              ? "text-amber"
+                                              : "text-muted"
+                                        }`}
+                                      >
+                                        {peer.position}
+                                      </span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            ) : suggestedApi.hasComparablePeers ? null : (
+                              <p className="text-[0.75rem] leading-5 text-muted">
+                                No similar-capability rivals yet — suggested price
+                                uses launch economics.
+                              </p>
+                            )}
+                            <p className="mt-2 text-[0.75rem] leading-5 text-muted">
+                              Hosting floor {money(hosting.blended)} per 1M tokens
+                              {hosting.source === "cloud_reference"
+                                ? " (cloud rental quote — no campus replica)"
+                                : " (energy, racks, halls, and leases at this size)"}
+                              {liveCost.source === "live"
+                                ? ` · settled ${money(liveCost.blended)}`
+                                : ""}
+                              {belowFloor
+                                ? " · current list price is below cost"
+                                : ""}
+                              . {pricingStatus.explanation}
+                            </p>
                           </div>
-                        ) : suggestedApi.hasComparablePeers ? null : (
-                          <p className="mt-2 text-[0.75rem] leading-5 text-muted">
-                            No similar-capability rivals yet — suggested price
-                            uses launch economics.
-                          </p>
-                        )}
-                        <p className="mt-2 text-[0.75rem] leading-5 text-muted">
-                          Hosting floor {money(hosting.blended)} per 1M tokens
-                          {hosting.source === "cloud_reference"
-                            ? " (cloud rental quote — no campus replica)"
-                            : " (energy, racks, halls, and leases at this size)"}
-                          {liveCost.source === "live"
-                            ? ` · settled ${money(liveCost.blended)}`
-                            : ""}
-                          {belowFloor
-                            ? " · current list price is below cost"
-                            : ""}
-                          . {pricingStatus.explanation}
-                        </p>
+                        </details>
                       </GameCard>
                     </div>
                   );
@@ -1548,9 +1567,12 @@ export function PlansCapacitySummary({
             >
               Capacity at a glance
             </h2>
-            <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">
+            <p className="hud-mobile-detail mt-0.5 text-[0.6875rem] leading-snug text-muted">
               Channel demand and serving health stay visible while you edit
               plans or API pricing.
+            </p>
+            <p className="hud-mobile-summary mt-0.5 text-[0.6875rem] text-muted">
+              Demand and serving health.
             </p>
             <PeakPricingStrip
               listPrice={peakListPrice}
@@ -1600,51 +1622,62 @@ export function PlansCapacitySummary({
         />
       </div>
 
-      <div className="min-w-0 border-t border-line/50 bg-void/25 px-2 pb-2">
-        {serveLoad ? (
-          <div
-            className="border-b border-line/50 px-1 py-2"
-            data-testid="plans-serve-model-load"
-          >
-            <p className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
-              Per-model serve load
-            </p>
-            <div className="mt-1.5">
-              <ServeModelLoadList
-                models={serveLoad.models}
-                live={serveLoad.usedPf > 1e-9}
-              />
+      <details
+        className="group min-w-0 border-t border-line/50 bg-void/25"
+        data-testid="plans-capacity-details"
+      >
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-[0.75rem] marker:hidden lg:min-h-0">
+          <span className="font-medium text-bone">Routing &amp; compute controls</span>
+          <span className="shrink-0 font-mono text-[0.6875rem] text-muted">
+            {priorityPct.toFixed(0)}% API · {num(totalBacklog, 1)} MTok waiting · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span>
+          </span>
+        </summary>
+        <div className="min-w-0 border-t border-line/50 px-2 pb-2">
+          {serveLoad ? (
+            <div
+              className="border-b border-line/50 px-1 py-2"
+              data-testid="plans-serve-model-load"
+            >
+              <p className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+                Per-model serve load
+              </p>
+              <div className="mt-1.5">
+                <ServeModelLoadList
+                  models={serveLoad.models}
+                  live={serveLoad.usedPf > 1e-9}
+                />
+              </div>
             </div>
-          </div>
-        ) : null}
-        <ComputeAllocationChart
-          apiMTok={apiServed}
-          apiPf={apiPf}
-          apiModelUsage={apiModelUsage}
-          plans={stats}
-          ledger={ledger}
-          headroom={headroom}
-        >
-          <CapacityRoutingControl
-            value={apiPriority}
-            autoValue={autoApiPriority}
-            apiServeFraction={apiServeFraction}
-            subscriptionServeFraction={subscriptionServeFraction}
-            apiBacklogMTok={apiBacklogMTok}
-            subscriptionBacklogMTok={subscriptionBacklogMTok}
-            unservedRatio={unservedRatio}
-            onChange={onPriorityChange}
-            slowdownLimit={resolvedSlowdownLimit}
-            peakPricingPct={resolvedPeakPricingPct}
-            onSlowdownLimitChange={setSlowdownLimit}
-            onPeakPricingPctChange={setPeakPricingPct}
-            apiLoad={apiLoad}
-            subLoad={subLoad}
-            apiStrain={apiStrain}
-            subStrain={subStrain}
-          />
-        </ComputeAllocationChart>
-      </div>
+          ) : null}
+          <ComputeAllocationChart
+            apiMTok={apiServed}
+            apiPf={apiPf}
+            apiModelUsage={apiModelUsage}
+            plans={stats}
+            ledger={ledger}
+            headroom={headroom}
+          >
+            <CapacityRoutingControl
+              value={apiPriority}
+              autoValue={autoApiPriority}
+              apiServeFraction={apiServeFraction}
+              subscriptionServeFraction={subscriptionServeFraction}
+              apiBacklogMTok={apiBacklogMTok}
+              subscriptionBacklogMTok={subscriptionBacklogMTok}
+              unservedRatio={unservedRatio}
+              onChange={onPriorityChange}
+              slowdownLimit={resolvedSlowdownLimit}
+              peakPricingPct={resolvedPeakPricingPct}
+              onSlowdownLimitChange={setSlowdownLimit}
+              onPeakPricingPctChange={setPeakPricingPct}
+              apiLoad={apiLoad}
+              subLoad={subLoad}
+              apiStrain={apiStrain}
+              subStrain={subStrain}
+            />
+          </ComputeAllocationChart>
+        </div>
+      </details>
     </section>
   );
 }
@@ -1857,6 +1890,19 @@ function PlanDemandSection({
         </div>
       </GameCard>
 
+      <details
+        className="group overflow-hidden rounded-lg border border-line/70 bg-panel-2/55"
+        data-testid="plan-demand-analysis-details"
+      >
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 marker:hidden lg:min-h-0">
+          <span className="text-[0.8125rem] font-semibold text-bone">
+            Revenue &amp; capacity analysis
+          </span>
+          <span className="shrink-0 font-mono text-[0.6875rem] text-muted">
+            {stats.length} plan{stats.length === 1 ? "" : "s"} · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span>
+          </span>
+        </summary>
+        <div className="space-y-3 border-t border-line/50 p-2.5">
       {revenueSeries.length > 0 ? (
         <GameCard eyebrow="Revenue" title="Plan revenue per day" tone="mint">
           <div className="rounded-lg border border-line/70 bg-void/40 p-2">
@@ -1974,6 +2020,8 @@ function PlanDemandSection({
           </div>
         </GameCard>
       ) : null}
+        </div>
+      </details>
     </div>
   );
 }
@@ -2046,7 +2094,7 @@ export function OverloadPolicyControl({
                 onChange(policy);
               }
             }}
-            className={`min-h-11 rounded-md border px-2 py-1.5 text-left text-[0.6875rem] transition sm:min-h-0 ${
+            className={`min-h-11 rounded-md border px-2 py-1.5 text-left text-[0.6875rem] transition lg:min-h-0 ${
               active
                 ? "border-mint/50 bg-mint/10 text-mint"
                 : "border-line/70 bg-panel-2 text-muted hover:border-line hover:text-bone"
@@ -2185,7 +2233,7 @@ function CapacityRoutingControl({
         <HudButton
           type="button"
           variant="secondary"
-          className="min-h-11 shrink-0 rounded-md border border-mint/35 bg-mint/10 px-2 py-1 text-[0.6875rem] font-medium text-mint transition-colors hover:bg-mint/20 sm:min-h-0"
+          className="min-h-11 shrink-0 rounded-md border border-mint/35 bg-mint/10 px-2 py-1 text-[0.6875rem] font-medium text-mint transition-colors hover:bg-mint/20 lg:min-h-0"
           onClick={() => onChange(autoValue)}
           title="Match API and seat capacity to current token demand"
         >
@@ -2528,7 +2576,7 @@ function ComputeAllocationChart({
             selected.modelUsage.map((usage) => (
               <div
                 key={usage.modelId}
-                className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 font-mono text-[0.6875rem]"
+                className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 font-mono text-[0.6875rem] min-[420px]:grid-cols-[minmax(0,1fr)_auto_auto]"
               >
                 <div className="min-w-0">
                   <div className="flex justify-between gap-2">
@@ -2545,7 +2593,7 @@ function ComputeAllocationChart({
                   </div>
                 </div>
                 <span className="text-muted">{num(usage.dayMTok, 2)} MTok</span>
-                <span className="text-amber">
+                <span className="col-start-2 text-right text-amber min-[420px]:col-auto">
                   {num(usage.dayInferPf, 2)} PF
                 </span>
               </div>
@@ -2718,7 +2766,7 @@ function WorkloadLedger({
           return (
             <div
               key={channel.id}
-              className="grid grid-cols-[3.25rem_minmax(0,1fr)_auto] items-center gap-2"
+              className="grid grid-cols-[3.25rem_minmax(0,1fr)] items-center gap-2 min-[420px]:grid-cols-[3.25rem_minmax(0,1fr)_auto]"
             >
               <span className={`text-[0.6875rem] font-medium ${channel.text}`}>
                 {channel.label}
@@ -2730,7 +2778,7 @@ function WorkloadLedger({
                 />
               </div>
               <span
-                className="font-mono text-[0.625rem] text-muted"
+                className="col-span-2 min-w-0 break-words text-right font-mono text-[0.625rem] text-muted min-[420px]:col-auto"
                 title={`Billed: ${nativeWorkSummary(channel.items, "billed")}`}
               >
                 {nativeWorkSummary(channel.items, "served")}
@@ -3227,7 +3275,7 @@ export function PlanEntitlementBreakdown({
   return (
     <>
       <div
-        className="mt-1.5 space-y-1.5 sm:hidden"
+        className="mt-1.5 space-y-1.5 lg:hidden"
         data-testid={`mobile-entitlements-${planId}`}
       >
         {entitlements.map((row) => (
@@ -3244,9 +3292,18 @@ export function PlanEntitlementBreakdown({
               </span>
             </div>
             <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 text-muted">
-              <span>API eq. {num(row.includedMTokPerMonth, 2)} MTok</span>
+              <span>Billed {num(row.includedMTokPerMonth, 2)} MTok</span>
               <span className="text-right">
                 ~{num(row.interactionsPerDay, 0)} msg/d
+              </span>
+              <span>List {money(row.blendedApiPricePerMTok)}/MTok</span>
+              <span className="text-right">
+                API value {money(row.apiEquivalentValuePerMonth)}/mo
+              </span>
+              <span className="col-span-2">
+                {row.tokenMult.toFixed(1)}× generated ·{" "}
+                {row.billedTokenMult.toFixed(1)}× billed ·{" "}
+                {row.computeTokenMult.toFixed(1)}× compute
               </span>
               <span>Util {(row.expectedUtilization * 100).toFixed(2)}%</span>
               <span className="text-right text-danger">
@@ -3259,13 +3316,19 @@ export function PlanEntitlementBreakdown({
           </div>
         ))}
       </div>
-      <div className="mt-1.5 hidden overflow-x-auto sm:block">
-        <table className="w-full min-w-[28rem] border-collapse text-left font-mono text-[0.6875rem]">
+      <div
+        className="mt-1.5 hidden overflow-x-auto lg:block"
+        data-testid={`desktop-entitlements-${planId}`}
+      >
+        <table className="w-full min-w-[48rem] border-collapse text-left font-mono text-[0.6875rem]">
           <thead>
             <tr className="text-muted">
               <th className="pb-1 pr-2 font-medium">Model</th>
-              <th className="pb-1 pr-2 font-medium">API eq.</th>
+              <th className="pb-1 pr-2 font-medium">Billed</th>
               <th className="pb-1 pr-2 font-medium">Msgs/day</th>
+              <th className="pb-1 pr-2 font-medium">Effort</th>
+              <th className="pb-1 pr-2 font-medium">List $/MTok</th>
+              <th className="pb-1 pr-2 font-medium">API value</th>
               <th className="pb-1 pr-2 font-medium">Util</th>
               <th className="pb-1 font-medium">Raw COGS</th>
             </tr>
@@ -3287,6 +3350,19 @@ export function PlanEntitlementBreakdown({
                 </td>
                 <td className="py-1 pr-2 text-bone">
                   ~{num(row.interactionsPerDay, 0)}
+                </td>
+                <td
+                  className="py-1 pr-2 text-muted"
+                  title={`${row.tokenMult.toFixed(2)}× generated · ${row.billedTokenMult.toFixed(2)}× billed · ${row.computeTokenMult.toFixed(2)}× compute`}
+                >
+                  {row.tokenMult.toFixed(1)}× / {row.billedTokenMult.toFixed(1)}× /{" "}
+                  {row.computeTokenMult.toFixed(1)}×
+                </td>
+                <td className="py-1 pr-2 text-bone">
+                  {money(row.blendedApiPricePerMTok)}
+                </td>
+                <td className="py-1 pr-2 text-bone">
+                  {money(row.apiEquivalentValuePerMonth)}/mo
                 </td>
                 <td className="py-1 pr-2 text-muted">
                   {(row.expectedUtilization * 100).toFixed(2)}%
@@ -3635,13 +3711,16 @@ function PlanCard({
               <div className="text-[0.75rem] font-medium text-bone">
                 Capacity & value
               </div>
-              <p className="mt-0.5 text-[0.6875rem] leading-snug text-muted">
+              <p className="hud-mobile-detail mt-0.5 text-[0.6875rem] leading-snug text-muted">
                 Fixed included usage, enrollment cap, and PF share under load.
                 Includes {formatAllowance(plan)}
                 {freeDemandProfile
                   ? ` · ${freeDemandProfile.label}`
                   : ` · ~${num(messagesPerDay, 0)} msg/day`}
                 .
+              </p>
+              <p className="hud-mobile-summary mt-0.5 text-[0.625rem] text-muted">
+                Include, seat cap, and serving priority.
               </p>
             </div>
             <div className="shrink-0 text-right font-mono text-[0.6875rem]">
@@ -3705,25 +3784,30 @@ function PlanCard({
           </div>
         </section>
 
-        <section className="plan-card-section rounded-lg border border-line/60 bg-void/45 px-2.5 py-2" aria-labelledby={`plan-models-${plan.id}`}>
-          <div className="plan-card-section__header">
-            <h3 id={`plan-models-${plan.id}`}>Model entitlement</h3>
-            <span>routing and included usage</span>
-          </div>
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[0.75rem] font-medium text-bone">
-              Per-model entitlements
+        <details
+          className="group plan-card-section overflow-hidden rounded-lg border border-line/60 bg-void/45"
+          data-testid={`plan-entitlement-details-${plan.id}`}
+        >
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-2.5 py-2 marker:hidden lg:min-h-0">
+            <span className="min-w-0">
+              <span className="block text-[0.75rem] font-medium text-bone">
+                Model entitlement
+              </span>
+              <span className="block truncate text-[0.625rem] text-muted">
+                {entitlements.length} effort route{entitlements.length === 1 ? "" : "s"}
+              </span>
             </span>
-            <span className="font-mono text-[0.625rem] text-muted">
-              subsidy ÷ model API list
+            <span className="shrink-0 font-mono text-[0.6875rem] text-mint">
+              {money(apiEq)}/mo value · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span>
             </span>
-          </div>
-          <PlanEntitlementBreakdown
-            planId={plan.id}
-            entitlements={entitlements}
-          />
-          {subs > 0.5 ? (
-            <div className="mt-1.5">
+          </summary>
+          <div className="border-t border-line/50 px-2.5 pb-2.5 pt-2">
+            <PlanEntitlementBreakdown
+              planId={plan.id}
+              entitlements={entitlements}
+            />
+            {subs > 0.5 ? (
+              <div className="mt-1.5">
               <div className="mb-0.5 flex justify-between text-[0.6875rem] text-muted">
                 <span>
                   Used {num(usedPerUserDay)} MTok/user ·{" "}
@@ -3740,8 +3824,9 @@ function PlanCard({
                 />
               </div>
             </div>
-          ) : null}
-        </section>
+            ) : null}
+          </div>
+        </details>
 
         {(() => {
           const collectCap = maxPlanDataCollectionShare(plan.pricePerMonth);
@@ -3809,12 +3894,18 @@ function PlanCard({
           />
         </section>
 
-        <section className="plan-card-section" aria-labelledby={`plan-today-${plan.id}`}>
-          <div className="plan-card-section__header">
-            <h3 id={`plan-today-${plan.id}`}>Today</h3>
-            <span>settled performance</span>
-          </div>
-        <div className="grid grid-cols-2 gap-1.5 font-mono text-[0.75rem] sm:grid-cols-4">
+        <details
+          className="group plan-card-section overflow-hidden rounded-lg border border-line/60 bg-void/30"
+          data-testid={`plan-settlement-details-${plan.id}`}
+        >
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-2.5 py-2 marker:hidden lg:min-h-0">
+            <span className="text-[0.75rem] font-medium text-bone">Today&apos;s settlement</span>
+            <span className={`shrink-0 font-mono text-[0.6875rem] ${marginBad ? "text-danger" : "text-mint"}`}>
+              {money((stats?.dayRevenue ?? 0) - (stats?.dayCogs ?? 0))} net · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span>
+            </span>
+          </summary>
+          <div className="space-y-2 border-t border-line/50 px-2.5 pb-2.5 pt-2">
+        <div className="grid grid-cols-2 gap-1.5 font-mono text-[0.75rem] lg:grid-cols-4">
           <Mini label="Day rev" value={money(stats?.dayRevenue ?? 0)} />
           <Mini
             label="Allocated serve ops"
@@ -3855,7 +3946,8 @@ function PlanCard({
             </div>
           </div>
         ) : null}
-        </section>
+          </div>
+        </details>
 
         {premiumScrutiny.applies ? (
           <div

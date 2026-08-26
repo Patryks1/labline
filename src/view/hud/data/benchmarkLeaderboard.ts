@@ -1,6 +1,7 @@
 import type {
   BenchmarkMetricId,
   BenchmarkSuiteId,
+  EffortBoard,
   EffortRecipe,
   Model,
 } from '../../../sim/types'
@@ -41,7 +42,17 @@ export type LeaderboardEffortRow = LeaderboardModelRow & {
   scores: Partial<Record<BenchmarkMetricId, number>>
 }
 
-export type LeaderboardSortId = 'cap' | BenchmarkMetricId
+export type LeaderboardSortId =
+  | 'model'
+  | 'lab'
+  | 'size'
+  | 'cap'
+  | 'think'
+  | 'tokens'
+  | 'price'
+  | 'day'
+  | BenchmarkMetricId
+export type LeaderboardSortDirection = 'asc' | 'desc'
 
 /** `Solace-Think`. Instant-only models keep the bare name. */
 export function leaderboardEffortDisplayName(
@@ -128,19 +139,91 @@ export function expandLeaderboardEffortRows(
 export function rankLeaderboardEffortRows(
   rows: readonly LeaderboardEffortRow[],
   sortId: LeaderboardSortId,
+  direction: LeaderboardSortDirection = 'desc',
 ): LeaderboardEffortRow[] {
-  return [...rows].sort((a, b) => {
-    const sa = sortId === 'cap' ? a.capability : (a.scores[sortId] ?? 0)
-    const sb = sortId === 'cap' ? b.capability : (b.scores[sortId] ?? 0)
-    if (sb !== sa) return sb - sa
+  const text = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+  const sign = direction === 'asc' ? 1 : -1
+  return rows
+    .map((row, index) => ({ row, index }))
+    .sort((left, right) => {
+    const a = left.row
+    const b = right.row
+    let comparison = 0
+    if (sortId === 'model') comparison = text.compare(a.displayName, b.displayName)
+    else if (sortId === 'lab') comparison = text.compare(a.labName, b.labName)
+    else if (sortId === 'think') comparison = text.compare(a.recipeName, b.recipeName)
+    else {
+      const sa =
+        sortId === 'cap'
+          ? a.capability
+          : sortId === 'size'
+            ? a.model.paramsB
+            : sortId === 'tokens'
+              ? a.tokenMult
+              : sortId === 'price'
+                ? (a.usdPerMTok ?? -1)
+                : sortId === 'day'
+                  ? a.model.releaseDay
+                  : (a.scores[sortId] ?? 0)
+      const sb =
+        sortId === 'cap'
+          ? b.capability
+          : sortId === 'size'
+            ? b.model.paramsB
+            : sortId === 'tokens'
+              ? b.tokenMult
+              : sortId === 'price'
+                ? (b.usdPerMTok ?? -1)
+                : sortId === 'day'
+                  ? b.model.releaseDay
+                  : (b.scores[sortId] ?? 0)
+      comparison = sa - sb
+    }
+    if (comparison !== 0) return comparison * sign
     const byName = a.displayName.localeCompare(b.displayName)
     if (byName !== 0) return byName
-    return a.recipeId.localeCompare(b.recipeId)
+    const byRecipe = a.recipeId.localeCompare(b.recipeId)
+    return byRecipe !== 0 ? byRecipe : left.index - right.index
   })
+    .map(({ row }) => row)
+}
+
+export function nextLeaderboardSortDirection(
+  currentId: LeaderboardSortId,
+  currentDirection: LeaderboardSortDirection,
+  nextId: LeaderboardSortId,
+): LeaderboardSortDirection {
+  if (currentId === nextId) return currentDirection === 'asc' ? 'desc' : 'asc'
+  return nextId === 'model' || nextId === 'lab' || nextId === 'think'
+    ? 'asc'
+    : 'desc'
 }
 
 export function leaderboardEffortRowKey(row: LeaderboardEffortRow): string {
   return `${row.labId}-${row.model.id}-${row.recipeId}`
+}
+
+/** Stable official rank, independent of the table's current presentation sort. */
+export function officialLeaderboardRankByKey(
+  rows: readonly LeaderboardEffortRow[],
+): Map<string, number> {
+  return new Map(
+    rankLeaderboardEffortRows(rows, 'cap', 'desc').map((row, index) => [
+      leaderboardEffortRowKey(row),
+      index + 1,
+    ]),
+  )
+}
+
+/**
+ * Provider COGS for an Instant-sized request envelope. Legacy boards only
+ * persisted the invariant Instant unit cost, so retain it as a compatibility
+ * fallback.
+ */
+export function effectiveEffortBoardUsdPerBaseMTok(
+  board: Pick<EffortBoard, 'effectiveUsdPerBaseMTok' | 'usdPerMTok'> | null | undefined,
+): number | null {
+  return board?.effectiveUsdPerBaseMTok ?? board?.usdPerMTok ?? null
 }
 
 /**
@@ -257,4 +340,3 @@ export function leaderboardMetricCostTitle(
   }
   return `${scoreBit} · ${usageBit} · ${formatQueryCost(cost.usdPerQuery)} / query at $${cost.usdPerMTok.toFixed(2)}/MTok`
 }
-

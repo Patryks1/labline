@@ -19,24 +19,37 @@ export function PanelScaffold({
   title,
   eyebrow,
   description,
+  mobileDescription,
   actions,
   className,
   children,
 }: {
   title: string
   eyebrow?: string
-  description?: string
+  description?: ReactNode
+  /** Optional concise replacement for `description` on compact screens. */
+  mobileDescription?: ReactNode
   actions?: ReactNode
   className?: string
   children: ReactNode
 }) {
   return (
-    <section className={`hud-section${className ? ` ${className}` : ''}`}>
-      <header className="hud-section__header">
+    <section
+      className={`hud-section${className ? ` ${className}` : ''}`}
+      data-mobile-section="true"
+    >
+      <header className="hud-section__header hud-section-header">
         <div className="min-w-0">
           {eyebrow ? <p className="hud-eyebrow">{eyebrow}</p> : null}
           <h2 className="hud-title">{title}</h2>
-          {description ? <p className="hud-description">{description}</p> : null}
+          {description ? (
+            <p className={`hud-description${mobileDescription ? ' hud-mobile-detail' : ''}`}>
+              {description}
+            </p>
+          ) : null}
+          {mobileDescription ? (
+            <p className="hud-description hud-mobile-summary">{mobileDescription}</p>
+          ) : null}
         </div>
         {actions ? <div className="hud-section__actions">{actions}</div> : null}
       </header>
@@ -49,20 +62,37 @@ export function MetricTile({
   label,
   value,
   detail,
+  mobileSummary,
+  mobilePriority = 'primary',
   tone = 'neutral',
   title,
 }: {
   label: string
   value: ReactNode
   detail?: ReactNode
+  /** Concise mobile replacement for a longer supporting detail. */
+  mobileSummary?: ReactNode
+  /** Allows dense mobile layouts to retain primary facts ahead of supporting facts. */
+  mobilePriority?: 'primary' | 'secondary'
   tone?: HudTone
   title?: string
 }) {
   return (
-    <div className={`metric-tile metric-tile--${tone}`} title={title}>
+    <div
+      className={`metric-tile metric-tile--${tone}`}
+      title={title}
+      data-mobile-priority={mobilePriority}
+    >
       <span className="metric-tile__label">{label}</span>
       <strong className="metric-tile__value">{value}</strong>
-      {detail ? <span className="metric-tile__detail">{detail}</span> : null}
+      {detail ? (
+        <span className={`metric-tile__detail${mobileSummary ? ' hud-mobile-detail' : ''}`}>
+          {detail}
+        </span>
+      ) : null}
+      {mobileSummary ? (
+        <span className="metric-tile__detail hud-mobile-summary">{mobileSummary}</span>
+      ) : null}
     </div>
   )
 }
@@ -150,10 +180,13 @@ export function ProgressBar({
 export function EmptyState({
   title,
   description,
+  mobileDescription,
   action,
 }: {
   title: string
-  description: string
+  description: ReactNode
+  /** Optional concise replacement for `description` on compact screens. */
+  mobileDescription?: ReactNode
   action?: ReactNode
 }) {
   return (
@@ -161,7 +194,8 @@ export function EmptyState({
       <span className="empty-state__marker" aria-hidden />
       <div>
         <h3>{title}</h3>
-        <p>{description}</p>
+        <p className={mobileDescription ? 'hud-mobile-detail' : undefined}>{description}</p>
+        {mobileDescription ? <p className="hud-mobile-summary">{mobileDescription}</p> : null}
       </div>
       {action ? <div className="empty-state__action">{action}</div> : null}
     </div>
@@ -172,11 +206,14 @@ export function HudState({
   kind = 'empty',
   title,
   description,
+  mobileDescription,
   action,
 }: {
   kind?: 'loading' | 'empty' | 'error'
   title: string
-  description?: string
+  description?: ReactNode
+  /** Optional concise replacement for `description` on compact screens. */
+  mobileDescription?: ReactNode
   action?: ReactNode
 }) {
   const isError = kind === 'error'
@@ -184,7 +221,14 @@ export function HudState({
     <div className={`hud-state hud-state--${kind}`} role={isError ? 'alert' : undefined}>
       <div>
         <h3 className="hud-state__title">{title}</h3>
-        {description ? <p className="hud-state__description">{description}</p> : null}
+        {description ? (
+          <p className={`hud-state__description${mobileDescription ? ' hud-mobile-detail' : ''}`}>
+            {description}
+          </p>
+        ) : null}
+        {mobileDescription ? (
+          <p className="hud-state__description hud-mobile-summary">{mobileDescription}</p>
+        ) : null}
       </div>
       {action ? <div>{action}</div> : null}
     </div>

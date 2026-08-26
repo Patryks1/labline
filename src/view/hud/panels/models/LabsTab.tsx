@@ -165,8 +165,13 @@ export function LabsTab({
             tone="train"
           />
         </div>
+        <details className="group mt-3 rounded-md border border-line/55 bg-void/25" data-labs-research-split="collapsed">
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.6875rem] text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-research/60 [&::-webkit-details-marker]:hidden">
+            <span>Research compute split</span>
+            <span className="font-mono tabular-nums text-bone">Gym {Math.round(gymShare * 100)}% · <span className="group-open:hidden">Details</span><span className="hidden group-open:inline">Hide</span></span>
+          </summary>
         <div
-          className="mt-3 grid gap-2 sm:grid-cols-3"
+          className="grid gap-2 border-t border-line/40 p-2.5 sm:grid-cols-3"
           aria-label="Research compute split"
         >
           {[
@@ -193,6 +198,7 @@ export function LabsTab({
             </div>
           ))}
         </div>
+        </details>
       </section>
 
       <div className="grid gap-3 xl:grid-cols-3">
@@ -235,6 +241,7 @@ export function LabsTab({
               key={gym.id}
               eyebrow={meta.grades}
               title={meta.name}
+              mobileSummary={`${Math.round(gym.quality * 100)}% quality · tier ${tier}`}
               tone="research"
               actions={
                 activePack ? (
@@ -246,7 +253,7 @@ export function LabsTab({
                 )
               }
             >
-              <p className="text-[0.6875rem] leading-5 text-muted">{meta.blurb}</p>
+              <p className="hud-mobile-detail text-[0.6875rem] leading-5 text-muted">{meta.blurb}</p>
               <div className="mt-2">
                 <MeterBar
                   label="Quality"
@@ -255,17 +262,18 @@ export function LabsTab({
                   tone="research"
                 />
               </div>
-              <p className="mt-2 font-mono text-[0.625rem] text-muted">
+              <p className="hud-mobile-detail mt-2 font-mono text-[0.625rem] text-muted">
                 Sunk {money(gym.investedCash)} cash · {money(gym.investedComputeCash)} compute
               </p>
               {unlocked ? (
-                <div className="mt-3 rounded-md border border-research/25 bg-research/5 p-2.5">
-                  <div className="flex items-center justify-between gap-2">
+                <details className="group mt-3 rounded-md border border-research/25 bg-research/5" data-gym-allocation="collapsed">
+                  <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-research/60 [&::-webkit-details-marker]:hidden">
                     <span className="hud-eyebrow">HQ research team</span>
                     <span className="font-mono text-[0.625rem] text-muted">
-                      {gym.assignedResearchers ?? 0}/{researcherMax}
+                      {gym.assignedResearchers ?? 0} people · {Math.round((gym.researchShare ?? 0) * 100)}% PF · <span className="group-open:hidden">Edit</span><span className="hidden group-open:inline">Hide</span>
                     </span>
-                  </div>
+                  </summary>
+                  <div className="border-t border-research/20 p-2.5">
                   <label className="mt-2 grid grid-cols-[1fr_4.5rem] items-center gap-2 text-[0.6875rem] text-muted">
                     Researchers assigned
                     <HudInput
@@ -305,7 +313,8 @@ export function LabsTab({
                   <p className="mt-1 text-[0.625rem] leading-4 text-muted">
                     Shared with tech research and synthetic data. Staff are reserved from the HQ pool.
                   </p>
-                </div>
+                  </div>
+                </details>
               ) : null}
               {activePack ? (
                 <div className="mt-3">
@@ -344,7 +353,7 @@ export function LabsTab({
                       >
                         <span>
                           <strong className="block text-[0.75rem]">{pack.label}</strong>
-                          <span className="block text-[0.625rem] font-normal text-muted">
+                          <span className="hud-mobile-detail block text-[0.625rem] font-normal text-muted">
                             {pack.researchPfDays} PF-days · {pack.minResearchers} researchers · {money(pack.operatingCostPerDay)}/day
                           </span>
                         </span>
@@ -386,8 +395,9 @@ export function LabsTab({
                     {meta.name}
                   </span>
                 }
+                mobileSummary={`${Math.round(skill.proficiency * 100)}% proficiency`}
               >
-                <p className="text-[0.6875rem] leading-5 text-muted">{meta.blurb}</p>
+                <p className="hud-mobile-detail text-[0.6875rem] leading-5 text-muted">{meta.blurb}</p>
                 <div className="mt-2">
                   <MeterBar
                     label="Proficiency"
@@ -406,7 +416,7 @@ export function LabsTab({
                         variant="ghost"
                         disabled={cash + 1e-9 < total}
                         title={pack.hint}
-                        className="!min-h-10 !w-full !justify-between !px-2 !text-left"
+                        className="!min-h-11 !w-full !justify-between !px-2 !text-left"
                         onClick={() => onTeachTool(skill.id, pack.id)}
                       >
                         <span className="text-[0.6875rem]">{pack.label}</span>

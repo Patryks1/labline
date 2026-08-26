@@ -19,6 +19,17 @@ import {
 import { rivalMapSites, rivalSiteKindLabel } from '../three/rivalMapSites'
 import { selectFinanceDashboardReadouts } from './data/financeDashboardModel'
 
+export const SHORT_LANDSCAPE_QUERY = '(orientation: landscape) and (max-height: 600px) and (max-width: 1180px)'
+export const COMPACT_BUILD_VIEWPORT_QUERY = `(max-width: 900px), ${SHORT_LANDSCAPE_QUERY}`
+export const COMPACT_NAVIGATOR_QUERY = '(max-width: 1000px), (max-height: 760px)'
+
+export function mediaQueryMatches(
+  query: string,
+  matchMedia?: (query: string) => Pick<MediaQueryList, 'matches'>,
+): boolean {
+  return Boolean(matchMedia?.(query).matches)
+}
+
 /** Navigator overlays share the store MapOverlayMode (zones/power/latency/risk). */
 export type MapNavigatorOverlay = Exclude<MapOverlayMode, 'none'>
 export type BuildingFilter = 'all' | 'player' | 'rival' | 'dc' | 'hq' | 'power' | 'lab'

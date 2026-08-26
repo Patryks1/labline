@@ -79,6 +79,9 @@ describe("TrainingEvidencePanel", () => {
     expect(markup).toContain("Benchmarks &amp; reviews");
     expect(markup).toContain("Measuring does not train the model");
     expect(markup).toContain("No benchmark evidence yet");
+    expect(markup).toMatch(/<details[^>]*data-mobile-default-collapsed="true"/);
+    expect(markup).not.toMatch(/<details[^>]*\sopen(?:=|\s|>)/);
+    expect(markup).toContain("min-h-11");
   });
 
   it("shows benchmark intervals, verdicts, strengths, and risks in the active run", () => {
@@ -151,5 +154,42 @@ describe("TrainingEvidencePanel", () => {
     expect(markup).toContain("64.25");
     expect(markup).toContain("Review due D46");
     expect(markup).toContain("90.00% expected accuracy");
+  });
+
+  it("renders effort-expanded spend per Instant-equivalent token envelope", () => {
+    const markup = renderToStaticMarkup(
+      createElement(TrainingEvidencePanel, {
+        job: job({
+          benchmarkSnapshots: [
+            {
+              day: 44,
+              progress: 0.5,
+              capability: 64,
+              safety: 60,
+              effortBoards: [
+                {
+                  id: "instant", name: "Instant", trained: true, served: true,
+                  capability: 64, tokenMult: 1, billedTokenMult: 1,
+                  computeTokenMult: 1, usdPerMTok: 2,
+                  effectiveUsdPerBaseMTok: 2, math: 64, coding: 64,
+                  science: 64, agents: 64,
+                },
+                {
+                  id: "max", name: "Max", trained: true, served: true,
+                  capability: 76, tokenMult: 100, billedTokenMult: 37,
+                  computeTokenMult: 101, usdPerMTok: 2,
+                  effectiveUsdPerBaseMTok: 74, math: 76, coding: 76,
+                  science: 76, agents: 76,
+                },
+              ],
+            },
+          ],
+        }),
+        checkpoints: [],
+      }),
+    );
+
+    expect(markup).toContain("$2.00/base MTok");
+    expect(markup).toContain("$74.00/base MTok");
   });
 });

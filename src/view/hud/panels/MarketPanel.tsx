@@ -98,13 +98,14 @@ export function MarketPanel() {
       eyebrow="Commercial"
       title="Market"
       description="Share, segments, and surfaces."
+      mobileDescription="Share, demand, and products."
       actions={
         <HudButton type="button" variant="ghost" onClick={() => setPanel('stats')}>
           Command
         </HudButton>
       }
     >
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-2 gap-2" data-mobile-summary="market-position">
         <MetricTile label="Your share" value={pct(playerShare, 1)} tone="positive" />
         <MetricTile
           label="Served / demand"
@@ -121,6 +122,7 @@ export function MarketPanel() {
           label="Paid / free"
           value={`${people(paidSubs)}`}
           detail={`${people(freeSubs)} free`}
+          mobilePriority="secondary"
         />
       </div>
 
@@ -244,7 +246,12 @@ function ShareView({
             )
           })}
         </div>
-        <div className="mt-3 grid grid-cols-2 gap-2 border-t border-line/50 pt-3">
+        <details className="group mt-3 border-t border-line/50 pt-1">
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 py-2 text-[0.75rem] marker:hidden lg:min-h-0">
+            <span className="font-medium text-bone">Market reach</span>
+            <span className="font-mono text-muted">{audience(aiUsers)} AI users · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span></span>
+          </summary>
+        <div className="grid grid-cols-2 gap-2 pb-1">
           <div>
             <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">You</div>
             <div className="font-mono text-xl font-semibold tabular-nums text-mint">
@@ -274,6 +281,7 @@ function ShareView({
             </div>
           </div>
         </div>
+        </details>
       </GameCard>
 
       <GameCard
@@ -299,7 +307,14 @@ function ShareView({
             tone={demandPf > capacityPf * 1.02 ? 'danger' : 'serve'}
           />
         </div>
-        <div className="mt-2 space-y-0.5 border-t border-line/50 pt-2">
+        <details className="group mt-2 border-t border-line/50 pt-1">
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 py-2 text-[0.75rem] marker:hidden lg:min-h-0">
+            <span className="font-medium text-bone">Operational detail</span>
+            <span className={unserved > 0.08 ? 'font-mono text-danger' : 'font-mono text-muted'}>
+              {pct(unserved, 0)} unserved · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span>
+            </span>
+          </summary>
+        <div className="space-y-0.5 pb-1">
           <StatRow label="Admitted inference" value={`${num(servedPf, 2)} PF`} />
           <StatRow label="Token capacity" value={`${num(capacityMTok, 1)} MTok/d`} />
           <StatRow
@@ -319,6 +334,7 @@ function ShareView({
             tone={servicePain > 0.2 ? 'danger' : servicePain > 0.08 ? 'warning' : 'neutral'}
           />
         </div>
+        </details>
         {overloaded ? (
           <p className="mt-2 text-[0.8125rem] leading-snug text-danger">
             Demand exceeds inference PF. Add racks, power, Serve %, or serving-efficiency research.

@@ -4,7 +4,14 @@ import { createElement, type ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../../sim/createGame'
-import { buildMapNavigatorData, navigatorCitySummary, type NavigatorCityLabel } from './mapNavigatorData'
+import {
+  buildMapNavigatorData,
+  COMPACT_NAVIGATOR_QUERY,
+  mediaQueryMatches,
+  navigatorCitySummary,
+  SHORT_LANDSCAPE_QUERY,
+  type NavigatorCityLabel,
+} from './mapNavigatorData'
 import {
   CloudVisibilityButton,
   MapNavigator,
@@ -39,6 +46,40 @@ describe('MapNavigator chrome', () => {
     expect(layersAt).toBeGreaterThan(toolsAt)
     expect(markup).toContain('aria-label="Building filter"')
     expect(markup).toContain('aria-label="Show clouds"')
+  })
+
+  it('keeps compact map gestures inside the frame and exposes touch-size zoom controls', () => {
+    const markup = renderToStaticMarkup(createElement(MapNavigator, { compact: true }))
+
+    expect(markup).toContain('data-compact="true"')
+    expect(markup).toContain('[&amp;_button]:!min-h-[44px]')
+    expect(markup).toContain('[&amp;_button]:!min-w-[44px]')
+    expect(markup).toContain('data-compact-layout="wrap"')
+    expect(markup).toContain('style="flex-wrap:wrap"')
+    expect(markup).toContain('Tap to pan, drag to explore, or pinch to zoom')
+    expect(markup).toContain('touch-none cursor-crosshair')
+    expect(markup).toContain('touch-pan-x touch-pan-y')
+    expect(markup).toContain('max-[900px]:!size-11')
+    expect(markup).toContain('pinch with two fingers')
+    for (const label of [
+      'Show clouds',
+      'Rotate map left',
+      'Rotate map right',
+      'Cycle map tilt, current standard',
+      'Reset map perspective',
+    ]) {
+      expect(markup).toContain(`aria-label="${label}"`)
+    }
+  })
+
+  it('lets compact portrait and landscape CSS own safe-area insets', () => {
+    const queries: string[] = []
+    expect(mediaQueryMatches(COMPACT_NAVIGATOR_QUERY, (query) => {
+      queries.push(query)
+      return { matches: true }
+    })).toBe(true)
+    expect(mediaQueryMatches(COMPACT_NAVIGATOR_QUERY, () => ({ matches: false }))).toBe(false)
+    expect(queries).toEqual([COMPACT_NAVIGATOR_QUERY])
   })
 })
 
@@ -81,6 +122,18 @@ describe('NavigatorOverlayLayers', () => {
     expect(markup).toContain('aria-label="Latency"')
     expect(markup).toContain('aria-label="Risk"')
     expect(markup).toContain('aria-pressed="true"')
+  })
+
+  it('uses one touch-size row when short landscape height cannot fit four stacked tools', () => {
+    const markup = renderToStaticMarkup(createElement(NavigatorOverlayLayers, {
+      overlay: 'none',
+      onSelect: () => undefined,
+      horizontal: true,
+    }))
+
+    expect(markup).toContain('data-layout="horizontal"')
+    expect(markup).toContain('style="flex-direction:row"')
+    expect(mediaQueryMatches(SHORT_LANDSCAPE_QUERY, () => ({ matches: true }))).toBe(true)
   })
 })
 
@@ -149,6 +202,23 @@ describe('NavigatorCityLabelLayer', () => {
     expect(markup).toContain(`title="${navigatorCitySummary(metro)}"`)
     layer.props.children[0]!.props.onClick({ stopPropagation: () => undefined })
     expect(calls).toEqual([[metro.cx, metro.cy]])
+  })
+
+  it('expands Harborline Cross to a centered 44px compact touch target', () => {
+    const harborline = { ...labels[0]!, id: metro.id, text: 'Harborline Cross', height: 13 }
+    const markup = renderToStaticMarkup(createElement(NavigatorCityLabelLayer, {
+      labels: [harborline],
+      cities: [metro],
+      onPan: () => undefined,
+      compact: true,
+      frameWidth: 268,
+      frameHeight: 144,
+    }))
+
+    expect(markup).toContain('>Harborline Cross</button>')
+    expect(markup).toContain('height:44px')
+    expect(markup).toContain('min-width:44px')
+    expect(markup).toContain('min-height:44px')
   })
 })
 

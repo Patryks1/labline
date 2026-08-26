@@ -85,11 +85,12 @@ export function CheckpointBranchDialog({
       eyebrow="Checkpoint branch"
       title="Train a new model from these weights"
       description="The source run keeps training. This creates a separate child model with independent data, compute, progress, and release decisions."
+      mobileDescription="Start an independent child from this snapshot."
       onClose={onClose}
       closeLabel="Close checkpoint branch"
       maxWidthClass="max-w-4xl"
       footer={
-        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between [&_.hud-button]:!min-h-11 [&_.hud-button]:!w-full sm:[&_.hud-button]:!w-auto">
           <HudButton type="button" variant="ghost" onClick={onClose}>
             Cancel
           </HudButton>
@@ -218,7 +219,7 @@ export function CheckpointBranchDialog({
                       {option.dataHint}
                     </span>
                   </span>
-                  <span className="mt-1 block text-[0.625rem] leading-4 text-muted">
+                  <span className="hud-mobile-detail mt-1 block text-[0.625rem] leading-4 text-muted">
                     {option.description}
                   </span>
                 </label>
@@ -280,7 +281,7 @@ export function CheckpointBranchDialog({
             className="mt-1 min-h-11 w-full text-sm"
             aria-invalid={!trimmedName}
           />
-          <span className="mt-1 block text-[0.625rem] font-normal leading-4 text-muted">
+          <span className="hud-mobile-detail mt-1 block text-[0.625rem] font-normal leading-4 text-muted">
             This appears as a separate run in Training Activity and retains a
             link back to this checkpoint.
           </span>

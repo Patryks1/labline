@@ -35,6 +35,7 @@ export function RecipePlanModal({
       eyebrow="Data recipe"
       title="Load a mix"
       description="Start from a previous model's spider, then change it on the radar."
+      mobileDescription="Reuse a saved data mix."
       onClose={onClose}
       closeLabel="Close mix library"
       maxWidthClass="max-w-lg"
@@ -48,7 +49,7 @@ export function RecipePlanModal({
         <ul className="space-y-2" data-recipe-plan-list="true">
           {plans.map((plan) => (
             <li key={plan.id}>
-              <div className="flex items-start justify-between gap-3 rounded-lg border border-line/70 bg-panel-2/50 px-3 py-2.5">
+              <div className="flex flex-col items-stretch justify-between gap-3 rounded-lg border border-line/70 bg-panel-2/50 px-3 py-2.5 min-[400px]:flex-row min-[400px]:items-start">
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium text-bone">
                     {plan.name}
@@ -69,14 +70,14 @@ export function RecipePlanModal({
                     {topDomains(plan) || "Flat mix"}
                   </p>
                 </div>
-                <div className="flex shrink-0 flex-col items-end gap-1.5">
+                <div className="flex shrink-0 items-center justify-between gap-2 min-[400px]:flex-col min-[400px]:items-end">
                   <StatusChip tone="neutral">
                     {Math.round(plan.postTrainShare * 100)}% align
                   </StatusChip>
                   <HudButton
                     type="button"
                     variant="primary"
-                    className="!min-h-9 !px-2.5 !text-[0.6875rem]"
+                    className="!min-h-11 !px-2.5 !text-[0.6875rem]"
                     onClick={() => onChoose(plan)}
                   >
                     Use plan

@@ -106,13 +106,21 @@ export function PauseMenu() {
       variant="pause"
       titleId="labline-pause-title"
       onRequestClose={requestClose}
-      contentClassName="pause-menu-content max-h-[calc(100dvh-11.5rem)] max-w-[46rem] p-5 sm:p-6"
+      contentClassName="pause-menu-content max-h-[calc(100dvh-11.5rem)] max-w-[46rem] p-3 sm:p-6 [@media(max-height:540px)]:!h-full [@media(max-height:540px)]:!max-h-[calc(100dvh-1rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] [@media(max-height:540px)]:!p-2"
     >
-        <div className="mb-3 flex items-center justify-between">
+        <div className="sticky top-0 z-20 -mx-3 -mt-3 mb-3 flex min-h-12 items-center justify-between gap-2 border-b border-line/70 bg-panel/95 px-3 py-2 backdrop-blur sm:static sm:mx-0 sm:mt-0 sm:min-h-0 sm:border-0 sm:bg-transparent sm:p-0 [@media(max-height:540px)]:!sticky [@media(max-height:540px)]:!-mx-2 [@media(max-height:540px)]:!-mt-2 [@media(max-height:540px)]:!min-h-12 [@media(max-height:540px)]:!border-b [@media(max-height:540px)]:!bg-panel/95 [@media(max-height:540px)]:!px-2 [@media(max-height:540px)]:!py-1">
           <h2 className="text-sm font-semibold text-bone">
             {tab === 'main' ? 'Paused' : tab === 'save' ? 'Save run' : tab === 'load' ? 'Load run' : tab === 'settings' ? 'Settings' : 'Balance'}
           </h2>
-          <span className="font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted">Esc to close</span>
+          <span className="font-mono text-[0.625rem] uppercase tracking-[0.14em] text-muted max-sm:hidden [@media(max-height:540px)]:hidden">Esc to close</span>
+          <HudButton
+            type="button"
+            variant="ghost"
+            onClick={requestClose}
+            className="hidden min-h-11 border border-line/70 px-3 text-[0.6875rem] text-mint max-sm:flex [@media(max-height:540px)]:flex"
+          >
+            Resume
+          </HudButton>
         </div>
 
         {(msg ?? lifecycleError) && (
@@ -153,6 +161,7 @@ export function PauseMenu() {
             />
             <MenuBtn
               label="Quick save (autosave)"
+              mobileOptional
               onClick={() => void onSave('auto')}
             />
             <MenuBtn
@@ -164,6 +173,7 @@ export function PauseMenu() {
             />
             <MenuBtn
               label="Balance"
+              mobileOptional
               onClick={() => {
                 setMsg(null)
                 setTab('balance')
@@ -285,17 +295,19 @@ function MenuBtn({
   onClick,
   primary,
   danger,
+  mobileOptional,
 }: {
   label: string
   onClick: () => void
   primary?: boolean
   danger?: boolean
+  mobileOptional?: boolean
 }) {
   return (
     <HudButton
       variant={primary ? 'primary' : danger ? 'danger' : 'secondary'}
       onClick={onClick}
-      className="min-h-11 w-full justify-start rounded-xl px-3 py-2.5 text-left text-[0.8125rem] transition"
+      className={`min-h-11 w-full justify-start rounded-xl px-3 py-2.5 text-left text-[0.8125rem] transition ${mobileOptional ? 'max-sm:hidden [@media(max-height:540px)]:hidden' : ''}`}
     >
       {label}
     </HudButton>
@@ -340,7 +352,7 @@ function BalanceTab({
   }
 
   return (
-    <div className="max-h-[calc(100dvh-16rem)] space-y-4 overflow-y-auto pr-1">
+    <div className="space-y-4">
       <HudButton
         variant="ghost"
         className="min-h-11 justify-start px-0 text-[0.75rem] text-mint hover:underline"
@@ -504,7 +516,7 @@ function SlotList({
             <div className="min-w-0">
               <div className="text-[0.8125rem] font-medium text-bone">{label}</div>
               {m ? (
-                <div className="truncate font-mono text-[0.6875rem] text-muted">
+                <div className="max-w-[14rem] truncate font-mono text-[0.6875rem] text-muted sm:max-w-none">
                   {m.labName} · Day {m.day} · {m.difficulty} · {money(m.cash)}
                 </div>
               ) : (

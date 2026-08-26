@@ -6,9 +6,11 @@ import {
 } from '../../../sim/balance/modelProduct'
 import {
   expandLeaderboardEffortRows,
+  effectiveEffortBoardUsdPerBaseMTok,
   leaderboardEffortDisplayName,
   leaderboardMetricCost,
   leaderboardMetricCostTitle,
+  officialLeaderboardRankByKey,
   rankLeaderboardEffortRows,
   type LeaderboardModelRow,
 } from './benchmarkLeaderboard'
@@ -216,6 +218,28 @@ describe('expandLeaderboardEffortRows', () => {
       ranked[ranked.length - 1]?.scores.coding ?? 0,
     )
   })
+
+  it('keeps official capability ranks stable when the table is sorted by another column', () => {
+    const stronger = thinkingModel('Zulu')
+    stronger.id = 'stronger'
+    stronger.capability = 60
+    const weaker = instantOnlyModel('Alpha')
+    weaker.id = 'weaker'
+    weaker.capability = 30
+    const instantRows = expandLeaderboardEffortRows(
+      [asRow(stronger), asRow(weaker, false)],
+      { suiteId: 'language' },
+    ).filter((row) => row.recipeId === INSTANT_EFFORT_ID)
+    const alphabeticRows = rankLeaderboardEffortRows(instantRows, 'model', 'asc')
+    const officialRanks = officialLeaderboardRankByKey(alphabeticRows)
+
+    expect(alphabeticRows.map((row) => row.model.id)).toEqual([
+      'weaker',
+      'stronger',
+    ])
+    expect(officialRanks.get('player-stronger-instant')).toBe(1)
+    expect(officialRanks.get('rival-a-weaker-instant')).toBe(2)
+  })
 })
 
 describe('leaderboardMetricCostTitle', () => {
@@ -248,5 +272,31 @@ describe('leaderboardMetricCostTitle', () => {
     expect(leaderboardMetricCost(deep, 'math').usdPerQuery!).toBeGreaterThan(
       leaderboardMetricCost(instant, 'math').usdPerQuery!,
     )
+  })
+})
+
+describe('effectiveEffortBoardUsdPerBaseMTok', () => {
+  it('uses effort-expanded spend for display and sorting instead of invariant list rate', () => {
+    const instant = {
+      usdPerMTok: 2,
+      effectiveUsdPerBaseMTok: 2,
+    }
+    const max = {
+      usdPerMTok: 2,
+      effectiveUsdPerBaseMTok: 74,
+    }
+
+    expect(effectiveEffortBoardUsdPerBaseMTok(max)).toBeGreaterThan(
+      effectiveEffortBoardUsdPerBaseMTok(instant)!,
+    )
+    expect(
+      [max, instant]
+        .sort(
+          (a, b) =>
+            effectiveEffortBoardUsdPerBaseMTok(a)! -
+            effectiveEffortBoardUsdPerBaseMTok(b)!,
+        )
+        .map((board) => board.effectiveUsdPerBaseMTok),
+    ).toEqual([2, 74])
   })
 })

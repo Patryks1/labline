@@ -37,12 +37,13 @@ export function ModelsTrainingModal({
       titleId="models-training-workflow"
       eyebrow="Model training"
       title="New training run"
-      description="Define the model, prepare its data, allocate compute and review the launch forecast."
+      description="Set the goal, data and compute, then review the launch."
+      mobileDescription="Goal → data → compute → launch."
       onClose={onCancel}
       closeLabel="Close training workflow"
       maxWidthClass="max-w-5xl"
       footer={
-        <div className="space-y-3">
+        <div className="space-y-3 [@media(max-height:600px)]:space-y-1">
           <ModelsWorkflowStepper
             activeStep={activeStep}
             completedThrough={completedThrough}

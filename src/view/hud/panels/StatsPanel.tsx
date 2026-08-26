@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { type ReactNode, useMemo, useState } from 'react'
 import { buildLabStats, type StatsSectionId } from '../../../sim/systems/stats'
 import type { PanelId } from '../../../sim/types'
 import { useGameStore } from '../../../store/gameStore'
@@ -21,6 +21,35 @@ const SECTIONS: { id: StatsSectionId; label: string }[] = [
   { id: 'capital', label: 'Capital' },
   { id: 'compute', label: 'Compute' },
 ]
+
+function FinanceDisclosure({
+  label,
+  value,
+  tone = 'text-muted',
+  children,
+}: {
+  label: string
+  value?: string
+  tone?: string
+  children: ReactNode
+}) {
+  return (
+    <details className="group overflow-hidden rounded-lg border border-line bg-panel-2/60">
+      <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 marker:hidden lg:min-h-0">
+        <span className="text-[0.8125rem] font-semibold text-bone">{label}</span>
+        <span className="flex shrink-0 items-center gap-2">
+          {value ? (
+            <span className={`font-mono text-[0.75rem] tabular-nums ${tone}`}>
+              {value}
+            </span>
+          ) : null}
+          <span aria-hidden="true" className="inline-block text-muted transition-transform group-open:rotate-180">⌄</span>
+        </span>
+      </summary>
+      <div className="border-t border-line/50 p-2.5">{children}</div>
+    </details>
+  )
+}
 
 function FinanceReadoutCell({
   label,
@@ -83,6 +112,7 @@ export function StatsPanel() {
       eyebrow={`Day ${stats.day}`}
       title="Finances"
       description="P&L, capital, and compute."
+      mobileDescription="Cash, runway, and daily profit."
       actions={
         <HudButton
           variant="ghost"
@@ -167,17 +197,28 @@ function PnlSection({
 }) {
   return (
     <div className="space-y-3">
-      <SparkTrendCard
-        label="Money over time"
-        values={financeModel.trends.net}
-        secondaryValues={financeModel.trends.revenue}
-        days={financeModel.trends.days}
-        format={money}
-        secondaryLabel="Revenue"
-        tall
-      />
+      <div className="grid grid-cols-2 gap-2" data-mobile-summary="daily-pnl">
+        <MetricTile label="Revenue / day" value={money(financeModel.revenue.total)} tone="positive" />
+        <MetricTile label="Cash out / day" value={money(-financeModel.costs.totalCashOut)} tone="danger" />
+      </div>
 
-      <GameCard eyebrow="Ledger" title="Money in" tone="mint">
+      <FinanceDisclosure
+        label="Money history"
+        value={money(financeModel.current.net)}
+        tone={financeModel.current.net < 0 ? 'text-danger' : 'text-mint'}
+      >
+        <SparkTrendCard
+          label="Money over time"
+          values={financeModel.trends.net}
+          secondaryValues={financeModel.trends.revenue}
+          days={financeModel.trends.days}
+          format={money}
+          secondaryLabel="Revenue"
+          tall
+        />
+      </FinanceDisclosure>
+
+      <FinanceDisclosure label="Revenue ledger" value={money(financeModel.revenue.total)} tone="text-mint">
         <StatRow label="Total" value={money(financeModel.revenue.total)} tone="positive" strong />
         <div className="anim-stagger mt-1 border-t border-line/50 pt-1">
           {stats.income.map((line) => (
@@ -216,13 +257,9 @@ function PnlSection({
             </div>
           ))}
         </div>
-      </GameCard>
+      </FinanceDisclosure>
 
-      <GameCard
-        eyebrow="Ledger"
-        title="Costs"
-        tone={(stats.finance.dayGrossProfit ?? 0) < 0 ? 'danger' : 'train'}
-      >
+      <FinanceDisclosure label="Cost ledger" value={money(-financeModel.costs.totalCashOut)} tone="text-danger">
         <StatRow label="Product COGS" value={money(-financeModel.costs.productCogs)} tone="danger" strong />
         <div className="anim-stagger mt-1 border-t border-line/50 pt-1">
           {stats.productCosts.map((line) => (
@@ -259,9 +296,13 @@ function PnlSection({
             strong
           />
         </div>
-      </GameCard>
+      </FinanceDisclosure>
 
-      <GameCard eyebrow="Unit economics" title="Per MTok">
+      <FinanceDisclosure
+        label="Unit economics"
+        value={`${money(stats.unitEconomics.marginPerMTok)}/MTok`}
+        tone={stats.unitEconomics.marginPerMTok < 0 ? 'text-danger' : 'text-mint'}
+      >
         <StatRow label="Revenue per MTok" value={money(stats.unitEconomics.revenuePerMTok)} />
         <StatRow label="Cost per MTok" value={money(stats.unitEconomics.costPerMTok)} tone="danger" />
         <StatRow
@@ -271,41 +312,43 @@ function PnlSection({
           strong
         />
         <StatRow label="Gross margin" value={pct(stats.unitEconomics.grossMarginPct, 0)} />
-      </GameCard>
+      </FinanceDisclosure>
 
       {stats.plans.length > 0 ? (
-        <GameCard
-          eyebrow="Plans"
-          title="Breakdown"
-          actions={
-            <HudButton variant="ghost" className="!px-2 !py-1 text-[0.75rem]" onClick={() => setPanel('plans')}>
-              Edit →
-            </HudButton>
-          }
-        >
-          <div className="anim-stagger space-y-2">
-            {stats.plans.map((p) => (
-              <div key={p.planId} className="rounded-md border border-line/70 bg-void/30 px-2.5 py-2">
-                <div className="flex items-baseline justify-between gap-2">
-                  <span className="truncate text-[0.8125rem] font-medium text-bone">{p.name}</span>
-                  <span className="shrink-0 font-mono text-[0.8125rem] tabular-nums text-muted">
-                    {Math.round(p.subscribers).toLocaleString()} subs
-                  </span>
+        <FinanceDisclosure label="Plan breakdown" value={`${stats.plans.length} plans`}>
+          <GameCard
+            eyebrow="Plans"
+            title="Breakdown"
+            actions={
+              <HudButton variant="ghost" className="!px-2 !py-1 text-[0.75rem]" onClick={() => setPanel('plans')}>
+                Edit →
+              </HudButton>
+            }
+          >
+            <div className="anim-stagger space-y-2">
+              {stats.plans.map((p) => (
+                <div key={p.planId} className="rounded-md border border-line/70 bg-void/30 px-2.5 py-2">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="truncate text-[0.8125rem] font-medium text-bone">{p.name}</span>
+                    <span className="shrink-0 font-mono text-[0.8125rem] tabular-nums text-muted">
+                      {Math.round(p.subscribers).toLocaleString()} subs
+                    </span>
+                  </div>
+                  <div className="mt-1 grid grid-cols-2 gap-2 font-mono text-[0.8125rem] tabular-nums sm:grid-cols-3">
+                    <span className="text-mint">{money(p.dayRevenue)}</span>
+                    <span className="text-right text-danger sm:text-center">{money(-p.dayCogs)}</span>
+                    <span className={`col-span-2 text-center sm:col-span-1 sm:text-right ${p.marginPerSubMonth < 0 ? 'text-danger' : 'text-mint'}`}>
+                      {money(p.marginPerSubMonth)}/sub
+                    </span>
+                  </div>
+                  <div className="mt-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
+                    {num(p.dayMTok, 2)} MTok/d
+                  </div>
                 </div>
-                <div className="mt-1 grid grid-cols-2 gap-2 font-mono text-[0.8125rem] tabular-nums sm:grid-cols-3">
-                  <span className="text-mint">{money(p.dayRevenue)}</span>
-                  <span className="text-right text-danger sm:text-center">{money(-p.dayCogs)}</span>
-                  <span className={`col-span-2 text-center sm:col-span-1 sm:text-right ${p.marginPerSubMonth < 0 ? 'text-danger' : 'text-mint'}`}>
-                    {money(p.marginPerSubMonth)}/sub
-                  </span>
-                </div>
-                <div className="mt-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
-                  {num(p.dayMTok, 2)} MTok/d
-                </div>
-              </div>
-            ))}
-          </div>
-        </GameCard>
+              ))}
+            </div>
+          </GameCard>
+        </FinanceDisclosure>
       ) : null}
     </div>
   )
@@ -338,17 +381,6 @@ function ComputeSection({
         <MetricTile label="Cost / MTok" value={money(c.costPerMTokServed)} />
       </div>
 
-      <SparkTrendCard
-        label="Serving demand"
-        values={financeModel.trends.servedMTok}
-        secondaryValues={financeModel.trends.effectivePf}
-        days={financeModel.trends.days}
-        format={(value) => `${num(value, 1)} MTok`}
-        secondaryLabel="Effective PF"
-        secondaryFormat={(value) => `${num(value, 1)} PF`}
-        tall
-      />
-
       <GameCard eyebrow="Capacity" title="What limits you">
         <div className="space-y-3">
           <MeterBar
@@ -377,7 +409,24 @@ function ComputeSection({
         </div>
       </GameCard>
 
-      <GameCard eyebrow="Pools" title="Cost centers" tone="train">
+      <FinanceDisclosure label="Serving history" value={`${num(c.servedMTok, 1)} MTok/d`}>
+        <SparkTrendCard
+          label="Serving demand"
+          values={financeModel.trends.servedMTok}
+          secondaryValues={financeModel.trends.effectivePf}
+          days={financeModel.trends.days}
+          format={(value) => `${num(value, 1)} MTok`}
+          secondaryLabel="Effective PF"
+          secondaryFormat={(value) => `${num(value, 1)} PF`}
+          tall
+        />
+      </FinanceDisclosure>
+
+      <FinanceDisclosure
+        label="Compute cost centers"
+        value={money(-(c.trainCostDay + c.inferCostDay + c.researchCostDay))}
+        tone="text-danger"
+      >
         <StatRow
           label={`Training (${pct(c.trainShare, 0)})`}
           value={money(-c.trainCostDay)}
@@ -396,11 +445,14 @@ function ComputeSection({
           hint={`${num(c.pools.research, 2)} PF effective`}
           tone="danger"
         />
-      </GameCard>
+      </FinanceDisclosure>
 
-      <details className="rounded-lg border border-line bg-panel-2/70">
-        <summary className="cursor-pointer px-3 py-2.5 text-[0.8125rem] font-semibold text-bone">
-          Chip fleet details
+      <details className="group rounded-lg border border-line bg-panel-2/70">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-[0.8125rem] font-semibold text-bone marker:hidden lg:min-h-0">
+          <span>Chip fleet details</span>
+          <span className="font-mono text-[0.75rem] font-normal text-muted">
+            {money(stats.chipTotals.bookValue)} book · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span>
+          </span>
         </summary>
         <div className="anim-stagger space-y-2 border-t border-line/50 px-3 py-3">
           {stats.chips.length === 0 ? (

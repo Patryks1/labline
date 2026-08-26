@@ -162,14 +162,16 @@ export function RacksPanel() {
       eyebrow="Hardware"
       title="Racks"
       description="Your data halls at a glance — open a hall editor to place racks, or design a custom blueprint."
+      mobileDescription="Manage halls, racks, and blueprints."
     >
-      <div className="space-y-3">
+      <div className="min-w-0 touch-pan-y space-y-3">
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <MetricTile label="Fleet PF" value={num(fleet.flopsPf, 1)} tone="positive" />
           <MetricTile label="Racks online" value={num(totals.online, 0)} />
           <MetricTile
             label="Commissioning"
             value={num(totals.commissioning, 0)}
+            mobilePriority={totals.commissioning > 0 ? 'primary' : 'secondary'}
             detail={
               totals.commissioning > 0
                 ? `${RACK_COMMISSION_PER_DAY}/day · ~${totals.commissioningDays}d left`
@@ -177,7 +179,12 @@ export function RacksPanel() {
             }
             tone={totals.commissioning > 0 ? 'warning' : 'neutral'}
           />
-          <MetricTile label="Fleet draw" value={mw(fleet.mw)} detail={`${num(fleet.vramGb, 0)} GB VRAM`} />
+          <MetricTile
+            label="Fleet draw"
+            value={mw(fleet.mw)}
+            detail={`${num(fleet.vramGb, 0)} GB VRAM`}
+            mobileSummary={`${num(fleet.vramGb, 0)} GB`}
+          />
         </div>
 
         <div className="grid grid-cols-2 gap-1" role="group" aria-label="Racks workspace">
@@ -290,7 +297,11 @@ export function RacksPanel() {
               ) : null}
 
               {hallCards.length > 0 ? (
-                <div className="anim-stagger space-y-2">
+                <div
+                  className="anim-stagger panel-scroll -mx-1 flex snap-x snap-mandatory gap-2 overflow-x-auto overscroll-x-contain px-1 pb-1 touch-pan-x touch-pan-y min-[1181px]:mx-0 min-[1181px]:block min-[1181px]:space-y-2 min-[1181px]:overflow-visible min-[1181px]:px-0 min-[1181px]:pb-0"
+                  role="region"
+                  aria-label="Data halls; swipe horizontally to browse on touch screens"
+                >
                   {hallCards.map(({ hall, built, usage, facilityId, offline }) => {
                     const tier = hallTier(usage?.flopsLive ?? 0)
                     const commissioning = usage?.ordered ?? 0
@@ -303,6 +314,7 @@ export function RacksPanel() {
                         title={<BuildingNameField tile={hall} />}
                         tone={isSelected ? 'mint' : 'train'}
                         live={commissioning > 0}
+                        className="w-[88%] shrink-0 snap-start min-[1181px]:w-auto"
                         actions={<StatusChip tone={tier.tone}>{tier.label}</StatusChip>}
                       >
                         {!built ? (
@@ -322,18 +334,26 @@ export function RacksPanel() {
                           <>
                             <div className="grid grid-cols-3 gap-2 font-mono text-[0.75rem] text-muted">
                               <span><b className="block text-bone">{usage.live}</b> online</span>
-                              <span><b className="block text-bone">{usage.staged || '—'}</b> staged</span>
-                              <span><b className="block text-bone">{usage.reserved || '—'}</b> planned footprint</span>
+                              <span><b className="block text-bone">{num(usage.flopsLive, 1)}</b> PF</span>
+                              <span><b className="block text-bone">{mw(usage.mwLive)}</b> draw</span>
                             </div>
-                            <div className="mt-2">
-                              <MeterBar
-                                label="Operational fit"
-                                value={usage.live / Math.max(1, usage.placed)}
-                                detail={`${usage.live}/${usage.placed} placed rack-width`}
-                                tone="positive"
-                                live={usage.staged > 0}
-                              />
-                            </div>
+                            <details className="group mt-2 rounded-md border border-line/60 bg-void/30">
+                              <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-muted marker:hidden">
+                                <span>Placement details</span>
+                                <span className="shrink-0 font-mono tabular-nums text-bone">
+                                  {usage.staged || 0} staged · {usage.reserved || 0} planned
+                                </span>
+                              </summary>
+                              <div className="border-t border-line/60 px-2.5 py-2">
+                                <MeterBar
+                                  label="Operational fit"
+                                  value={usage.live / Math.max(1, usage.placed)}
+                                  detail={`${usage.live}/${usage.placed} placed rack-width`}
+                                  tone="positive"
+                                  live={usage.staged > 0}
+                                />
+                              </div>
+                            </details>
                             {commissioning > 0 ? (
                               <p className="mt-1.5 text-[0.75rem] text-amber">
                                 Spinning up {commissioning} rack{commissioning === 1 ? '' : 's'} · {RACK_COMMISSION_PER_DAY}/day · ~{commissioningDays}d until fully on
@@ -344,10 +364,6 @@ export function RacksPanel() {
                                 {offline} rack{offline === 1 ? '' : 's'} offline — needs power/network in the hall editor
                               </p>
                             ) : null}
-                            <div className="mt-2 flex items-center justify-between font-mono text-[0.75rem] text-muted">
-                              <span>{num(usage.flopsLive, 1)} PF</span>
-                              <span>{mw(usage.mwLive)}</span>
-                            </div>
                             <HudButton
                               type="button"
                               variant="primary"
@@ -389,13 +405,17 @@ export function RacksPanel() {
                   ))}
                 </div>
                 <p className="mb-2 text-[0.75rem] text-muted">Recommendations are deterministic previews. Choosing one loads it into the editor; nothing is saved or ordered automatically.</p>
-                <div className="space-y-1.5">
+                <div
+                  className="panel-scroll -mx-1 flex snap-x snap-mandatory gap-2 overflow-x-auto overscroll-x-contain px-1 pb-1 touch-pan-x touch-pan-y min-[1181px]:mx-0 min-[1181px]:grid min-[1181px]:grid-cols-3 min-[1181px]:overflow-visible min-[1181px]:px-0 min-[1181px]:pb-0"
+                  role="region"
+                  aria-label="Recommended rack designs; swipe horizontally to browse on touch screens"
+                >
                   {autoDesigns.map((recommendation) => (
                     <HudButton
                       key={recommendation.blueprint.id}
                       type="button"
                       variant="ghost"
-                      className="w-full rounded-lg border border-line/70 bg-void/45 px-2.5 py-2 text-left transition hover:border-mint/45"
+                      className="w-[84%] shrink-0 snap-start rounded-lg border border-line/70 bg-void/45 px-2.5 py-2 text-left transition hover:border-mint/45 min-[1181px]:w-auto"
                       onClick={() => {
                         setDesign({ ...recommendation.blueprint, id: emptyDesign(recommendation.blueprint.chassisId).id })
                         setMsg(`Loaded ${autoDesignGoal} recommendation — review before saving`)
@@ -531,7 +551,7 @@ export function RacksPanel() {
                               type="button"
                               variant={selectedModule === m.id ? 'primary' : 'ghost'}
                               onClick={() => setSelectedModule(m.id)}
-                              className={`min-h-11 rounded-lg border px-2 py-1 text-left text-[0.75rem] transition ${
+                              className={`max-w-full min-h-11 rounded-lg border px-2 py-1 text-left text-[0.75rem] transition ${
                                 selectedModule === m.id
                                   ? 'border-mint bg-mint/10'
                                   : 'border-line bg-void hover:border-mint/30'

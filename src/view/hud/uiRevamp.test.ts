@@ -8,6 +8,7 @@ import { buildObjectives } from './objectives'
 import { FULL_BLEED_MAP_STYLE } from './layout'
 import { groupForPanel, panelPresentation } from './navConfig'
 import { BuildPanel } from './BuildTray'
+import { COMPACT_BUILD_VIEWPORT_QUERY, mediaQueryMatches } from './mapNavigatorData'
 
 describe('interface scaling', () => {
   it('uses display height and keeps ultrawide 1080p at the base scale', () => {
@@ -126,13 +127,29 @@ describe('map navigation', () => {
 })
 
 describe('construction guidance', () => {
-  it('shows one idle instruction without a duplicate status banner', () => {
+  it('shows concise mobile placement guidance without a duplicate status banner', () => {
     const state = createGame({ seed: 8_216, difficulty: 'easy' })
     useGameStore.setState({ state, selectedTile: null, buildMode: null })
 
     const idleMarkup = renderToStaticMarkup(createElement(BuildPanel))
-    expect(idleMarkup.match(/Pick a blueprint/g)).toHaveLength(1)
+    expect(idleMarkup.match(/Choose a blueprint/g)).toHaveLength(1)
     expect(idleMarkup).not.toContain('Select a blueprint below')
+    expect(idleMarkup).toContain('Swipe horizontally through blueprint categories')
+    expect(idleMarkup).toContain('touch-pan-x touch-pan-y')
+    expect(idleMarkup).toContain('grid-cols-2 gap-2')
+    expect(idleMarkup).not.toContain('>Blueprints<')
+    expect(idleMarkup).toContain('Cost breakdown')
+  })
+
+  it('hands compact portrait and landscape sheets back to the map after blueprint selection', () => {
+    const queries: string[] = []
+    expect(mediaQueryMatches(COMPACT_BUILD_VIEWPORT_QUERY, (query) => {
+      queries.push(query)
+      return { matches: true }
+    })).toBe(true)
+    expect(mediaQueryMatches(COMPACT_BUILD_VIEWPORT_QUERY, () => ({ matches: false }))).toBe(false)
+    expect(mediaQueryMatches(COMPACT_BUILD_VIEWPORT_QUERY)).toBe(false)
+    expect(queries).toEqual([COMPACT_BUILD_VIEWPORT_QUERY])
   })
 })
 

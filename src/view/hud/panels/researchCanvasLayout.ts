@@ -1,4 +1,5 @@
 export const RESEARCH_TREE_MIN_ZOOM = 0.28;
+export const RESEARCH_TREE_MAX_ZOOM = 1.6;
 
 /**
  * The initial canvas view is a working view, not an all-tree thumbnail.

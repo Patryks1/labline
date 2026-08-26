@@ -1,7 +1,7 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { HudFilterBar } from './HudFilterBar'
+import { COMPACT_FILTER_QUERY, HudFilterBar } from './HudFilterBar'
 
 describe('HudFilterBar', () => {
   it('keeps filter groups semantic and exposes active state/counts', () => {
@@ -32,6 +32,13 @@ describe('HudFilterBar', () => {
     expect(markup).toContain('min-h-11')
     expect(markup).toContain('aria-controls="hud-filter-content-')
     expect(markup).toContain('Clear')
+    expect(markup).toContain('hud-filter-bar__controls')
+    expect(markup).toContain('data-mobile-collapsible="true"')
+    expect(markup).toContain('data-mobile-scroll="true"')
+    expect(markup).toContain('data-swipe-ignore="true"')
+    expect(COMPACT_FILTER_QUERY).toContain('max-width: 900px')
+    expect(COMPACT_FILTER_QUERY).toContain('orientation: landscape')
+    expect(COMPACT_FILTER_QUERY).toContain('max-height: 600px')
   })
 
   it('does not render a misleading clear action when no non-default filters are active', () => {

@@ -108,7 +108,7 @@ export function ReleaseEvaluationOrder({
   }
 
   return (
-    <div className="mt-3 space-y-3">
+    <div className="mt-3 space-y-3" data-release-evaluation-mobile="stacked">
       <div className="grid gap-2 sm:grid-cols-2">
         {eligible.map((suiteId) => {
           const suite = BENCHMARK_SUITE_UI[suiteId]
@@ -116,7 +116,7 @@ export function ReleaseEvaluationOrder({
           return (
             <label
               key={suiteId}
-              className={`cursor-pointer rounded-md border px-3 py-2 text-[0.75rem] transition ${
+              className={`min-h-11 cursor-pointer rounded-md border px-3 py-2 text-[0.75rem] transition ${
                 checked
                   ? 'border-mint/55 bg-mint/10'
                   : 'border-line/60 bg-void/35 hover:border-line'
@@ -129,7 +129,7 @@ export function ReleaseEvaluationOrder({
                 className="sr-only"
               />
               <strong className="block text-bone">{suite.label}</strong>
-              <span className="mt-0.5 block text-[0.6875rem] leading-relaxed text-muted">
+              <span className="hud-mobile-detail mt-0.5 block text-[0.6875rem] leading-relaxed text-muted">
                 {suite.description}
               </span>
             </label>
@@ -143,7 +143,7 @@ export function ReleaseEvaluationOrder({
           return (
             <label
               key={option.id}
-              className={`cursor-pointer rounded-md border px-3 py-2 text-[0.75rem] ${
+              className={`min-h-11 cursor-pointer rounded-md border px-3 py-2 text-[0.75rem] ${
                 checked
                   ? 'border-mint/55 bg-mint/10'
                   : 'border-line/60 bg-void/35'
@@ -157,7 +157,7 @@ export function ReleaseEvaluationOrder({
                 className="sr-only"
               />
               <strong className="block text-bone">{option.label}</strong>
-              <span className="mt-0.5 block text-[0.6875rem] text-muted">
+              <span className="hud-mobile-detail mt-0.5 block text-[0.6875rem] text-muted">
                 {option.description}
               </span>
             </label>
@@ -171,7 +171,7 @@ export function ReleaseEvaluationOrder({
           return (
             <label
               key={option.id}
-              className={`cursor-pointer rounded-md border px-3 py-2 text-[0.75rem] ${
+              className={`min-h-11 cursor-pointer rounded-md border px-3 py-2 text-[0.75rem] ${
                 checked
                   ? 'border-research/60 bg-research/10'
                   : 'border-line/60 bg-void/35'
@@ -215,6 +215,7 @@ export function ReleaseEvaluationOrder({
               : undefined)
           }
           onClick={() => valid && onSubmit(request)}
+          className="min-h-11 w-full sm:w-auto"
         >
           <Flask size="0.875rem" />
           Run evaluation

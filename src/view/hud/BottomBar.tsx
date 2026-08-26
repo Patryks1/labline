@@ -23,6 +23,7 @@ import {
 import {
   COMPUTE_ALLOCATION_MIN,
   rebalanceComputeAllocation,
+  useShellSwipeGesture,
 } from './mobileShellContracts'
 
 /**
@@ -44,6 +45,9 @@ export function BottomBar() {
   const grid = gridScarcity(state)
   const [expanded, setExpanded] = useState(false)
   const [hoveredPool, setHoveredPool] = useState<HoveredPool | null>(null)
+  const allocationGesture = useShellSwipeGesture<HTMLDivElement>({
+    onDown: () => setExpanded(false),
+  })
 
   const breakdown = useMemo(() => buildComputeBreakdown(state), [state])
   const hoveredBreakdown =
@@ -128,6 +132,7 @@ export function BottomBar() {
       data-expanded={expanded ? 'true' : 'false'}
       data-pool-flyout={hoveredPool ?? 'false'}
       aria-label="Live operations"
+      aria-describedby={expanded ? 'operations-mobile-gesture-description' : undefined}
     >
       {expanded ? (
         <button
@@ -159,6 +164,22 @@ export function BottomBar() {
       ) : null}
       <div className="operations-panel pointer-events-auto absolute inset-x-2 bottom-2 rounded-lg px-3 py-2">
         <div className="operations-panel__surface hud-surface rounded-lg" aria-hidden="true" />
+        {expanded ? (
+          <>
+            <div
+              {...allocationGesture}
+              className="operations-mobile-gesture-zone hidden"
+              data-shell-gesture-surface="true"
+              aria-hidden="true"
+            >
+              <span className="mobile-sheet-grabber" />
+              <span>Swipe down to close</span>
+            </div>
+            <p id="operations-mobile-gesture-description" className="sr-only">
+              Swipe down from the allocation handle to close compute allocation.
+            </p>
+          </>
+        ) : null}
         <div className="operations-telemetry relative z-10 mb-1.5 flex min-w-0 items-center gap-2 font-mono text-[0.75rem]">
           <div className="operations-telemetry__facts flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
             <Stat
@@ -170,6 +191,7 @@ export function BottomBar() {
                   : `raw ${pf(snap.rawFlopsPf)}`
               }
               danger={snap.effectiveFlopsPf < 0.05 && snap.rawFlopsPf > 0.05}
+              mobilePriority="secondary"
               className="min-w-0 max-xl:hidden"
               title={`Effective ${pf(snap.effectiveFlopsPf)} · raw ${pf(snap.rawFlopsPf)} · train ${pf(snap.pools.training)} · serve ${pf(snap.pools.inference)} · research ${pf(snap.pools.research)} · yield ${pct(breakdown.fleetYield)}${snap.stallMessage ? ` · ${snap.stallMessage}` : ''} · 1 EF = 1,000 PF`}
             />
@@ -178,6 +200,7 @@ export function BottomBar() {
               value={`${mw(snap.mwDemand)}`}
               sub={`/ ${mw(snap.mwAvailable)}`}
               danger={snap.throttled || powerTight}
+              mobilePriority="secondary"
               className="min-w-0 max-xl:hidden"
               title={`Fleet draw ${mw(snap.mwDemand)} of ${mw(resolved.mwGeneration + resolved.mwInterconnect)} available (${mw(resolved.mwGeneration)} on-site + ${mw(resolved.mwInterconnect)} interconnect) — you only draw what the fleet consumes; contract headroom isn't usage. Rented compute is powered by the provider.`}
             />
@@ -185,6 +208,7 @@ export function BottomBar() {
               label="Demand served"
               value={pct(servedRatio)}
               danger={unserved > 0.08}
+              mobilePriority="primary"
               className="operations-telemetry__served min-w-0 shrink-0"
               title={demandTitle}
             />
@@ -206,6 +230,7 @@ export function BottomBar() {
               type="button"
               title="Auto-balance hosting ~80%"
               onClick={() => autoBalanceHosting()}
+              data-mobile-priority="secondary"
               className="min-h-7 rounded-md bg-mint/15 px-2 text-[0.6875rem] font-medium text-mint hover:bg-mint/25"
             >
               Auto-bal
@@ -213,6 +238,7 @@ export function BottomBar() {
             <button
               type="button"
               onClick={() => setPanel('stats')}
+              data-mobile-priority="tertiary"
               className="hidden min-h-7 rounded-md px-2 text-[0.6875rem] text-muted hover:bg-panel-2 hover:text-bone lg:inline-flex lg:items-center"
             >
               Intel
@@ -222,6 +248,7 @@ export function BottomBar() {
               aria-expanded={expanded}
               title={expanded ? 'Collapse operations details' : 'Expand operations details'}
               onClick={() => setExpanded((value) => !value)}
+              data-mobile-priority="primary"
               className="operations-toggle flex min-h-7 min-w-7 items-center justify-center gap-1 rounded-md px-1 text-muted hover:bg-panel-2 hover:text-bone"
             >
               <span className="operations-toggle-label">{expanded ? 'Done' : 'Allocate'}</span>
@@ -457,6 +484,7 @@ function Stat({
   danger,
   className = '',
   title,
+  mobilePriority = 'secondary',
 }: {
   label: string
   value: string
@@ -464,11 +492,13 @@ function Stat({
   danger?: boolean
   className?: string
   title?: string
+  mobilePriority?: 'primary' | 'secondary' | 'tertiary'
 }) {
   return (
     <span
       className={`operations-stat inline-flex max-w-full items-baseline gap-1 overflow-hidden whitespace-nowrap text-muted ${className}`}
       title={title}
+      data-mobile-priority={mobilePriority}
     >
       <span className="shrink-0 text-[0.625rem] uppercase tracking-wide opacity-80">{label}</span>
       <strong className={`min-w-0 truncate text-bone ${danger ? 'text-danger' : ''}`}>{value}</strong>
@@ -489,6 +519,7 @@ function StatusChip({
   return (
     <span
       title={title}
+      data-mobile-priority="urgent"
       className={`operations-status-chip hidden shrink-0 rounded-full px-2 py-0.5 text-[0.6875rem] font-medium sm:inline-flex ${
         tone === 'danger' ? 'bg-danger/15 text-danger' : 'bg-amber/15 text-amber'
       }`}

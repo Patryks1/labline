@@ -20,7 +20,7 @@ import {
   setRouterLane,
 } from '../systems/modelStudio'
 import { collectLeaderboardModels } from '../systems/rivals'
-import { collectOffers } from '../systems/market'
+import { collectOffers, tickMarket } from '../systems/market'
 import { planModelTrafficMix } from '../systems/plans'
 import { hostedServingModels } from '../systems/servingPlacement'
 import { startTraining } from '../systems/training'
@@ -217,6 +217,126 @@ describe('router mix and cost', () => {
         .map((model) => model.id)
         .sort(),
     ).toEqual([fast.id, frontier.id].sort())
+  })
+
+  it('settles each routed member with its own effort recipes', () => {
+    const instant = released('router-instant', 'Instant lane', 3, 58)
+    const reasoning = released('router-reasoning', 'Reasoning lane', 30, 76)
+    instant.reasoningEnabled = true
+    reasoning.reasoningEnabled = true
+    instant.productProfile = undefined
+    reasoning.productProfile = {
+      lifecycle: 'reasoning',
+      focus: { coding: 0, science: 0, research: 0, personality: 0, chat: 0 },
+      personality: 55,
+      tokenEfficiency: 80,
+      defaultEffortId: 'max',
+      effortRecipes: [
+        {
+          id: 'instant',
+          name: 'Instant',
+          kind: 'instant',
+          thinkingTokenMult: 1,
+          trainPfDays: 0,
+          trainCash: 0,
+          trained: true,
+          quality: 1,
+          served: true,
+        },
+        {
+          id: 'max',
+          name: 'Max',
+          kind: 'trained',
+          thinkingTokenMult: 32,
+          trainPfDays: 160,
+          trainCash: 8_000_000,
+          trained: true,
+          quality: 0.9,
+          served: true,
+          capabilityBias: 0.6,
+        },
+      ],
+    }
+    for (const model of [instant, reasoning]) {
+      model.apiPricePerMTok = null
+      model.apiPriceInPerMTok = 1
+      model.apiPriceOutPerMTok = 5
+    }
+    let state = withRouterTech(createGame(6_206))
+    state = {
+      ...state,
+      segments: state.segments.map((segment) => ({
+        ...segment,
+        providerShares: {},
+      })),
+      player: {
+        ...state.player,
+        models: [instant, reasoning],
+        pricing: {
+          ...state.player.pricing,
+          apiModelIds: [],
+          apiPriceInPerMTok: 1,
+          apiPriceOutPerMTok: 5,
+          apiVsSubPriority: 0.88,
+          plans: state.player.pricing.plans.map((plan) => ({
+            ...plan,
+            enabled: false,
+          })),
+        },
+      },
+    }
+    state = createModelRouter(state, 'Heterogeneous effort')
+    const routerId = state.player.modelRouters![0]!.id
+    state = setRouterLane(state, routerId, 'fast', instant.id)
+    state = setRouterLane(state, routerId, 'frontier', reasoning.id)
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        pricing: {
+          ...state.player.pricing,
+          apiRouterIds: [routerId],
+          apiModelIds: [],
+        },
+      },
+    }
+
+    const settled = tickMarket(state)
+    const apiItems = (settled.lastMarket.computeLedger?.items ?? []).filter(
+      (item) => item.channel === 'api',
+    )
+    const instantItem = apiItems.find((item) => item.modelId === instant.id)!
+    const reasoningItem = apiItems.find((item) => item.modelId === reasoning.id)!
+    expect(instantItem).toBeTruthy()
+    expect(reasoningItem).toBeTruthy()
+    const tokenRatio = (item: typeof instantItem) =>
+      ((item.billed.outputMTok ?? 0) + (item.billed.reasoningMTok ?? 0)) /
+      Math.max(1e-12, item.billed.inputMTok ?? 0)
+    expect(tokenRatio(instantItem)).toBeCloseTo(0.35 / 0.65, 7)
+    expect(tokenRatio(reasoningItem)).toBeGreaterThan(tokenRatio(instantItem))
+    const billedMTok = apiItems.reduce(
+      (sum, item) =>
+        sum +
+        (item.billed.inputMTok ?? 0) +
+        (item.billed.cachedInputMTok ?? 0) +
+        (item.billed.outputMTok ?? 0) +
+        (item.billed.reasoningMTok ?? 0),
+      0,
+    )
+    expect(billedMTok).toBeCloseTo(settled.lastMarket.apiDayMTok, 7)
+    expect(apiItems.reduce((sum, item) => sum + item.revenue, 0)).toBeCloseTo(
+      settled.lastMarket.apiDayRevenue,
+      7,
+    )
+    expect(
+      apiItems.reduce((sum, item) => sum + item.servedPfDays, 0),
+    ).toBeCloseTo(
+      (settled.lastMarket.apiModelUsage ?? []).reduce(
+        (sum, usage) => sum + usage.dayInferPf,
+        0,
+      ),
+      7,
+    )
   })
 
   it('does not fall back to a live mix once apiRouterIds is set', () => {

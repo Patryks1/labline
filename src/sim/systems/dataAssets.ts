@@ -180,6 +180,12 @@ export function pruneDatasetAssetsForDomain(input: {
       ? {
           ...asset.synthetic,
           teacherModelIds: [...asset.synthetic.teacherModelIds],
+          teacherEffortIds: asset.synthetic.teacherEffortIds
+            ? [...asset.synthetic.teacherEffortIds]
+            : undefined,
+          teacherEffortNames: asset.synthetic.teacherEffortNames
+            ? [...asset.synthetic.teacherEffortNames]
+            : undefined,
         }
       : undefined,
   }));

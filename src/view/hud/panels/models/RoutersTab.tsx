@@ -77,9 +77,9 @@ export function RoutersTab({
           <div>
             <p className="hud-eyebrow">Serving routers</p>
             <h3 className="mt-1 text-sm font-semibold text-bone">
-              One specialist per category. Chat, code, math, and science each pick a model.
+              Route each category to its best model
             </h3>
-            <p className="mt-1 max-w-3xl text-[0.6875rem] leading-5 text-muted">
+            <p className="hud-mobile-detail mt-1 max-w-3xl text-[0.6875rem] leading-5 text-muted">
               Live routers show on the public board as a blend. Subs and API
               use the mix more when it is capable and fairly priced.
             </p>
@@ -139,6 +139,7 @@ export function RoutersTab({
                 title={router.name}
                 tone={active ? "mint" : undefined}
                 selected={active}
+                mobileSummary={composed ? `cap ${composed.capability.toFixed(0)} · ${costPf.toFixed(3)} PF/MTok` : "Assign serving models"}
                 actions={
                   <StatusChip tone={active ? "positive" : "neutral"}>
                     {active ? "serving" : "idle"}
@@ -168,7 +169,7 @@ export function RoutersTab({
                           <strong className="text-bone">
                             {ROUTER_LANE_META[lane].label}
                           </strong>
-                          <span className="text-[0.625rem]">
+                          <span className="hud-mobile-detail text-[0.625rem]">
                             {ROUTER_LANE_META[lane].blurb}
                           </span>
                         </span>
@@ -206,7 +207,7 @@ export function RoutersTab({
                           ) : null}
                         </HudSelect>
                         {strongest && router.lanes[lane] !== strongest.id ? (
-                          <span className="text-[0.625rem] text-muted">
+                          <span className="hud-mobile-detail text-[0.625rem] text-muted">
                             Strongest {ROUTER_LANE_META[lane].label.toLowerCase()}
                             : {strongest.name}
                           </span>
@@ -226,7 +227,7 @@ export function RoutersTab({
                     Assign released models to see the board mix.
                   </p>
                 )}
-                <div className="mt-3 flex flex-wrap gap-1.5">
+                <div className="mt-3 grid grid-cols-2 gap-1.5 [&_.hud-button]:!min-h-11 [&_.hud-button]:!w-full sm:flex sm:flex-wrap sm:[&_.hud-button]:!w-auto">
                   <HudButton
                     type="button"
                     variant={active ? "secondary" : "primary"}

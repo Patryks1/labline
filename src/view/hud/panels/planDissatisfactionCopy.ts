@@ -156,7 +156,7 @@ export function PlanDissatisfactionStatusChip(
     {
       tone: "danger",
       title: planDissatisfactionChipTitle(input),
+      children: `${pct(input.dissatisfaction)} dissatisfied`,
     },
-    `${pct(input.dissatisfaction)} dissatisfied`,
   );
 }

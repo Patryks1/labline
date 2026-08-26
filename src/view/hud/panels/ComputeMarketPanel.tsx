@@ -402,8 +402,9 @@ export function ComputeMarketPanel() {
       eyebrow="Compute"
       title="Compute market"
       description="Cloud, reserved, spot & rival compute capacity."
+      mobileDescription="Buy, sell, and manage compute."
     >
-      <div className="space-y-3">
+      <div className="min-w-0 touch-pan-y space-y-3">
         <GameCard eyebrow="Capacity mix" title="Owned vs rented" tone="mint">
           <div className="grid min-w-0 grid-cols-1 items-center gap-3 min-[400px]:grid-cols-[auto_minmax(0,1fr)]">
             <OwnedRentedDonut owned={ownedPf} rented={rentedPf} />
@@ -416,16 +417,24 @@ export function ComputeMarketPanel() {
               />
               <StatRow label="Rented" value={pf(rentedPf)} tone="serve" />
               <StatRow
-                label="Rented RAM"
-                value={gb(remoteAcceleratorRamGb(rentedPf))}
-                tone="serve"
-              />
-              <StatRow
                 label="$/MW-day"
                 value={pricePerPfDay > 0 ? money(pricePerMwDayFromPf(pricePerPfDay)) : "—"}
                 tone="warning"
               />
-              <StatRow label="Local util" value={pct(util, 0)} />
+              <details className="group rounded-md border border-line/60 bg-void/30">
+                <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-muted marker:hidden">
+                  <span>Capacity details</span>
+                  <span className="shrink-0 font-mono tabular-nums text-bone">{pct(util, 0)} local util</span>
+                </summary>
+                <div className="space-y-0.5 border-t border-line/60 px-2.5 py-2">
+                  <StatRow
+                    label="Rented RAM"
+                    value={gb(remoteAcceleratorRamGb(rentedPf))}
+                    tone="serve"
+                  />
+                  <StatRow label="Local util" value={pct(util, 0)} />
+                </div>
+              </details>
             </div>
           </div>
         </GameCard>
@@ -457,8 +466,8 @@ export function ComputeMarketPanel() {
                 status={negotiationStatus}
               />
 
-              <div className="space-y-2 p-2.5">
-                <label className="flex items-center gap-2 rounded-md border border-line/70 bg-void/55 px-2 py-1.5">
+              <div className="min-w-0 space-y-2 p-2.5">
+                <label className="flex flex-col items-stretch gap-1 rounded-md border border-line/70 bg-void/55 px-2 py-1.5 min-[420px]:flex-row min-[420px]:items-center min-[420px]:gap-2">
                   <span className="shrink-0 font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
                     Chat with
                   </span>
@@ -473,7 +482,7 @@ export function ComputeMarketPanel() {
                       setCloudProviderId(nextId);
                       setCloudPf(defaultCloudContractPf(nextProvider?.availablePf ?? 1));
                     }}
-                    className="min-h-11 min-w-0 flex-1 border-0 bg-transparent text-right text-[0.8125rem] font-medium text-bone outline-none"
+                    className="min-h-11 min-w-0 w-full flex-1 border-0 bg-transparent text-left text-[0.8125rem] font-medium text-bone outline-none min-[420px]:text-right"
                     aria-label="Compute provider"
                   >
                     {state.worldMarkets.cloudProviders.map((provider) => (
@@ -490,7 +499,7 @@ export function ComputeMarketPanel() {
                   </HudSelect>
                 </label>
 
-                <div className="space-y-2 rounded-lg border border-line/60 bg-void/35 p-2">
+                <div className="panel-scroll max-h-[min(15rem,35dvh)] space-y-2 overflow-y-auto overscroll-y-auto rounded-lg border border-line/60 bg-void/35 p-2 touch-pan-y">
                   <NegotiationMessage
                     side="provider"
                     name={selectedProvider?.name ?? "Provider"}
@@ -772,6 +781,7 @@ export function ComputeMarketPanel() {
                         <HudButton
                           type="button"
                           variant="primary"
+                          className="min-h-11 flex-1"
                           onClick={() =>
                             setState(acceptComputeOffer(state, o.id))
                           }
@@ -781,6 +791,7 @@ export function ComputeMarketPanel() {
                         <HudButton
                           type="button"
                           variant="ghost"
+                          className="min-h-11 flex-1"
                           onClick={() =>
                             setState(rejectComputeOffer(state, o.id))
                           }
@@ -950,46 +961,54 @@ export function ComputeQuoteCard({
         </div>
       </div>
 
-      <div className="grid gap-2 sm:grid-cols-2">
-        <div className="rounded-md border border-line/60 bg-panel-2/70 p-1.5" data-testid="compute-quote-cost-projection">
-          <div className="flex items-center justify-between gap-2 text-[0.625rem] uppercase tracking-[0.12em] text-muted">
-            <span>Spend projection</span>
-            <span className="font-mono normal-case tracking-normal text-bone">
-              {money(cumulativeCost)} total
-            </span>
+      <details className="group rounded-md border border-line/60 bg-panel-2/45">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.6875rem] text-muted marker:hidden">
+          <span>Cost &amp; interruption projection</span>
+          <span className="shrink-0 font-mono tabular-nums text-bone">
+            {money(cumulativeCost)} · {pct(cumulativeRisk, 1)} risk
+          </span>
+        </summary>
+        <div className="grid gap-2 border-t border-line/60 p-2 sm:grid-cols-2">
+          <div className="rounded-md border border-line/60 bg-panel-2/70 p-1.5" data-testid="compute-quote-cost-projection">
+            <div className="flex items-center justify-between gap-2 text-[0.625rem] uppercase tracking-[0.12em] text-muted">
+              <span>Spend projection</span>
+              <span className="font-mono normal-case tracking-normal text-bone">
+                {money(cumulativeCost)} total
+              </span>
+            </div>
+            <LineChart
+              series={[projections.spend]}
+              height={78}
+              compact
+              showAxes={false}
+              showPoints={false}
+              area
+              ariaLabel={`Projected spend reaches ${money(cumulativeCost)} by day ${termDays}`}
+              formatX={(value) => `D${Math.round(value)}`}
+              formatY={(value) => money(value)}
+            />
           </div>
-          <LineChart
-            series={[projections.spend]}
-            height={78}
-            compact
-            showAxes={false}
-            showPoints={false}
-            area
-            ariaLabel={`Projected spend reaches ${money(cumulativeCost)} by day ${termDays}`}
-            formatX={(value) => `D${Math.round(value)}`}
-            formatY={(value) => money(value)}
-          />
-        </div>
-        <div className="rounded-md border border-line/60 bg-panel-2/70 p-1.5" data-testid="compute-quote-risk-projection">
-          <div className="flex items-center justify-between gap-2 text-[0.625rem] uppercase tracking-[0.12em] text-muted">
-            <span>Risk projection</span>
-            <span className="font-mono normal-case tracking-normal text-amber">
-              {pct(cumulativeRisk, 1)} cumulative
-            </span>
+          <div className="rounded-md border border-line/60 bg-panel-2/70 p-1.5" data-testid="compute-quote-risk-projection">
+            <div className="flex items-center justify-between gap-2 text-[0.625rem] uppercase tracking-[0.12em] text-muted">
+              <span>Risk projection</span>
+              <span className="font-mono normal-case tracking-normal text-amber">
+                {pct(cumulativeRisk, 1)} cumulative
+              </span>
+            </div>
+            <LineChart
+              series={[projections.risk]}
+              height={78}
+              compact
+              showAxes={false}
+              showPoints={false}
+              area
+              ariaLabel={`Projected interruption exposure reaches ${pct(cumulativeRisk, 1)} by day ${termDays}`}
+              formatX={(value) => `D${Math.round(value)}`}
+              formatY={(value) => pct(value, 1)}
+            />
           </div>
-          <LineChart
-            series={[projections.risk]}
-            height={78}
-            compact
-            showAxes={false}
-            showPoints={false}
-            area
-            ariaLabel={`Projected interruption exposure reaches ${pct(cumulativeRisk, 1)} by day ${termDays}`}
-            formatX={(value) => `D${Math.round(value)}`}
-            formatY={(value) => pct(value, 1)}
-          />
         </div>
-      </div>
+      </details>
 
       <div className="grid grid-cols-2 gap-1.5 font-mono text-[0.6875rem] sm:grid-cols-4">
         <QuoteMetric label="Daily" value={money(dailyCost)} />

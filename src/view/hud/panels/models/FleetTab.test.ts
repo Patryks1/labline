@@ -5,6 +5,18 @@ import type { Model } from "../../../../sim/types";
 import { FleetTab } from "./FleetTab";
 import type { CheckpointUiRecord } from "./checkpointUi";
 
+function matchingDivEnd(markup: string, start: number): number {
+  const tags = /<\/?div\b[^>]*>/g;
+  tags.lastIndex = start;
+  let depth = 0;
+  for (let match = tags.exec(markup); match; match = tags.exec(markup)) {
+    if (match[0].startsWith("</")) depth -= 1;
+    else depth += 1;
+    if (depth === 0) return match.index;
+  }
+  return -1;
+}
+
 function promotedModel(): Model {
   return {
     id: "promoted-model",
@@ -158,7 +170,7 @@ describe("FleetTab checkpoint evidence", () => {
       }),
     );
 
-    expect(markup).toContain("internal · measured checkpoint");
+    expect(markup).toContain("private · measured checkpoint");
     expect(markup).toContain("Eval score");
     expect(markup).toContain("61.4 · 57.2–65.1");
     expect(markup).toContain("Day 40");
@@ -168,8 +180,8 @@ describe("FleetTab checkpoint evidence", () => {
     expect(markup).not.toContain("Custom API markup percentage");
     expect(markup).not.toContain("Markup");
     expect(markup).toMatch(/data-hud-variant="danger"[^>]*>Delete<\/button>/);
-    expect(markup).not.toContain("Private checkpoints");
-    expect(markup).not.toContain("Public fleet");
+    expect(markup).toContain("Private checkpoints");
+    expect(markup).toContain("Public fleet");
   });
 
   it("puts serving economics and the public radar on released fleet cards", () => {
@@ -199,12 +211,27 @@ describe("FleetTab checkpoint evidence", () => {
     expect(markup).toContain("Sub rev");
     expect(markup).toContain("Enterprise");
     expect(markup).toContain("Serving API and subscription traffic");
+    expect(markup).toContain('data-serving-economics="collapsed"');
+    expect(markup).toContain("hud-mobile-summary");
+    expect(markup).toContain("hud-mobile-detail");
+    expect(markup).toContain('data-shell-gesture-ignore="true"');
+    expect(markup).toContain("[&amp;_.hud-button]:!min-h-11");
     expect(markup).toContain("Axis readout");
     expect(markup).toContain("$621.26B");
     expect(markup).toContain("Archive");
     expect(markup).toContain("Train new version");
     expect(markup).toContain("Distill");
     expect(markup).toContain("Effort heads");
+    expect(markup).toContain('data-fleet-evidence-disclosure="compact"');
+    expect(markup).toMatch(
+      /<details[^>]*data-fleet-evidence-disclosure="compact"[^>]*>/,
+    );
+    expect(
+      markup.match(
+        /<details[^>]*data-fleet-evidence-disclosure="compact"[^>]*>/,
+      )?.[0],
+    ).not.toContain("open=");
+    expect(markup.match(/aria-label="Select Spark"/g)).toHaveLength(1);
     expect(markup).toMatch(/data-hud-variant="danger"[^>]*>Delete<\/button>/);
     expect(markup).not.toContain("max-w-[14rem]");
   });
@@ -228,21 +255,78 @@ describe("FleetTab checkpoint evidence", () => {
     );
 
     expect(markup).toContain("Trained models");
+    expect(markup).toContain('data-fleet-archive-disclosure="true"');
+    expect(markup).toContain('data-archived-card="true"');
+    expect(markup).toContain("Show archived models");
+    expect(markup).toContain("Hide archived models");
+    expect(markup).not.toMatch(/<details[^>]*\sopen(?:=|\s|>)/);
+    expect(markup).toContain('data-archived-visual="muted"');
+    expect(markup).toContain("opacity-60 grayscale-[0.65] saturate-50");
+    expect(markup).not.toContain("border-t border-line/50 p-3 opacity-60");
+    const archivedCardMarker = markup.indexOf('data-archived-card="true"');
+    const archivedShellStart = markup.indexOf("<section", archivedCardMarker);
+    const archivedShellTag = markup.slice(
+      archivedShellStart,
+      markup.indexOf(">", archivedShellStart) + 1,
+    );
+    expect(archivedShellTag).toContain("!border-line/50");
+    expect(archivedShellTag).toContain("!bg-panel-2/45");
+    expect(archivedShellTag).toContain("[&amp;&gt;header]:bg-void/15");
+    expect(archivedShellTag).not.toMatch(/opacity|grayscale|saturate/);
     expect(markup).toContain("ARCHIVED");
     expect(markup).toContain("Train new version");
     expect(markup).toContain("Distill");
     expect(markup).toContain("Restore");
+    expect(markup.match(/aria-label="Select Spark"/g)).toHaveLength(1);
+    const archivedTitleLabel = markup.indexOf(
+      'aria-label="Select Spark"',
+      archivedCardMarker,
+    );
+    const archivedTitleTag = markup.slice(
+      markup.lastIndexOf("<button", archivedTitleLabel),
+      markup.indexOf(">", archivedTitleLabel) + 1,
+    );
+    expect(archivedTitleTag).toContain("!text-muted");
+    expect(archivedTitleTag).not.toMatch(/opacity|grayscale|saturate/);
+    const archivedActions = markup.match(
+      /<div[^>]*data-fleet-actions="archived"[^>]*>/,
+    )?.[0];
+    expect(archivedActions).toBeDefined();
+    expect(archivedActions).not.toMatch(/opacity|grayscale|saturate/);
+    const mutedStart = markup.indexOf('data-archived-visual="muted"');
+    const mutedContainerStart = markup.lastIndexOf("<div", mutedStart);
+    const mutedEnd = matchingDivEnd(markup, mutedContainerStart);
+    const archivedRadar = markup.indexOf('data-fleet-radar="archived"');
+    expect(mutedEnd).toBeGreaterThan(mutedStart);
+    expect(archivedRadar).toBeGreaterThan(mutedEnd);
+    const archivedRadarTagStart = markup.lastIndexOf("<details", archivedRadar);
+    expect(
+      markup.slice(
+        archivedRadarTagStart,
+        markup.indexOf(">", archivedRadar) + 1,
+      ),
+    ).not.toMatch(/opacity|grayscale|saturate/);
+    expect(markup).toContain('data-fleet-evidence-disclosure="compact"');
     expect(markup).toMatch(/data-hud-variant="danger"[^>]*>Delete<\/button>/);
     expect(markup).not.toContain("ACTIVE");
     expect(markup).toContain("Axis readout");
   });
 
-  it("groups internal and released cards and orders them by finish day", () => {
+  it("separates public, private, and archived models in lifecycle order", () => {
     const markup = renderToStaticMarkup(
       createElement(FleetTab, {
-        internal: [{ ...promotedModel(), releaseDay: 12 }],
-        released: [{ ...releasedModel(), releaseDay: 40 }],
-        pricingId: null,
+        internal: [{ ...promotedModel(), name: "Private Aster", releaseDay: 12 }],
+        released: [
+          { ...releasedModel(), releaseDay: 40 },
+          {
+            ...releasedModel(),
+            id: "nova",
+            name: "Newer Nova",
+            releaseDay: 80,
+          },
+        ],
+        archived: [{ ...releasedModel(), id: "legacy", name: "Legacy Ember", archived: true, releaseDay: 8 }],
+        pricingId: "spark",
         frontierCapability: 60,
         onSelect: vi.fn(),
         onRelease: vi.fn(),
@@ -255,12 +339,41 @@ describe("FleetTab checkpoint evidence", () => {
     );
 
     expect(markup).toContain("Trained models");
-    expect(markup).not.toContain("Private checkpoints");
-    expect(markup).not.toContain("Public fleet");
-    expect(markup.indexOf("Spark")).toBeGreaterThan(-1);
-    expect(markup.indexOf("Spark")).toBeLessThan(markup.indexOf("Aster · C32"));
+    expect(markup).toContain("Private checkpoints");
+    expect(markup).toContain("Public fleet");
+    expect(markup.indexOf('id="public-fleet-heading"')).toBeLessThan(markup.indexOf('id="private-fleet-heading"'));
+    expect(markup.indexOf('id="private-fleet-heading"')).toBeLessThan(markup.indexOf('data-fleet-archive-disclosure="true"'));
+    expect(markup.indexOf("Spark")).toBeLessThan(markup.indexOf("Newer Nova"));
+    expect(markup.indexOf("Newer Nova")).toBeLessThan(markup.indexOf("Private Aster"));
+    expect(markup.indexOf("Spark")).toBeLessThan(markup.indexOf("Private Aster"));
+    expect(markup.indexOf("Private Aster")).toBeLessThan(markup.indexOf("Legacy Ember"));
     expect(markup).toContain("Day 40");
     expect(markup).toContain("Day 12");
+    expect(markup).toContain("Scale");
+    expect(markup).toContain("Profile");
     expect(markup).toContain("Axis readout");
+  });
+
+  it("disables archiving the source of an active safety campaign", () => {
+    const markup = renderToStaticMarkup(
+      createElement(FleetTab, {
+        internal: [],
+        released: [releasedModel()],
+        pricingId: "spark",
+        frontierCapability: 60,
+        activeSafetyCampaignModelId: "spark",
+        onSelect: vi.fn(),
+        onRelease: vi.fn(),
+        onDelete: vi.fn(),
+        onArchive: vi.fn(),
+        onRestore: vi.fn(),
+        onTrainFurther: vi.fn(),
+        onDistill: vi.fn(),
+      }),
+    );
+
+    expect(markup).toContain("Safety active");
+    expect(markup).toContain("active safety campaign before archiving");
+    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>Safety active<\/button>/);
   });
 });

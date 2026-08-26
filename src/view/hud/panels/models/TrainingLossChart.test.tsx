@@ -51,7 +51,9 @@ describe("TrainingLossChart checkpoints", () => {
     expect(markup).toContain('role="button"');
     expect(markup).toContain('aria-live="polite"');
     expect(markup).toContain('data-training-chart-plot="true"');
-    expect(markup).toContain('relative h-40 w-full');
+    expect(markup).toContain('relative h-32 w-full overflow-visible sm:h-40');
+    expect(markup).toContain('touch-pan-y');
+    expect(markup).not.toContain('touch-none');
     expect(markup).toContain('observed min 3.70');
     expect(markup).not.toContain('observed min 3.700');
   });

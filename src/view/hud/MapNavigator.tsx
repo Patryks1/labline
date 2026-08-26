@@ -29,13 +29,16 @@ import { useUiStore } from '../../store/uiStore'
 import {
   buildMapNavigatorData,
   buildMinimapTerrain,
+  COMPACT_NAVIGATOR_QUERY,
   layoutNavigatorCityLabels,
+  mediaQueryMatches,
   minimapTerrainColor,
   navigatorPointToWorld,
   navigatorCitySummary,
   navigatorView,
   navigatorZoomAround,
   regionOverlayFill,
+  SHORT_LANDSCAPE_QUERY,
   type MapNavigatorData,
   type MapNavigatorCity,
   type MapNavigatorSite,
@@ -69,6 +72,18 @@ type DragState = {
   centerY: number
   viewport: boolean
   moved: boolean
+}
+type NavigatorTouchPoint = { x: number; y: number }
+type NavigatorPinchState = { distance: number }
+
+function navigatorPinchSample(points: Iterable<NavigatorTouchPoint>) {
+  const [first, second] = Array.from(points)
+  if (!first || !second) return null
+  return {
+    centerX: (first.x + second.x) / 2,
+    centerY: (first.y + second.y) / 2,
+    distance: Math.hypot(second.x - first.x, second.y - first.y),
+  }
 }
 
 function mapViewportPolygonPoints(viewport: MapViewport): string {
@@ -142,12 +157,20 @@ export function CloudVisibilityButton({
 export function NavigatorOverlayLayers({
   overlay,
   onSelect,
+  horizontal = false,
 }: {
   overlay: MapOverlayMode
   onSelect: (id: Exclude<MapOverlayMode, 'none'>) => void
+  horizontal?: boolean
 }) {
   return (
-    <div className="map-navigator-layers" role="group" aria-label="Map layers">
+    <div
+      className="map-navigator-layers"
+      role="group"
+      aria-label="Map layers"
+      data-layout={horizontal ? 'horizontal' : 'vertical'}
+      style={horizontal ? { flexDirection: 'row' } : undefined}
+    >
       {OVERLAYS.map(({ id, label, title, icon: Icon }) => {
         const active = overlay === id
         return (
@@ -244,10 +267,16 @@ export function NavigatorCityLabelLayer({
   labels,
   cities,
   onPan,
+  compact = false,
+  frameWidth,
+  frameHeight,
 }: {
   labels: readonly NavigatorCityLabel[]
   cities: readonly MapNavigatorCity[]
   onPan: (x: number, y: number) => void
+  compact?: boolean
+  frameWidth?: number
+  frameHeight?: number
 }) {
   const cityById = new Map(cities.map((city) => [city.id, city]))
   return (
@@ -255,6 +284,16 @@ export function NavigatorCityLabelLayer({
       {labels.map((label) => {
         const city = cityById.get(label.id)
         const summary = city ? navigatorCitySummary(city) : label.text
+        const targetWidth = compact ? Math.max(44, label.width) : label.width
+        const targetHeight = compact ? Math.max(44, label.height) : label.height
+        const centeredLeft = label.left - (targetWidth - label.width) / 2
+        const centeredTop = label.top - (targetHeight - label.height) / 2
+        const left = compact && frameWidth != null
+          ? Math.max(0, Math.min(Math.max(0, frameWidth - targetWidth), centeredLeft))
+          : centeredLeft
+        const top = compact && frameHeight != null
+          ? Math.max(0, Math.min(Math.max(0, frameHeight - targetHeight), centeredTop))
+          : centeredTop
         return (
           <button
             key={label.id}
@@ -269,10 +308,12 @@ export function NavigatorCityLabelLayer({
             }}
             className="pointer-events-auto absolute m-0 inline-flex select-none items-center justify-center overflow-visible whitespace-nowrap rounded-sm border-0 bg-transparent p-0 font-mono outline-none focus-visible:ring-1 focus-visible:ring-mint focus-visible:ring-offset-1 focus-visible:ring-offset-void"
             style={{
-              left: label.left,
-              top: label.top,
-              width: label.width,
-              height: label.height,
+              left,
+              top,
+              width: targetWidth,
+              height: targetHeight,
+              minWidth: compact ? 44 : undefined,
+              minHeight: compact ? 44 : undefined,
               fontSize: 11,
               lineHeight: '13px',
               color: city?.tier === 'metro' ? '#dceffc' : '#d8dfdc',
@@ -419,7 +460,7 @@ function zoomStep(current: NavigatorZoom, direction: -1 | 1): NavigatorZoom {
 }
 
 /** Compact world navigator with a cached canvas base and lightweight interactive overlay. */
-export function MapNavigator() {
+export function MapNavigator({ compact: compactOverride }: { compact?: boolean }) {
   const state = useGameStore((store) => store.state)
   const selectedTile = useGameStore((store) => store.selectedTile)
   const focusMapTile = useGameStore((store) => store.focusMapTile)
@@ -439,10 +480,24 @@ export function MapNavigator() {
   const [size, setSize] = useState({ width: 268, height: 144 })
   const [zoomAnnouncement, setZoomAnnouncement] = useState('Minimap zoom 2 times, following camera')
   const [navigatorExpanded, setNavigatorExpanded] = useState(false)
+  const [compactLayout, setCompactLayout] = useState(() =>
+    typeof window !== 'undefined'
+      ? mediaQueryMatches(COMPACT_NAVIGATOR_QUERY, window.matchMedia?.bind(window))
+      : false,
+  )
+  const [shortLandscape, setShortLandscape] = useState(() =>
+    typeof window !== 'undefined'
+      ? mediaQueryMatches(SHORT_LANDSCAPE_QUERY, window.matchMedia?.bind(window))
+      : false,
+  )
   const navigatorBottom = 'calc(var(--hud-bottom-telemetry-bottom) + max(var(--hud-training-height, 0px), 4rem))'
   const frameRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement>(null)
   const dragRef = useRef<DragState | null>(null)
+  const touchPointersRef = useRef(new Map<number, NavigatorTouchPoint>())
+  const pinchRef = useRef<NavigatorPinchState | null>(null)
+  const pinchConsumedTapRef = useRef(false)
+  const zoomRef = useRef<NavigatorZoom>(zoom)
   const launcherRef = useRef<HTMLButtonElement>(null)
   const compactCloseRef = useRef<HTMLButtonElement>(null)
   const map = state.map
@@ -456,6 +511,28 @@ export function MapNavigator() {
   )
   const worldPerPixel = view.height / Math.max(1, size.height)
   const markerScale = worldPerPixel * 8
+  const compact = compactOverride ?? compactLayout
+
+  useEffect(() => {
+    zoomRef.current = zoom
+  }, [zoom])
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return
+    const query = window.matchMedia(COMPACT_NAVIGATOR_QUERY)
+    const landscapeQuery = window.matchMedia(SHORT_LANDSCAPE_QUERY)
+    const update = () => {
+      setCompactLayout(query.matches)
+      setShortLandscape(landscapeQuery.matches)
+    }
+    update()
+    query.addEventListener('change', update)
+    landscapeQuery.addEventListener('change', update)
+    return () => {
+      query.removeEventListener('change', update)
+      landscapeQuery.removeEventListener('change', update)
+    }
+  }, [])
 
   useEffect(() => {
     const element = frameRef.current
@@ -514,17 +591,19 @@ export function MapNavigator() {
   const setOverlay = (id: Exclude<MapOverlayMode, 'none'>) => setMapOverlay(overlay === id ? 'none' : id)
 
   const applyZoom = useCallback((nextZoom: NavigatorZoom, localX = size.width / 2, localY = size.height / 2) => {
-    if (nextZoom === zoom) return
+    if (nextZoom === zoomRef.current) return
     const anchor = navigatorPointToWorld(view, localX, localY, size.width, size.height)
     const next = navigatorZoomAround(data.width, data.height, view, nextZoom, anchor.x, anchor.y, aspect)
     setZoom(nextZoom)
+    zoomRef.current = nextZoom
     setCenter({ x: next.x + next.width / 2, y: next.y + next.height / 2 })
     setFollowViewport(false)
     setZoomAnnouncement(`Minimap zoom ${nextZoom} times`)
-  }, [aspect, data.height, data.width, size.height, size.width, view, zoom])
+  }, [aspect, data.height, data.width, size.height, size.width, view])
 
   const fit = useCallback(() => {
     setZoom(1)
+    zoomRef.current = 1
     setCenter({ x: data.width / 2, y: data.height / 2 })
     setFollowViewport(false)
     setZoomAnnouncement('Minimap fit to world')
@@ -561,6 +640,17 @@ export function MapNavigator() {
     const target = event.target as Element
     if (target.closest('[data-map-marker]')) return
     event.currentTarget.setPointerCapture(event.pointerId)
+    if (event.pointerType === 'touch') {
+      touchPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      if (touchPointersRef.current.size >= 2) {
+        const sample = navigatorPinchSample(touchPointersRef.current.values())
+        pinchRef.current = sample ? { distance: sample.distance } : null
+        pinchConsumedTapRef.current = true
+        dragRef.current = null
+        event.preventDefault()
+        return
+      }
+    }
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -573,6 +663,24 @@ export function MapNavigator() {
   }
 
   const onPointerMove = (event: PointerEvent<SVGSVGElement>) => {
+    if (event.pointerType === 'touch' && touchPointersRef.current.has(event.pointerId)) {
+      touchPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
+    }
+    const pinch = pinchRef.current
+    if (pinch && touchPointersRef.current.size >= 2) {
+      const sample = navigatorPinchSample(touchPointersRef.current.values())
+      if (!sample || sample.distance <= 0 || pinch.distance <= 0) return
+      event.preventDefault()
+      const ratio = sample.distance / pinch.distance
+      const direction: -1 | 0 | 1 = ratio >= 1.24 ? 1 : ratio <= 1 / 1.24 ? -1 : 0
+      if (direction !== 0) {
+        const rect = svgRef.current?.getBoundingClientRect()
+        if (!rect) return
+        applyZoom(zoomStep(zoomRef.current, direction), sample.centerX - rect.left, sample.centerY - rect.top)
+        pinch.distance = sample.distance
+      }
+      return
+    }
     const drag = dragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
     const dx = event.clientX - drag.startX
@@ -594,10 +702,22 @@ export function MapNavigator() {
   }
 
   const onPointerUp = (event: PointerEvent<SVGSVGElement>) => {
+    if (event.pointerType === 'touch') touchPointersRef.current.delete(event.pointerId)
+    if (pinchConsumedTapRef.current) {
+      dragRef.current = null
+      pinchRef.current = null
+      if (touchPointersRef.current.size === 0) pinchConsumedTapRef.current = false
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId)
+      }
+      return
+    }
     const drag = dragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
     dragRef.current = null
-    event.currentTarget.releasePointerCapture(event.pointerId)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
     if (drag.moved) return
     const local = localPoint(event)
     if (!local) return
@@ -605,16 +725,23 @@ export function MapNavigator() {
     pan(point.x, point.y)
   }
 
+  const onPointerCancel = (event: PointerEvent<SVGSVGElement>) => {
+    touchPointersRef.current.delete(event.pointerId)
+    if (touchPointersRef.current.size === 0) pinchConsumedTapRef.current = false
+    pinchRef.current = null
+    dragRef.current = null
+  }
+
   const onWheel = (event: WheelEvent<SVGSVGElement>) => {
     event.preventDefault()
     const local = localPoint(event)
     if (!local) return
-    applyZoom(zoomStep(zoom, event.deltaY < 0 ? 1 : -1), local.x, local.y)
+    applyZoom(zoomStep(zoomRef.current, event.deltaY < 0 ? 1 : -1), local.x, local.y)
   }
 
   const onKeyDown = (event: KeyboardEvent<SVGSVGElement>) => {
-    if (event.key === '+' || event.key === '=') applyZoom(zoomStep(zoom, 1))
-    else if (event.key === '-') applyZoom(zoomStep(zoom, -1))
+    if (event.key === '+' || event.key === '=') applyZoom(zoomStep(zoomRef.current, 1))
+    else if (event.key === '-') applyZoom(zoomStep(zoomRef.current, -1))
     else if (event.key === 'Home') fit()
     else if (event.key === 'Enter') pan(view.x + view.width / 2, view.y + view.height / 2)
     else if (event.key.startsWith('Arrow')) {
@@ -635,17 +762,18 @@ export function MapNavigator() {
         aria-expanded={navigatorExpanded}
         aria-controls="world-navigator-panel"
         onClick={openNavigator}
-        style={{ bottom: navigatorBottom }}
+        style={compact ? undefined : { bottom: navigatorBottom }}
         className="map-navigator-launcher hud-surface pointer-events-auto absolute min-h-11 items-center gap-2 rounded-lg border-mint/35 px-3 text-[0.75rem] font-semibold text-mint"
       >
         <MapTrifold size="1rem" weight="duotone" /> Map
       </button>
       <aside
         id="world-navigator-panel"
-        className="map-navigator hud-surface pointer-events-auto absolute overflow-hidden rounded-lg"
+        className={`map-navigator hud-surface pointer-events-auto absolute touch-pan-y overflow-hidden rounded-lg ${compact ? '[&_button]:!min-h-[44px] [&_button]:!min-w-[44px]' : ''}`}
         data-expanded={navigatorExpanded ? 'true' : 'false'}
+        data-compact={compact ? 'true' : 'false'}
         aria-label="World navigator"
-        style={{ bottom: navigatorBottom }}
+        style={compact ? undefined : { bottom: navigatorBottom }}
       >
       <div className="map-navigator-compact-heading min-h-10 items-center border-b border-line/70 px-3 font-mono text-[0.625rem] uppercase tracking-[0.14em] text-mint">
         World navigator
@@ -670,7 +798,7 @@ export function MapNavigator() {
             {activeSite ? <>
               <Factory size="0.8rem" className="shrink-0" style={{ color: activeSite.color }} />
               <span className="min-w-0 flex-1 truncate text-[0.6875rem] font-semibold uppercase tracking-[0.06em] text-bone">{activeSite.label}</span>
-              <span className="shrink-0 truncate font-mono text-[0.625rem] text-muted">{activeSite.ownerName} · {buildingIndex % sites.length + 1}/{sites.length}</span>
+              <span className="shrink-0 truncate font-mono text-[0.625rem] text-muted"><span className="max-[420px]:hidden">{activeSite.ownerName} · </span>{buildingIndex % sites.length + 1}/{sites.length}</span>
             </> : <span className="flex items-center gap-1.5 text-[0.6875rem] text-muted"><Buildings size="0.85rem" /> No facilities</span>}
           </HudButton>
           <HudButton variant="ghost" type="button" aria-label="Next building" disabled={sites.length === 0} onClick={() => {
@@ -683,7 +811,11 @@ export function MapNavigator() {
           </HudButton>
         </div>
 
-        <div className="map-navigator-commandbar flex items-center gap-1 overflow-x-auto border-b border-line/70 bg-void/35 px-2 py-1.5">
+        <div
+          className="map-navigator-commandbar flex touch-pan-x touch-pan-y items-center gap-1 overflow-x-auto overscroll-x-contain border-b border-line/70 bg-void/35 px-2 py-1.5"
+          data-compact-layout={compact ? 'wrap' : 'single-row'}
+          style={compact ? { flexWrap: 'wrap' } : undefined}
+        >
           <div className="flex shrink-0 items-center rounded-md border border-line/70 bg-void/45 p-0.5" role="group" aria-label="Building filter">
             {([['all', 'All'], ['player', 'Yours'], ['rival', 'Rivals']] as const).map(([id, label]) => (
               <HudButton variant="ghost" key={id} type="button" aria-pressed={buildingFilter === id} onClick={() => {
@@ -712,15 +844,15 @@ export function MapNavigator() {
               preserveAspectRatio="none"
               role="application"
               tabIndex={0}
-              aria-label={`North-up world minimap at ${zoom} times zoom${followViewport ? ', following camera' : ''}. Click to pan the main map; drag to explore.`}
+              aria-label={`North-up world minimap at ${zoom} times zoom${followViewport ? ', following camera' : ''}. Tap to pan, drag to explore, or pinch to zoom.`}
               aria-describedby="map-navigator-help"
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
               onPointerUp={onPointerUp}
-              onPointerCancel={() => { dragRef.current = null }}
+              onPointerCancel={onPointerCancel}
               onWheel={onWheel}
               onKeyDown={onKeyDown}
-              className="absolute inset-0 h-full w-full cursor-crosshair outline-none focus-visible:ring-1 focus-visible:ring-mint"
+              className="absolute inset-0 h-full w-full touch-none cursor-crosshair outline-none focus-visible:ring-1 focus-visible:ring-mint"
             >
               {overlay !== 'none' ? data.regions.map((region, index) => (
                 <rect key={region.id} x={region.originX} y={region.originY} width={region.width} height={region.height} fill={regionOverlayFill(region, data.regions, overlay, index)} fillOpacity={0.42} stroke="rgba(145,166,173,0.28)" strokeWidth={worldPerPixel * 0.6} pointerEvents="none"><title>{region.name}</title></rect>
@@ -745,22 +877,29 @@ export function MapNavigator() {
                 <line x1={selectedTile.x + 0.5 - markerScale} y1={selectedTile.y + 0.5} x2={selectedTile.x + 0.5 + markerScale} y2={selectedTile.y + 0.5} stroke="#f3c969" strokeWidth={worldPerPixel * 0.55} />
               </g> : null}
             </svg>
-            <NavigatorCityLabelLayer labels={labels} cities={data.cities} onPan={pan} />
-            <NavigatorOverlayLayers overlay={overlay} onSelect={setOverlay} />
-            <div className="map-navigator-zoombar absolute bottom-1.5 left-1/2 flex -translate-x-1/2 items-center rounded-md border border-line/70 bg-void/90 shadow backdrop-blur-sm">
-              <HudButton variant="ghost" type="button" aria-label="Zoom minimap out" disabled={zoom === 1} onClick={() => applyZoom(zoomStep(zoom, -1))} className="map-navigator-zoombar__icon rounded border-transparent text-bone hover:bg-panel-2 disabled:opacity-35">−</HudButton>
+            <NavigatorCityLabelLayer
+              labels={labels}
+              cities={data.cities}
+              onPan={pan}
+              compact={compact}
+              frameWidth={size.width}
+              frameHeight={size.height}
+            />
+            <NavigatorOverlayLayers overlay={overlay} onSelect={setOverlay} horizontal={shortLandscape} />
+            <div className="map-navigator-zoombar absolute bottom-1.5 left-1/2 flex -translate-x-1/2 items-center rounded-md border border-line/70 bg-void/90 shadow backdrop-blur-sm max-[900px]:!h-11">
+              <HudButton variant="ghost" type="button" aria-label="Zoom minimap out" disabled={zoom === 1} onClick={() => applyZoom(zoomStep(zoom, -1))} className="map-navigator-zoombar__icon rounded border-transparent text-bone hover:bg-panel-2 disabled:opacity-35 max-[900px]:!size-11 max-[900px]:!min-h-11 max-[900px]:!min-w-11">−</HudButton>
               <span className="map-navigator-zoombar__level" aria-hidden="true">{zoom}×</span>
-              <HudButton variant="ghost" type="button" aria-label="Zoom minimap in" disabled={zoom === 4} onClick={() => applyZoom(zoomStep(zoom, 1))} className="map-navigator-zoombar__icon rounded border-transparent text-bone hover:bg-panel-2 disabled:opacity-35">+</HudButton>
-              <HudButton variant="ghost" type="button" aria-label="Fit minimap to world" onClick={fit} className="map-navigator-zoombar__label rounded border-transparent text-muted hover:bg-panel-2 hover:text-bone">Fit</HudButton>
-              <HudButton variant="ghost" type="button" aria-label="Follow main map camera" aria-pressed={followViewport} onClick={follow} className={`map-navigator-zoombar__label rounded border-transparent ${followViewport ? 'bg-mint/15 text-mint' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}>Follow</HudButton>
+              <HudButton variant="ghost" type="button" aria-label="Zoom minimap in" disabled={zoom === 4} onClick={() => applyZoom(zoomStep(zoom, 1))} className="map-navigator-zoombar__icon rounded border-transparent text-bone hover:bg-panel-2 disabled:opacity-35 max-[900px]:!size-11 max-[900px]:!min-h-11 max-[900px]:!min-w-11">+</HudButton>
+              <HudButton variant="ghost" type="button" aria-label="Fit minimap to world" onClick={fit} className="map-navigator-zoombar__label rounded border-transparent text-muted hover:bg-panel-2 hover:text-bone max-[900px]:!h-11 max-[900px]:!min-h-11 max-[900px]:!min-w-11">Fit</HudButton>
+              <HudButton variant="ghost" type="button" aria-label="Follow main map camera" aria-pressed={followViewport} onClick={follow} className={`map-navigator-zoombar__label rounded border-transparent max-[900px]:!h-11 max-[900px]:!min-h-11 max-[900px]:!min-w-11 ${followViewport ? 'bg-mint/15 text-mint' : 'text-muted hover:bg-panel-2 hover:text-bone'}`}>Follow</HudButton>
             </div>
           </div>
-          <div className="map-navigator-legend pointer-events-none flex h-6 items-center gap-2 px-1.5 font-mono text-[0.5rem] uppercase tracking-[0.06em] text-muted">
+          <div className="map-navigator-legend pointer-events-none flex h-6 items-center gap-2 px-1.5 font-mono text-[0.5rem] uppercase tracking-[0.06em] text-muted max-[900px]:landscape:hidden">
             <span className="h-1.5 w-1.5 rounded-full border border-mint bg-mint/20" /> Yours
             <span className="h-1.5 w-1.5 rotate-45 border border-danger bg-danger/25" /> Rival
             <span className="ml-auto h-[2px] w-3 bg-[#d8d1bd]" /><span>Road</span>
           </div>
-          <span id="map-navigator-help" className="sr-only">The map is north up. Terrain color shows biome and elevation. Roads use distinct widths and colors for local roads, collectors, arterials, and highways. City names appear as the navigator zooms. The outlined camera footprint reflects the exact main map perspective and its mint edge points forward. Use plus and minus to zoom, Follow to track the camera, drag the footprint to pan the main map, drag the background to explore this navigator, or press Home to fit the world.</span>
+          <span id="map-navigator-help" className="sr-only">The map is north up. Terrain color shows biome and elevation. Roads use distinct widths and colors for local roads, collectors, arterials, and highways. City names appear as the navigator zooms. The outlined camera footprint reflects the exact main map perspective and its mint edge points forward. Tap to pan the main map, drag one finger across the background to explore, pinch with two fingers or use plus and minus to zoom, use Follow to track the camera, or press Home to fit the world.</span>
           <span className="sr-only" aria-live="polite">{zoomAnnouncement}</span>
         </div>
       </div>
@@ -788,7 +927,7 @@ function SiteMarker({ site, active, markerScale, strokeScale, onFocus }: { site:
       {active ? <circle cx={cx} cy={cy} r={size + strokeScale * 0.8} fill="rgba(72,215,209,0.12)" stroke="#e8f2f2" strokeWidth={strokeScale * 0.75} /> : null}
       <polygon points={`${cx},${cy - half} ${cx + half},${cy} ${cx},${cy + half} ${cx - half},${cy}`} fill={site.color} stroke="#e8f2f2" strokeWidth={strokeScale * 0.55} />
       {site.constructing ? <circle cx={cx} cy={cy} r={size + strokeScale * 0.55} fill="none" stroke="#e8ad56" strokeWidth={strokeScale * 0.65} strokeDasharray={`${strokeScale * 1.4} ${strokeScale}`} /> : null}
-      <title>{site.label} · {site.ownerName}</title>
+      <title>{`${site.label} · ${site.ownerName}`}</title>
     </g>
   )
 }

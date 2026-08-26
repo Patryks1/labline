@@ -65,8 +65,11 @@ import {
   ensureLabData,
   dataResearchReservationShare,
   newDataSinceModel,
+  specialistDomainBoost,
   totalProcessed,
 } from "../../../sim/systems/data";
+import { modelCanCurateDataDomain } from "../../../sim/systems/modelEligibility";
+import { syntheticTeacherGenerationEconomics } from "../../../sim/balance/syntheticTeacherEffort";
 import { apiUnitCostPerMTok } from "../../../sim/balance/pricing";
 import { unlockedGymKinds } from "../../../sim/balance/modelStudio";
 import { assignedPodStaff } from "../../../sim/systems/researchPrograms";
@@ -146,7 +149,6 @@ import { ModelsEmptyWorkbench } from "./models/ModelsEmptyWorkbench";
 import { SafetyCampaignSection } from "./models/SafetyCampaignSection";
 import { CheckpointWorkspace } from "./models/CheckpointWorkspace";
 import { CheckpointEvaluationDialog } from "./models/CheckpointEvaluationDialog";
-import { BenchmarkEntryPoint } from "./models/BenchmarkEntryPoint";
 import {
   checkpointUiRecordFromCandidate,
   type CheckpointReviewMode,
@@ -177,6 +179,8 @@ import {
   type CheckpointBranchRequest,
 } from "./models/CheckpointBranchDialog";
 import { resolveModelsFocusJobId } from "./models/modelsFocus";
+import { useShellSwipeGesture } from "../mobileShellContracts";
+import { modelsWorkspaceViewForSwipe } from "./models/modelsResponsiveLayout";
 
 const TRAINING_FORMAT_OPTIONS: ReadonlyArray<{
   value: TrainingComputeFormat;
@@ -303,6 +307,16 @@ export function ModelsPanel({
   const [panelTab, setPanelTab] = useState<ModelsWorkspaceView>("runs");
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [showNewModel, setShowNewModel] = useState(false);
+  const modelsSwipeHandlers = useShellSwipeGesture<HTMLDivElement>({
+    onLeft: () =>
+      setPanelTab((current) =>
+        modelsWorkspaceViewForSwipe(current, "left") ?? current,
+      ),
+    onRight: () =>
+      setPanelTab((current) =>
+        modelsWorkspaceViewForSwipe(current, "right") ?? current,
+      ),
+  });
   const [newModelStep, setNewModelStep] =
     useState<ModelsWorkflowStep>("product");
   const [name, setName] = useState("Spark");
@@ -358,6 +372,9 @@ export function ModelsPanel({
   const [includeSynthHQ, setIncludeSynthHQ] = useState(true);
   const [includeSynthLQ] = useState(false);
   const [syntheticTeacherIds, setSyntheticTeacherIds] = useState<
+    Partial<Record<DataDomain, string>>
+  >({});
+  const [syntheticTeacherEffortIds, setSyntheticTeacherEffortIds] = useState<
     Partial<Record<DataDomain, string>>
   >({});
   const [modelStack, setModelStack] = useState<string[]>([]);
@@ -674,6 +691,7 @@ export function ModelsPanel({
       includeSynthHQ: includeSynthHQ && allowSynthetic && synthUnlocked,
       includeSynthLQ: includeSynthLQ && allowSynthetic && synthUnlocked,
       syntheticTeacherIds,
+      syntheticTeacherEffortIds,
       syntheticMultiplier: effectiveSyntheticMultiplier,
       postTrainWeights,
       postTrainMTok,
@@ -692,9 +710,59 @@ export function ModelsPanel({
       includeSynthHQ,
       includeSynthLQ,
       syntheticTeacherIds,
+      syntheticTeacherEffortIds,
       effectiveSyntheticMultiplier,
     ],
   );
+  const syntheticTeacherByDomain = useMemo(
+    () =>
+      Object.fromEntries(
+        DATA_DOMAINS.map((domain) => {
+          const eligible = teachers
+            .filter((model) => modelCanCurateDataDomain(model, domain))
+            .toSorted(
+              (a, b) =>
+                specialistDomainBoost(b, domain) -
+                specialistDomainBoost(a, domain),
+            );
+          return [
+            domain,
+            eligible.find(
+              (model) => model.id === syntheticTeacherIds[domain],
+            ) ?? eligible[0] ?? null,
+          ];
+        }),
+      ) as Record<DataDomain, Model | null>,
+    [teachers, syntheticTeacherIds],
+  );
+  const syntheticTeacherGenerationForecast = useMemo(() => {
+    const acceptedTotalMTok =
+      Math.min(realDataMTok, processedAvail) * effectiveSyntheticMultiplier;
+    return DATA_DOMAINS.reduce(
+      (total, domain) => {
+        const teacher = syntheticTeacherByDomain[domain];
+        if (!teacher) return total;
+        const economics = syntheticTeacherGenerationEconomics({
+          model: teacher,
+          domain,
+          effortId: syntheticTeacherEffortIds[domain],
+          acceptedMTok: acceptedTotalMTok * (weights[domain] ?? 0),
+        });
+        return {
+          computePfDays: total.computePfDays + economics.computePfDays,
+          cashCost: total.cashCost + economics.cashCost,
+        };
+      },
+      { computePfDays: 0, cashCost: 0 },
+    );
+  }, [
+    effectiveSyntheticMultiplier,
+    processedAvail,
+    realDataMTok,
+    syntheticTeacherByDomain,
+    syntheticTeacherEffortIds,
+    weights,
+  ]);
   const researchEffects = useMemo(
     () => aggregateEffects(unlocked),
     [unlocked],
@@ -703,7 +771,7 @@ export function ModelsPanel({
     1 +
     Math.min(0.12, (researchEffects.capabilityBonus ?? 0) * 0.015) +
     (backbone === "moe" && unlocked.includes("moe_hier") ? 0.04 : 0);
-  const trainingForecast = useMemo(
+  const baseTrainingForecast = useMemo(
     () =>
       forecastTrainingV3({
         spec: {
@@ -785,6 +853,29 @@ export function ModelsPanel({
       state.day,
     ],
   );
+  const trainingForecast = useMemo(() => {
+    const targetPfDays =
+      baseTrainingForecast.targetPfDays +
+      syntheticTeacherGenerationForecast.computePfDays;
+    return {
+      ...baseTrainingForecast,
+      targetPfDays,
+      etaDays:
+        snap.pools.training > 0.001
+          ? Math.max(
+              baseTrainingForecast.minCalendarDays,
+              Math.ceil(targetPfDays / snap.pools.training),
+            )
+          : Number.POSITIVE_INFINITY,
+      upfrontCash:
+        baseTrainingForecast.upfrontCash +
+        syntheticTeacherGenerationForecast.cashCost,
+    };
+  }, [
+    baseTrainingForecast,
+    snap.pools.training,
+    syntheticTeacherGenerationForecast,
+  ]);
   const dataGuidance = trainingForecast.dataGuidance
     ? trainingDataGuidanceText({
         selectedMTok: dataMTok,
@@ -918,7 +1009,12 @@ export function ModelsPanel({
     );
   }, [mode, continueFromId, continueModel]);
 
-  const dataCost = Math.max(0, Math.floor(dataMTok * 0.35));
+  const dataCost = Math.max(
+    0,
+    Math.floor(
+      dataMTok * 0.35 + syntheticTeacherGenerationForecast.cashCost,
+    ),
+  );
   const setupCost = Math.max(0, trainingForecast.upfrontCash - dataCost);
   const dailyCost = trainingForecast.cashBurnPerDay;
   const upfront = trainingForecast.upfrontCash;
@@ -1568,24 +1664,6 @@ export function ModelsPanel({
           >
             Train model
           </HudButton>
-          {panelTab === "runs" && selectedJob && !showNewModel ? (
-            <BenchmarkEntryPoint
-              context={{ kind: "training-run", id: selectedJob.id }}
-              disabled={
-                selectedJob.progressPfDays <= 1e-9 &&
-                selectedJob.postTrainProgress <= 1e-9
-              }
-              title={
-                selectedJob.progressPfDays > 1e-9 ||
-                selectedJob.postTrainProgress > 1e-9
-                  ? "Capture the current run checkpoint, then choose suites and evidence depth."
-                  : "Allocate compute before benchmarking current weights."
-              }
-              onOpen={() => benchmarkCurrentRun(selectedJob.id)}
-            >
-              Benchmark
-            </BenchmarkEntryPoint>
-          ) : null}
         </div>
       }
     >
@@ -1620,8 +1698,9 @@ export function ModelsPanel({
 
       <div key={panelTab} className="panel-swap">
         <div
-          className="models-workbench-layout min-w-0 grid gap-3"
+          className="models-workbench-layout min-w-0 grid gap-3 max-[1360px]:!grid-cols-1"
           data-models-workbench-layout="responsive"
+          data-models-short-landscape="stacked"
         >
           <ModelsTrainingQueue
             jobs={jobs}
@@ -1648,10 +1727,14 @@ export function ModelsPanel({
           />
           <div
             id="models-workspace-panel"
-            className="models-workbench-detail min-w-0 space-y-3"
+            className="models-workbench-detail min-w-0 touch-pan-y space-y-3"
             role="tabpanel"
             aria-labelledby={`models-view-tab-${panelTab}`}
             tabIndex={-1}
+            data-shell-gesture-surface="true"
+            data-models-swipe-surface="workspace-tabs"
+            data-mobile-orientations="portrait landscape"
+            {...modelsSwipeHandlers}
           >
             {panelTab === "runs" ? (
               <>
@@ -1760,6 +1843,7 @@ export function ModelsPanel({
                       <GameCard
                         eyebrow="Define"
                         title="How do you want to train?"
+                        mobileSummary={`${MODE_META[mode].label} selected`}
                         tone="train"
                         className={newModelStep === "architecture" ? "hidden" : undefined}
                       >
@@ -1784,7 +1868,7 @@ export function ModelsPanel({
                                     : MODE_META[option].hint
                                 }
                                 onClick={() => setMode(option)}
-                                className={`!min-h-11 !justify-start !rounded-md !border !px-3 !py-2.5 !text-left !normal-case !tracking-normal !text-bone transition sm:!min-h-0 ${
+                                className={`!min-h-11 !justify-start !rounded-md !border !px-3 !py-2.5 !text-left !normal-case !tracking-normal !text-bone transition xl:!min-h-0 ${
                                   on
                                     ? "!border-train/50 !bg-train/10"
                                     : "!border-line/70 !bg-void/30 hover:!border-train/30"
@@ -1793,7 +1877,7 @@ export function ModelsPanel({
                                 <span className="block text-sm font-semibold text-bone">
                                   {MODE_META[option].label}
                                 </span>
-                                <span className="mt-0.5 block text-[0.75rem] text-muted">
+                                <span className="hud-mobile-detail mt-0.5 block text-[0.75rem] text-muted">
                                   {MODE_META[option].hint}
                                 </span>
                               </HudButton>
@@ -1808,6 +1892,11 @@ export function ModelsPanel({
                           newModelStep === "product"
                             ? mode === "pretrain" ? "Goal, identity & lineage" : "Goal & base model"
                             : mode === "continue" ? "Inherited topology" : "Backbone & parameter topology"
+                        }
+                        mobileSummary={
+                          newModelStep === "product"
+                            ? `${name || "Unnamed"} · ${productPreset.replaceAll("_", " ")}`
+                            : `${backbone.toUpperCase()} · ${formatParams(paramsB)}`
                         }
                       >
                         <div className="space-y-2.5">
@@ -1848,7 +1937,7 @@ export function ModelsPanel({
                                       weights inherited
                                     </span>
                                   </div>
-                                  <p className="mt-2 text-[0.6875rem] leading-relaxed text-muted">
+                                  <p className="hud-mobile-detail mt-2 text-[0.6875rem] leading-relaxed text-muted">
                                     Architecture, parameter topology, numerics
                                     and model stack are locked to{" "}
                                     {continueModel.name}. Add fresh data now,
@@ -2072,7 +2161,7 @@ export function ModelsPanel({
                                           setBaseVolumes(seeded.base);
                                           setAlignVolumes(seeded.align);
                                         }}
-                                        className={`!min-h-11 !rounded-md !border !px-2.5 !py-1.5 !text-[0.75rem] !normal-case !tracking-normal transition disabled:cursor-not-allowed disabled:opacity-40 sm:!min-h-0 ${
+                                        className={`!min-h-11 !rounded-md !border !px-2.5 !py-1.5 !text-[0.75rem] !normal-case !tracking-normal transition disabled:cursor-not-allowed disabled:opacity-40 xl:!min-h-0 ${
                                           on
                                             ? "!border-train/45 !bg-train/15 !text-train"
                                             : "!border-line !bg-transparent !text-muted hover:!text-bone"
@@ -2166,7 +2255,7 @@ export function ModelsPanel({
                                         setAlignVolumes(seeded.align);
                                         setRealDataMTok(seeded.totalMTok);
                                       }}
-                                      className={`!min-h-11 !rounded-md !border !px-2.5 !py-1.5 !text-[0.75rem] !normal-case !tracking-normal transition disabled:cursor-not-allowed disabled:opacity-40 sm:!min-h-0 ${
+                                      className={`!min-h-11 !rounded-md !border !px-2.5 !py-1.5 !text-[0.75rem] !normal-case !tracking-normal transition disabled:cursor-not-allowed disabled:opacity-40 xl:!min-h-0 ${
                                         on
                                           ? "!border-mint/45 !bg-mint/15 !text-mint"
                                           : "!border-line !bg-transparent !text-muted hover:!text-bone"
@@ -2253,6 +2342,7 @@ export function ModelsPanel({
                       <GameCard
                         eyebrow="Data recipe"
                         title="Spider mix"
+                        mobileSummary={`${formatTokens(dataMTok)} selected · ${Math.round(trainShare * 100)}% train`}
                         tone="train"
                       >
                         <div className="space-y-3">
@@ -2267,7 +2357,7 @@ export function ModelsPanel({
                                 )}
                                 % of pile
                               </strong>
-                              <p className="mt-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
+                              <p className="hud-mobile-detail mt-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
                                 <span style={{ color: RECIPE_ZONE_META.base.stroke }}>
                                   Base {formatTokens(tokenSplit.baseMTok)}
                                 </span>
@@ -2347,6 +2437,7 @@ export function ModelsPanel({
                             </p>
                           ) : null}
 
+                          <div className="min-w-0 overflow-hidden" data-shell-gesture-ignore="true" data-models-radar="training-data">
                           <TrainingDataRadar
                             baseWeights={weights}
                             postWeights={postTrainWeights}
@@ -2355,7 +2446,7 @@ export function ModelsPanel({
                             baseMTok={tokenSplit.baseMTok}
                             postMTok={tokenSplit.postTrainMTok}
                             data={labData}
-                            syntheticUnlocked={synthUnlocked}
+                            syntheticUnlocked={synthExpansionUnlocked}
                             syntheticMultiplier={effectiveSyntheticMultiplier}
                             syntheticExpansionAvailable={
                               synthExpansionUnlocked && !!strongestTeacher
@@ -2366,6 +2457,9 @@ export function ModelsPanel({
                             syntheticSource={distillTeacher ? "teacher" : "lab"}
                             teachers={teachers}
                             syntheticTeacherIds={syntheticTeacherIds}
+                            syntheticTeacherEffortIds={
+                              syntheticTeacherEffortIds
+                            }
                             includeSynthHQ={includeSynthHQ && synthUnlocked}
                             includeSynthLQ={includeSynthLQ && synthUnlocked}
                             freezeBaseLayer={mode === "continue"}
@@ -2408,15 +2502,20 @@ export function ModelsPanel({
                               setAllowSynthetic(false);
                               setRealDataMTok(owned);
                             }}
-                            onTeacherChange={(domain, teacher) =>
+                            onTeacherChange={(domain, teacher, effortId) => {
                               setSyntheticTeacherIds((current) => ({
                                 ...current,
                                 [domain]: teacher,
-                              }))
-                            }
+                              }));
+                              setSyntheticTeacherEffortIds((current) => ({
+                                ...current,
+                                [domain]: teacher ? effortId : undefined,
+                              }));
+                            }}
                             trainShare={trainShare}
                             onTrainShareChange={setTrainShare}
                           />
+                          </div>
 
                           {!mixUnlocked ? (
                             <ResearchUnlockLink
@@ -2476,8 +2575,9 @@ export function ModelsPanel({
                       className="space-y-3"
                     >
                       <GameCard
-                        eyebrow="Compute · Advanced"
+                        eyebrow="Compute"
                         title="Numerics & model stack"
+                        mobileSummary={`${TRAINING_PRECISION_PROFILES[trainingFormat].label} · ${daysEst === Infinity ? "no pool" : `${daysEst.toFixed(1)}d`}`}
                       >
                         <div className="space-y-3">
                           <div className="grid gap-2 sm:grid-cols-2">
@@ -2681,11 +2781,9 @@ export function ModelsPanel({
                             </div>
                           </div>
 
-                          <div>
-                            <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
-                              <h4 className="text-[0.8125rem] font-semibold text-bone">
-                                Model stack
-                              </h4>
+                          <details className="group rounded-md border border-line/50 bg-void/25" data-model-stack-disclosure="true">
+                            <summary className="flex min-h-11 cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-2.5 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
+                              <h4 className="text-[0.8125rem] font-semibold text-bone">Model stack</h4>
                               <div className="flex flex-wrap gap-1 font-mono text-[0.625rem]">
                                 <span className="rounded-full bg-mint/10 px-2 py-0.5 text-mint">
                                   host −
@@ -2703,8 +2801,10 @@ export function ModelsPanel({
                                   ).toFixed(2)}
                                   %
                                 </span>
+                                <span aria-hidden className="text-muted transition-transform group-open:rotate-180">⌄</span>
                               </div>
-                            </div>
+                            </summary>
+                            <div className="border-t border-line/40 p-2.5">
                             <CardGrid min="10rem" className="anim-stagger">
                               {stackModules.map((module) => {
                                 const available = unlocked.includes(module.id);
@@ -2771,7 +2871,8 @@ export function ModelsPanel({
                                 );
                               })}
                             </CardGrid>
-                          </div>
+                            </div>
+                          </details>
                         </div>
                       </GameCard>
                     </div>
@@ -2783,6 +2884,7 @@ export function ModelsPanel({
                       <GameCard
                         eyebrow="Review · Launch"
                         title="Forecast & start"
+                        mobileSummary={`${daysEst === Infinity ? "No compute" : `${daysEst.toFixed(0)}d`} · ${money(upfront)} · cap ${trainingForecast.expectedCapability.toFixed(1)}`}
                         tone="train"
                       >
                         <div className="space-y-3">
@@ -2801,16 +2903,18 @@ export function ModelsPanel({
                             />
                           </label>
 
-                          <div>
-                            <p className="text-[0.8125rem] text-muted">
-                              Gyms on this run
-                            </p>
+                          <details className="group rounded-md border border-line/50 bg-void/25" data-review-gyms-disclosure="true">
+                            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
+                              <span className="text-[0.8125rem] text-muted">Gyms on this run</span>
+                              <span className="font-mono text-[0.625rem] text-muted">{attachedGymKinds.length} attached · <span className="group-open:hidden">Edit</span><span className="hidden group-open:inline">Hide</span></span>
+                            </summary>
+                            <div className="border-t border-line/40 p-2.5">
                             {attachedGymKinds.length === 0 ? (
-                              <p className="mt-1 text-[0.6875rem] text-amber">
+                              <p className="mb-1.5 text-[0.6875rem] text-amber">
                                 None attached — post-train will be weaker.
                               </p>
                             ) : null}
-                            <div className="mt-1.5">
+                            <div>
                               <TrainingLabsPicker
                                 gyms={playerCompany.ops.postTrainGyms}
                                 researchUnlocked={unlocked}
@@ -2818,7 +2922,8 @@ export function ModelsPanel({
                                 onChange={setAttachedGymKinds}
                               />
                             </div>
-                          </div>
+                            </div>
+                          </details>
 
                           <div
                             className="rounded-md border border-line/60 bg-void/35 p-3"
@@ -2851,6 +2956,7 @@ export function ModelsPanel({
                                     ? "warning"
                                     : "positive"
                                 }
+                                mobileSummary={daysEst === Infinity ? "Need compute" : `${num(trainingForecast.targetPfDays, 1)} PF-d`}
                               />
                               <MetricTile
                                 label="Budget"
@@ -2869,6 +2975,7 @@ export function ModelsPanel({
                                     ? "danger"
                                     : "neutral"
                                 }
+                                mobileSummary={`${money(setupCost)} setup · ${money(dailyCost)}/d`}
                               />
                               <MetricTile
                                 label="Capability"
@@ -2877,6 +2984,7 @@ export function ModelsPanel({
                                 )}
                                 detail={`ceiling ${capabilityLimit.capability.toFixed(2)} · ${trainingForecast.interactiveTokPerSec.toFixed(2)} tok/s`}
                                 tone="positive"
+                                mobileSummary={`${trainingForecast.interactiveTokPerSec.toFixed(1)} tok/s`}
                               />
                               <MetricTile
                                 label="Memory"
@@ -2904,9 +3012,16 @@ export function ModelsPanel({
                                     ? "positive"
                                     : "danger"
                                 }
+                                mobilePriority="secondary"
+                                mobileSummary={prospectiveRamFit.ready ? "Fits" : "Blocked"}
                               />
                             </div>
-                            <div className="mt-2 grid gap-x-4 gap-y-1 rounded-md border border-line/40 bg-panel-2/35 px-2.5 py-2 sm:grid-cols-2">
+                            <details className="group mt-2 rounded-md border border-line/40 bg-panel-2/35" data-readiness-disclosure="true">
+                              <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 font-mono text-[0.6875rem] text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
+                                <span>Technical readiness</span>
+                                <span>{blockersWithName.length === 0 ? "Ready" : `${blockersWithName.length} issue${blockersWithName.length === 1 ? "" : "s"}`} · <span className="group-open:hidden">Details</span><span className="hidden group-open:inline">Hide</span></span>
+                              </summary>
+                            <div className="grid gap-x-4 gap-y-1 border-t border-line/40 px-2.5 py-2 sm:grid-cols-2">
                               {[
                                 {
                                   label: "Compute",
@@ -2977,6 +3092,7 @@ export function ModelsPanel({
                                 </div>
                               ))}
                             </div>
+                            </details>
                           </div>
 
                           <BlockerList items={blockersWithName} />
@@ -3066,6 +3182,7 @@ export function ModelsPanel({
                 onDistill={prefillDistill}
                 onSetDefaultEffort={setDefaultEffort}
                 onSetServedEffort={setServedEffort}
+                activeSafetyCampaignModelId={state.player.safetyCampaign?.modelId}
                 modelFinance={state.lastMarket.modelFinance}
                 day={state.day}
                 safetySlot={

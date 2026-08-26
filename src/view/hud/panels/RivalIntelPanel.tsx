@@ -27,7 +27,7 @@ function RangeBar({
 }) {
   if (!values) {
     return (
-      <div className="rounded-lg border border-line/60 bg-void/35 px-3 py-2.5">
+      <div className="rounded-lg border border-line/60 bg-void/35 px-2.5 py-2">
         <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
           {label}
         </div>
@@ -44,12 +44,12 @@ function RangeBar({
     Math.min(76, (span / Math.max(Math.abs(max), Math.abs(min), 1)) * 100),
   );
   return (
-    <div className="rounded-lg border border-line/60 bg-void/35 px-3 py-2.5">
+    <div className="min-w-0 rounded-lg border border-line/60 bg-void/35 px-2.5 py-2">
       <div className="flex flex-col gap-1 min-[420px]:flex-row min-[420px]:items-center min-[420px]:justify-between">
         <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
           {label}
         </div>
-        <div className="font-mono text-[0.8125rem] tabular-nums text-bone min-[420px]:text-right">
+        <div className="min-w-0 font-mono text-[0.75rem] tabular-nums text-bone min-[420px]:text-right">
           {format(min)} – {format(max)}
         </div>
       </div>
@@ -163,6 +163,7 @@ export function RivalIntelPanel() {
       title="Rival intelligence"
       eyebrow={`Day ${state.day}`}
       description="Public offers, projects, and operating ranges."
+      mobileDescription="Compare public rival signals."
     >
       <div className="space-y-3">
         <GameCard eyebrow="Field" title="Market position" tone="research">
@@ -224,7 +225,7 @@ export function RivalIntelPanel() {
               tone="mint"
               actions={<StatusChip tone="positive">Exact</StatusChip>}
             >
-              <div className="grid gap-x-5 sm:grid-cols-2">
+              <div className="grid gap-x-5 min-[420px]:grid-cols-2">
                 <StatRow
                   label="Cash"
                   value={money(financeModel.current.cash)}
@@ -247,26 +248,34 @@ export function RivalIntelPanel() {
                   value={money(financeModel.current.net)}
                   tone={financeModel.current.net < 0 ? "danger" : "positive"}
                 />
-                <StatRow
-                  label="Lifetime revenue"
-                  value={money(financeModel.current.lifetimeRevenue)}
-                />
-                <StatRow
-                  label="Lifetime net"
-                  value={money(financeModel.current.lifetimeNet)}
-                  tone={
-                    financeModel.current.lifetimeNet < 0 ? "danger" : "positive"
-                  }
-                />
-                <StatRow
-                  label="Company value"
-                  value={money(financeModel.current.valuation)}
-                />
-                <StatRow
-                  label="Debt"
-                  value={money(financeModel.current.debtOutstanding)}
-                />
               </div>
+              <details className="group mt-2 border-t border-line/50 pt-1">
+                <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 py-2 text-[0.75rem] marker:hidden lg:min-h-0">
+                  <span className="font-medium text-bone">Long-term position</span>
+                  <span className="font-mono text-muted">{money(financeModel.current.valuation)} value · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span></span>
+                </summary>
+                <div className="grid gap-x-5 pb-1 min-[420px]:grid-cols-2">
+                  <StatRow
+                    label="Lifetime revenue"
+                    value={money(financeModel.current.lifetimeRevenue)}
+                  />
+                  <StatRow
+                    label="Lifetime net"
+                    value={money(financeModel.current.lifetimeNet)}
+                    tone={
+                      financeModel.current.lifetimeNet < 0 ? "danger" : "positive"
+                    }
+                  />
+                  <StatRow
+                    label="Company value"
+                    value={money(financeModel.current.valuation)}
+                  />
+                  <StatRow
+                    label="Debt"
+                    value={money(financeModel.current.debtOutstanding)}
+                  />
+                </div>
+              </details>
             </GameCard>
 
             <GameCard
@@ -394,7 +403,7 @@ export function RivalIntelPanel() {
                 </StatusChip>
               }
             >
-              <div className="grid gap-2 sm:grid-cols-2">
+              <div className="grid grid-cols-2 gap-2">
                 <RangeBar
                   label="Compute"
                   values={estimate?.computePf}
@@ -480,7 +489,58 @@ export function RivalIntelPanel() {
               title="Released models & API"
               tone="infer"
             >
-              <div className="overflow-x-auto overscroll-x-contain rounded-lg border border-line/60">
+              <div
+                className="anim-stagger space-y-2 lg:hidden"
+                data-testid="rival-public-model-mobile-list"
+              >
+                {publicModels.map((model) => {
+                  const input =
+                    model.apiPriceInPerMTok ?? rival.pricing.apiPriceInPerMTok;
+                  const output =
+                    model.apiPriceOutPerMTok ?? rival.pricing.apiPriceOutPerMTok;
+                  return (
+                    <article
+                      key={model.id}
+                      className="rounded-lg border border-line/60 bg-void/35 p-2.5"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <strong className="block truncate text-[0.875rem] text-bone">
+                            {model.name}
+                          </strong>
+                          <span className="mt-0.5 block truncate text-[0.6875rem] text-muted">
+                            {model.backbone ?? model.family} · {num(model.paramsB, 1)}B
+                          </span>
+                        </div>
+                        <span className="shrink-0 font-mono text-base font-semibold tabular-nums text-mint">
+                          {model.capability.toFixed(0)} cap
+                        </span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 gap-2 border-t border-line/50 pt-2 font-mono text-[0.6875rem] tabular-nums">
+                        <span className="min-w-0 text-bone">
+                          ${input.toFixed(2)} in · ${output.toFixed(2)} out
+                        </span>
+                        <span className="text-right text-muted">
+                          {num(
+                            model.serviceProfile?.interactiveTokPerSec ??
+                              52 * model.tokPerSecMult,
+                            0,
+                          )} tok/s
+                        </span>
+                      </div>
+                    </article>
+                  );
+                })}
+                {publicModels.length === 0 ? (
+                  <p className="rounded-lg border border-dashed border-line px-3 py-5 text-center text-[0.8125rem] text-muted">
+                    No public release.
+                  </p>
+                ) : null}
+              </div>
+              <div
+                className="hidden overflow-x-auto overscroll-x-contain rounded-lg border border-line/60 lg:block"
+                data-testid="rival-public-model-desktop-table"
+              >
                 <table className="w-full min-w-[42rem] text-left text-[0.8125rem]">
                   <thead className="bg-void/60 font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
                     <tr>

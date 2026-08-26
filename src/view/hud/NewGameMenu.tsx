@@ -147,10 +147,27 @@ export function NewGameMenu() {
   // action is the only deliberate way to discard a player's tuning.
   const [adv, setAdv] = useState<AdvancedOverrides>({})
   const initialTabResolved = useRef(false)
+  const difficultyRefs = useRef<Partial<Record<ScenarioId, HTMLButtonElement | null>>>({})
 
   useEffect(() => {
     void refreshSaves()
   }, [refreshSaves])
+
+  useEffect(() => {
+    if (newGameStep !== 1) return
+    const compact = window.matchMedia(
+      '(max-width: 640px), (orientation: landscape) and (max-height: 600px) and (max-width: 1180px)',
+    )
+    if (!compact.matches) return
+    const frame = window.requestAnimationFrame(() => {
+      difficultyRefs.current[scenario]?.scrollIntoView({
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+        block: 'nearest',
+        inline: 'center',
+      })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [newGameStep, scenario])
 
   const compatibleSaveCount = saves.filter((meta) => meta.compatible).length
   useEffect(() => {
@@ -285,7 +302,7 @@ export function NewGameMenu() {
     <LablineMenuShell
       variant="title"
       titleId="labline-main-title"
-      contentClassName={`main-menu-console max-h-[calc(100dvh-11.5rem)] ${tab === 'new' ? 'main-menu-console--setup max-w-[64rem]' : 'max-w-[48rem]'}`}
+      contentClassName={`main-menu-console max-h-[calc(100dvh-11.5rem)] [@media(max-height:540px)]:!h-full [@media(max-height:540px)]:!max-h-[calc(100dvh-1rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] ${tab === 'new' ? 'main-menu-console--setup flex max-w-[64rem] flex-col !overflow-hidden max-sm:!animate-none [@media(max-height:600px)]:!animate-none' : 'max-w-[48rem]'}`}
       utilityNav={showNewsFeed ? (
         <aside className={`main-menu-news-feed overflow-hidden border bg-void/90 shadow-[0_22px_70px_rgba(0,8,12,.58)] backdrop-blur-xl ${tab === 'news' ? 'border-mint/55' : 'border-line/90'}`}>
           <header className="flex items-center gap-2.5 border-b border-line/70 px-3 py-3">
@@ -312,7 +329,7 @@ export function NewGameMenu() {
       ) : undefined}
     >
           <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-mint/80 via-mint/20 to-transparent" />
-          <div className="main-menu-console-head border-b border-line/70 px-5 pb-4 pt-5 sm:px-7 sm:pt-6">
+          <div className="main-menu-console-head min-w-0 shrink-0 border-b border-line/70 px-3 pb-3 pt-3 sm:px-7 sm:pb-4 sm:pt-6 [@media(max-height:540px)]:py-2">
             <div className="flex items-start justify-between gap-5">
               <div>
                 <p className="font-mono text-[0.625rem] uppercase tracking-[0.22em] text-mint">
@@ -326,7 +343,7 @@ export function NewGameMenu() {
                           ? 'Settings'
                           : 'Command'}
                 </p>
-                <h2 className="mt-2 text-[2rem] font-semibold leading-none tracking-[-0.045em] text-bone">
+                <h2 className="mt-1.5 text-[1.5rem] font-semibold leading-none tracking-[-0.045em] text-bone sm:mt-2 sm:text-[2rem]">
                   {tab === 'new'
                     ? newGameStep === 0
                       ? 'Name your company'
@@ -363,7 +380,7 @@ export function NewGameMenu() {
                 </span>
               )}
             </div>
-            <p className="mt-3 max-w-[58ch] text-[0.8125rem] leading-5 text-muted">
+            <p className="mt-3 max-w-[58ch] text-[0.8125rem] leading-5 text-muted max-sm:hidden [@media(max-height:540px)]:hidden">
               {tab === 'home' && 'Continue, start fresh, or manage saves.'}
               {tab === 'new' && (
                 newGameStep === 0
@@ -378,7 +395,7 @@ export function NewGameMenu() {
             </p>
           </div>
 
-          <div className="main-menu-console-body px-5 pb-6 pt-4 sm:px-7 sm:pb-7">
+          <div className={`main-menu-console-body min-w-0 max-w-full overflow-x-hidden px-3 pb-3 pt-3 sm:px-7 sm:pb-7 sm:pt-4 [@media(max-height:540px)]:py-2 ${tab === 'new' ? 'flex min-h-0 flex-1 flex-col !overflow-hidden' : ''}`}>
 
         {(status ?? lifecycleError) && (
           <div role="alert" className="mb-4 flex gap-2.5 border border-danger/45 bg-danger/10 px-3 py-2.5 text-[0.8125rem] text-danger">
@@ -399,7 +416,7 @@ export function NewGameMenu() {
         {tab !== 'new' && (
           <nav
             aria-label="Main menu sections"
-            className="grid grid-cols-3 border border-line/80 bg-void/50 p-1"
+            className="sticky top-0 z-20 grid grid-cols-3 border border-line/80 bg-void/95 p-1 shadow-sm backdrop-blur sm:static sm:bg-void/50 sm:shadow-none"
           >
             <TabChip active={tab === 'home'} onClick={() => selectTab('home')}>
               Command
@@ -414,7 +431,7 @@ export function NewGameMenu() {
         )}
 
         {tab === 'home' && (
-          <div className="main-menu-actions mt-5 space-y-2.5">
+          <div className="main-menu-actions mt-3 space-y-1.5 sm:mt-5 sm:space-y-2.5">
             {canContinue && (
               <button type="button" className="main-menu-action main-menu-action--primary" onClick={() => void onContinue()}>
                 <span className="grid size-10 shrink-0 place-items-center border border-mint/30 bg-void/30 text-mint">
@@ -422,7 +439,7 @@ export function NewGameMenu() {
                 </span>
                 <span>
                   <strong>Continue Sandbox</strong>
-                  <small>
+                  <small className="max-sm:hidden [@media(max-height:540px)]:hidden">
                     Last played {latestSave ? formatLastPlayed(latestSave.savedAt) : 'recently'}
                     {latestSave ? ` · saved Day ${latestSave.day}${latestSave.campaignDate ? ` (${latestSave.campaignDate})` : ''}` : ''}
                   </small>
@@ -440,13 +457,13 @@ export function NewGameMenu() {
               </span>
               <span>
                 <strong>New Sandbox</strong>
-                <small>Create a company and fresh market</small>
+                <small className="max-sm:hidden [@media(max-height:540px)]:hidden">Create a company and fresh market</small>
               </span>
               <ArrowRight size="1.1rem" />
             </button>
             <button
               type="button"
-              className="main-menu-action"
+              className="main-menu-action max-sm:hidden [@media(max-height:540px)]:hidden"
               onClick={() => selectTab('load')}
             >
               <span className="grid size-10 shrink-0 place-items-center border border-line bg-void/30 text-mint">
@@ -458,7 +475,7 @@ export function NewGameMenu() {
               </span>
               <ArrowRight size="1.1rem" />
             </button>
-            <div className="main-menu-action cursor-not-allowed opacity-45" aria-disabled="true">
+            <div className="main-menu-action cursor-not-allowed opacity-45 max-sm:hidden [@media(max-height:540px)]:hidden" aria-disabled="true">
               <span className="grid size-10 shrink-0 place-items-center border border-line bg-void/30 text-muted">
                 <Lock size="1.05rem" />
               </span>
@@ -471,7 +488,7 @@ export function NewGameMenu() {
         )}
 
         {tab === 'news' && (
-          <div className="anim-stagger mt-5 space-y-2">
+          <div className="anim-stagger mt-3 space-y-2 sm:mt-5">
             {MENU_NEWS_POSTS.map((post) => (
               <FeedPost key={post.title} source={post.source} timeLabel={post.timeLabel} tone={post.tone} body={<><strong className="text-bone">{post.title}</strong> — {post.detail}</>} />
             ))}
@@ -481,13 +498,13 @@ export function NewGameMenu() {
         {tab === 'settings' && <SettingsPanel />}
 
         {tab === 'load' && (
-          <div className="mt-5 space-y-1.5">
+          <div className="mt-3 space-y-1.5 sm:mt-5">
             {(['auto', ...MANUAL_SLOTS] as SaveSlotId[]).map((id) => {
               const m = bySlot[id]
               return (
                 <div
                   key={id}
-                  className="flex min-h-14 flex-wrap items-center justify-between gap-3 border border-line bg-panel-2/75 px-3.5 py-2.5"
+                  className="flex min-h-14 flex-wrap items-center justify-between gap-2 border border-line bg-panel-2/75 px-2.5 py-2 sm:gap-3 sm:px-3.5 sm:py-2.5"
                 >
                   <div className="min-w-0">
                     <div className="text-[0.8125rem] font-medium text-bone">
@@ -495,10 +512,10 @@ export function NewGameMenu() {
                     </div>
                     {m ? (
                       <>
-                        <div className="truncate font-mono text-[0.75rem] text-muted">
+                        <div className="max-w-[15rem] truncate font-mono text-[0.6875rem] text-muted sm:max-w-none sm:text-[0.75rem]">
                           {m.labName} · Day {m.day}{m.campaignDate ? ` · ${m.campaignDate}` : ''} · {money(m.cash)}
                         </div>
-                        <div className={`mt-0.5 text-[0.6875rem] ${m.compatible ? 'text-muted' : 'text-danger'}`}>
+                        <div className={`mt-0.5 text-[0.6875rem] max-sm:hidden ${m.compatible ? 'text-muted' : 'text-danger'}`}>
                           {m.compatible ? `Last played ${formatLastPlayed(m.savedAt)}` : 'Save needs attention'}
                         </div>
                       </>
@@ -574,8 +591,8 @@ export function NewGameMenu() {
         )}
 
         {tab === 'new' && (
-          <div className="main-menu-setup">
-            <nav aria-label="New sandbox steps" className="grid grid-cols-3 border border-line/80 bg-void/45 p-1">
+          <div className="main-menu-setup flex min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-hidden">
+            <nav aria-label="New sandbox steps" className="relative z-20 grid min-w-0 max-w-full shrink-0 grid-cols-3 border border-line/80 bg-void/95 p-1 shadow-sm backdrop-blur sm:bg-void/45 sm:shadow-none">
               {(['Identity', 'Market & world', 'Launch'] as const).map((label, index) => (
                 <button
                   key={label}
@@ -586,15 +603,17 @@ export function NewGameMenu() {
                     newGameStep === index ? 'bg-panel-2 text-mint shadow-[inset_0_-2px_0_#48d7d1]' : 'text-muted hover:bg-panel-2/60 hover:text-bone'
                   }`}
                 >
-                  <span className="font-mono text-[0.5625rem] opacity-70">0{index + 1}</span>
-                  {label}
+                  <span className="hidden font-mono text-[0.5625rem] opacity-70 min-[380px]:inline">0{index + 1}</span>
+                  <span className="sm:hidden">{index === 1 ? 'Market' : label}</span>
+                  <span className="hidden sm:inline">{label}</span>
                 </button>
               ))}
             </nav>
 
+            <div className="main-menu-setup-scroll panel-scroll min-h-0 min-w-0 max-w-full flex-1 overflow-x-hidden overflow-y-auto overscroll-contain pr-0.5 touch-pan-y">
             {newGameStep === 0 && (
-              <section className="main-menu-setup-step mt-4 grid gap-4 lg:grid-cols-[minmax(15rem,.8fr)_minmax(30rem,1.4fr)]">
-                <div className="main-menu-identity border border-line/70 bg-void/45 p-4 text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted">
+              <section className="main-menu-setup-step mt-3 grid min-w-0 max-w-full grid-cols-[minmax(0,1fr)] gap-3 sm:mt-4 sm:gap-4 md:grid-cols-[minmax(15rem,.8fr)_minmax(0,1.4fr)]">
+                <div className="main-menu-identity min-w-0 max-w-full border border-line/70 bg-void/45 p-3 text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted sm:p-4">
                   <label htmlFor="new-game-company-name">Company name</label>
                   <div className="main-menu-name-random mt-2 grid grid-cols-[minmax(0,1fr)_auto] items-stretch gap-2">
                     <HudInput
@@ -606,28 +625,28 @@ export function NewGameMenu() {
                       placeholder="Labline"
                       autoFocus
                     />
-                    <HudButton type="button" variant="ghost" onClick={randomizeCompanyName} aria-label="Randomize company name" title="Randomize company name" className="main-menu-random-button flex min-h-11 items-center gap-2 border border-line bg-panel-2 px-3 font-mono text-[0.625rem] uppercase tracking-[0.08em] text-muted transition-colors hover:border-mint/45 hover:text-mint">
-                      <DiceFive size="1rem" weight="duotone" /> Randomize
+                    <HudButton type="button" variant="ghost" onClick={randomizeCompanyName} aria-label="Randomize company name" title="Randomize company name" className="main-menu-random-button flex min-h-11 items-center gap-2 border border-line bg-panel-2 px-3 font-mono text-[0.625rem] uppercase tracking-[0.08em] text-muted transition-colors hover:border-mint/45 hover:text-mint max-sm:!min-w-11 max-sm:!px-0">
+                      <DiceFive size="1rem" weight="duotone" /> <span className="max-sm:hidden">Randomize</span>
                     </HudButton>
                   </div>
                   <div className="mt-4 flex items-center gap-3 border-t border-line/60 pt-4 normal-case tracking-normal">
                     <CompanyMarkBadge mark={companyMark} logo={companyLogo} className="size-14 shrink-0 border border-line/70" markClassName="size-8" />
-                    <span><strong className="block text-sm text-bone">{labName.trim() || 'Labline'}</strong><small className="mt-1 block text-[0.6875rem] font-normal text-muted">Your identity across the world feed and market.</small></span>
+                    <span className="min-w-0"><strong className="block truncate text-sm text-bone">{labName.trim() || 'Labline'}</strong><small className="mt-1 block text-[0.6875rem] font-normal text-muted max-sm:hidden">Your identity across the world feed and market.</small></span>
                   </div>
                 </div>
 
-                <fieldset className="main-menu-logo-maker border border-line/70 bg-panel-2/60 p-4">
+                <fieldset className="main-menu-logo-maker min-w-0 max-w-full border border-line/70 bg-panel-2/60 p-3 sm:p-4">
                   <legend className="sr-only">Logo maker</legend>
                   <div className="flex items-center justify-between gap-3">
-                    <div><p className="text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted">Procedural logo maker</p><p className="mt-1 text-[0.6875rem] text-muted">Tune a filled mark, then copy or save the seed.</p></div>
-                    <HudButton type="button" variant="ghost" onClick={randomizeCompanyMark} aria-label="Randomize procedural logo" className="main-menu-random-button flex min-h-11 items-center gap-2 border border-line bg-void/65 px-3 font-mono text-[0.625rem] uppercase tracking-[0.08em] text-muted hover:border-mint/40 hover:text-mint"><DiceFive size="0.95rem" weight="duotone" /> Randomize</HudButton>
+                    <div><p className="text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted">Company logo</p><p className="mt-1 text-[0.6875rem] text-muted max-sm:hidden">Tune a filled mark, then copy or save the seed.</p></div>
+                    <HudButton type="button" variant="ghost" onClick={randomizeCompanyMark} aria-label="Randomize procedural logo" className="main-menu-random-button flex min-h-11 items-center gap-2 border border-line bg-void/65 px-3 font-mono text-[0.625rem] uppercase tracking-[0.08em] text-muted hover:border-mint/40 hover:text-mint max-sm:!px-2"><DiceFive size="0.95rem" weight="duotone" /> <span className="max-sm:hidden">Randomize</span></HudButton>
                   </div>
-                  <div className="main-menu-logo-workbench mt-3 grid gap-3 sm:grid-cols-[9.5rem_minmax(0,1fr)]">
-                    <div className="main-menu-logo-preview grid min-h-40 place-items-center border border-line/70" data-logo-ink={logoInk}>
-                      <CompanyMark mark={companyMark} logo={companyLogo} className="size-28" />
+                  <div className="main-menu-logo-workbench mt-3 grid min-w-0 max-w-full grid-cols-[minmax(0,1fr)] gap-3 sm:grid-cols-[9.5rem_minmax(0,1fr)]">
+                    <div className="main-menu-logo-preview grid min-h-28 place-items-center border border-line/70 sm:min-h-40" data-logo-ink={logoInk}>
+                      <CompanyMark mark={companyMark} logo={companyLogo} className="size-20 sm:size-28" />
                       <span className="border-t border-line/50 px-2 py-1.5 text-center font-mono text-[0.5625rem] uppercase tracking-[0.12em] text-muted">{COMPANY_MARKS.find((mark) => mark.id === companyMark)?.label} structure</span>
                     </div>
-                    <div className="grid content-start gap-2 sm:grid-cols-2">
+                    <div className="hidden content-start gap-2 sm:grid sm:grid-cols-2">
                       <LogoSlider label="Symmetry" value={companyLogo.symmetry} min={3} max={10} step={1} display={`${companyLogo.symmetry}-way`} onChange={(value) => setLogoField('symmetry', Math.round(value))} />
                       <LogoSlider label="Complexity" value={companyLogo.complexity} min={1} max={5} step={1} display={`${companyLogo.complexity}/5`} onChange={(value) => setLogoField('complexity', Math.round(value))} />
                       <LogoSlider label="Spread" value={companyLogo.spread} min={0.35} max={1} step={0.01} display={`${Math.round(companyLogo.spread * 100)}%`} onChange={(value) => setLogoField('spread', value)} />
@@ -655,7 +674,7 @@ export function NewGameMenu() {
                     </div>
                   </div>
                   <div className="mt-3">
-                    <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                    <div className="mb-1.5 hidden flex-wrap items-center justify-between gap-2 sm:flex">
                       <span className="font-mono text-[0.5625rem] uppercase tracking-[0.12em] text-muted">Base structure</span>
                       <div className="flex min-w-0 flex-1 items-center justify-end gap-1.5 sm:max-w-[22rem]">
                         <label htmlFor="company-logo-seed" className="sr-only">Logo seed</label>
@@ -682,8 +701,8 @@ export function NewGameMenu() {
                         </HudButton>
                       </div>
                     </div>
-                    <p id="company-logo-seed-hint" className="mb-2 font-mono text-[0.5rem] uppercase tracking-[0.12em] text-muted">Paste a saved seed or type a number, then leave the field.</p>
-                    <div className="grid grid-cols-5 gap-2 sm:grid-cols-9">
+                    <p id="company-logo-seed-hint" className="mb-2 hidden font-mono text-[0.5rem] uppercase tracking-[0.12em] text-muted sm:block">Paste a saved seed or type a number, then leave the field.</p>
+                    <div className="panel-scroll flex w-full min-w-0 max-w-full snap-x snap-mandatory gap-2 overflow-x-auto overscroll-x-contain pb-1 touch-auto sm:grid sm:grid-cols-9 sm:overflow-visible sm:pb-0">
                     {COMPANY_MARKS.map((mark) => {
                       const selected = companyMark === mark.id
                       return (
@@ -694,7 +713,7 @@ export function NewGameMenu() {
                           aria-pressed={selected}
                           title={mark.label}
                           onClick={() => { setCompanyMark(mark.id); setCompanyLogo((current) => ({ ...current, seed: defaultCompanyLogoSpec(mark.id).seed })) }}
-                          className={`company-mark-button grid min-h-11 min-w-11 aspect-square place-items-center border p-1 transition-colors ${selected ? 'border-mint bg-mint/10' : 'border-line bg-void/65 hover:border-mint/40'}`}
+                          className={`company-mark-button grid min-h-11 min-w-11 snap-start aspect-square place-items-center border p-1 transition-colors ${selected ? 'border-mint bg-mint/10' : 'border-line bg-void/65 hover:border-mint/40'}`}
                         >
                           <span className={`company-mark-thumb company-mark-thumb--${logoInk} grid size-full place-items-center`}>
                             <CompanyMark mark={mark.id} logo={{ ...companyLogo, seed: defaultCompanyLogoSpec(mark.id).seed }} className="size-7" />
@@ -704,7 +723,7 @@ export function NewGameMenu() {
                     })}
                     </div>
                     {savedLogoRecipes.length > 0 ? (
-                      <div className="mt-2 flex flex-wrap gap-1.5">
+                      <div className="mt-2 hidden flex-wrap gap-1.5 sm:flex">
                         {savedLogoRecipes.map((recipe) => {
                           const parsed = parseCompanyLogoRecipe(recipe)
                           if (parsed?.kind !== 'recipe') return null
@@ -735,31 +754,32 @@ export function NewGameMenu() {
             )}
 
             {newGameStep === 1 && (
-              <section className="main-menu-setup-step mt-4">
-                <div className="flex items-center justify-between gap-3">
+              <section className="main-menu-setup-step mt-4 min-w-0 max-w-full overflow-x-hidden">
+                <div className="flex items-center justify-between gap-3 max-sm:hidden">
                   <div>
                     <p className="text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted">Market pressure</p>
                     <p className="mt-1 text-[0.6875rem] text-muted">Choose a base difficulty, then tune optional controls below.</p>
                   </div>
                   <span className="shrink-0 font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">Base scenario</span>
                 </div>
-                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <div aria-label="Difficulty choices. Swipe horizontally for more." className="panel-scroll mt-2 grid w-full min-w-0 max-w-full snap-x snap-mandatory grid-flow-col auto-cols-[82%] grid-cols-none gap-2 overflow-x-auto overscroll-x-contain pb-1 touch-auto sm:mt-3 sm:grid-flow-row sm:auto-cols-auto sm:grid-cols-3 sm:overflow-visible sm:pb-0">
                   {SCENARIOS.map((d, index) => {
                     const on = scenario === d.id
                     return (
                       <button
+                        ref={(node) => { difficultyRefs.current[d.id] = node }}
                         key={d.id}
                         type="button"
                         onClick={() => applyScenario(d.id)}
                         aria-pressed={on}
                         data-difficulty={d.id}
-                        className={`main-menu-difficulty main-menu-difficulty--${d.id} group min-h-[10.5rem] border px-3.5 py-3.5 text-left transition ${on ? 'border-mint/65 bg-mint/12' : 'border-line bg-panel-2/80 hover:border-mint/35'}`}
+                        className={`main-menu-difficulty main-menu-difficulty--${d.id} group min-h-[7.5rem] snap-center border px-3 py-3 text-left transition sm:min-h-[10.5rem] sm:px-3.5 sm:py-3.5 ${on ? 'border-mint/65 bg-mint/12' : 'border-line bg-panel-2/80 hover:border-mint/35'}`}
                       >
                         <span className="relative z-[1] flex items-center justify-between gap-2">
                           <span className={`text-sm font-semibold ${on ? 'text-mint' : 'text-bone'}`}>{d.label}</span>
                           <span className="font-mono text-[0.625rem] text-muted">0{index + 1}</span>
                         </span>
-                        <span className="relative z-[1] mt-3 block max-w-[28ch] text-[0.6875rem] leading-[1.5] text-muted">{d.blurb}</span>
+                        <span className="relative z-[1] mt-2 block max-w-[28ch] text-[0.6875rem] leading-[1.45] text-muted sm:mt-3 sm:leading-[1.5]">{d.blurb}</span>
                         {on ? <span className="relative z-[1] mt-4 block font-mono text-[0.5625rem] uppercase tracking-[0.14em] text-mint">Selected</span> : null}
                       </button>
                     )
@@ -767,9 +787,9 @@ export function NewGameMenu() {
                 </div>
 
                 <div className="main-menu-advanced-toggle mt-3 flex items-center justify-between gap-3 border border-line bg-void/55 px-3.5 py-2.5">
-                  <div>
+                  <div className="min-w-0">
                     <p className="font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-mint">Advanced controls</p>
-                    <p className="mt-1 text-[0.6875rem] text-muted">World size, costs, research, capital, seed and governance.</p>
+                    <p className="mt-1 truncate text-[0.6875rem] text-muted max-sm:hidden">World size, costs, research, capital, seed and governance.</p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     {advancedCustomized ? <span className="font-mono text-[0.5625rem] uppercase tracking-[0.1em] text-amber">Customized</span> : null}
@@ -788,8 +808,8 @@ export function NewGameMenu() {
                 </div>
 
                 {showAdvanced && (
-                  <div id="new-game-advanced-panel" role="region" aria-labelledby="new-game-advanced-toggle" className="main-menu-world-controls mt-2 border border-line bg-panel-2/80 p-3.5">
-                    <div className="mb-3 flex items-center justify-between gap-3">
+                  <div id="new-game-advanced-panel" role="region" aria-labelledby="new-game-advanced-toggle" className="main-menu-world-controls mt-2 min-w-0 max-w-full overflow-x-hidden border border-line bg-panel-2/80 p-3 sm:p-3.5">
+                    <div className="mb-3 flex items-center justify-between gap-3 max-sm:hidden">
                       <div>
                         <p className="text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-mint">World controls</p>
                         <p className="mt-1 text-[0.6875rem] text-muted">Overrides stay in place when you close this panel or switch difficulty.</p>
@@ -814,16 +834,17 @@ export function NewGameMenu() {
             )}
 
             {newGameStep === 2 && (
-              <section className="main-menu-setup-step mt-4 grid gap-4 lg:grid-cols-[1fr_.72fr]">
-                <div className="main-menu-briefing flex flex-col border border-line/70 bg-void/55"><div className="flex items-center justify-between border-b border-line/60 px-3.5 py-2.5"><span className="flex items-center gap-2 text-[0.75rem] font-semibold text-bone"><GlobeHemisphereWest size="1rem" className="text-mint" /> World briefing</span><span className="font-mono text-[0.5625rem] uppercase tracking-[0.15em] text-muted">Seed {seed}</span></div><div className="grid grid-cols-3 divide-x divide-line/60"><BriefingStat label="Territory" value={`${preview.mapWidth}×${preview.mapHeight}`} detail={`${preview.mapWidth * preview.mapHeight} tiles`} /><BriefingStat label="Opposition" value={`${preview.rivalCount} rivals`} detail={`${preview.cityCount} metros + towns`} /><BriefingStat label="Capital" value={money(ECONOMY.startingCash * preview.startingCashMult)} detail="Day-one runway" /></div><div className="main-menu-briefing-envelope mt-auto border-t border-line/60 p-3.5"><div className="flex items-center justify-between gap-3"><div><p className="font-mono text-[0.5625rem] uppercase tracking-[0.14em] text-mint">Operating envelope</p><p className="mt-1 text-[0.6875rem] text-muted">The rules that shape expansion after launch.</p></div><span className="border border-line/70 bg-panel-2/70 px-2 py-1 font-mono text-[0.5625rem] uppercase tracking-[0.1em] text-bone">{SCENARIOS.find((item) => item.id === scenario)?.label}</span></div><div className="mt-3 grid grid-cols-2 gap-px overflow-hidden border border-line/60 bg-line/60 sm:grid-cols-4"><BriefingDatum label="Build cost" value={`×${preview.economyMult.toFixed(2)}`} /><BriefingDatum label="Research" value={`×${preview.researchCostMult.toFixed(2)}`} /><BriefingDatum label="Traffic" value={`${preview.drivingSide}-hand`} /><BriefingDatum label="Governance" value={preview.campaignRules?.externalityMode === 'advanced' ? 'Advanced' : 'Standard'} /></div></div></div>
-                <div className="flex items-center gap-3 border border-mint/30 bg-mint/8 p-4"><CompanyMarkBadge mark={companyMark} logo={companyLogo} className="size-14 shrink-0 border border-line/70" markClassName="size-8" /><span><strong className="block text-base text-bone">{labName.trim() || 'Labline'}</strong><small className="mt-1 block text-[0.6875rem] text-muted">{SCENARIOS.find((item) => item.id === scenario)?.label} market · {preview.drivingSide}-hand traffic</small></span></div>
+              <section className="main-menu-setup-step mt-3 grid min-w-0 max-w-full grid-cols-[minmax(0,1fr)] gap-3 sm:mt-4 sm:gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,.72fr)]">
+                <div className="main-menu-briefing min-w-0 max-w-full flex flex-col border border-line/70 bg-void/55"><div className="flex min-w-0 items-center justify-between border-b border-line/60 px-3.5 py-2.5"><span className="flex items-center gap-2 text-[0.75rem] font-semibold text-bone"><GlobeHemisphereWest size="1rem" className="text-mint" /> World briefing</span><span className="shrink-0 font-mono text-[0.5625rem] uppercase tracking-[0.15em] text-muted">Seed {seed}</span></div><div className="grid min-w-0 grid-cols-3 divide-x divide-line/60"><BriefingStat label="Territory" value={`${preview.mapWidth}×${preview.mapHeight}`} detail={`${preview.mapWidth * preview.mapHeight} tiles`} /><BriefingStat label="Opposition" value={`${preview.rivalCount} rivals`} detail={`${preview.cityCount} metros + towns`} /><BriefingStat label="Capital" value={money(ECONOMY.startingCash * preview.startingCashMult)} detail="Day-one runway" /></div><div className="main-menu-briefing-envelope mt-auto min-w-0 border-t border-line/60 p-3.5"><div className="flex min-w-0 items-center justify-between gap-3"><div className="min-w-0"><p className="font-mono text-[0.5625rem] uppercase tracking-[0.14em] text-mint">Operating envelope</p><p className="mt-1 text-[0.6875rem] text-muted max-sm:hidden">The rules that shape expansion after launch.</p></div><span className="shrink-0 border border-line/70 bg-panel-2/70 px-2 py-1 font-mono text-[0.5625rem] uppercase tracking-[0.1em] text-bone">{SCENARIOS.find((item) => item.id === scenario)?.label}</span></div><div className="mt-3 grid min-w-0 grid-cols-2 gap-px overflow-hidden border border-line/60 bg-line/60 sm:grid-cols-4"><BriefingDatum label="Build cost" value={`×${preview.economyMult.toFixed(2)}`} /><BriefingDatum label="Research" value={`×${preview.researchCostMult.toFixed(2)}`} /><BriefingDatum label="Traffic" value={`${preview.drivingSide}-hand`} /><BriefingDatum label="Governance" value={preview.campaignRules?.externalityMode === 'advanced' ? 'Advanced' : 'Standard'} /></div></div></div>
+                <div className="flex min-w-0 items-center gap-3 border border-mint/30 bg-mint/8 p-3 sm:p-4"><CompanyMarkBadge mark={companyMark} logo={companyLogo} className="size-14 shrink-0 border border-line/70" markClassName="size-8" /><span className="min-w-0"><strong className="block truncate text-base text-bone">{labName.trim() || 'Labline'}</strong><small className="mt-1 block truncate text-[0.6875rem] text-muted">{SCENARIOS.find((item) => item.id === scenario)?.label} market · {preview.drivingSide}-hand traffic</small></span></div>
               </section>
             )}
+            </div>
 
-            <div className="main-menu-setup-footer mt-4 flex items-center justify-between gap-3 border-t border-line/70 pt-3">
-              <HudButton type="button" variant="ghost" disabled={newGameStep === 0} onClick={() => setNewGameStep((newGameStep - 1) as NewGameStep)} className="min-h-11 border border-line px-4 text-[0.75rem] text-muted disabled:invisible hover:text-bone"><ArrowLeft size="0.95rem" className="mr-2 inline" /> Previous</HudButton>
+            <div className="main-menu-setup-footer relative isolate z-30 -mx-3 mt-2 flex shrink-0 items-center justify-between gap-2 border-t border-line/70 bg-panel/95 px-3 pb-[max(0.25rem,env(safe-area-inset-bottom))] pt-2 shadow-[0_-12px_30px_rgba(7,17,23,.82)] sm:mx-0 sm:mt-3 sm:gap-3 sm:bg-transparent sm:px-0 sm:pb-0 sm:pt-3 sm:shadow-none [@media(max-height:600px)]:!-mx-3 [@media(max-height:600px)]:!bg-panel/95 [@media(max-height:600px)]:!px-3 [@media(max-height:600px)]:!pb-[max(0.25rem,env(safe-area-inset-bottom))] [@media(max-height:600px)]:!pt-2 [@media(max-height:600px)]:!shadow-[0_-12px_30px_rgba(7,17,23,.82)]">
+              <HudButton aria-label="Previous setup step" type="button" variant="ghost" disabled={newGameStep === 0} onClick={() => setNewGameStep((newGameStep - 1) as NewGameStep)} className="min-h-11 min-w-11 border border-line px-3 text-[0.75rem] text-muted disabled:invisible hover:text-bone sm:px-4"><ArrowLeft size="0.95rem" className="sm:mr-2" /> <span className="hidden sm:inline">Previous</span></HudButton>
               {newGameStep < 2 ? (
-                <HudButton type="button" variant="primary" onClick={() => setNewGameStep((newGameStep + 1) as NewGameStep)} className="main-menu-step-cta border border-mint/50 bg-mint/10 px-4 text-[0.75rem] font-semibold text-mint hover:bg-mint/15">{newGameStep === 0 ? 'Market & world' : 'Review launch'} <ArrowRight size="0.95rem" className="ml-2 inline" /></HudButton>
+                <HudButton type="button" variant="primary" onClick={() => setNewGameStep((newGameStep + 1) as NewGameStep)} className="main-menu-step-cta !min-w-0 flex-1 border border-mint/50 bg-mint/10 px-3 text-[0.75rem] font-semibold text-mint hover:bg-mint/15 sm:flex-none sm:px-4">{newGameStep === 0 ? <><span className="sm:hidden">Market</span><span className="hidden sm:inline">Market & world</span></> : <><span className="sm:hidden">Review</span><span className="hidden sm:inline">Review launch</span></>} <ArrowRight size="0.95rem" className="ml-2 inline" /></HudButton>
               ) : (
                 <button type="button" className="main-menu-launch main-menu-step-cta flex flex-1 items-center justify-between px-4 py-2.5 text-sm sm:flex-initial" onClick={() => { clearLifecycleError(); setStatus(null); void startGame({ labName: labName.trim() || 'Labline', companyMark, companyLogo, difficulty, seed, advanced: adv }) }}><span><strong className="block text-[0.8125rem]">Launch Sandbox</strong><small className="mt-0.5 block font-mono text-[0.5625rem] uppercase tracking-[0.12em] opacity-70">Begin day one</small></span><ArrowRight size="1.15rem" weight="bold" /></button>
               )}
@@ -995,7 +1016,7 @@ function SliderField({
 function FieldHint({ id, text }: { id?: string; text: string }) {
   return (
     <span
-      className="group relative inline-grid size-4 shrink-0 place-items-center align-middle text-muted"
+      className="group relative hidden size-4 shrink-0 place-items-center align-middle text-muted sm:inline-grid [@media(max-height:540px)]:hidden"
       title={text}
       tabIndex={0}
       aria-label={text}

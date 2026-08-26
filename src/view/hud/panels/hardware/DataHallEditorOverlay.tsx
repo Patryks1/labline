@@ -5,6 +5,8 @@ import {
   useRef,
   useState,
   type DragEvent as ReactDragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type TouchEvent as ReactTouchEvent,
 } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
@@ -85,6 +87,11 @@ import {
   serializeHallRackSkuPayload,
 } from "./hallPaletteModel";
 import { createHallEquipmentModel, rackVariantSeed } from "./hallSceneModels";
+import {
+  hallEditorTabTarget,
+  hallMobileWorkspaceAfterSwipe,
+  type HallMobileWorkspace,
+} from "./mobileHardwareNavigation";
 
 type Draft = Pick<
   DataHallLayout,
@@ -103,8 +110,6 @@ type HallOverlayMode =
   | "access"
   | "risk"
   | "construction";
-export type HallMobileWorkspace = "palette" | "floor" | "inspect";
-
 const HALL_MOBILE_WORKSPACES: ReadonlyArray<{
   id: HallMobileWorkspace;
   label: string;
@@ -113,6 +118,16 @@ const HALL_MOBILE_WORKSPACES: ReadonlyArray<{
   { id: "floor", label: "Floor" },
   { id: "inspect", label: "Inspect" },
 ];
+const HALL_EDITOR_FOCUSABLE = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  'summary',
+  '[contenteditable="true"]',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
 
 export function HallMobileWorkspaceTabs({
   active,
@@ -125,9 +140,34 @@ export function HallMobileWorkspaceTabs({
   placementActive: boolean;
   onChange: (workspace: HallMobileWorkspace) => void;
 }) {
+  const swipeStart = useRef<{ x: number; y: number } | null>(null);
+
   return (
     <nav
-      className="order-2 hidden border-y border-line/80 bg-panel/98 px-2 py-1 max-[900px]:grid"
+      data-swipe-navigation="hall-workspaces"
+      onTouchStart={(event) => {
+        const touch = event.touches[0];
+        if (touch) swipeStart.current = { x: touch.clientX, y: touch.clientY };
+      }}
+      onTouchEnd={(event) => {
+        const start = swipeStart.current;
+        swipeStart.current = null;
+        const touch = event.changedTouches[0];
+        if (!start || !touch) return;
+        const nextWorkspace = hallMobileWorkspaceAfterSwipe(
+          active,
+          touch.clientX - start.x,
+          touch.clientY - start.y,
+        );
+        if (nextWorkspace !== active) {
+          event.preventDefault();
+          onChange(nextWorkspace);
+        }
+      }}
+      onTouchCancel={() => {
+        swipeStart.current = null;
+      }}
+      className="order-2 hidden touch-pan-y border-y border-line/80 bg-panel/98 px-2 py-1 max-[900px]:grid [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:col-start-2 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:row-start-1 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:grid [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:border-y-0 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:border-b [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:border-l [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:pl-[max(0.5rem,env(safe-area-inset-left))] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:pr-[max(0.5rem,env(safe-area-inset-right))]"
     >
       <SegmentedTabs
         ariaLabel="Hall editor workspace"
@@ -161,6 +201,9 @@ export function HallMobileWorkspaceTabs({
           };
         })}
       />
+      <span className="sr-only">
+        Swipe left or right to move between hall workspaces.
+      </span>
     </nav>
   );
 }
@@ -282,6 +325,12 @@ export function DataHallEditorOverlay() {
   const [shiftHeld, setShiftHeld] = useState(false);
   const [mobileWorkspace, setMobileWorkspace] =
     useState<HallMobileWorkspace>("floor");
+  const workspaceSwipeStart = useRef<{
+    x: number;
+    y: number;
+    blocked: boolean;
+  } | null>(null);
+  const editorRef = useRef<HTMLElement | null>(null);
   const idCounter = useRef(1);
   const priorClock = useRef<HallClockSnapshot | null>(null);
   const repeatPlacement = useRef(false);
@@ -289,6 +338,43 @@ export function DataHallEditorOverlay() {
   const editingLockedRef = useRef(false);
   const constructionProject = layout?.constructionProject;
   editingLockedRef.current = Boolean(constructionProject);
+
+  const startWorkspaceSwipe = (event: ReactTouchEvent<HTMLElement>) => {
+    const touch = event.touches[0];
+    if (!touch) return;
+    const target = event.target;
+    workspaceSwipeStart.current = {
+      x: touch.clientX,
+      y: touch.clientY,
+      blocked:
+        target instanceof Element &&
+        Boolean(
+          target.closest(
+            'input, select, textarea, [role="slider"], [data-horizontal-scroll]',
+          ),
+        ),
+    };
+  };
+
+  const finishWorkspaceSwipe = (event: ReactTouchEvent<HTMLElement>) => {
+    const start = workspaceSwipeStart.current;
+    workspaceSwipeStart.current = null;
+    const touch = event.changedTouches[0];
+    if (!start || start.blocked || !touch) return;
+    const nextWorkspace = hallMobileWorkspaceAfterSwipe(
+      mobileWorkspace,
+      touch.clientX - start.x,
+      touch.clientY - start.y,
+    );
+    if (nextWorkspace !== mobileWorkspace) {
+      event.preventDefault();
+      setMobileWorkspace(nextWorkspace);
+    }
+  };
+
+  const cancelWorkspaceSwipe = () => {
+    workspaceSwipeStart.current = null;
+  };
 
   useEffect(() => {
     if (!facilityId || !layout) return;
@@ -382,6 +468,26 @@ export function DataHallEditorOverlay() {
         : null,
     [hall, planningProjection],
   );
+  const editorReady = Boolean(facilityId && layout && hall && draft && analysis);
+  useEffect(() => {
+    if (!editorReady) return;
+    const previous =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const frame = window.requestAnimationFrame(() => {
+      const initial =
+        editorRef.current?.querySelector<HTMLElement>(
+          '[data-hall-editor-initial-focus="true"]',
+        ) ??
+        editorRef.current?.querySelector<HTMLElement>(HALL_EDITOR_FOCUSABLE);
+      (initial ?? editorRef.current)?.focus();
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [editorReady, facilityId]);
   const planNetCost = useMemo(
     () => (layout && draft ? quoteHallPlanNetCost(layout, draft) : 0),
     [draft, layout],
@@ -740,6 +846,14 @@ export function DataHallEditorOverlay() {
     if (!facilityId) return;
     const handler = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        repeatPlacement.current = false;
+        if (mode) setMode(null);
+        else requestClose();
+        return;
+      }
       if (
         target?.matches(
           'input, textarea, select, button, a, [contenteditable="true"]',
@@ -748,14 +862,6 @@ export function DataHallEditorOverlay() {
         return;
       if (event.key === "Shift") {
         setShiftHeld(true);
-        return;
-      }
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        repeatPlacement.current = false;
-        if (mode) setMode(null);
-        else requestClose();
         return;
       }
       if (event.key.toLowerCase() === "r") {
@@ -917,6 +1023,38 @@ export function DataHallEditorOverlay() {
     },
     [draft, hall, layout],
   );
+
+  const trapEditorFocus = (event: ReactKeyboardEvent<HTMLElement>) => {
+    event.stopPropagation();
+    if (event.key !== "Tab") return;
+    const root = editorRef.current;
+    if (!root) return;
+    const focusable = [
+      ...root.querySelectorAll<HTMLElement>(HALL_EDITOR_FOCUSABLE),
+    ].filter(
+      (element) =>
+        element.offsetParent !== null &&
+        element.getAttribute("aria-hidden") !== "true",
+    );
+    if (!focusable.length) {
+      event.preventDefault();
+      root.focus();
+      return;
+    }
+    const first = focusable[0]!;
+    const last = focusable[focusable.length - 1]!;
+    const active = document.activeElement;
+    const wrapTarget = hallEditorTabTarget({
+      shiftKey: event.shiftKey,
+      atFirst: active === first,
+      atLast: active === last,
+      activeOnDialog: active === root,
+      activeInside: root.contains(active),
+    });
+    if (!wrapTarget) return;
+    event.preventDefault();
+    (wrapTarget === "first" ? first : last).focus();
+  };
 
   if (!facilityId) return null;
   if (!layout || !hall || !draft || !analysis)
@@ -1344,24 +1482,34 @@ export function DataHallEditorOverlay() {
 
   return (
     <section
-      className="fixed inset-0 z-[100] flex flex-col overflow-y-auto bg-void text-bone max-[900px]:grid max-[900px]:h-[100dvh] max-[900px]:grid-rows-[minmax(7rem,1fr)_auto_minmax(6rem,36dvh)_auto] max-[900px]:overflow-hidden xl:grid xl:grid-cols-[20rem_minmax(0,1fr)_20rem] xl:grid-rows-[minmax(0,1fr)_auto] xl:overflow-hidden"
+      ref={editorRef}
+      className="fixed inset-0 z-[100] flex flex-col overflow-y-auto bg-void text-bone max-[900px]:grid max-[900px]:h-[100dvh] max-[900px]:grid-rows-[minmax(7rem,1fr)_auto_minmax(6rem,36dvh)_auto] max-[900px]:overflow-hidden [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:grid [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:h-[100dvh] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:grid-cols-[minmax(0,1fr)_minmax(15rem,42vw)] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:grid-rows-[auto_minmax(0,1fr)_auto] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:overflow-hidden xl:grid xl:grid-cols-[20rem_minmax(0,1fr)_20rem] xl:grid-rows-[minmax(0,1fr)_auto] xl:overflow-hidden"
       role="dialog"
       aria-modal="true"
       aria-label="Data Hall Editor"
+      data-hall-editor-dialog="true"
+      tabIndex={-1}
+      onKeyDown={trapEditorFocus}
     >
       <aside
         id="hall-mobile-panel-palette"
         role="tabpanel"
         aria-labelledby="hall-mobile-tab-palette"
-        className={`order-2 max-h-[48vh] min-h-0 overflow-y-auto border-r border-line/80 bg-panel/95 p-4 shadow-2xl max-[900px]:order-3 max-[900px]:max-h-none max-[900px]:border-r-0 max-[900px]:p-3 ${mobileWorkspace === "palette" ? "max-[900px]:block" : "max-[900px]:hidden"} xl:order-none xl:max-h-none`}
+        data-swipe-navigation="hall-workspaces"
+        onTouchStart={startWorkspaceSwipe}
+        onTouchEnd={finishWorkspaceSwipe}
+        onTouchCancel={cancelWorkspaceSwipe}
+        className={`order-2 max-h-[48vh] min-h-0 touch-pan-y overscroll-contain overflow-y-auto border-r border-line/80 bg-panel/95 p-4 shadow-2xl max-[900px]:order-3 max-[900px]:max-h-none max-[900px]:border-r-0 max-[900px]:p-3 max-[900px]:pl-[max(0.75rem,env(safe-area-inset-left))] max-[900px]:pr-[max(0.75rem,env(safe-area-inset-right))] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:col-start-2 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:row-start-2 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:max-h-none [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:border-l [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:py-2.5 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:pl-[max(0.75rem,env(safe-area-inset-left))] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:pr-[max(0.75rem,env(safe-area-inset-right))] ${mobileWorkspace === "palette" ? "max-[900px]:block [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:block" : "max-[900px]:hidden [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden"} xl:order-none xl:max-h-none`}
       >
         <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="font-mono text-[0.625rem] uppercase tracking-[0.2em] text-mint">
+            <p className="font-mono text-[0.625rem] uppercase tracking-[0.2em] text-mint [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden">
               Hall planner
             </p>
-            <h1 className="mt-1 text-xl font-semibold">Build inventory</h1>
-            <p className="mt-1 text-[0.75rem] text-muted">
+            <h1 className="mt-1 text-xl font-semibold [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:mt-0 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:text-base">
+              Build inventory
+            </h1>
+            <p className="mt-1 text-[0.75rem] text-muted [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden">
               {hall.name} · 250 mm snap grid
             </p>
           </div>
@@ -1383,7 +1531,7 @@ export function DataHallEditorOverlay() {
             <p className="font-mono text-[0.625rem] uppercase tracking-[0.18em] text-violet-300">
               Floor locked · {constructionProject.stage}
             </p>
-            <p className="mt-1 text-[0.75rem] leading-relaxed text-muted">
+            <p className="mt-1 text-[0.75rem] leading-relaxed text-muted [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden">
               The funded target is shown as a ghost.{" "}
               {constructionProject.remainingDays} day
               {constructionProject.remainingDays === 1 ? "" : "s"} remain before
@@ -1392,7 +1540,7 @@ export function DataHallEditorOverlay() {
           </div>
         ) : null}
 
-        <label className="relative mt-4 block">
+        <label className="relative mt-4 block [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:mt-2">
           <span className="sr-only">Search hall inventory</span>
           <MagnifyingGlass
             aria-hidden="true"
@@ -1420,7 +1568,7 @@ export function DataHallEditorOverlay() {
         </label>
 
         <div
-          className={`mt-3 flex items-center gap-2 rounded-lg border px-3 py-2 text-[0.6875rem] max-[900px]:hidden ${shiftHeld ? "border-mint/50 bg-mint/10 text-mint" : "border-line/70 bg-void/45 text-muted"}`}
+          className={`mt-3 flex items-center gap-2 rounded-lg border px-3 py-2 text-[0.6875rem] max-[900px]:hidden [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden ${shiftHeld ? "border-mint/50 bg-mint/10 text-mint" : "border-line/70 bg-void/45 text-muted"}`}
         >
           <ArrowsOutCardinal size={15} weight="duotone" />
           <span>
@@ -1458,7 +1606,7 @@ export function DataHallEditorOverlay() {
             <strong className="block text-[0.8125rem] text-bone">
               Design your own rack
             </strong>
-            <span className="mt-0.5 block text-[0.625rem] leading-snug text-muted">
+            <span className="mt-0.5 block text-[0.625rem] leading-snug text-muted max-[600px]:hidden [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden">
               Configure a custom chassis and components, then order it for this
               hall.
             </span>
@@ -1590,7 +1738,7 @@ export function DataHallEditorOverlay() {
         </PaletteGroup>
       </aside>
 
-      <main className="relative order-1 min-h-[24rem] min-w-0 flex-1 max-[900px]:min-h-0 xl:order-none xl:min-h-0">
+      <main className="relative order-1 min-h-[24rem] min-w-0 flex-1 max-[900px]:min-h-0 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:col-start-1 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:row-[1/3] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:min-h-0 xl:order-none xl:min-h-0">
         <DataHallEditorScene
           key={facilityId}
           layout={
@@ -1629,10 +1777,10 @@ export function DataHallEditorOverlay() {
             "Funded target shown as violet ghost · live floor stays solid"
           ) : (
             <>
-              <span className="max-[900px]:hidden">
+              <span className="max-[900px]:hidden [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden">
                 Drag cards to build · drag floor to orbit · drag assets to move · Shift repeats · R rotates
               </span>
-              <span className="hidden max-[900px]:inline">
+              <span className="hidden max-[900px]:inline [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:inline">
                 {mode
                   ? "Tap a clear floor position to place"
                   : "Tap an asset to inspect · drag empty floor to orbit"}
@@ -1645,12 +1793,13 @@ export function DataHallEditorOverlay() {
           variant="ghost"
           onClick={requestClose}
           aria-label="Back to map"
+          data-hall-editor-initial-focus="true"
           className="absolute right-[max(0.75rem,env(safe-area-inset-right))] top-[max(0.75rem,env(safe-area-inset-top))] z-10 grid size-11 place-items-center rounded-lg border border-line/80 bg-void/90 text-muted shadow-xl transition hover:border-mint/50 hover:text-bone focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
         >
           <ArrowLeft size={17} />
         </HudButton>
         {previewStrategy ? (
-          <div className="pointer-events-none absolute right-3 top-16 min-w-56 rounded-lg border border-mint/50 bg-void/90 px-3 py-2 shadow-xl max-[900px]:hidden">
+          <div className="pointer-events-none absolute right-3 top-16 min-w-56 rounded-lg border border-mint/50 bg-void/90 px-3 py-2 shadow-xl max-[900px]:hidden [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden">
             <p className="font-mono text-[0.625rem] uppercase tracking-[0.18em] text-mint">
               Layout preview
             </p>
@@ -1715,7 +1864,11 @@ export function DataHallEditorOverlay() {
         id="hall-mobile-panel-floor"
         role="tabpanel"
         aria-labelledby="hall-mobile-tab-floor"
-        className={`order-3 min-h-0 overflow-y-auto border-b border-line/80 bg-panel/98 p-3 ${mobileWorkspace === "floor" ? "hidden max-[900px]:block" : "hidden"}`}
+        data-swipe-navigation="hall-workspaces"
+        onTouchStart={startWorkspaceSwipe}
+        onTouchEnd={finishWorkspaceSwipe}
+        onTouchCancel={cancelWorkspaceSwipe}
+        className={`order-3 min-h-0 touch-pan-y overscroll-contain overflow-y-auto border-b border-line/80 bg-panel/98 p-3 max-[900px]:pl-[max(0.75rem,env(safe-area-inset-left))] max-[900px]:pr-[max(0.75rem,env(safe-area-inset-right))] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:col-start-2 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:row-start-2 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:border-l [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:py-2.5 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:pl-[max(0.75rem,env(safe-area-inset-left))] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:pr-[max(0.75rem,env(safe-area-inset-right))] ${mobileWorkspace === "floor" ? "hidden max-[900px]:block [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:block" : "hidden"}`}
       >
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -1782,6 +1935,7 @@ export function DataHallEditorOverlay() {
           Diagnostic layer
         </p>
         <div
+          data-horizontal-scroll
           className="mt-1 flex max-w-full gap-1.5 overflow-x-auto pb-1"
           role="group"
           aria-label="Hall diagnostic overlay"
@@ -1826,14 +1980,18 @@ export function DataHallEditorOverlay() {
         id="hall-mobile-panel-inspect"
         role="tabpanel"
         aria-labelledby="hall-mobile-tab-inspect"
-        className={`order-3 max-h-[55vh] min-h-0 overflow-y-auto border-l border-line/80 bg-panel/95 p-3 max-[900px]:max-h-none max-[900px]:border-l-0 ${mobileWorkspace === "inspect" ? "max-[900px]:block" : "max-[900px]:hidden"} xl:order-none xl:max-h-none`}
+        data-swipe-navigation="hall-workspaces"
+        onTouchStart={startWorkspaceSwipe}
+        onTouchEnd={finishWorkspaceSwipe}
+        onTouchCancel={cancelWorkspaceSwipe}
+        className={`order-3 max-h-[55vh] min-h-0 touch-pan-y overscroll-contain overflow-y-auto border-l border-line/80 bg-panel/95 p-3 max-[900px]:max-h-none max-[900px]:border-l-0 max-[900px]:pl-[max(0.75rem,env(safe-area-inset-left))] max-[900px]:pr-[max(0.75rem,env(safe-area-inset-right))] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:col-start-2 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:row-start-2 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:max-h-none [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:border-l [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:py-2.5 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:pl-[max(0.75rem,env(safe-area-inset-left))] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:pr-[max(0.75rem,env(safe-area-inset-right))] ${mobileWorkspace === "inspect" ? "max-[900px]:block [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:block" : "max-[900px]:hidden [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden"} xl:order-none xl:max-h-none`}
       >
         <div className="flex items-start justify-between gap-2">
-          <div>
+          <div className="min-w-0">
             <p className="font-mono text-[0.625rem] uppercase tracking-widest text-mint">
               Selected
             </p>
-            <h2 className="mt-1 text-base font-semibold">
+            <h2 className="mt-1 break-words text-base font-semibold">
               {selectedObject?.catalogId ??
                 selectedWall?.id ??
                 "Nothing selected"}
@@ -1864,6 +2022,7 @@ export function DataHallEditorOverlay() {
             <InspectorRow
               label="Position"
               value={`${(selectedObject.x * HALL_GRID_METERS).toFixed(2)}m, ${(selectedObject.z * HALL_GRID_METERS).toFixed(2)}m`}
+              className="max-[900px]:hidden"
             />
             <InspectorRow
               label="Rotation"
@@ -1963,13 +2122,15 @@ export function DataHallEditorOverlay() {
                 Placed hardware vs ghost plan
               </h3>
             </div>
-            <HallFootprintMix
-              installed={draftRackImpact.installed.rackBays}
-              ordered={draftRackImpact.ordered.rackBays}
-              planned={draftRackImpact.planned.rackBays}
-            />
+            <div className="max-[900px]:hidden">
+              <HallFootprintMix
+                installed={draftRackImpact.installed.rackBays}
+                ordered={draftRackImpact.ordered.rackBays}
+                planned={draftRackImpact.planned.rackBays}
+              />
+            </div>
           </div>
-          <div className="mt-2 grid grid-cols-2 gap-1 text-[0.5625rem] text-muted">
+          <div className="mt-2 grid grid-cols-2 gap-1 text-[0.5625rem] text-muted max-[900px]:hidden">
             <span>
               <i className="mr-1 inline-block size-1.5 rounded-full bg-mint" />
               {draftRackImpact.installed.rackBays} assigned rack-width
@@ -1987,7 +2148,7 @@ export function DataHallEditorOverlay() {
               {purchaseQuote.stagedFleetRackBays} staged off-floor
             </span>
           </div>
-          <p className="mt-2 text-[0.5625rem] leading-relaxed text-muted">
+          <p className="mt-2 text-[0.5625rem] leading-relaxed text-muted max-[900px]:hidden">
             There is no shell bay quota. Additional racks fit only when their
             drawn footprints do not collide and retain service access, power,
             cooling, and network routes.
@@ -2021,7 +2182,7 @@ export function DataHallEditorOverlay() {
             withPlan={planCapacity.tokPerSec}
             format={formatServeRate}
           />
-          <p className="mt-2 text-[0.625rem] leading-relaxed text-muted">
+          <p className="mt-2 text-[0.625rem] leading-relaxed text-muted max-[900px]:hidden">
             Planned capacity assumes each empty cabinet is populated with its
             assigned rack profile. Effective compute at this layout is{" "}
             {num(planCapacity.flopsPf * analysis.throughputMultiplier, 1)} PF.
@@ -2058,16 +2219,19 @@ export function DataHallEditorOverlay() {
             live={layout.analysis.pueMultiplier.toFixed(2)}
             planned={analysis.pueMultiplier.toFixed(2)}
             lowerIsBetter
+            className="max-[900px]:hidden"
           />
           <PlanDeltaRow
             label="Service access"
             live={`${Math.round((layout.analysis.accessScore ?? 1) * 100)}%`}
             planned={`${Math.round((analysis.accessScore ?? 1) * 100)}%`}
+            className="max-[900px]:hidden"
           />
           <PlanDeltaRow
             label="Redundancy"
             live={`${Math.round((layout.analysis.redundancyScore ?? 0) * 100)}%`}
             planned={`${Math.round((analysis.redundancyScore ?? 0) * 100)}%`}
+            className="max-[900px]:hidden"
           />
           <PlanDeltaRow
             label="Infra opex"
@@ -2083,7 +2247,7 @@ export function DataHallEditorOverlay() {
           <ConstructionPreview schedule={buildSchedule} />
         ) : null}
 
-        <div className="mt-5 border-t border-line pt-3">
+        <div className="mt-5 border-t border-line pt-3 max-[900px]:hidden">
           <p className="font-mono text-[0.625rem] uppercase tracking-widest text-muted">
             {constructionProject ? "Commissioned target" : "Operations"}
           </p>
@@ -2149,8 +2313,8 @@ export function DataHallEditorOverlay() {
         ) : null}
       </aside>
 
-      <footer className="order-4 flex min-h-[4.5rem] flex-wrap items-center gap-2 border-t border-line/80 bg-panel px-3 py-2 max-[900px]:sticky max-[900px]:bottom-0 max-[900px]:z-30 max-[900px]:min-h-0 max-[900px]:pl-[max(0.75rem,env(safe-area-inset-left))] max-[900px]:pr-[max(0.75rem,env(safe-area-inset-right))] max-[900px]:pb-[max(0.5rem,env(safe-area-inset-bottom))] xl:col-span-3 xl:order-none xl:flex-nowrap">
-        <div className="hidden w-full grid-cols-[minmax(5.5rem,0.65fr)_minmax(0,1.35fr)] gap-2 max-[900px]:grid">
+      <footer className="order-4 flex min-h-[4.5rem] flex-wrap items-center gap-2 border-t border-line/80 bg-panel px-3 py-2 max-[900px]:sticky max-[900px]:bottom-0 max-[900px]:z-30 max-[900px]:min-h-0 max-[900px]:pl-[max(0.75rem,env(safe-area-inset-left))] max-[900px]:pr-[max(0.75rem,env(safe-area-inset-right))] max-[900px]:pb-[max(0.5rem,env(safe-area-inset-bottom))] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:col-span-2 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:row-start-3 xl:col-span-3 xl:order-none xl:flex-nowrap">
+        <div className="hidden w-full grid-cols-[minmax(5.5rem,0.65fr)_minmax(0,1.35fr)] gap-2 max-[900px]:grid [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:grid">
           <HudButton
             type="button"
             variant="secondary"
@@ -2171,7 +2335,7 @@ export function DataHallEditorOverlay() {
           </HudButton>
         </div>
 
-        <div className="flex w-full flex-wrap items-center gap-2 max-[900px]:hidden xl:flex-nowrap">
+        <div className="flex w-full flex-wrap items-center gap-2 max-[900px]:hidden [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden xl:flex-nowrap">
           <HudButton
             type="button"
             variant="secondary"
@@ -2277,8 +2441,8 @@ function PaletteGroup({
   children: React.ReactNode;
 }) {
   return (
-    <section className="mt-4">
-      <h2 className="mb-2 font-mono text-[0.625rem] uppercase tracking-widest text-muted">
+    <section className="mt-4 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:mt-2.5">
+      <h2 className="mb-2 font-mono text-[0.625rem] uppercase tracking-widest text-muted [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:mb-1">
         {title}
       </h2>
       <div className="space-y-1">{children}</div>
@@ -2352,7 +2516,7 @@ function RackPaletteCard({
       onClick={onClick}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
-      className={`group flex w-full items-stretch overflow-hidden rounded-lg border text-left transition disabled:cursor-not-allowed disabled:opacity-45 ${active ? "border-mint bg-mint/10 ring-2 ring-mint/20" : "border-line/75 bg-void/45 hover:border-mint/40 hover:bg-panel-2/80"}`}
+      className={`group flex min-h-11 w-full items-stretch overflow-hidden rounded-lg border text-left transition disabled:cursor-not-allowed disabled:opacity-45 ${active ? "border-mint bg-mint/10 ring-2 ring-mint/20" : "border-line/75 bg-void/45 hover:border-mint/40 hover:bg-panel-2/80"}`}
       title={
         disabled
           ? "Wait for the active hall project to commission"
@@ -2407,7 +2571,7 @@ function RackCardVisual({
   return (
     <span
       aria-hidden="true"
-      className="relative m-2 mr-0 block h-[4.1rem] w-11 shrink-0 overflow-hidden rounded border border-white/15 bg-void shadow-inner"
+      className="relative m-2 mr-0 block h-[4.1rem] w-11 shrink-0 overflow-hidden rounded border border-white/15 bg-void shadow-inner [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden"
       style={{
         boxShadow: `inset 0 0 0 1px hsl(${hue} 55% 45% / .18), 0 6px 16px color-mix(in srgb, var(--color-void) 55%, transparent)`,
       }}
@@ -2463,7 +2627,7 @@ function EquipmentPaletteCard({
       onClick={onClick}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
-      className={`min-h-20 rounded-lg border p-2 text-left transition disabled:cursor-not-allowed disabled:opacity-45 ${active ? "border-mint bg-mint/10 ring-2 ring-mint/20" : "border-line/75 bg-void/45 hover:border-mint/40 hover:bg-panel-2/80"}`}
+      className={`min-h-20 rounded-lg border p-2 text-left transition disabled:cursor-not-allowed disabled:opacity-45 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:flex [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:min-h-11 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:items-center [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:gap-2 ${active ? "border-mint bg-mint/10 ring-2 ring-mint/20" : "border-line/75 bg-void/45 hover:border-mint/40 hover:bg-panel-2/80"}`}
       title={
         disabled
           ? "Wait for the active hall project to commission"
@@ -2481,17 +2645,29 @@ function EquipmentPaletteCard({
               : "text-violet-300"
         }
       />
-      <span className="mt-2 block text-[0.6875rem] font-semibold leading-tight text-bone">
+      <span className="mt-2 block text-[0.6875rem] font-semibold leading-tight text-bone [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:mt-0">
         {name}
       </span>
-      <span className="mt-1 block font-mono text-[0.5625rem] text-muted">
+      <span className="mt-1 block font-mono text-[0.5625rem] text-muted [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden">
         {price}
       </span>
     </HudButton>
   );
 }
-function InspectorRow({ label, value }: { label: string; value: string }) {
-  return <StatRow label={label} value={value} />;
+function InspectorRow({
+  label,
+  value,
+  className = "",
+}: {
+  label: string;
+  value: string;
+  className?: string;
+}) {
+  return (
+    <div className={className}>
+      <StatRow label={label} value={value} />
+    </div>
+  );
 }
 function Metric({
   label,
@@ -2511,14 +2687,18 @@ function PlanDeltaRow({
   live,
   planned,
   lowerIsBetter: _lowerIsBetter,
+  className = "",
 }: {
   label: string;
   live: string;
   planned: string;
   lowerIsBetter?: boolean;
+  className?: string;
 }) {
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-x-2 border-b border-line/50 py-1.5 text-[0.6875rem]">
+    <div
+      className={`grid grid-cols-[minmax(0,1fr)_auto_auto] gap-x-2 border-b border-line/50 py-1.5 text-[0.6875rem] ${className}`}
+    >
       <span className="text-muted">{label}</span>
       <span className="font-mono text-muted">{live}</span>
       <span className="font-mono text-bone">{planned}</span>

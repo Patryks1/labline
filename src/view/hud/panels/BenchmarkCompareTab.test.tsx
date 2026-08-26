@@ -13,6 +13,7 @@ import {
   formatFrontierReadout,
   formatFrontierThinking,
   frontierThinkingFor,
+  isCompactBenchmarkViewport,
   thinkingPointRadius,
 } from './BenchmarkCompareTab'
 
@@ -44,7 +45,9 @@ const THINK: EffortRecipe = {
 
 function fixtureRow(
   suiteId: BenchmarkSuiteId,
-  overrides: Partial<LeaderboardRow> & { model?: Partial<LeaderboardRow['model']> } = {},
+  overrides: Omit<Partial<LeaderboardRow>, 'model'> & {
+    model?: Partial<LeaderboardRow['model']>
+  } = {},
 ): LeaderboardRow {
   const { model: modelOverrides, ...rowOverrides } = overrides
   return {
@@ -123,6 +126,14 @@ describe('frontier thinking encoding', () => {
 })
 
 describe('benchmark compare workflow', () => {
+  it('uses the compact treatment for portrait and landscape phone widths', () => {
+    expect(isCompactBenchmarkViewport(390, 844)).toBe(true)
+    expect(isCompactBenchmarkViewport(844, 390)).toBe(true)
+    expect(isCompactBenchmarkViewport(1080, 540)).toBe(true)
+    expect(isCompactBenchmarkViewport(1024, 768)).toBe(false)
+    expect(isCompactBenchmarkViewport(1280, 720)).toBe(false)
+  })
+
   it('exposes one touch-sized market group and a pinned chart readout', () => {
     const market = EVALUATION_MARKETS[0]!.id
     const suiteId = suiteForEvaluationMarket(market)
@@ -144,6 +155,11 @@ describe('benchmark compare workflow', () => {
     expect(markup).toContain('data-benchmark-pinned-point')
     expect(markup).toContain('Point size is thinking budget (— if none). Hover or select a point; click or tap to pin.')
     expect(markup).toContain('data-point-detail="think —"')
+    expect(markup).toContain('Tap a point to pin its model.')
+    expect(markup).toContain('Pick two models, then inspect exact scores.')
+    expect(markup).toContain('data-swipe-ignore="true"')
+    expect(markup).toContain('touch-pan-x touch-pan-y')
+    expect(markup).toContain('snap-x snap-proximity')
   })
 
   it('renders rival thinking budgets as larger markers than Instant-only', () => {

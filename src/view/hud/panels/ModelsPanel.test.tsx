@@ -47,7 +47,13 @@ describe("ModelsPanel workbench IA", () => {
     expect(modelsWorkbenchLayoutForViewport(1280)).toBe("stacked");
     expect(modelsWorkbenchLayoutForViewport(1440)).toBe("columns");
     expect(markup).toContain('data-models-workbench-layout="responsive"');
+    expect(markup).toContain('data-models-short-landscape="stacked"');
+    expect(markup).toContain("max-[1360px]:!grid-cols-1");
     expect(markup).toContain("models-workbench-layout");
+    expect(markup).toContain('data-models-swipe-surface="workspace-tabs"');
+    expect(markup).toContain('data-mobile-orientations="portrait landscape"');
+    expect(markup).toContain('data-shell-gesture-surface="true"');
+    expect(markup).not.toContain("sm:!min-h-0");
   });
 
   it("resolves an explicit concurrent run while preserving missing-run fallback", () => {

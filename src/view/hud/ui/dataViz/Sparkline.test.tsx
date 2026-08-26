@@ -15,7 +15,7 @@ describe('Sparkline', () => {
     )
 
     expect(markup).toContain('aria-label="Cash sparkline"')
-    expect(markup).toContain('class="block touch-none"')
+    expect(markup).toContain('class="block touch-pan-y"')
     expect(markup).toContain('Cash sparkline. No point selected.')
   })
 })

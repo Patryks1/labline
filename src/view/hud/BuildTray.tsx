@@ -18,6 +18,7 @@ import { mapTileAtAny } from '../../sim/systems/worldAccess'
 import { money, num, people } from './format'
 import { FacilityModelPreview } from './ui/FacilityModelPreview'
 import { writeBuildBlueprintDrag } from '../buildPlacement'
+import { COMPACT_BUILD_VIEWPORT_QUERY, mediaQueryMatches } from './mapNavigatorData'
 import {
   BlockerList,
   CardGrid,
@@ -128,13 +129,21 @@ export function BuildPanel() {
   const startPlacement = (kind: BuildableKind) => {
     setSelectedKind(kind)
     setBuildMode(kind)
+    if (
+      typeof window !== 'undefined' &&
+      mediaQueryMatches(COMPACT_BUILD_VIEWPORT_QUERY, window.matchMedia?.bind(window))
+    ) {
+      // A compact workspace is a full-height sheet. Hand the player back to
+      // the map after choosing a blueprint so the next tap can place it.
+      useGameStore.getState().setLeftRailOpen(false)
+    }
   }
 
   return (
     <PanelScaffold
       eyebrow="Construction"
       title="Build"
-      description="Pick a blueprint, then place it on an eligible parcel."
+      description="Choose a blueprint, then tap an eligible parcel."
       actions={
         buildMode ? (
           <HudButton type="button" variant="ghost" onClick={() => setBuildMode(null)}>
@@ -148,17 +157,15 @@ export function BuildPanel() {
           <div className="flex items-center gap-2 rounded-lg border border-mint/35 bg-mint/10 px-3 py-2 text-[0.8125rem] text-mint">
             <LiveDot />
             <span className="min-w-0 truncate">
-              Placing {getBuildDef(buildMode).label} — hover an eligible parcel, click to place, Esc to exit.
+              Placing {getBuildDef(buildMode).label} — tap to place · drag to pan · pinch to zoom.
             </span>
           </div>
         ) : null}
 
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-2">
           <MetricTile label="Cash" value={money(state.player.cash)} tone="positive" />
-          <MetricTile label="Blueprints" value={`${visibleDefs.length}/${BUILD_DEFS.length}`} />
-          <MetricTile label="Build price" value={money(buildCash)} tone="train" />
           <MetricTile
-            label="Upfront"
+            label="Selected cost"
             value={money(upfrontTotal)}
             detail={tile?.kind === 'empty' ? 'incl. land' : 'est.'}
             tone={canAfford ? 'neutral' : 'danger'}
@@ -178,7 +185,7 @@ export function BuildPanel() {
             role="searchbox"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search halls, power, research…"
+            placeholder="Search blueprints…"
             className="h-11 w-full pl-8 pr-8 text-[0.8125rem]"
           />
           {search ? (
@@ -194,7 +201,11 @@ export function BuildPanel() {
           ) : null}
         </label>
 
-        <div className="build-category-tabs">
+        <div
+          className="build-category-tabs touch-pan-x touch-pan-y overscroll-x-contain"
+          role="region"
+          aria-label="Swipe horizontally through blueprint categories"
+        >
           <SegmentedTabs
             ariaLabel="Blueprint category"
             active={buildCategory}
@@ -228,7 +239,7 @@ export function BuildPanel() {
               }
             />
           ) : (
-            <CardGrid min="15rem" className="anim-stagger">
+            <CardGrid min="8rem" className="anim-stagger">
               {visibleDefs.map((definition) => {
                 const cost = Math.floor(definition.cash * economyMult)
                 const affordable = state.player.cash >= cost
@@ -244,10 +255,11 @@ export function BuildPanel() {
                     variant="ghost"
                     draggable={affordable}
                     aria-pressed={selected}
+                    aria-label={`${definition.label}, ${money(cost)}, ${definition.days} days, ${blueprintUtility(definition)}. ${affordable ? 'Select to place' : `Need ${money(cost - state.player.cash)} more`}`}
                     disabled={!affordable}
                     title={
                       affordable
-                        ? 'Click to place, or drag onto the map'
+                        ? 'Tap to place, or drag onto the map'
                         : `Need ${money(cost - state.player.cash)} more`
                     }
                     onClick={() => {
@@ -263,13 +275,13 @@ export function BuildPanel() {
                       setBuildMode(definition.kind)
                       writeBuildBlueprintDrag(event.dataTransfer, definition.kind)
                     }}
-                    className={`min-h-11 hover-lift rounded-lg border text-left transition disabled:cursor-not-allowed disabled:opacity-55 ${
+                    className={`min-h-11 touch-manipulation hover-lift rounded-lg border text-left transition disabled:cursor-not-allowed disabled:opacity-55 ${
                       selected
                         ? 'border-mint ring-2 ring-mint/50 bg-mint/10'
                         : 'border-line/70 bg-panel-2/70 hover:border-mint/30'
                     }`}
                   >
-                    <div className="flex items-start justify-between gap-2 border-b border-line/50 px-3 pb-2 pt-2.5">
+                    <div className="flex items-start justify-between gap-1.5 px-2.5 pb-1 pt-2.5">
                       <div className="flex min-w-0 items-center gap-2">
                         <Icon
                           size={18}
@@ -277,23 +289,22 @@ export function BuildPanel() {
                           className={affordable ? 'text-mint' : 'text-danger'}
                         />
                         <div className="min-w-0">
-                          <p className="hud-eyebrow">{cat}</p>
-                          <h3 className="break-words text-sm font-semibold leading-tight text-bone">{definition.label}</h3>
+                          <span className="sr-only">{cat}: </span>
+                          <h3 className="line-clamp-2 break-words text-[0.8125rem] font-semibold leading-tight text-bone">{definition.label}</h3>
                         </div>
                       </div>
                       <span
-                        className={`shrink-0 font-mono text-[0.8125rem] tabular-nums font-semibold ${
+                        className={`shrink-0 font-mono text-[0.6875rem] tabular-nums font-semibold ${
                           affordable ? 'text-mint' : 'text-danger'
                         }`}
                       >
                         {money(cost)}
                       </span>
                     </div>
-                    <div className="space-y-1 p-3">
-                      <div className="font-mono text-[0.6875rem] tabular-nums text-muted">
-                        {definition.days}d · {footprintLabel(definition)}
+                    <div className="space-y-1 px-2.5 pb-2.5">
+                      <div className="truncate font-mono text-[0.625rem] tabular-nums text-muted">
+                        {definition.days}d · {footprintLabel(definition)} · {blueprintUtility(definition)}
                       </div>
-                      <div className="truncate text-[0.8125rem] text-bone">{blueprintUtility(definition)}</div>
                       {!affordable ? (
                         <p className="text-[0.75rem] text-danger">
                           Short {money(cost - state.player.cash)}
@@ -316,13 +327,8 @@ export function BuildPanel() {
             <StatusChip tone={canAfford ? 'positive' : 'danger'}>{money(upfrontTotal)}</StatusChip>
           }
         >
-          <div className="grid grid-cols-[minmax(0,1fr)_7rem] gap-3">
+          <div className="grid grid-cols-1 gap-3 min-[480px]:grid-cols-[minmax(0,1fr)_7rem]">
             <div className="min-w-0 space-y-1">
-              <StatRow label="Build price" value={money(buildCash)} />
-              <StatRow
-                label="Land"
-                value={landEstimate > 0 ? money(landEstimate) : tile?.kind === 'empty' ? money(0) : '—'}
-              />
               <StatRow label="Build time" value={`${selectedDef.days}d`} />
               <StatRow label="Daily ops" value={`${money(shellOpex)}/d`} tone="danger" />
               <StatRow label="Footprint" value={footprintLabel(selectedDef)} />
@@ -337,8 +343,23 @@ export function BuildPanel() {
                 <StatRow label="Staff seats" value={people(selectedDef.staffCap)} />
               ) : null}
             </div>
-            <FacilityModelPreview definition={selectedDef} />
+            <div className="hidden min-[480px]:block">
+              <FacilityModelPreview definition={selectedDef} />
+            </div>
           </div>
+
+          <details className="mt-3 rounded-md border border-line/60 bg-void/30">
+            <summary className="flex min-h-11 cursor-pointer touch-manipulation items-center px-3 text-[0.75rem] font-semibold text-muted">
+              Cost breakdown
+            </summary>
+            <div className="space-y-1 border-t border-line/50 px-3 py-2">
+              <StatRow label="Build price" value={money(buildCash)} />
+              <StatRow
+                label="Land"
+                value={landEstimate > 0 ? money(landEstimate) : tile?.kind === 'empty' ? money(0) : '—'}
+              />
+            </div>
+          </details>
 
           <div className="mt-3 space-y-2 border-t border-line/50 pt-3">
             <div className="font-mono text-[0.6875rem] tabular-nums text-muted">

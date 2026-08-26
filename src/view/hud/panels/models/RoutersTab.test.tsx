@@ -35,7 +35,8 @@ describe("RoutersTab", () => {
     );
 
     expect(markup).toContain("Create router");
-    expect(markup).toContain("One specialist per category");
+    expect(markup).toContain("Route each category to its best model");
+    expect(markup).toContain("Assign serving models");
     expect(markup).toContain("Chat");
     expect(markup).toContain("Code");
     expect(markup).toContain("Math");

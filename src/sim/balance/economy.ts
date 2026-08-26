@@ -217,6 +217,12 @@ export const ECONOMY = {
   subCapacityShare: 0.38,
   /** Default API share of inference under constraint (0–1). Seats take the larger share. */
   defaultApiVsSubPriority: 0.46,
+  /**
+   * Global lift to token consumption after a customer or seat has been won.
+   * This changes work run per customer, never audience, seats, or non-token
+   * revenue.
+   */
+  tokenDemandMultiplier: 1.25,
   /** Live 8-accelerator node opex/day beyond power and amortization. */
   rackOpexPerGpuDay: 210,
   /** Extra $/day per MW of live fleet draw beyond energy bill */
@@ -365,4 +371,10 @@ export const ECONOMY = {
       },
     ],
   },
+}
+
+/** Apply the global economy lift at a token-work boundary only. */
+export function liftMarketTokenDemand(mtok: number): number {
+  const safe = Number.isFinite(mtok) ? Math.max(0, mtok) : 0
+  return safe * ECONOMY.tokenDemandMultiplier
 }

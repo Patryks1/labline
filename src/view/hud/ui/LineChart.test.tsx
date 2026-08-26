@@ -26,6 +26,11 @@ describe('LineChart interaction contract', () => {
     expect(markup).toContain('role="button"')
     expect(markup).toContain('aria-live="polite"')
     expect(markup).toContain('Validation loss. No point selected.')
+    expect(markup).toContain('class="hud-chart-frame relative w-full"')
+    expect(markup).toContain('data-mobile-chart="true"')
+    expect(markup).toContain('data-swipe-ignore="true"')
+    expect(markup).toContain('class="block touch-pan-y"')
+    expect(markup).not.toContain('touch-none')
   })
 
   it('uses per-point radius and detail in the accessible label', () => {

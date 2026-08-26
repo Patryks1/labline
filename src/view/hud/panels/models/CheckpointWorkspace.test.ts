@@ -83,6 +83,9 @@ describe("CheckpointWorkspace", () => {
     expect(markup).toContain('class="hud-select mt-1 min-h-11 w-full');
     expect(markup).toContain('class="hud-input mt-1 min-h-11 w-full');
     expect(markup).toContain("grid grid-cols-2 gap-2");
+    expect(markup).toContain('data-manual-checkpoint-disclosure="true"');
+    expect(markup).toContain('data-mobile-scroll="horizontal"');
+    expect(markup).not.toMatch(/<details[^>]*data-manual-checkpoint-disclosure="true"[^>]*\sopen/);
   });
 
   it("keeps archived checkpoints actionable when no run is active", () => {

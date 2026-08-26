@@ -227,12 +227,30 @@ export function scoreTokenEfficiency(input: {
 
 export const INSTANT_EFFORT_ID = "instant";
 export const MAX_TRAINED_EFFORTS = 3;
-export const THINKING_TOKEN_MIN = 1.4;
-export const THINKING_TOKEN_MAX = 8;
+/** Continuous generated/reasoning-token budget exposed by the effort studio. */
+export const THINKING_TOKEN_MIN = 1;
+export const THINKING_TOKEN_MAX = 100;
+/** Old Max saves used 32x; it remains a valid persisted budget. */
+export const LEGACY_MAX_THINKING_TOKEN_MULT = 32;
 export const EFFORT_HEAD_SHARE_MAX = 0.45;
 export const EFFORT_HEAD_POOL_CAP = 0.8;
 export const EFFORT_CAPABILITY_BIAS_DEFAULT = 0.5;
 export const DEFAULT_EFFORT_HEAD_SHARE = 0.2;
+
+/** Retired inline quote. Real head fitting is deliberately at least 2x. */
+export const LEGACY_EFFORT_HEAD_COST_PER_PF_DAY = 18_000;
+export const EFFORT_HEAD_COST_PER_PF_DAY =
+  LEGACY_EFFORT_HEAD_COST_PER_PF_DAY * 2;
+
+const EFFORT_CAPABILITY_SATURATION_TAU = 4.8;
+
+const EFFORT_BUDGET_ANCHORS = [
+  { tokens: 1, trainingShare: 0, computeIntensity: 1 },
+  { tokens: 2.5, trainingShare: 0.55, computeIntensity: 1.25 },
+  { tokens: 6, trainingShare: 1.5, computeIntensity: 1.6 },
+  { tokens: LEGACY_MAX_THINKING_TOKEN_MULT, trainingShare: 8, computeIntensity: 2.25 },
+  { tokens: THINKING_TOKEN_MAX, trainingShare: 12, computeIntensity: 2.75 },
+] as const;
 
 export const EFFORT_OUTPUT_TOKEN_MULT: Record<ReasoningEffort, number> = {
   low: 1,
@@ -285,6 +303,80 @@ export function effortCapabilityScale(
   return 0.74 + 0.52 * clampCapabilityBias(capabilityBias);
 }
 
+function interpolateEffortBudgetAnchor(
+  tokenMultiplier: number,
+  field: "trainingShare" | "computeIntensity",
+): number {
+  const budget = clampThinkingTokenMult(tokenMultiplier);
+  const upperIndex = EFFORT_BUDGET_ANCHORS.findIndex(
+    (anchor) => anchor.tokens >= budget,
+  );
+  if (upperIndex <= 0) return EFFORT_BUDGET_ANCHORS[0][field];
+  const upper = EFFORT_BUDGET_ANCHORS[upperIndex]!;
+  const lower = EFFORT_BUDGET_ANCHORS[upperIndex - 1]!;
+  const progress =
+    (Math.log(budget) - Math.log(lower.tokens)) /
+    Math.max(1e-9, Math.log(upper.tokens) - Math.log(lower.tokens));
+  return lower[field] + (upper[field] - lower[field]) * progress;
+}
+
+/** Relative fitting work at a continuous generated-token budget. */
+export function effortTrainingComputeShare(tokenMultiplier: number): number {
+  return interpolateEffortBudgetAnchor(tokenMultiplier, "trainingShare");
+}
+
+/** Serving compute per generated/reasoning token versus Instant. */
+export function effortComputeIntensityForTokenMultiplier(
+  tokenMultiplier: number,
+): number {
+  return interpolateEffortBudgetAnchor(tokenMultiplier, "computeIntensity");
+}
+
+export function effortComputeIntensityForRecipe(
+  recipe: Pick<EffortRecipe, "kind" | "thinkingTokenMult">,
+): number {
+  return recipe.kind === "instant"
+    ? 1
+    : effortComputeIntensityForTokenMultiplier(recipe.thinkingTokenMult);
+}
+
+/**
+ * Maximum proportional capability lift. Most benefit arrives by 6x and 32x
+ * is effectively saturated; 32x -> 100x adds less than 0.05% of source cap.
+ */
+export function effortCapabilityLiftCeilingPct(
+  tokenMultiplier: number,
+): number {
+  const budget = clampThinkingTokenMult(tokenMultiplier);
+  return (
+    0.2 *
+    (1 - Math.exp(-(budget - THINKING_TOKEN_MIN) / EFFORT_CAPABILITY_SATURATION_TAU))
+  );
+}
+
+/** Media-only and embedding products cannot use generated text reasoning. */
+export function modelSupportsEffortHeads(
+  model: Pick<Model, "family" | "productPreset"> &
+    Partial<Pick<Model, "modalities">>,
+): boolean {
+  if (
+    model.family === "embedding" ||
+    model.family === "diffusion" ||
+    model.family === "video"
+  ) {
+    return false;
+  }
+  if (
+    model.productPreset === "audio" ||
+    model.productPreset === "image_generation" ||
+    model.productPreset === "video_generation"
+  ) {
+    return false;
+  }
+  if (model.family === "omni" || model.productPreset === "omni") return true;
+  return model.modalities == null || model.modalities.includes("text");
+}
+
 export function effortFundedPfFromQuality(
   quality: number,
   requiredPfDays: number,
@@ -303,7 +395,12 @@ export function allocateEffortHeadPf(
   const shares: Record<string, number> = {};
   let totalShare = 0;
   for (const recipe of recipes) {
-    const share = clampEffortTrainShare(recipe.trainComputeShare);
+    const target = Math.max(0, recipe.targetPfDays ?? 0);
+    const progress = Math.max(0, recipe.progressPfDays ?? 0);
+    const active = target > progress + 1e-9;
+    const share = active
+      ? clampEffortTrainShare(recipe.trainComputeShare)
+      : 0;
     shares[recipe.id] = share;
     totalShare += share;
   }
@@ -314,7 +411,14 @@ export function allocateEffortHeadPf(
   const byId: Record<string, number> = {};
   let used = 0;
   for (const recipe of recipes) {
-    const headPf = pf * (shares[recipe.id] ?? 0) * scale;
+    const remaining = Math.max(
+      0,
+      (recipe.targetPfDays ?? 0) - (recipe.progressPfDays ?? 0),
+    );
+    const headPf = Math.min(
+      remaining,
+      pf * (shares[recipe.id] ?? 0) * scale,
+    );
     byId[recipe.id] = headPf;
     used += headPf;
   }
@@ -324,6 +428,10 @@ export function allocateEffortHeadPf(
 export function normalizeEffortRecipe(recipe: EffortRecipe): EffortRecipe {
   return {
     ...recipe,
+    thinkingTokenMult:
+      recipe.kind === "instant"
+        ? 1
+        : clampThinkingTokenMult(recipe.thinkingTokenMult),
     capabilityBias: clampCapabilityBias(recipe.capabilityBias),
     trainComputeShare: clampEffortTrainShare(recipe.trainComputeShare),
     progressPfDays: Math.max(0, recipe.progressPfDays ?? 0),
@@ -331,6 +439,23 @@ export function normalizeEffortRecipe(recipe: EffortRecipe): EffortRecipe {
     loss:
       recipe.loss != null && Number.isFinite(recipe.loss)
         ? recipe.loss
+        : undefined,
+    finalLoss:
+      recipe.finalLoss != null && Number.isFinite(recipe.finalLoss)
+        ? Math.max(0, recipe.finalLoss)
+        : undefined,
+    outcomeSeed:
+      recipe.outcomeSeed != null && Number.isFinite(recipe.outcomeSeed)
+        ? recipe.outcomeSeed >>> 0
+        : undefined,
+    optimizationYield:
+      recipe.optimizationYield != null &&
+      Number.isFinite(recipe.optimizationYield)
+        ? clampUnit(recipe.optimizationYield)
+        : undefined,
+    realizedLiftPct:
+      recipe.realizedLiftPct != null && Number.isFinite(recipe.realizedLiftPct)
+        ? Math.max(0, Math.min(0.2, recipe.realizedLiftPct))
         : undefined,
   };
 }
@@ -446,9 +571,11 @@ export function effortTrainTargetPfDays(input: {
   const researchCut =
     (research.has("align_process") ? 0.88 : 1) *
     (research.has("align_grpo") ? 0.82 : 1);
+  const workShare =
+    budget <= 1 + 1e-9 ? 0.25 : effortTrainingComputeShare(budget);
   return Math.max(
     8,
-    Math.round(42 * size * (0.45 + budget * 0.28) * gymTax * researchCut * 10) /
+    Math.round(42 * size * workShare * gymTax * researchCut * 10) /
       10,
   );
 }
@@ -463,7 +590,76 @@ export function effortQualityFromTrain(
 }
 
 export function effortCashCost(targetPfDays: number, paramsB: number): number {
-  return Math.round(18_000 * targetPfDays * Math.pow(Math.max(1, paramsB), 0.22));
+  return Math.round(
+    EFFORT_HEAD_COST_PER_PF_DAY *
+      targetPfDays *
+      Math.pow(Math.max(1, paramsB), 0.22),
+  );
+}
+
+export interface EffortTrainingOutcome {
+  quality: number;
+  optimizationYield: number;
+  realizedLiftPct: number;
+  finalLoss: number;
+  outcomeSeed: number;
+}
+
+/**
+ * Resolve a head once from persisted telemetry. The seeded result responds to
+ * terminal loss, funded compute, source data and source reliability without
+ * consuming global RNG state.
+ */
+export function resolveEffortTrainingOutcome(input: {
+  recipeId: string;
+  thinkingTokenMult: number;
+  progressPfDays: number;
+  targetPfDays: number;
+  requiredPfDays: number;
+  finalLoss: number;
+  dataQuality: number;
+  reliability: number;
+  outcomeSeed: number;
+  capabilityBias?: number;
+}): EffortTrainingOutcome {
+  const target = Math.max(1e-9, input.targetPfDays);
+  const maturity = clampUnit(input.progressPfDays / target);
+  const quality = effortQualityFromTrain(
+    input.progressPfDays,
+    Math.max(1, input.requiredPfDays),
+  );
+  const lossQuality = clampUnit((5.75 - Math.max(0, input.finalLoss)) / 2.4);
+  const dataQuality = clampUnit(
+    input.dataQuality > 1 ? input.dataQuality / 100 : input.dataQuality,
+  );
+  const reliability = clampUnit(
+    input.reliability > 1 ? input.reliability / 100 : input.reliability,
+  );
+  const variance = seededJitter(
+    input.outcomeSeed,
+    `effort-outcome:${input.recipeId}:${Math.round(target * 1_000)}:${Math.round(input.finalLoss * 1_000)}`,
+    0.12,
+  );
+  const optimizationYield = clampUnit(
+    0.42 +
+      quality * 0.2 +
+      lossQuality * 0.23 +
+      dataQuality * 0.08 +
+      reliability * 0.07 +
+      variance,
+  );
+  const ceiling = effortCapabilityLiftCeilingPct(input.thinkingTokenMult);
+  const biasedYield = Math.min(
+    1,
+    optimizationYield * effortCapabilityScale(input.capabilityBias),
+  );
+  return {
+    quality,
+    optimizationYield,
+    realizedLiftPct: Math.min(0.2, ceiling * maturity * biasedYield),
+    finalLoss: Math.max(0, input.finalLoss),
+    outcomeSeed: input.outcomeSeed >>> 0,
+  };
 }
 
 export function effortReasoningUnlocked(
@@ -547,11 +743,14 @@ export function serveTokenMultiplierForRecipe(
     Partial<Pick<EffortRecipe, "kind" | "capabilityBias">>,
   tokenEfficiency: number,
 ): number {
+  if (recipe.kind === "instant") return 1;
   const base =
     Math.max(1, recipe.thinkingTokenMult) /
     efficiencyTokenFactor(tokenEfficiency);
-  if (recipe.kind === "instant") return Math.max(1, base);
-  return Math.max(1, base * effortServeCostScale(recipe.capabilityBias));
+  return Math.min(
+    THINKING_TOKEN_MAX,
+    Math.max(1, base * effortServeCostScale(recipe.capabilityBias)),
+  );
 }
 
 export function serveTokenMultiplier(
@@ -641,6 +840,160 @@ export function servedEffortTokenMultiplier(
   );
 }
 
+export interface EffortRequestMultipliers {
+  /** Generated + hidden-reasoning tokens versus Instant. */
+  generatedTokenMultiplier: number;
+  /** Total billable text tokens; prompt input remains fixed. */
+  billedTokenMultiplier: number;
+  /** Compute-equivalent text work including per-generated-token intensity. */
+  computeTokenMultiplier: number;
+  /** PF per billed token versus Instant. */
+  computeIntensityMultiplier: number;
+}
+
+/**
+ * Request economics with a fixed prompt. Expanded generated/reasoning tokens
+ * are the only tokens multiplied by effort and should be billed at output rate.
+ */
+export function effortRequestMultipliers(
+  recipe: Pick<EffortRecipe, "kind" | "thinkingTokenMult"> &
+    Partial<Pick<EffortRecipe, "capabilityBias">>,
+  tokenEfficiency: number,
+  outputTokenShare = 0.35,
+): EffortRequestMultipliers {
+  const outputShare = clampUnit(outputTokenShare);
+  const inputShare = 1 - outputShare;
+  const generatedTokenMultiplier = serveTokenMultiplierForRecipe(
+    recipe,
+    tokenEfficiency,
+  );
+  const billedTokenMultiplier =
+    inputShare + outputShare * generatedTokenMultiplier;
+  const computeTokenMultiplier =
+    inputShare +
+    outputShare *
+      generatedTokenMultiplier *
+      effortComputeIntensityForRecipe(recipe);
+  return {
+    generatedTokenMultiplier,
+    billedTokenMultiplier,
+    computeTokenMultiplier,
+    computeIntensityMultiplier:
+      computeTokenMultiplier / Math.max(1e-9, billedTokenMultiplier),
+  };
+}
+
+export interface PriceSensitiveEffortChoice {
+  shares: Record<string, number>;
+  preferredRecipeId: string;
+  generatedTokenMultiplier: number;
+  billedTokenMultiplier: number;
+  computeTokenMultiplier: number;
+  computeIntensityMultiplier: number;
+  complaintPressure: number;
+  realizedCapability: number;
+}
+
+/**
+ * Deterministic nested choice between the effort recipes exposed by an API.
+ * Expensive endpoints shift elastic customers toward cheaper reasoning while
+ * retaining complaint pressure when a capable recipe is priced out of reach.
+ */
+export function priceSensitiveEffortChoice(input: {
+  model: Pick<
+    Model,
+    | "capability"
+    | "benchmarks"
+    | "productProfile"
+    | "family"
+    | "productPreset"
+    | "modalities"
+  >;
+  ratioToPeer: number | null;
+  priceElasticity: number;
+  outputTokenShare?: number;
+}): PriceSensitiveEffortChoice {
+  const profile = input.model.productProfile;
+  const instant = instantRecipe();
+  const offered = profile ? servedRecipes(profile) : [instant];
+  const recipes = modelSupportsEffortHeads(input.model) ? offered : [instant];
+  const tokenEfficiency = profile?.tokenEfficiency ?? 50;
+  const ratio = Math.max(0.12, Math.min(25, input.ratioToPeer ?? 1));
+  const elasticity = Math.max(0.05, Math.min(3, input.priceElasticity));
+  const scored = recipes.map((recipe) => {
+    const economics = effortRequestMultipliers(
+      recipe,
+      tokenEfficiency,
+      input.outputTokenShare,
+    );
+    const view = effortViewForRecipe(input.model, recipe.id);
+    const capability = view?.capability ?? input.model.capability;
+    const capabilityLift = Math.max(0, capability - input.model.capability);
+    const capabilityUtility = capabilityLift * 0.14;
+    const costUtility =
+      Math.log(Math.max(1, economics.billedTokenMultiplier)) *
+      elasticity *
+      Math.sqrt(ratio) *
+      0.72;
+    return {
+      recipe,
+      economics,
+      capability,
+      capabilityLift,
+      capabilityUtility,
+      costUtility,
+      utility: capabilityUtility - costUtility,
+    };
+  });
+  const maxUtility = Math.max(...scored.map((item) => item.utility));
+  const weights = scored.map((item) =>
+    Math.exp((item.utility - maxUtility) / 0.72),
+  );
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  const shares: Record<string, number> = {};
+  scored.forEach((item, index) => {
+    shares[item.recipe.id] = weights[index]! / Math.max(1e-12, total);
+  });
+  const preferredRecipeId = [...scored].sort(
+    (a, b) =>
+      (shares[b.recipe.id] ?? 0) - (shares[a.recipe.id] ?? 0) ||
+      a.recipe.thinkingTokenMult - b.recipe.thinkingTokenMult,
+  )[0]!.recipe.id;
+  const blend = (value: (item: (typeof scored)[number]) => number) =>
+    scored.reduce(
+      (sum, item) => sum + (shares[item.recipe.id] ?? 0) * value(item),
+      0,
+    );
+  const billedTokenMultiplier = blend(
+    (item) => item.economics.billedTokenMultiplier,
+  );
+  const computeTokenMultiplier = blend(
+    (item) => item.economics.computeTokenMultiplier,
+  );
+  const complaintPressure = scored.reduce((worst, item) => {
+    if (item.recipe.kind === "instant" || item.capabilityLift <= 0) return worst;
+    const resistance =
+      Math.max(0, item.costUtility - item.capabilityUtility - 0.2) / 3;
+    return Math.max(
+      worst,
+      Math.min(1, resistance * Math.min(1, item.capabilityLift / 8)),
+    );
+  }, 0);
+  return {
+    shares,
+    preferredRecipeId,
+    generatedTokenMultiplier: blend(
+      (item) => item.economics.generatedTokenMultiplier,
+    ),
+    billedTokenMultiplier,
+    computeTokenMultiplier,
+    computeIntensityMultiplier:
+      computeTokenMultiplier / Math.max(1e-9, billedTokenMultiplier),
+    complaintPressure,
+    realizedCapability: blend((item) => item.capability),
+  };
+}
+
 const HARD_BENCHES: readonly (keyof BenchmarkScores)[] = [
   "math",
   "coding",
@@ -656,7 +1009,13 @@ export function applyEffortLiftFromRecipe(
     "kind" | "trained" | "thinkingTokenMult" | "quality"
   > &
     Partial<
-      Pick<EffortRecipe, "capabilityBias" | "trainPfDays" | "targetPfDays">
+      Pick<
+        EffortRecipe,
+        | "capabilityBias"
+        | "trainPfDays"
+        | "targetPfDays"
+        | "realizedLiftPct"
+      >
     >,
 ): { capability: number; benchmarks: BenchmarkScores } {
   if (!recipe.trained && recipe.kind !== "instant") {
@@ -671,8 +1030,8 @@ export function applyEffortLiftFromRecipe(
     }
     const required = Math.max(1, recipe.targetPfDays ?? funded);
     const extra = effortQualityFromTrain(funded, required);
-    const capLift = 3.6 * extra * capScale;
-    const benchLift = 3.1 * extra * capScale;
+    const capLift = Math.min(capability * 0.2, 3.6 * extra * capScale);
+    const benchLift = Math.min(capability * 0.18, 3.1 * extra * capScale);
     const next = { ...benches };
     for (const id of HARD_BENCHES) {
       next[id] = clamp(next[id] + benchLift);
@@ -680,14 +1039,18 @@ export function applyEffortLiftFromRecipe(
     next.mmlu = clamp(next.mmlu + benchLift * 0.45);
     next.personality = benches.personality;
     return {
-      capability: clamp(capability + capLift),
+      capability: clamp(Math.min(capability * 1.2, capability + capLift)),
       benchmarks: next,
     };
   }
   const quality = clampUnit(recipe.quality);
-  const usefulMult = 1 + (Math.max(1, recipe.thinkingTokenMult) - 1) * quality;
-  const capLift = 7.2 * Math.log2(Math.max(1, usefulMult)) * quality * capScale;
-  const benchLift = 6.4 * Math.log2(Math.max(1, usefulMult)) * quality * capScale;
+  const ceiling = effortCapabilityLiftCeilingPct(recipe.thinkingTokenMult);
+  const realizedLiftPct =
+    recipe.realizedLiftPct != null
+      ? Math.max(0, Math.min(ceiling, recipe.realizedLiftPct))
+      : Math.min(ceiling, ceiling * quality * capScale);
+  const capLift = Math.min(capability * 0.2, capability * realizedLiftPct);
+  const benchLift = capLift * 0.9;
   const next = { ...benches };
   for (const id of HARD_BENCHES) {
     next[id] = clamp(next[id] + benchLift);
@@ -695,7 +1058,7 @@ export function applyEffortLiftFromRecipe(
   next.mmlu = clamp(next.mmlu + benchLift * 0.45);
   next.personality = benches.personality;
   return {
-    capability: clamp(capability + capLift),
+    capability: clamp(Math.min(capability * 1.2, capability + capLift)),
     benchmarks: next,
   };
 }
@@ -914,19 +1277,32 @@ export function effortEconomics(
   pfPerMTokBase: number,
 ): {
   tokenMult: number;
+  billedTokenMult: number;
+  computeTokenMult: number;
+  computeIntensityMult: number;
   pfPerMTok: number;
   usdPerMTok: number;
   usdPer1kQueries: number;
 } {
-  const tokenMult = serveTokenMultiplierForRecipe(recipe, tokenEfficiency);
-  const pfPerMTok = Math.max(0, pfPerMTokBase) * tokenMult;
-  const usdPerMTok = pfPerMTok * Math.max(0, usdPerPfDay);
-  const tokensPer1kQueries = 800 * tokenMult;
+  const request = effortRequestMultipliers(recipe, tokenEfficiency);
+  const pfPerMTok =
+    Math.max(0, pfPerMTokBase) * request.computeTokenMultiplier;
+  const pfPerBilledMTok =
+    pfPerMTok / Math.max(1e-9, request.billedTokenMultiplier);
+  const usdPerMTok = pfPerBilledMTok * Math.max(0, usdPerPfDay);
   return {
-    tokenMult,
+    tokenMult: request.generatedTokenMultiplier,
+    billedTokenMult: request.billedTokenMultiplier,
+    computeTokenMult: request.computeTokenMultiplier,
+    computeIntensityMult: request.computeIntensityMultiplier,
     pfPerMTok,
     usdPerMTok,
-    usdPer1kQueries: (tokensPer1kQueries / 1_000_000) * usdPerMTok,
+    // 800 is the Instant-equivalent token envelope for 1K short queries.
+    // pfPerMTok already includes billed expansion and compute intensity once.
+    usdPer1kQueries:
+      (800 / 1_000_000) *
+      pfPerMTok *
+      Math.max(0, usdPerPfDay),
   };
 }
 
@@ -995,8 +1371,15 @@ export function effortBoardsFor(
         served: recipe.served,
         capability: view?.capability ?? model.capability,
         tokenMult: econ.tokenMult,
-        usdPerMTok:
-          usdPerMTokBase != null ? usdPerMTokBase * econ.tokenMult : null,
+        generatedTokenMult: econ.tokenMult,
+        billedTokenMult: econ.billedTokenMult,
+        computeTokenMult: econ.computeTokenMult,
+        computeIntensityMult: econ.computeIntensityMult,
+        usdPerMTok: usdPerMTokBase,
+        effectiveUsdPerBaseMTok:
+          usdPerMTokBase != null
+            ? usdPerMTokBase * econ.computeTokenMult
+            : null,
         math: view?.benchmarks.math ?? model.benchmarks.math,
         coding: view?.benchmarks.coding ?? model.benchmarks.coding,
         science: view?.benchmarks.science ?? model.benchmarks.science,

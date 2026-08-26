@@ -1,4 +1,8 @@
-import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import type { TrainingJob } from "../../../../sim/types";
 import type { TrainingResourceAllocation } from "../../../../sim/systems/training";
 import {
@@ -9,13 +13,9 @@ import {
 import { formatParams } from "../../../../sim/balance/training";
 import { HudButton, HudMeter, StatusChip } from "../../ui/HudPrimitives";
 import { checkpointBranchDirectionLabel } from "./checkpointBranching";
+import type { ModelsWorkspaceView } from "./modelsResponsiveLayout";
 
-export type ModelsWorkspaceView =
-  | "runs"
-  | "checkpoints"
-  | "labs"
-  | "routers"
-  | "fleet";
+export type { ModelsWorkspaceView } from "./modelsResponsiveLayout";
 
 const VIEW_ITEMS: ReadonlyArray<{
   view: ModelsWorkspaceView;
@@ -59,6 +59,8 @@ export function ModelsTrainingQueue({
   onResume?: (jobId: string) => void;
   onRecover?: (jobId: string, checkpointId: string) => void;
 }) {
+  const tabsRef = useRef<HTMLDivElement>(null);
+  const runsRef = useRef<HTMLDivElement>(null);
   const viewModels = sortTrainingJobViewModels(
     jobs.map((job) =>
       buildTrainingJobViewModel(job, {
@@ -66,6 +68,38 @@ export function ModelsTrainingQueue({
       }),
     ),
   );
+  useEffect(() => {
+    const strip = tabsRef.current;
+    const active = strip?.querySelector<HTMLElement>('[aria-selected="true"]');
+    if (!strip || !active) return;
+    const left = active.offsetLeft;
+    const right = left + active.offsetWidth;
+    const nextLeft =
+      left < strip.scrollLeft
+        ? Math.max(0, left - 8)
+        : right > strip.scrollLeft + strip.clientWidth
+          ? right - strip.clientWidth + 8
+          : strip.scrollLeft;
+    if (nextLeft !== strip.scrollLeft) {
+      strip.scrollTo?.({ left: nextLeft, behavior: "smooth" });
+    }
+  }, [activeView]);
+  useEffect(() => {
+    const list = runsRef.current;
+    const active = list?.querySelector<HTMLElement>('[data-selected="true"]');
+    if (!list || !active) return;
+    const top = active.offsetTop;
+    const bottom = top + active.offsetHeight;
+    const nextTop =
+      top < list.scrollTop
+        ? Math.max(0, top - 8)
+        : bottom > list.scrollTop + list.clientHeight
+          ? bottom - list.clientHeight + 8
+          : list.scrollTop;
+    if (nextTop !== list.scrollTop) {
+      list.scrollTo?.({ top: nextTop, behavior: "smooth" });
+    }
+  }, [selectedJobId]);
   const moveTab = (
     event: ReactKeyboardEvent<HTMLButtonElement>,
     current: ModelsWorkspaceView,
@@ -94,9 +128,10 @@ export function ModelsTrainingQueue({
     <aside
       aria-label="Training activity"
       data-model-training-queue="true"
-      className="models-training-queue rounded-lg border border-line/70 bg-panel-2/55 p-2.5"
+      data-models-short-landscape="compact-runs"
+      className="models-training-queue min-w-0 rounded-lg border border-line/70 bg-panel-2/55 p-2.5"
     >
-      <header className="px-0.5 pb-2">
+      <header className="hidden px-0.5 pb-2 sm:block">
         <p className="hud-eyebrow">Campaign</p>
       </header>
 
@@ -107,7 +142,13 @@ export function ModelsTrainingQueue({
         role="tablist"
         aria-orientation="horizontal"
       >
-        <div className="models-view-tabs" data-models-view-tabs="true">
+        <div
+          ref={tabsRef}
+          className="models-view-tabs panel-scroll max-lg:!flex max-lg:snap-x max-lg:snap-mandatory max-lg:overflow-x-auto max-lg:overscroll-x-contain"
+          data-models-view-tabs="true"
+          data-mobile-scroll="horizontal"
+          data-models-short-landscape="scroll"
+        >
           {VIEW_ITEMS.map(({ view, label, unit }) => {
             const active = activeView === view;
             const count = viewCounts[view];
@@ -126,7 +167,7 @@ export function ModelsTrainingQueue({
                 data-selected={active ? "true" : "false"}
                 onClick={() => onViewChange(view)}
                 onKeyDown={(event) => moveTab(event, view)}
-                className={`models-view-tab !flex min-h-12 min-w-[6.5rem] flex-1 !flex-col !items-start !justify-center !gap-1 !rounded-md !border !px-2.5 !py-2 !text-left ${
+                className={`models-view-tab !flex min-h-12 min-w-[6.5rem] flex-1 !flex-col !items-start !justify-center !gap-1 !rounded-md !border !px-2.5 !py-2 !text-left max-lg:!min-w-[5.25rem] max-lg:!flex-none max-lg:snap-start ${
                   active
                     ? "!border-mint/60 !bg-mint/10 !text-mint"
                     : "!border-line/60 !bg-void/30 !text-muted hover:!border-line hover:!text-bone"
@@ -136,7 +177,7 @@ export function ModelsTrainingQueue({
                   {label}
                 </span>
                 <span className="font-mono text-[0.625rem] tabular-nums leading-none text-bone">
-                  {count} {unit}
+                  {count}<span className="max-lg:sr-only"> {unit}</span>
                 </span>
               </HudButton>
             );
@@ -146,8 +187,9 @@ export function ModelsTrainingQueue({
 
       {viewModels.length > 0 ? (
         <div
+          ref={runsRef}
           role="list"
-          className="grid max-h-[28rem] gap-1.5 overflow-y-auto panel-scroll"
+          className="panel-scroll grid max-h-[28rem] touch-pan-y gap-1.5 overflow-y-auto !overscroll-y-auto max-lg:max-h-44"
           data-run-count={viewModels.length}
         >
           {viewModels.map((viewModel) => {
@@ -194,7 +236,7 @@ export function ModelsTrainingQueue({
                       {viewModel.etaLabel}
                     </span>
                     {viewModel.job.parentCheckpointId ? (
-                      <span className="mt-1 flex items-center gap-1.5 text-[0.625rem] text-research">
+                      <span className="mt-1 hidden items-center gap-1.5 text-[0.625rem] text-research sm:flex">
                         <span aria-hidden="true">↳</span>
                         {checkpointBranchDirectionLabel(
                           viewModel.job.branchDirection ?? "general",
@@ -219,7 +261,7 @@ export function ModelsTrainingQueue({
                     <HudButton
                       type="button"
                       variant="ghost"
-                      className="my-1 mr-1 min-h-11 self-start px-2 text-[0.625rem] sm:min-h-9"
+                      className="my-1 mr-1 min-h-11 self-start px-2 text-[0.625rem] xl:min-h-9"
                       title={
                         action.kind === "recover"
                           ? "Recover this failed post-training run from its eligible checkpoint."

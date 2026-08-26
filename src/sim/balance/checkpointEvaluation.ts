@@ -1,6 +1,13 @@
 import { createRng, hashSeed, seededId } from "../rng";
 import type { BenchmarkMetricId, BenchmarkSuiteId, Model } from "../types";
 import {
+  benchmarkEffortRecipes,
+  benchmarkTaskWorkload,
+  estimateBenchmarkRun,
+  type BenchmarkRunEstimate,
+} from "./benchmarkCost";
+import { INSTANT_EFFORT_ID, effortViewForRecipe } from "./modelProduct";
+import {
   buildBenchmarkSuites,
   evaluationMarketsForModel,
   suiteComposite,
@@ -17,6 +24,8 @@ export interface CheckpointEvaluationRequest {
   suiteIds: BenchmarkSuiteId[];
   budgetTier: CheckpointEvaluationBudgetTier;
   mode: CheckpointEvaluationMode;
+  /** Trained inference recipe used for text/reasoning tasks. Legacy means Instant. */
+  effortRecipeId?: string;
 }
 
 export interface CheckpointEvaluationQuote {
@@ -28,7 +37,17 @@ export interface CheckpointEvaluationQuote {
   suiteCost: number;
   /** Recruiting, honoraria, secure lab, and pilot-operation cost. */
   panelCost: number;
+  /** API-equivalent inference value for every task in this concrete run. */
+  inferenceCost?: number;
   totalCost: number;
+  effortRecipeId?: string;
+  taskCount?: number;
+  costPerTask?: number;
+  computePfDays?: number;
+  averageLatencyMs?: number;
+  estimatedTokensPerSecond?: number;
+  billedTokens?: number;
+  workload?: BenchmarkRunEstimate;
   durationDays: number;
   reviewerCount: number;
   /** Expected measurement accuracy, not model capability. */
@@ -49,6 +68,8 @@ export interface PendingCheckpointEvaluation {
   quote: CheckpointEvaluationQuote;
   scheduledDay: number;
   readyDay: number;
+  /** Training-pool PF completed. Missing preserves legacy calendar-only work. */
+  computeProgressPfDays?: number;
 }
 
 export interface CheckpointRivalComparison {
@@ -153,11 +174,30 @@ const BUDGETS: Record<
     accuracy: number;
     confidence: number;
     days: number;
+    tasksPerMetric: number;
   }
 > = {
-  lean: { spend: 50_000, accuracy: 0.65, confidence: 0.72, days: 0 },
-  standard: { spend: 100_000, accuracy: 0.775, confidence: 0.84, days: 2 },
-  rigorous: { spend: 150_000, accuracy: 0.9, confidence: 0.96, days: 5 },
+  lean: {
+    spend: 50_000,
+    accuracy: 0.65,
+    confidence: 0.72,
+    days: 0,
+    tasksPerMetric: 200,
+  },
+  standard: {
+    spend: 100_000,
+    accuracy: 0.775,
+    confidence: 0.84,
+    days: 2,
+    tasksPerMetric: 500,
+  },
+  rigorous: {
+    spend: 150_000,
+    accuracy: 0.9,
+    confidence: 0.96,
+    days: 5,
+    tasksPerMetric: 1_200,
+  },
 };
 
 const MODES: Record<
@@ -253,6 +293,10 @@ export function validateCheckpointEvaluationRequest(
   if (!(request.budgetTier in BUDGETS))
     errors.push("Unknown evaluation budget tier.");
   if (!(request.mode in MODES)) errors.push("Unknown evaluation panel mode.");
+  const requestedRecipe = request.effortRecipeId ?? INSTANT_EFFORT_ID;
+  if (!benchmarkEffortRecipes(model).some((recipe) => recipe.id === requestedRecipe)) {
+    errors.push(`The ${requestedRecipe} effort recipe is not trained.`);
+  }
   return errors;
 }
 
@@ -295,6 +339,33 @@ export function quoteCheckpointEvaluation(
         ? 20_000
         : 35_000;
   const panelCost = mode.panelCost + reviewerCount * reviewerHonorarium;
+  const effortRecipeId = request.effortRecipeId ?? INSTANT_EFFORT_ID;
+  const priceIn = Math.max(
+    0,
+    model.apiPriceInPerMTok ??
+      model.suggestedApiPriceIn ??
+      model.apiPricePerMTok ??
+      model.suggestedApiPrice ??
+      0,
+  );
+  const priceOut = Math.max(
+    0,
+    model.apiPriceOutPerMTok ??
+      model.suggestedApiPriceOut ??
+      model.apiPricePerMTok ??
+      model.suggestedApiPrice ??
+      0,
+  );
+  const workload = estimateBenchmarkRun(
+    model,
+    request.suiteIds.flatMap((suiteId) =>
+      SUITE_METRICS[suiteId].map((metric) => metric.id),
+    ),
+    effortRecipeId,
+    { priceIn, priceOut },
+    budget.tasksPerMetric,
+  );
+  const inferenceCost = workload.tokenCost;
   // More reviewers and more outside organizations increase the operational surface.
   const leakRisk =
     request.mode === "internal"
@@ -311,7 +382,19 @@ export function quoteCheckpointEvaluation(
     spendPerSuite: budget.spend,
     suiteCost,
     panelCost,
-    totalCost: suiteCost + panelCost,
+    inferenceCost,
+    totalCost: suiteCost + panelCost + inferenceCost,
+    effortRecipeId,
+    taskCount: workload.taskCount,
+    costPerTask:
+      workload.taskCount > 0
+        ? (suiteCost + panelCost + inferenceCost) / workload.taskCount
+        : 0,
+    computePfDays: workload.computePfDays,
+    averageLatencyMs: workload.averageLatencyMs,
+    estimatedTokensPerSecond: workload.estimatedTokensPerSecond,
+    billedTokens: workload.billedTokens,
+    workload,
     durationDays:
       mode.days + budget.days + Math.max(0, request.suiteIds.length - 1),
     reviewerCount,
@@ -349,6 +432,7 @@ export function createPendingCheckpointEvaluation(
     quote,
     scheduledDay,
     readyDay: scheduledDay + quote.durationDays,
+    computeProgressPfDays: 0,
   };
 }
 
@@ -361,6 +445,30 @@ function suiteScores(
     buildBenchmarkSuites(model).suites[suiteId] ??
     {}
   );
+}
+
+/**
+ * Private effort runs project the selected checkpoint only. Public rival
+ * evidence and official rankings stay on persisted Instant scores.
+ */
+function effortAdjustedMetricScore(
+  model: Model,
+  metricId: BenchmarkMetricId,
+  latent: number,
+  effortRecipeId: string,
+): number {
+  const workload = benchmarkTaskWorkload(metricId);
+  if (
+    effortRecipeId === INSTANT_EFFORT_ID ||
+    (workload !== "language" &&
+      workload !== "coding" &&
+      workload !== "reasoning")
+  ) {
+    return clamp(latent);
+  }
+  const view = effortViewForRecipe(model, effortRecipeId);
+  const lift = Math.max(0, (view?.capability ?? model.capability) - model.capability);
+  return clamp(latent + lift);
 }
 
 function measuredScore(
@@ -523,6 +631,7 @@ export function resolveCheckpointEvaluation(
   input: ResolveCheckpointEvaluationInput,
 ): CheckpointEvaluationReport {
   const quote = quoteCheckpointEvaluation(input.model, input.request);
+  const effortRecipeId = input.request.effortRecipeId ?? INSTANT_EFFORT_ID;
   const completedDay =
     input.completedDay ?? input.scheduledDay + quote.durationDays;
   const contamination = quote.contaminationRisk;
@@ -532,7 +641,12 @@ export function resolveCheckpointEvaluation(
       const targetScores = suiteScores(input.model, suiteId);
       const metrics = SUITE_METRICS[suiteId].map((definition) => {
         const target = measuredScore(
-          targetScores[definition.id] ?? 0,
+          effortAdjustedMetricScore(
+            input.model,
+            definition.id,
+            targetScores[definition.id] ?? 0,
+            effortRecipeId,
+          ),
           input.seed,
           input.model.id,
           input.request.mode,
@@ -647,6 +761,7 @@ export function resolveCheckpointEvaluation(
       completedDay,
       input.request.mode,
       input.request.budgetTier,
+      effortRecipeId,
       input.request.suiteIds.join(","),
     ),
     modelId: input.model.id,

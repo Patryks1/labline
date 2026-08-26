@@ -107,6 +107,10 @@ describe("CheckpointRail", () => {
     expect(markup).toContain("source run keeps");
     expect(markup).toContain('data-hud-variant="danger"');
     expect(markup).toContain('aria-label="Checkpoint history"');
+    expect(markup).toContain('data-mobile-scroll="horizontal"');
+    expect(markup).toContain('data-checkpoint-evidence-disclosure="true"');
+    expect(markup).toContain("snap-start");
+    expect(markup).toContain("[&amp;_.hud-button]:!min-h-11");
     expect(markup).not.toContain("Training run checkpoint graph");
   });
 
@@ -278,6 +282,9 @@ describe("CheckpointRail", () => {
     );
 
     expect(markup).toContain("Evidence ledger · 1 report · consensus");
+    expect(markup).toContain("metric results");
+    expect(markup).toContain("panel-scroll hidden overflow-x-auto xl:block");
+    expect(markup).not.toMatch(/<details[^>]*\sopen(?:=|\s|>)/);
     expect(markup).toContain("Day 46 · NDA external panel");
     expect(markup).toContain("+3.2 vs Northstar · rank 1/5");
     expect(markup).toContain("reviewer calibration -1.2");

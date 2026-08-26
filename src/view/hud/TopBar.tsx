@@ -64,7 +64,11 @@ export function TopBar() {
 
         {/* ── Zone 1: day clock + transport ── */}
         <div className="top-command-controls flex shrink-0 items-center gap-2 sm:gap-2.5">
-          <div className="top-command-clock" data-paused={paused}>
+          <div
+            className="top-command-clock"
+            data-paused={paused}
+            data-mobile-priority="primary"
+          >
             <div className="top-command-clock__icon" aria-hidden="true">
               <CalendarBlank size="1rem" weight="duotone" />
             </div>
@@ -73,7 +77,7 @@ export function TopBar() {
                 <span className="top-command-clock__label">DAY</span>
                 <strong className="top-command-clock__day">{state.day.toLocaleString()}</strong>
               </div>
-              <div className="top-command-clock__meta">
+              <div className="top-command-clock__meta" data-mobile-detail="secondary">
                 <time>{campaignDate}</time>
               </div>
             </div>
@@ -131,6 +135,7 @@ export function TopBar() {
           <Metric
             label="Cash"
             value={money(playerCompany.finance.cash)}
+            mobilePriority="primary"
             danger={playerCompany.finance.cash < 1e6}
             active={activeMetric === 'cash'}
             onClick={() => setActiveMetric((current) => current === 'cash' ? null : 'cash')}
@@ -138,6 +143,7 @@ export function TopBar() {
           <Metric
             label="Day P&L"
             value={money(pnl)}
+            mobilePriority="primary"
             danger={pnl < 0}
             active={activeMetric === 'net'}
             onClick={() => setActiveMetric((current) => current === 'net' ? null : 'net')}
@@ -145,12 +151,14 @@ export function TopBar() {
           <Metric
             label="Share"
             value={pct(finance.share)}
+            mobilePriority="secondary"
             active={activeMetric === 'share'}
             onClick={() => setActiveMetric((current) => current === 'share' ? null : 'share')}
           />
           <Metric
             label="Value"
             value={money(finance.valuation)}
+            mobilePriority="tertiary"
             className="hidden md:flex"
             active={activeMetric === 'valuation'}
             onClick={() => setActiveMetric((current) => current === 'valuation' ? null : 'valuation')}
@@ -158,6 +166,7 @@ export function TopBar() {
           <Metric
             label="Brand"
             value={`${num(finance.brand ?? 0, 0)}/100`}
+            mobilePriority="tertiary"
             className="hidden md:flex"
             active={activeMetric === 'brand'}
             onClick={() => setActiveMetric((current) => current === 'brand' ? null : 'brand')}
@@ -241,6 +250,7 @@ function Metric({
   active,
   onClick,
   controlsId = 'kpi-history-popover',
+  mobilePriority = 'secondary',
   className = '',
 }: {
   label: string
@@ -249,6 +259,7 @@ function Metric({
   active?: boolean
   onClick?: () => void
   controlsId?: string
+  mobilePriority?: 'primary' | 'secondary' | 'tertiary'
   className?: string
 }) {
   const Comp = onClick ? 'button' : 'div'
@@ -259,6 +270,7 @@ function Metric({
       aria-pressed={onClick ? active : undefined}
       aria-expanded={onClick ? active === true : undefined}
       aria-controls={onClick ? controlsId : undefined}
+      data-mobile-priority={mobilePriority}
       title={onClick ? `View ${label} history` : undefined}
       className={`top-command-metric flex min-w-[4rem] max-w-[7rem] shrink flex-col items-start rounded-md px-1 py-1 leading-none ${
         onClick ? 'text-left hover:opacity-90' : ''

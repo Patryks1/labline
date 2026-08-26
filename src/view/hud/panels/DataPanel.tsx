@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState, type TouchEvent } from "react";
 import { Check, Trash } from "@phosphor-icons/react";
 import { useGameStore } from "../../../store/gameStore";
 import { ResearchUnlockLink } from "../ui/ResearchUnlockLink";
@@ -29,7 +29,6 @@ import {
   totalProcessed,
   totalRaw,
   totalSources,
-  synthTeacherFit,
   type DataPruneEstimate,
   type SynthBudgetEstimate,
 } from "../../../sim/systems/data";
@@ -73,9 +72,54 @@ import {
   NegotiationMessage,
   NegotiationMetric,
 } from "../ui/NegotiationRoom";
+import {
+  parseSyntheticTeacherSelectValue,
+  syntheticTeacherSelectOptions,
+  syntheticTeacherSelectValue,
+} from "../ui/trainingSyntheticTeacherOptions";
 
 type CorpusSourceKey = "web" | "bought" | "user" | "synth";
 type DataTab = "stocks" | "sources" | "market" | "synth";
+
+const DATA_TAB_ORDER: readonly DataTab[] = [
+  "stocks",
+  "sources",
+  "market",
+  "synth",
+];
+
+/**
+ * Resolve a deliberate horizontal swipe without stealing ordinary vertical
+ * scrolling. Keeping the threshold logic pure also makes the gesture contract
+ * easy to verify without a browser-sized test harness.
+ */
+function dataTabAfterSwipe(
+  current: DataTab,
+  deltaX: number,
+  deltaY: number,
+): DataTab {
+  if (Math.abs(deltaX) < 56 || Math.abs(deltaX) < Math.abs(deltaY) * 1.25) {
+    return current;
+  }
+  const index = DATA_TAB_ORDER.indexOf(current);
+  const nextIndex = deltaX > 0 ? index + 1 : index - 1;
+  return (
+    DATA_TAB_ORDER[
+      Math.max(0, Math.min(DATA_TAB_ORDER.length - 1, nextIndex))
+    ] ?? current
+  );
+}
+
+function blocksPanelSwipe(target: EventTarget | null) {
+  return (
+    target instanceof Element &&
+    Boolean(
+      target.closest(
+        "button, a, input, select, textarea, summary, label, [data-swipe-ignore='true']",
+      ),
+    )
+  );
+}
 
 const CORPUS_SOURCE_META: Record<
   CorpusSourceKey,
@@ -135,9 +179,16 @@ const QUALITY_BANDS = Object.keys(DATA_QUALITY_LABELS) as DataQualityBand[];
 
 /** Keep filter cards wide enough for their selected values in the drawer. */
 export const DATA_MARKET_FILTER_GRID_CLASS =
-  "grid-cols-1 min-[520px]:grid-cols-2 xl:grid-cols-3";
+  "grid-cols-1 min-[520px]:grid-cols-2 xl:grid-cols-3 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:grid-cols-3 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:max-h-[44vh] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:overflow-y-auto";
 export const DATA_MARKET_FILTER_SELECT_CLASS =
-  "w-full min-w-0 text-left text-[0.75rem] font-medium";
+  "min-h-11 w-full min-w-0 text-left text-[0.75rem] font-medium";
+
+export const DATA_PANEL_SWIPE_CLASS =
+  "data-panel-swipe touch-pan-y [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:space-y-2";
+export const DATA_COMPACT_SECONDARY_CLASS =
+  "sm:hidden [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:block";
+export const DATA_WIDE_SECONDARY_CLASS =
+  "hidden sm:block [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden";
 
 function FilterSelect({
   label,
@@ -151,7 +202,7 @@ function FilterSelect({
   options: readonly { value: string; label: string }[];
 }) {
   return (
-    <label className="grid min-w-0 gap-1 rounded-md border border-line/70 bg-void/55 px-2 py-2">
+    <label className="grid min-h-11 min-w-0 gap-1 rounded-md border border-line/70 bg-void/55 px-2 py-2">
       <span className="min-w-0 truncate font-mono text-[0.625rem] uppercase tracking-[0.1em] text-muted">
         {label}
       </span>
@@ -175,45 +226,65 @@ export function SynthTeacherRoutingTable({
   state,
   estimate,
   picks,
+  effortPicks,
   onPick,
 }: {
   state: SimState;
   estimate: SynthBudgetEstimate;
   picks: Record<DataDomain, string>;
-  onPick: (domain: DataDomain, modelId: string) => void;
+  effortPicks: Record<DataDomain, string>;
+  onPick: (domain: DataDomain, modelId: string, effortId: string) => void;
 }) {
   return (
-    <section
-      className="mt-3 overflow-hidden rounded-md border border-line/70 bg-void/45"
+    <details
+      className="group mt-3 overflow-hidden rounded-md border border-line/70 bg-void/45"
       aria-label="Synthetic corpus teacher routing"
     >
-      <div className="flex flex-col gap-2 border-b border-line/60 px-2.5 py-2 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
-        <div>
+      <summary className="flex min-h-11 cursor-pointer list-none flex-col justify-center gap-2 px-2.5 py-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+        <div className="min-w-0">
           <div className="font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">
-            Corpus routing
+            Corpus routing · {estimate.domains.length} domains
           </div>
-          <p className="mt-0.5 text-[0.6875rem] text-dim">
-            Yield costs research PF by teacher size. Weak teachers mint mostly
-            low-quality data; capability raises useful yield and high-Q share.
+          <p className="mt-0.5 hidden text-[0.6875rem] text-dim sm:block [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden">
+            Yield costs research PF by teacher size and thinking intensity. Weak
+            teachers mint mostly low-quality data; trained reasoning can raise
+            quality but bills more tokens and reduces fixed-budget yield.
           </p>
         </div>
-        <div className="flex gap-3 font-mono text-[0.625rem] tabular-nums text-muted sm:block sm:shrink-0 sm:text-right">
+        <div className="flex shrink-0 items-center gap-3 font-mono text-[0.625rem] tabular-nums text-muted sm:text-right">
           <div>{pct(estimate.usefulChance, 0)} useful</div>
           <div>{pct(estimate.hqChance, 0)} high-Q</div>
+          <span className="text-research group-open:hidden">Open</span>
+          <span className="hidden text-research group-open:inline">Close</span>
         </div>
-      </div>
+      </summary>
 
-      <div className="divide-y divide-line/45">
+      <div className="divide-y divide-line/45 border-t border-line/60">
         {estimate.domains.map((route) => {
-          const options = eligibleSynthTeachersForDomain(state, route.domain);
+          const options = syntheticTeacherSelectOptions(
+            eligibleSynthTeachersForDomain(state, route.domain),
+            route.domain,
+          );
           const assigned = Boolean(picks[route.domain]);
+          const selectedOption = assigned
+            ? (options.find(
+                (option) =>
+                  option.teacherId === picks[route.domain] &&
+                  option.effortId === (effortPicks[route.domain] || "instant"),
+              ) ??
+              options.find(
+                (option) =>
+                  option.teacherId === picks[route.domain] &&
+                  option.effortId === "instant",
+              ))
+            : undefined;
           const yieldDelta = route.yieldDeltaMTokPerDay;
           const costDelta = route.costDeltaPerAcceptedMTok;
           const powerDelta = route.powerDeltaKwhPerAcceptedMTok;
           return (
             <div
               key={route.domain}
-              className="grid gap-2 px-2.5 py-2 sm:grid-cols-[6.25rem_minmax(11rem,1fr)_minmax(15rem,1.2fr)] sm:items-center"
+              className="grid gap-2 px-2.5 py-2 min-[520px]:grid-cols-[6.25rem_minmax(0,1fr)] min-[520px]:items-center xl:grid-cols-[6.25rem_minmax(11rem,1fr)_minmax(15rem,1.2fr)]"
             >
               <div className="min-w-0">
                 <div className="text-[0.75rem] font-semibold text-bone">
@@ -231,25 +302,39 @@ export function SynthTeacherRoutingTable({
                 </span>
                 <HudSelect
                   aria-label={`Teacher for ${DATA_DOMAIN_META[route.domain].label} corpus`}
-                  value={picks[route.domain]}
-                  onChange={(event) => onPick(route.domain, event.target.value)}
-                  className="w-full text-[0.6875rem] font-medium focus:border-research/70"
+                  value={
+                    selectedOption
+                      ? syntheticTeacherSelectValue(
+                          selectedOption.teacherId,
+                          selectedOption.effortId,
+                        )
+                      : ""
+                  }
+                  onChange={(event) => {
+                    const parsed = parseSyntheticTeacherSelectValue(
+                      event.target.value,
+                    );
+                    onPick(
+                      route.domain,
+                      parsed?.teacherId ?? "",
+                      parsed?.effortId ?? "",
+                    );
+                  }}
+                  className="min-h-11 w-full text-[0.6875rem] font-medium focus:border-research/70"
                 >
                   <option value="" className="bg-void">
-                    Auto · {route.autoTeacher?.name ?? "No eligible model"}
+                    Auto · {route.autoTeacher?.name ?? "No eligible model"} ·
+                    Instant
                   </option>
-                  {options.map((model) => {
-                    const fit = synthTeacherFit(model, route.domain);
-                    return (
-                      <option
-                        key={model.id}
-                        value={model.id}
-                        className="bg-void"
-                      >
-                        {model.name} · fit {Math.round(fit.overallFit * 100)}
-                      </option>
-                    );
-                  })}
+                  {options.map((option) => (
+                    <option
+                      key={option.value}
+                      value={option.value}
+                      className="bg-void"
+                    >
+                      {option.label}
+                    </option>
+                  ))}
                 </HudSelect>
                 {route.validation ? (
                   <span className="mt-1 block text-[0.625rem] text-warning">
@@ -258,8 +343,8 @@ export function SynthTeacherRoutingTable({
                 ) : null}
               </label>
 
-              <div className="min-w-0 font-mono text-[0.625rem] tabular-nums">
-                <div className="grid grid-cols-3 gap-2 text-muted">
+              <div className="min-w-0 font-mono text-[0.625rem] tabular-nums min-[520px]:col-span-2 xl:col-span-1">
+                <div className="grid grid-cols-2 gap-2 text-muted min-[520px]:grid-cols-4">
                   <span>
                     <span className="block text-dim">Yield</span>
                     <strong className="font-medium text-bone">
@@ -270,6 +355,12 @@ export function SynthTeacherRoutingTable({
                     <span className="block text-dim">Cost</span>
                     <strong className="font-medium text-bone">
                       {money(route.costPerAcceptedMTok)}/MTok
+                    </strong>
+                  </span>
+                  <span>
+                    <span className="block text-dim">PF</span>
+                    <strong className="font-medium text-bone">
+                      {num(route.pfPerAcceptedMTok, 2)}/MTok
                     </strong>
                   </span>
                   <span>
@@ -288,15 +379,15 @@ export function SynthTeacherRoutingTable({
                   }
                 >
                   {assigned
-                    ? `vs Auto · yield ${yieldDelta >= 0 ? "+" : ""}${formatTokens(yieldDelta)}/d · cost ${costDelta >= 0 ? "+" : ""}${money(costDelta)} · power ${powerDelta >= 0 ? "+" : ""}${num(powerDelta, 1)} kWh`
-                    : `Auto · ${route.teacher?.name ?? "no eligible teacher"}`}
+                    ? `${route.effortName} · ${route.billedTokenMultiplier.toFixed(1)}× billed · ${route.computeIntensityMultiplier.toFixed(2)}× PF intensity · vs Auto yield ${yieldDelta >= 0 ? "+" : ""}${formatTokens(yieldDelta)}/d · cost ${costDelta >= 0 ? "+" : ""}${money(costDelta)}`
+                    : `Auto · ${route.teacher?.name ?? "no eligible teacher"} · Instant`}
                 </div>
               </div>
             </div>
           );
         })}
       </div>
-    </section>
+    </details>
   );
 }
 
@@ -357,6 +448,7 @@ export function DataPanel({
   );
 
   const [tab, setTab] = useState<DataTab>(initialTab);
+  const panelSwipeStart = useRef<{ x: number; y: number } | null>(null);
   const [genShare, setGenShare] = useState(
     initialAutoSynthJob?.researchShare ?? 0.25,
   );
@@ -371,6 +463,16 @@ export function DataPanel({
         ]),
       ) as Record<DataDomain, string>,
   );
+  const [synthTeacherEffortPickByDomain, setSynthTeacherEffortPickByDomain] =
+    useState<Record<DataDomain, string>>(
+      () =>
+        Object.fromEntries(
+          DATA_DOMAINS.map((domain) => [
+            domain,
+            initialAutoSynthJob?.teacherEffortIds?.[domain] ?? "",
+          ]),
+        ) as Record<DataDomain, string>,
+    );
   const [selectedSource, setSelectedSource] = useState<CorpusSourceKey>("user");
   // Per-desk delivery-mix picks. Missing entry = the desk's standard mix;
   // a present entry is the player's explicit data-type selection.
@@ -421,9 +523,26 @@ export function DataPanel({
       ) as Partial<Record<DataDomain, string>>,
     [synthTeacherPickByDomain],
   );
+  const synthTeacherEffortIds = useMemo(
+    () =>
+      Object.fromEntries(
+        DATA_DOMAINS.flatMap((domain) => {
+          const modelId = synthTeacherPickByDomain[domain];
+          const effortId = synthTeacherEffortPickByDomain[domain];
+          return modelId && effortId ? [[domain, effortId]] : [];
+        }),
+      ) as Partial<Record<DataDomain, string>>,
+    [synthTeacherEffortPickByDomain, synthTeacherPickByDomain],
+  );
   const synthEstimate = useMemo(
-    () => estimateSynthBudget(state, genShare, synthTeacherIds),
-    [state, genShare, synthTeacherIds],
+    () =>
+      estimateSynthBudget(
+        state,
+        genShare,
+        synthTeacherIds,
+        synthTeacherEffortIds,
+      ),
+    [state, genShare, synthTeacherIds, synthTeacherEffortIds],
   );
   const autoSynthJob = initialAutoSynthJob;
   const liveSynthEstimate = useMemo(
@@ -433,6 +552,7 @@ export function DataPanel({
             state,
             autoSynthJob.researchShare,
             autoSynthJob.teacherModelIds,
+            autoSynthJob.teacherEffortIds,
           )
         : synthEstimate,
     [state, autoSynthJob, synthEstimate],
@@ -684,28 +804,48 @@ export function DataPanel({
       tone: "warning",
     });
 
+  const beginPanelSwipe = (event: TouchEvent<HTMLDivElement>) => {
+    const touch = event.touches[0];
+    panelSwipeStart.current =
+      event.touches.length === 1 && touch && !blocksPanelSwipe(event.target)
+        ? { x: touch.clientX, y: touch.clientY }
+        : null;
+  };
+
+  const finishPanelSwipe = (event: TouchEvent<HTMLDivElement>) => {
+    const start = panelSwipeStart.current;
+    panelSwipeStart.current = null;
+    const touch = event.changedTouches[0];
+    if (!start || !touch || blocksPanelSwipe(event.target)) return;
+    setTab((current) =>
+      dataTabAfterSwipe(
+        current,
+        start.x - touch.clientX,
+        start.y - touch.clientY,
+      ),
+    );
+  };
+
   return (
     <PanelScaffold
       eyebrow="Assets · Rights · Synth"
       title="Data"
       description="Corpus stocks, acquisition, and synthetic generation."
+      mobileDescription="Corpus, buying & synthetic data."
       actions={
         <StatusChip tone={readyShare >= 0.7 ? "positive" : "warning"}>
           {pct(readyShare, 0)} ready
         </StatusChip>
       }
     >
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div
+        className="grid grid-cols-2 gap-2 sm:grid-cols-4"
+        data-testid="data-critical-metrics"
+      >
         <MetricTile
           label="Corpus"
           value={formatTokens(raw + proc)}
           detail={`${formatTokens(proc)} ready`}
-        />
-        <MetricTile
-          label="Licensed"
-          value={pct(licensedShare, 0)}
-          detail={`${formatTokens(sources.bought + sources.user)} bought/user`}
-          tone="positive"
         />
         <MetricTile
           label="Quality"
@@ -719,15 +859,54 @@ export function DataPanel({
                 : "neutral"
           }
         />
-        <MetricTile
-          label="Today"
-          value={`+${formatTokens(data.dayProcessed)}`}
-          detail={`${data.assets.length} assets · ${data.manifests.length} manifests`}
-          tone={autoSynthJob ? "research" : "neutral"}
-        />
+        <div className={DATA_WIDE_SECONDARY_CLASS}>
+          <MetricTile
+            label="Licensed"
+            value={pct(licensedShare, 0)}
+            detail={`${formatTokens(sources.bought + sources.user)} bought/user`}
+            tone="positive"
+          />
+        </div>
+        <div className={DATA_WIDE_SECONDARY_CLASS}>
+          <MetricTile
+            label="Today"
+            value={`+${formatTokens(data.dayProcessed)}`}
+            detail={`${data.assets.length} assets · ${data.manifests.length} manifests`}
+            tone={autoSynthJob ? "research" : "neutral"}
+          />
+        </div>
       </div>
 
-      <div className="mt-3">
+      <details
+        className={`group mt-2 rounded-md border border-line/60 bg-void/30 ${DATA_COMPACT_SECONDARY_CLASS}`}
+        data-testid="data-mobile-secondary"
+      >
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-bone">
+          <span>More corpus stats</span>
+          <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
+            {pct(licensedShare, 0)} licensed · +
+            {formatTokens(data.dayProcessed)} today
+          </span>
+        </summary>
+        <div className="grid grid-cols-2 gap-x-3 border-t border-line/60 px-2.5 py-2">
+          <StatRow
+            label="Bought / user"
+            value={formatTokens(sources.bought + sources.user)}
+          />
+          <StatRow label="Assets" value={String(data.assets.length)} />
+          <StatRow label="Manifests" value={String(data.manifests.length)} />
+          <StatRow
+            label="Domains"
+            value={`${domainsCovered}/${DATA_DOMAINS.length}`}
+          />
+        </div>
+      </details>
+
+      <div
+        className="mt-3 touch-auto overflow-x-auto overscroll-x-contain"
+        data-swipe-ignore="true"
+        data-testid="data-touch-tabs"
+      >
         <SegmentedTabs
           ariaLabel="Data views"
           active={tab}
@@ -759,7 +938,16 @@ export function DataPanel({
         />
       </div>
 
-      <div key={tab} className="panel-swap mt-3 space-y-3">
+      <div
+        key={tab}
+        className={`panel-swap mt-3 space-y-3 ${DATA_PANEL_SWIPE_CLASS}`}
+        onTouchStart={beginPanelSwipe}
+        onTouchEnd={finishPanelSwipe}
+        onTouchCancel={() => {
+          panelSwipeStart.current = null;
+        }}
+        data-testid="data-swipe-surface"
+      >
         {tab === "stocks" && (
           <>
             <GameCard
@@ -792,11 +980,25 @@ export function DataPanel({
                 <MeterBar
                   value={hygiene.pressure}
                   detail={`${formatTokens(hygiene.exposedMTok)} exposed`}
-                  tone={hygieneTone === "danger" ? "danger" : hygieneTone === "warning" ? "warning" : "positive"}
+                  tone={
+                    hygieneTone === "danger"
+                      ? "danger"
+                      : hygieneTone === "warning"
+                        ? "warning"
+                        : "positive"
+                  }
                   live={hygiene.pressure >= 0.25}
                 />
                 <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[0.625rem] tabular-nums text-muted">
-                  <span>{formatTokens(data.processQueue.reduce((sum, job) => sum + Math.max(0, job.remaining), 0))} queued</span>
+                  <span>
+                    {formatTokens(
+                      data.processQueue.reduce(
+                        (sum, job) => sum + Math.max(0, job.remaining),
+                        0,
+                      ),
+                    )}{" "}
+                    queued
+                  </span>
                   <span>{pct(hygiene.rawShare, 0)} raw/backlog</span>
                   <span>
                     {hygiene.modelDriftRate > 0
@@ -806,7 +1008,9 @@ export function DataPanel({
                 </div>
                 {hygiene.pressure >= 0.25 ? (
                   <p className="mt-1 text-[0.6875rem] leading-snug text-warning">
-                    High collection leaves dirty work in flight. Cleaning spends cash and compute; leaving it exposed degrades released models.
+                    High collection leaves dirty work in flight. Cleaning spends
+                    cash and compute; leaving it exposed degrades released
+                    models.
                   </p>
                 ) : null}
               </div>
@@ -842,19 +1046,32 @@ export function DataPanel({
                   value={`${data.processQueue.length}/6`}
                 />
               </div>
-              <div className="mt-2 grid grid-cols-2 gap-x-3">
-                <StatRow
-                  label="Chat · free plans"
-                  value={formatTokens(data.dayCollectChatFree ?? 0)}
-                />
-                <StatRow
-                  label="Chat · paid ≤$50"
-                  value={formatTokens(data.dayCollectChatPaid ?? 0)}
-                />
-              </div>
-              <p className="mt-1.5 text-[0.6875rem] leading-snug text-muted">
-                Free traffic can reach 100%; paid tiers cap collection and high rates reduce trust. Clean rejects noisy records instead of making them train-ready.
-              </p>
+              <details className="group mt-2 rounded-md border border-line/60 bg-void/25">
+                <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-bone">
+                  <span>Collection breakdown</span>
+                  <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
+                    {formatTokens(data.dayCollectChatFree ?? 0)} free ·{" "}
+                    {formatTokens(data.dayCollectChatPaid ?? 0)} paid
+                  </span>
+                </summary>
+                <div className="border-t border-line/60 px-2.5 py-2">
+                  <div className="grid grid-cols-2 gap-x-3">
+                    <StatRow
+                      label="Chat · free plans"
+                      value={formatTokens(data.dayCollectChatFree ?? 0)}
+                    />
+                    <StatRow
+                      label="Chat · paid ≤$50"
+                      value={formatTokens(data.dayCollectChatPaid ?? 0)}
+                    />
+                  </div>
+                  <p className="mt-1.5 text-[0.6875rem] leading-snug text-muted">
+                    Free traffic can reach 100%; paid tiers cap collection and
+                    high rates reduce trust. Cleaning rejects noisy records
+                    instead of making them train-ready.
+                  </p>
+                </div>
+              </details>
               <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                 <label className="flex items-center gap-2 text-[0.8125rem] text-bone">
                   <HudInput
@@ -868,6 +1085,7 @@ export function DataPanel({
                 <HudButton
                   variant="secondary"
                   onClick={() => enqueueProcessAll()}
+                  className="min-h-11"
                 >
                   Process backlog
                 </HudButton>
@@ -917,8 +1135,10 @@ export function DataPanel({
                     </span>
                     <span className="font-mono tabular-nums text-muted">
                       {money(pruneAllEstimate.cashCost)} ·{" "}
-                      {num(pruneAllEstimate.pfDays, 0)} PFd ·{" "}
-                      ~{pruneAllEstimate.estimatedDays}d · {pruneAllEstimate.researchersRequired}R · {pruneAllEstimate.engineersRequired}E
+                      {num(pruneAllEstimate.pfDays, 0)} PFd · ~
+                      {pruneAllEstimate.estimatedDays}d ·{" "}
+                      {pruneAllEstimate.researchersRequired}R ·{" "}
+                      {pruneAllEstimate.engineersRequired}E
                     </span>
                   </div>
                   <p className="mt-1 text-mint">
@@ -1118,14 +1338,14 @@ export function DataPanel({
                 />
               </div>
 
-              <div className="mt-3 border-t border-line/60 pt-3">
-                <div className="mb-2 flex items-center justify-between gap-2 text-[0.6875rem]">
+              <details className="group mt-3 rounded-md border border-line/60 bg-void/25">
+                <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.6875rem]">
                   <span className="uppercase tracking-[0.12em] text-muted">
                     Top domains
                   </span>
                   <span className="text-amber">{selectedSourceInfo.risk}</span>
-                </div>
-                <div className="anim-stagger space-y-2">
+                </summary>
+                <div className="anim-stagger space-y-2 border-t border-line/60 px-2.5 py-2">
                   {sourceDomainRows.slice(0, 4).map((row) => (
                     <MeterBar
                       key={row.domain}
@@ -1139,7 +1359,7 @@ export function DataPanel({
                     />
                   ))}
                 </div>
-              </div>
+              </details>
             </GameCard>
 
             <GameCard
@@ -1211,24 +1431,36 @@ export function DataPanel({
                               label="Quality"
                               value={`Q${Math.round(asset.quality)}`}
                             />
-                            <StatRow
-                              label="Diversity"
-                              value={pct(asset.diversity, 0)}
-                            />
-                            <StatRow
-                              label="Freshness"
-                              value={pct(asset.freshness, 0)}
-                            />
                           </div>
-                          <p className="mt-2 truncate text-[0.6875rem] text-muted">
-                            {formatMix(asset.domainWeights)}
-                          </p>
-                          <p className="mt-1 font-mono text-[0.625rem] text-muted">
-                            contamination {pct(asset.contaminationRisk, 0)}
-                            {asset.synthetic
-                              ? ` · synth depth ${asset.synthetic.generationDepth} · human anchor ${pct(asset.synthetic.humanAnchorShare, 0)}`
-                              : ""}
-                          </p>
+                          <details className="group mt-2 rounded-md border border-line/60 bg-void/25">
+                            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2 py-1.5 text-[0.6875rem] text-muted">
+                              <span>Asset details</span>
+                              <span className="font-mono tabular-nums">
+                                {pct(asset.diversity, 0)} diverse
+                              </span>
+                            </summary>
+                            <div className="border-t border-line/60 px-2 py-2">
+                              <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                                <StatRow
+                                  label="Diversity"
+                                  value={pct(asset.diversity, 0)}
+                                />
+                                <StatRow
+                                  label="Freshness"
+                                  value={pct(asset.freshness, 0)}
+                                />
+                              </div>
+                              <p className="mt-2 truncate text-[0.6875rem] text-muted">
+                                {formatMix(asset.domainWeights)}
+                              </p>
+                              <p className="mt-1 font-mono text-[0.625rem] text-muted">
+                                contamination {pct(asset.contaminationRisk, 0)}
+                                {asset.synthetic
+                                  ? ` · synth depth ${asset.synthetic.generationDepth} · human anchor ${pct(asset.synthetic.humanAnchorShare, 0)}`
+                                  : ""}
+                              </p>
+                            </div>
+                          </details>
                         </div>
                       );
                     })}
@@ -1245,7 +1477,7 @@ export function DataPanel({
 
         {tab === "market" && (
           <>
-            <div className="grid gap-2 min-[420px]:grid-cols-3">
+            <div className="grid grid-cols-2 gap-2 min-[420px]:grid-cols-3">
               <MetricTile
                 label="Open bids"
                 value={String(playerDataOrders.length)}
@@ -1255,20 +1487,35 @@ export function DataPanel({
                 value={money(dataReserved)}
                 tone="warning"
               />
-              <MetricTile
-                label="Last fill"
-                value={
-                  latestDataFills[0]
-                    ? formatTokens(latestDataFills[0].quantity)
-                    : "—"
-                }
-                detail={
-                  latestDataFills[0]
-                    ? `${money(latestDataFills[0].unitPrice)}/MTok`
-                    : undefined
-                }
-              />
+              <div className={DATA_WIDE_SECONDARY_CLASS}>
+                <MetricTile
+                  label="Last fill"
+                  value={
+                    latestDataFills[0]
+                      ? formatTokens(latestDataFills[0].quantity)
+                      : "—"
+                  }
+                  detail={
+                    latestDataFills[0]
+                      ? `${money(latestDataFills[0].unitPrice)}/MTok`
+                      : undefined
+                  }
+                />
+              </div>
             </div>
+
+            <details
+              className={`group rounded-md border border-line/60 bg-void/25 ${DATA_COMPACT_SECONDARY_CLASS}`}
+            >
+              <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-bone">
+                <span>Last market fill</span>
+                <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
+                  {latestDataFills[0]
+                    ? `${formatTokens(latestDataFills[0].quantity)} · ${money(latestDataFills[0].unitPrice)}/MTok`
+                    : "No fills"}
+                </span>
+              </summary>
+            </details>
 
             <GameCard
               eyebrow="Live lots"
@@ -1287,21 +1534,26 @@ export function DataPanel({
                   aria-expanded={filtersOpen}
                   aria-controls="data-market-filters"
                   onClick={() => setFiltersOpen((open) => !open)}
+                  className="min-h-11"
                 >
-                  Filters{activeFilterCount > 0 ? ` · ${activeFilterCount}` : ""}
+                  Filters
+                  {activeFilterCount > 0 ? ` · ${activeFilterCount}` : ""}
                 </HudButton>
                 <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
                   {activeFilterCount > 0 ? "Refine live lots" : "All live lots"}
                 </span>
               </div>
               {activeFilterChips.length > 0 ? (
-                <div className="mt-1.5 flex flex-wrap gap-1" aria-label="Active market filters">
+                <div
+                  className="mt-1.5 flex flex-wrap gap-1"
+                  aria-label="Active market filters"
+                >
                   {activeFilterChips.map((chip) => (
                     <HudButton
                       key={chip.id}
                       variant="ghost"
                       onClick={chip.clear}
-                      className="min-h-8 rounded-md px-2 py-1 text-[0.6875rem]"
+                      className="min-h-11 rounded-md px-2 py-1 text-[0.6875rem]"
                       title={`Clear ${chip.label} filter`}
                     >
                       {chip.label}
@@ -1318,7 +1570,7 @@ export function DataPanel({
                       setFilterSeller("all");
                       setFilterPrice("all");
                     }}
-                    className="min-h-8 px-2 py-1 text-[0.6875rem] text-muted"
+                    className="min-h-11 px-2 py-1 text-[0.6875rem] text-muted"
                   >
                     Clear all
                   </HudButton>
@@ -1326,99 +1578,104 @@ export function DataPanel({
               ) : null}
 
               {filtersOpen ? (
-              <div id="data-market-filters" className={`mt-2 grid gap-1.5 rounded-md border border-line/60 bg-void/25 p-1.5 ${DATA_MARKET_FILTER_GRID_CLASS}`}>
-                <FilterSelect
-                  label="Acquisition"
-                  value={filterSource}
-                  onChange={(value) =>
-                    setFilterSource(value as MarketSourceFilter)
-                  }
-                  options={[
-                    { value: "all", label: "All sources" },
-                    ...(
-                      Object.entries(MARKET_SOURCE_LABELS) as [
-                        Exclude<MarketSourceFilter, "all">,
-                        string,
-                      ][]
-                    ).map(([value, label]) => ({ value, label })),
-                  ]}
-                />
-                <FilterSelect
-                  label="Quality"
-                  value={filterQuality}
-                  onChange={(value) =>
-                    setFilterQuality(value as "all" | DataQualityBand)
-                  }
-                  options={[
-                    { value: "all", label: "All bands" },
-                    ...QUALITY_BANDS.map((band) => ({
-                      value: band,
-                      label: DATA_QUALITY_LABELS[band],
-                    })),
-                  ]}
-                />
-                <FilterSelect
-                  label="License"
-                  value={filterLicense}
-                  onChange={(value) =>
-                    setFilterLicense(value as MarketLicenseFilter)
-                  }
-                  options={[
-                    { value: "all", label: "All rights" },
-                    ...(
-                      Object.entries(MARKET_LICENSE_LABELS) as [
-                        Exclude<MarketLicenseFilter, "all">,
-                        string,
-                      ][]
-                    ).map(([value, label]) => ({ value, label })),
-                  ]}
-                />
-                <FilterSelect
-                  label="Seller"
-                  value={filterSeller}
-                  onChange={(value) =>
-                    setFilterSeller(value as "all" | DataSellerKind)
-                  }
-                  options={[
-                    { value: "all", label: "All sellers" },
-                    ...SELLER_KINDS.map((kind) => ({
-                      value: kind,
-                      label: DATA_SELLER_LABELS[kind],
-                    })),
-                  ]}
-                />
-                <FilterSelect
-                  label="Price"
-                  value={filterPrice}
-                  onChange={(value) =>
-                    setFilterPrice(value as MarketPriceFilter)
-                  }
-                  options={[
-                    { value: "all", label: "Any price" },
-                    { value: "low", label: "Lower third" },
-                    { value: "mid", label: "Mid third" },
-                    { value: "high", label: "Upper third" },
-                  ]}
-                />
-                <FilterSelect
-                  label="Sort"
-                  value={sortBy}
-                  onChange={(value) => setSortBy(value as MarketSort)}
-                  options={[
-                    { value: "priceAsc", label: "$/MTok ↑" },
-                    { value: "priceDesc", label: "$/MTok ↓" },
-                    { value: "quality", label: "Quality" },
-                    { value: "size", label: "Lot size" },
-                    { value: "days", label: "Days left" },
-                  ]}
-                />
-              </div>
+                <div
+                  id="data-market-filters"
+                  className={`mt-2 grid gap-1.5 rounded-md border border-line/60 bg-void/25 p-1.5 ${DATA_MARKET_FILTER_GRID_CLASS}`}
+                  data-swipe-ignore="true"
+                >
+                  <FilterSelect
+                    label="Acquisition"
+                    value={filterSource}
+                    onChange={(value) =>
+                      setFilterSource(value as MarketSourceFilter)
+                    }
+                    options={[
+                      { value: "all", label: "All sources" },
+                      ...(
+                        Object.entries(MARKET_SOURCE_LABELS) as [
+                          Exclude<MarketSourceFilter, "all">,
+                          string,
+                        ][]
+                      ).map(([value, label]) => ({ value, label })),
+                    ]}
+                  />
+                  <FilterSelect
+                    label="Quality"
+                    value={filterQuality}
+                    onChange={(value) =>
+                      setFilterQuality(value as "all" | DataQualityBand)
+                    }
+                    options={[
+                      { value: "all", label: "All bands" },
+                      ...QUALITY_BANDS.map((band) => ({
+                        value: band,
+                        label: DATA_QUALITY_LABELS[band],
+                      })),
+                    ]}
+                  />
+                  <FilterSelect
+                    label="License"
+                    value={filterLicense}
+                    onChange={(value) =>
+                      setFilterLicense(value as MarketLicenseFilter)
+                    }
+                    options={[
+                      { value: "all", label: "All rights" },
+                      ...(
+                        Object.entries(MARKET_LICENSE_LABELS) as [
+                          Exclude<MarketLicenseFilter, "all">,
+                          string,
+                        ][]
+                      ).map(([value, label]) => ({ value, label })),
+                    ]}
+                  />
+                  <FilterSelect
+                    label="Seller"
+                    value={filterSeller}
+                    onChange={(value) =>
+                      setFilterSeller(value as "all" | DataSellerKind)
+                    }
+                    options={[
+                      { value: "all", label: "All sellers" },
+                      ...SELLER_KINDS.map((kind) => ({
+                        value: kind,
+                        label: DATA_SELLER_LABELS[kind],
+                      })),
+                    ]}
+                  />
+                  <FilterSelect
+                    label="Price"
+                    value={filterPrice}
+                    onChange={(value) =>
+                      setFilterPrice(value as MarketPriceFilter)
+                    }
+                    options={[
+                      { value: "all", label: "Any price" },
+                      { value: "low", label: "Lower third" },
+                      { value: "mid", label: "Mid third" },
+                      { value: "high", label: "Upper third" },
+                    ]}
+                  />
+                  <FilterSelect
+                    label="Sort"
+                    value={sortBy}
+                    onChange={(value) => setSortBy(value as MarketSort)}
+                    options={[
+                      { value: "priceAsc", label: "$/MTok ↑" },
+                      { value: "priceDesc", label: "$/MTok ↓" },
+                      { value: "quality", label: "Quality" },
+                      { value: "size", label: "Lot size" },
+                      { value: "days", label: "Days left" },
+                    ]}
+                  />
+                </div>
               ) : null}
 
               <div
-                className="mt-2 flex flex-wrap gap-1"
+                className="mt-2 flex touch-auto flex-nowrap gap-1 overflow-x-auto overscroll-x-contain pb-1"
                 role="group"
                 aria-label="Data type filter"
+                data-swipe-ignore="true"
               >
                 {(["all", ...DATA_DOMAINS] as const).map((domain) => {
                   const active = filterDomain === domain;
@@ -1434,7 +1691,7 @@ export function DataPanel({
                       variant="ghost"
                       aria-pressed={active}
                       onClick={() => setFilterDomain(domain)}
-                      className={`min-h-11 rounded-md px-2 py-1 font-mono text-[0.6875rem] transition ${
+                      className={`min-h-11 shrink-0 rounded-md px-2 py-1 font-mono text-[0.6875rem] transition ${
                         active
                           ? "border-mint/50 bg-mint/10 text-bone"
                           : "border-line/70 bg-void/35 text-muted hover:border-line hover:bg-void/55"
@@ -1455,22 +1712,24 @@ export function DataPanel({
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div className="min-w-0">
                     <div className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
-                      Buy all · +
-                      {Math.round(DATA_BULK_BUY_PREMIUM * 100)}% premium
+                      Buy all · +{Math.round(DATA_BULK_BUY_PREMIUM * 100)}%
+                      premium
                     </div>
                     <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
                       <span>
                         {bulkPreview.lots} lots ·{" "}
                         {formatTokens(bulkPreview.volumeMTok)}
                       </span>
-                      <span>
+                      <span className="hidden min-[420px]:inline">
                         Q
                         {bulkPreview.lots > 0
                           ? Math.round(bulkPreview.weightedQuality)
                           : "—"}
                       </span>
-                      <span>Base {money(bulkPreview.baseCost)}</span>
-                      <span className="text-amber">
+                      <span className="hidden min-[420px]:inline">
+                        Base {money(bulkPreview.baseCost)}
+                      </span>
+                      <span className="hidden text-amber min-[420px]:inline">
                         Premium {money(bulkPreview.bulkPremium)}
                       </span>
                       <span className="text-bone">
@@ -1513,462 +1772,504 @@ export function DataPanel({
               </div>
             </GameCard>
 
-            <GameCard
-              eyebrow="Suppliers"
-              title="Negotiate delivery"
-              tone="train"
-              actions={
-                <StatusChip tone="warning">
-                  {supplierOffers.length} desks
-                </StatusChip>
-              }
-            >
-              <p className="mb-2 text-[0.8125rem] text-muted">
-                Recurring delivery desks. Up to{" "}
-                {DATA_MAX_CONTRACTS_PER_SUPPLIER} concurrent contracts per desk
-                — each extra one costs +
-                {Math.round(DATA_CONCURRENT_CONTRACT_PREMIUM * 100)}%.
-              </p>
-              <div className="anim-stagger space-y-2">
-                {supplierOffers.map((offer) => {
-                  const openNegotiation = supplierContracts.find(
-                    (contract) =>
-                      contract.supplierId === offer.id &&
-                      (contract.status === "offered" ||
-                        contract.status === "countered"),
-                  );
-                  const liveContracts = supplierContracts.filter(
-                    (contract) =>
-                      contract.supplierId === offer.id &&
-                      (contract.status === "accepted" ||
-                        contract.status === "active" ||
-                        contract.status === "extended") &&
-                      contract.daysRemaining > 0,
-                  );
-                  const contractCount =
-                    liveContracts.length + (openNegotiation ? 1 : 0);
-                  const atCap =
-                    contractCount >= DATA_MAX_CONTRACTS_PER_SUPPLIER;
-                  const premiumMult =
-                    1 + DATA_CONCURRENT_CONTRACT_PREMIUM * contractCount;
-                  const blocked = atCap || Boolean(openNegotiation);
-                  const awaitingResponse =
-                    openNegotiation?.status === "offered";
-                  const baseTerms = supplierTermsFromOffer(offer);
-                  const standardDomains = DATA_DOMAINS.filter(
-                    (domain) => (offer.domainMix[domain] ?? 0) > 0,
-                  );
-                  const domainPick =
-                    domainPickByOffer[offer.id] ?? standardDomains;
-                  const isCustomPick =
-                    domainPickByOffer[offer.id] !== undefined &&
-                    (domainPick.length !== standardDomains.length ||
-                      domainPick.some(
-                        (domain) => !standardDomains.includes(domain),
-                      ));
-                  // A custom data-type pick shares the volume equally across
-                  // the chosen domains; otherwise keep the last proposed mix,
-                  // then the desk's standard mix.
-                  const negotiatedMix: Partial<Record<DataDomain, number>> =
-                    isCustomPick && domainPick.length > 0
-                      ? Object.fromEntries(
-                          domainPick.map((domain) => [
-                            domain,
-                            1 / domainPick.length,
-                          ]),
+            <details className="group rounded-lg border border-line/70 bg-panel/45">
+              <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5 text-[0.8125rem] font-semibold text-bone">
+                <span>Supplier contracts</span>
+                <span className="font-mono text-[0.6875rem] font-normal tabular-nums text-muted">
+                  {
+                    supplierContracts.filter((contract) =>
+                      ["accepted", "active", "extended"].includes(
+                        contract.status,
+                      ),
+                    ).length
+                  }{" "}
+                  live · {supplierOffers.length} desks
+                </span>
+              </summary>
+              <div className="border-t border-line/60 p-2">
+                <GameCard
+                  eyebrow="Suppliers"
+                  title="Negotiate delivery"
+                  tone="train"
+                  actions={
+                    <StatusChip tone="warning">
+                      {supplierOffers.length} desks
+                    </StatusChip>
+                  }
+                >
+                  <p className="mb-2 text-[0.8125rem] text-muted">
+                    Recurring delivery desks. Up to{" "}
+                    {DATA_MAX_CONTRACTS_PER_SUPPLIER} concurrent contracts per
+                    desk — each extra one costs +
+                    {Math.round(DATA_CONCURRENT_CONTRACT_PREMIUM * 100)}%.
+                  </p>
+                  <div className="anim-stagger space-y-2">
+                    {supplierOffers.map((offer) => {
+                      const openNegotiation = supplierContracts.find(
+                        (contract) =>
+                          contract.supplierId === offer.id &&
+                          (contract.status === "offered" ||
+                            contract.status === "countered"),
+                      );
+                      const liveContracts = supplierContracts.filter(
+                        (contract) =>
+                          contract.supplierId === offer.id &&
+                          (contract.status === "accepted" ||
+                            contract.status === "active" ||
+                            contract.status === "extended") &&
+                          contract.daysRemaining > 0,
+                      );
+                      const contractCount =
+                        liveContracts.length + (openNegotiation ? 1 : 0);
+                      const atCap =
+                        contractCount >= DATA_MAX_CONTRACTS_PER_SUPPLIER;
+                      const premiumMult =
+                        1 + DATA_CONCURRENT_CONTRACT_PREMIUM * contractCount;
+                      const blocked = atCap || Boolean(openNegotiation);
+                      const awaitingResponse =
+                        openNegotiation?.status === "offered";
+                      const baseTerms = supplierTermsFromOffer(offer);
+                      const standardDomains = DATA_DOMAINS.filter(
+                        (domain) => (offer.domainMix[domain] ?? 0) > 0,
+                      );
+                      const domainPick =
+                        domainPickByOffer[offer.id] ?? standardDomains;
+                      const isCustomPick =
+                        domainPickByOffer[offer.id] !== undefined &&
+                        (domainPick.length !== standardDomains.length ||
+                          domainPick.some(
+                            (domain) => !standardDomains.includes(domain),
+                          ));
+                      // A custom data-type pick shares the volume equally across
+                      // the chosen domains; otherwise keep the last proposed mix,
+                      // then the desk's standard mix.
+                      const negotiatedMix: Partial<Record<DataDomain, number>> =
+                        isCustomPick && domainPick.length > 0
+                          ? Object.fromEntries(
+                              domainPick.map((domain) => [
+                                domain,
+                                1 / domainPick.length,
+                              ]),
+                            )
+                          : {
+                              ...(openNegotiation?.proposedTerms?.domainMix ??
+                                baseTerms.domainMix),
+                            };
+                      const negotiatedTerms: DataSupplierTerms = {
+                        ...baseTerms,
+                        pricePerMTok:
+                          baseTerms.pricePerMTok * (supplierOfferPercent / 100),
+                        domainMix: negotiatedMix,
+                      };
+                      const negotiatedDaily = Math.round(
+                        negotiatedTerms.dailyDeliveryMTok *
+                          negotiatedTerms.pricePerMTok *
+                          premiumMult,
+                      );
+                      const counterDaily = openNegotiation?.counterTerms
+                        ? Math.round(
+                            openNegotiation.counterTerms.dailyDeliveryMTok *
+                              openNegotiation.counterTerms.pricePerMTok *
+                              (1 +
+                                DATA_CONCURRENT_CONTRACT_PREMIUM *
+                                  liveContracts.length),
+                          )
+                        : 0;
+                      const mix = Object.entries(offer.domainMix)
+                        .filter(([, weight]) => (weight ?? 0) > 0)
+                        .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
+                        .slice(0, 4)
+                        .map(
+                          ([domain, weight]) =>
+                            `${DATA_DOMAIN_META[domain as DataDomain]?.label ?? domain} ${Math.round((weight ?? 0) * 100)}%`,
                         )
-                      : {
-                          ...(openNegotiation?.proposedTerms?.domainMix ??
-                            baseTerms.domainMix),
-                        };
-                  const negotiatedTerms: DataSupplierTerms = {
-                    ...baseTerms,
-                    pricePerMTok:
-                      baseTerms.pricePerMTok * (supplierOfferPercent / 100),
-                    domainMix: negotiatedMix,
-                  };
-                  const negotiatedDaily = Math.round(
-                    negotiatedTerms.dailyDeliveryMTok *
-                      negotiatedTerms.pricePerMTok *
-                      premiumMult,
-                  );
-                  const counterDaily = openNegotiation?.counterTerms
-                    ? Math.round(
-                        openNegotiation.counterTerms.dailyDeliveryMTok *
-                          openNegotiation.counterTerms.pricePerMTok *
-                          (1 +
-                            DATA_CONCURRENT_CONTRACT_PREMIUM *
-                              liveContracts.length),
-                      )
-                    : 0;
-                  const mix = Object.entries(offer.domainMix)
-                    .filter(([, weight]) => (weight ?? 0) > 0)
-                    .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
-                    .slice(0, 4)
-                    .map(
-                      ([domain, weight]) =>
-                        `${DATA_DOMAIN_META[domain as DataDomain]?.label ?? domain} ${Math.round((weight ?? 0) * 100)}%`,
-                    )
-                    .join(" · ");
-                  const negotiationStatus =
-                    liveContracts.length > 0
-                      ? ("signed" as const)
-                      : openNegotiation?.status === "countered"
-                        ? ("countered" as const)
-                        : ("idle" as const);
-                  const blockers: Blocker[] = [];
-                  if (atCap) {
-                    blockers.push({
-                      text: `${DATA_MAX_CONTRACTS_PER_SUPPLIER}/${DATA_MAX_CONTRACTS_PER_SUPPLIER} contracts live — let one lapse or cancel first`,
-                      tone: "warning",
-                    });
-                  } else if (openNegotiation?.status === "offered") {
-                    blockers.push({
-                      text: "Offer pending seller response tomorrow",
-                      tone: "warning",
-                    });
-                  } else if (openNegotiation?.status === "countered") {
-                    blockers.push({
-                      text: "Seller countered — accept, re-counter, or walk away",
-                      tone: "warning",
-                    });
-                  }
-                  if (!blocked && state.player.cash < negotiatedDaily) {
-                    blockers.push({
-                      text: `Need ${money(negotiatedDaily)} for day 1`,
-                      tone: "danger",
-                    });
-                  }
-                  return (
-                    <section
-                      key={offer.id}
-                      className="overflow-hidden rounded-lg border border-line/70 bg-void/30"
-                    >
-                      <NegotiationHeader
-                        title={offer.name}
-                        subtitle="Recurring corpus delivery"
-                        status={negotiationStatus}
-                      />
-                      <div className="space-y-2 p-2.5">
-                        <NegotiationMessage side="provider" name={offer.name}>
-                          We collect and clear a steady mix of {mix}. Delivery
-                          runs daily for the full term.
-                        </NegotiationMessage>
-                        <div className="grid grid-cols-2 gap-1.5 font-mono text-[0.6875rem] sm:grid-cols-4">
-                          <NegotiationMetric
-                            label="Quality"
-                            value={`Q${offer.quality}`}
-                          />
-                          <NegotiationMetric
-                            label="Delivery"
-                            value={`${formatTokens(offer.dailyDeliveryMTok)}/d`}
-                          />
-                          <NegotiationMetric
-                            label="Term"
-                            value={`${offer.termDays}d`}
-                          />
-                          <NegotiationMetric
-                            label="Contracts"
-                            value={`${contractCount}/${DATA_MAX_CONTRACTS_PER_SUPPLIER}`}
-                          />
-                        </div>
-
-                        {openNegotiation?.status === "countered" &&
-                        openNegotiation.counterTerms ? (
-                          <NegotiationMessage
-                            side="provider"
-                            name={offer.name}
-                            status="countered"
-                          >
-                            Counter: {money(counterDaily)}/d · Q≥
-                            {Math.round(
-                              openNegotiation.counterTerms.qualityFloor,
-                            )}{" "}
-                            · {openNegotiation.counterTerms.termDays}d ·{" "}
-                            {formatMix(openNegotiation.counterTerms.domainMix)}
-                          </NegotiationMessage>
-                        ) : null}
-
-                        <NegotiationMessage
-                          side="player"
-                          name="Labline"
-                          status={
-                            liveContracts.length > 0
-                              ? "signed"
-                              : openNegotiation?.status === "countered"
-                                ? "countered"
-                                : "idle"
-                          }
+                        .join(" · ");
+                      const negotiationStatus =
+                        liveContracts.length > 0
+                          ? ("signed" as const)
+                          : openNegotiation?.status === "countered"
+                            ? ("countered" as const)
+                            : ("idle" as const);
+                      const blockers: Blocker[] = [];
+                      if (atCap) {
+                        blockers.push({
+                          text: `${DATA_MAX_CONTRACTS_PER_SUPPLIER}/${DATA_MAX_CONTRACTS_PER_SUPPLIER} contracts live — let one lapse or cancel first`,
+                          tone: "warning",
+                        });
+                      } else if (openNegotiation?.status === "offered") {
+                        blockers.push({
+                          text: "Offer pending seller response tomorrow",
+                          tone: "warning",
+                        });
+                      } else if (openNegotiation?.status === "countered") {
+                        blockers.push({
+                          text: "Seller countered — accept, re-counter, or walk away",
+                          tone: "warning",
+                        });
+                      }
+                      if (!blocked && state.player.cash < negotiatedDaily) {
+                        blockers.push({
+                          text: `Need ${money(negotiatedDaily)} for day 1`,
+                          tone: "danger",
+                        });
+                      }
+                      return (
+                        <section
+                          key={offer.id}
+                          className="overflow-hidden rounded-lg border border-line/70 bg-void/30"
                         >
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <span className="font-mono tabular-nums text-amber">
-                              {money(
-                                Math.round(offer.dailyPrice * premiumMult),
-                              )}
-                              /day
-                              {contractCount > 0 ? (
-                                <span className="text-muted">
-                                  {" "}
-                                  (list {money(offer.dailyPrice)} +
-                                  {Math.round(
-                                    DATA_CONCURRENT_CONTRACT_PREMIUM *
-                                      contractCount *
-                                      100,
-                                  )}
-                                  % surcharge)
-                                </span>
-                              ) : (
-                                " list"
-                              )}
-                            </span>
-                            {!blocked ? (
-                              <HudButton
-                                variant="primary"
-                                disabled={
-                                  (isCustomPick && domainPick.length === 0) ||
-                                  state.player.cash <
-                                    (isCustomPick
-                                      ? negotiatedDaily
-                                      : Math.round(
-                                          offer.dailyPrice * premiumMult,
-                                        ))
-                                }
-                                title={
-                                  isCustomPick
-                                    ? domainPick.length === 0
-                                      ? "Pick at least one data type below"
-                                      : `Send custom-mix terms (${formatMix(negotiatedMix)}) — the supplier answers tomorrow and may counter`
-                                    : (blockers[0]?.text?.toString() ??
-                                      `Sign the desk's standard mix instantly (${mix})`)
-                                }
-                                onClick={() =>
-                                  isCustomPick
-                                    ? proposeDataSupplierTerms(
-                                        offer.id,
-                                        negotiatedTerms,
-                                      )
-                                    : acceptDataSupplierOffer(
-                                        offer.id,
-                                        supplierOfferPercent / 100,
-                                      )
-                                }
-                              >
-                                {isCustomPick
-                                  ? "Send offer · custom mix"
-                                  : "Accept offer · standard mix"}
-                              </HudButton>
-                            ) : atCap ? (
-                              <StatusChip tone="warning">
-                                {DATA_MAX_CONTRACTS_PER_SUPPLIER}/
-                                {DATA_MAX_CONTRACTS_PER_SUPPLIER} contracts
-                              </StatusChip>
-                            ) : (
-                              <StatusChip tone="warning">
-                                {openNegotiation?.status}
-                              </StatusChip>
-                            )}
-                          </div>
-                        </NegotiationMessage>
-
-                        {!atCap ? (
-                          <div className="flex flex-wrap items-center gap-2">
-                            <label className="min-w-0 flex-1 text-[0.6875rem] text-muted">
-                              Offer {supplierOfferPercent}%
-                              <HudRange
-                                min={80}
-                                max={100}
-                                value={supplierOfferPercent}
-                                disabled={awaitingResponse}
-                                onChange={(event) =>
-                                  setSupplierOfferPercent(
-                                    Number(event.target.value),
-                                  )
-                                }
-                                className="ml-2 align-middle"
+                          <NegotiationHeader
+                            title={offer.name}
+                            subtitle="Recurring corpus delivery"
+                            status={negotiationStatus}
+                          />
+                          <div className="space-y-2 p-2.5">
+                            <NegotiationMessage
+                              side="provider"
+                              name={offer.name}
+                            >
+                              We collect and clear a steady mix of {mix}.
+                              Delivery runs daily for the full term.
+                            </NegotiationMessage>
+                            <div className="grid grid-cols-2 gap-1.5 font-mono text-[0.6875rem] sm:grid-cols-4">
+                              <NegotiationMetric
+                                label="Quality"
+                                value={`Q${offer.quality}`}
                               />
-                              <span className="ml-2 font-mono text-amber">
-                                {money(negotiatedDaily)}/d
-                              </span>
-                            </label>
-                            <div className="w-full rounded-md border border-line/60 bg-void/40 p-2">
-                              <div className="flex items-center justify-between gap-2 text-[0.6875rem] uppercase tracking-[0.1em] text-muted">
-                                <span>Delivery mix — pick data types</span>
-                                <span className="font-mono normal-case tracking-normal text-amber">
-                                  {domainPick.length > 0
-                                    ? formatMix(negotiatedMix)
-                                    : "Pick ≥1 data type"}
-                                </span>
-                              </div>
-                              <div
-                                className="mt-1.5 flex flex-wrap gap-1"
-                                role="group"
-                                aria-label="Contract data types"
-                              >
-                                {DATA_DOMAINS.map((domain) => {
-                                  const active = domainPick.includes(domain);
-                                  const inDeskMix =
-                                    (offer.domainMix[domain] ?? 0) > 0;
-                                  return (
-                                    <HudButton
-                                      key={domain}
-                                      type="button"
-                                      variant="ghost"
-                                      aria-pressed={active}
-                                      disabled={awaitingResponse}
-                                      title={
-                                        awaitingResponse
-                                          ? "Waiting for the supplier's answer"
-                                          : inDeskMix
-                                            ? `${DATA_DOMAIN_META[domain].label} — in this desk's standard mix`
-                                            : `${DATA_DOMAIN_META[domain].label} — outside the standard mix; the seller may counter`
-                                      }
-                                      onClick={() =>
-                                        setDomainPickByOffer((current) => {
-                                          const pick =
-                                            current[offer.id] ??
-                                            standardDomains;
-                                          const nextPick = pick.includes(domain)
-                                            ? pick.filter(
-                                                (picked) => picked !== domain,
-                                              )
-                                            : [...pick, domain];
-                                          return {
-                                            ...current,
-                                            [offer.id]: nextPick,
-                                          };
-                                        })
-                                      }
-                                      className={`min-h-11 rounded-md px-2 py-1 font-mono text-[0.6875rem] transition ${
-                                        active
-                                          ? "!border-mint !bg-mint/20 !text-mint hover:!border-mint hover:!bg-mint/28 hover:!text-mint"
-                                          : "!border-line/70 !bg-void/40 !text-muted hover:!border-line hover:!bg-void/60 hover:!text-bone"
-                                      } ${active || inDeskMix ? "" : "!border-dashed"} disabled:opacity-50`}
-                                    >
-                                      <span className="inline-flex items-center gap-1">
-                                        {active ? (
-                                          <Check
-                                            size="0.7rem"
-                                            weight="bold"
-                                            aria-hidden
-                                          />
-                                        ) : null}
-                                        {DATA_DOMAIN_META[domain].label}
-                                      </span>
-                                    </HudButton>
-                                  );
-                                })}
-                              </div>
+                              <NegotiationMetric
+                                label="Delivery"
+                                value={`${formatTokens(offer.dailyDeliveryMTok)}/d`}
+                              />
+                              <NegotiationMetric
+                                label="Term"
+                                value={`${offer.termDays}d`}
+                              />
+                              <NegotiationMetric
+                                label="Contracts"
+                                value={`${contractCount}/${DATA_MAX_CONTRACTS_PER_SUPPLIER}`}
+                              />
                             </div>
-                          </div>
-                        ) : null}
 
-                        {openNegotiation?.status === "countered" &&
-                        openNegotiation.counterTerms ? (
-                          <div className="flex flex-wrap gap-1.5">
-                            <HudButton
-                              variant="primary"
-                              disabled={state.player.cash < counterDaily}
-                              title="Sign the seller's counter terms"
-                              onClick={() =>
-                                acceptDataSupplierCounter(openNegotiation.id)
-                              }
-                            >
-                              Accept counter
-                            </HudButton>
-                            <HudButton
-                              variant="secondary"
-                              disabled={state.player.cash < negotiatedDaily}
-                              title={
-                                state.player.cash < negotiatedDaily
-                                  ? `Need ${money(negotiatedDaily)} to re-counter`
-                                  : "Re-counter at your offer %"
-                              }
-                              onClick={() =>
-                                counterDataSupplierOffer(
-                                  openNegotiation.id,
-                                  negotiatedTerms,
-                                )
-                              }
-                            >
-                              Re-counter · {supplierOfferPercent}%
-                            </HudButton>
-                            <HudButton
-                              variant="ghost"
-                              title="Walk away from this negotiation"
-                              onClick={() =>
-                                rejectDataSupplierCounter(openNegotiation.id)
-                              }
-                            >
-                              Decline
-                            </HudButton>
-                          </div>
-                        ) : null}
+                            {openNegotiation?.status === "countered" &&
+                            openNegotiation.counterTerms ? (
+                              <NegotiationMessage
+                                side="provider"
+                                name={offer.name}
+                                status="countered"
+                              >
+                                Counter: {money(counterDaily)}/d · Q≥
+                                {Math.round(
+                                  openNegotiation.counterTerms.qualityFloor,
+                                )}{" "}
+                                · {openNegotiation.counterTerms.termDays}d ·{" "}
+                                {formatMix(
+                                  openNegotiation.counterTerms.domainMix,
+                                )}
+                              </NegotiationMessage>
+                            ) : null}
 
-                        {liveContracts.map((liveContract) => {
-                          const cancelFee = dataCancellationFee(liveContract);
-                          const cancelDisabledReason =
-                            state.player.cash + 1e-9 < cancelFee
-                              ? `Need ${money(cancelFee)} for the cancellation fee`
-                              : undefined;
-                          return (
-                            <div
-                              key={liveContract.id}
-                              className="space-y-1.5 rounded-md border border-line/60 bg-void/40 p-2"
+                            <NegotiationMessage
+                              side="player"
+                              name="Labline"
+                              status={
+                                liveContracts.length > 0
+                                  ? "signed"
+                                  : openNegotiation?.status === "countered"
+                                    ? "countered"
+                                    : "idle"
+                              }
                             >
-                              <div className="flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
-                                <span>
-                                  {formatTokens(liveContract.dailyDeliveryMTok)}
-                                  /d
-                                </span>
-                                <span>{money(liveContract.dailyPrice)}/d</span>
-                                <span>{liveContract.daysRemaining}d left</span>
-                                <span>
-                                  Delivered{" "}
-                                  {formatTokens(
-                                    liveContract.deliveredMTok ?? 0,
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className="font-mono tabular-nums text-amber">
+                                  {money(
+                                    Math.round(offer.dailyPrice * premiumMult),
+                                  )}
+                                  /day
+                                  {contractCount > 0 ? (
+                                    <span className="text-muted">
+                                      {" "}
+                                      (list {money(offer.dailyPrice)} +
+                                      {Math.round(
+                                        DATA_CONCURRENT_CONTRACT_PREMIUM *
+                                          contractCount *
+                                          100,
+                                      )}
+                                      % surcharge)
+                                    </span>
+                                  ) : (
+                                    " list"
                                   )}
                                 </span>
-                                <span>{formatMix(liveContract.domainMix)}</span>
+                                {!blocked ? (
+                                  <HudButton
+                                    variant="primary"
+                                    disabled={
+                                      (isCustomPick &&
+                                        domainPick.length === 0) ||
+                                      state.player.cash <
+                                        (isCustomPick
+                                          ? negotiatedDaily
+                                          : Math.round(
+                                              offer.dailyPrice * premiumMult,
+                                            ))
+                                    }
+                                    title={
+                                      isCustomPick
+                                        ? domainPick.length === 0
+                                          ? "Pick at least one data type below"
+                                          : `Send custom-mix terms (${formatMix(negotiatedMix)}) — the supplier answers tomorrow and may counter`
+                                        : (blockers[0]?.text?.toString() ??
+                                          `Sign the desk's standard mix instantly (${mix})`)
+                                    }
+                                    onClick={() =>
+                                      isCustomPick
+                                        ? proposeDataSupplierTerms(
+                                            offer.id,
+                                            negotiatedTerms,
+                                          )
+                                        : acceptDataSupplierOffer(
+                                            offer.id,
+                                            supplierOfferPercent / 100,
+                                          )
+                                    }
+                                  >
+                                    {isCustomPick
+                                      ? "Send offer · custom mix"
+                                      : "Accept offer · standard mix"}
+                                  </HudButton>
+                                ) : atCap ? (
+                                  <StatusChip tone="warning">
+                                    {DATA_MAX_CONTRACTS_PER_SUPPLIER}/
+                                    {DATA_MAX_CONTRACTS_PER_SUPPLIER} contracts
+                                  </StatusChip>
+                                ) : (
+                                  <StatusChip tone="warning">
+                                    {openNegotiation?.status}
+                                  </StatusChip>
+                                )}
                               </div>
-                              <div className="flex flex-wrap items-center gap-1.5">
+                            </NegotiationMessage>
+
+                            {!atCap ? (
+                              <div className="flex flex-wrap items-center gap-2">
+                                <label className="min-w-0 flex-1 text-[0.6875rem] text-muted">
+                                  Offer {supplierOfferPercent}%
+                                  <HudRange
+                                    min={80}
+                                    max={100}
+                                    value={supplierOfferPercent}
+                                    disabled={awaitingResponse}
+                                    onChange={(event) =>
+                                      setSupplierOfferPercent(
+                                        Number(event.target.value),
+                                      )
+                                    }
+                                    className="ml-2 align-middle"
+                                  />
+                                  <span className="ml-2 font-mono text-amber">
+                                    {money(negotiatedDaily)}/d
+                                  </span>
+                                </label>
+                                <div className="w-full rounded-md border border-line/60 bg-void/40 p-2">
+                                  <div className="flex items-center justify-between gap-2 text-[0.6875rem] uppercase tracking-[0.1em] text-muted">
+                                    <span>Delivery mix — pick data types</span>
+                                    <span className="font-mono normal-case tracking-normal text-amber">
+                                      {domainPick.length > 0
+                                        ? formatMix(negotiatedMix)
+                                        : "Pick ≥1 data type"}
+                                    </span>
+                                  </div>
+                                  <div
+                                    className="mt-1.5 flex flex-wrap gap-1"
+                                    role="group"
+                                    aria-label="Contract data types"
+                                  >
+                                    {DATA_DOMAINS.map((domain) => {
+                                      const active =
+                                        domainPick.includes(domain);
+                                      const inDeskMix =
+                                        (offer.domainMix[domain] ?? 0) > 0;
+                                      return (
+                                        <HudButton
+                                          key={domain}
+                                          type="button"
+                                          variant="ghost"
+                                          aria-pressed={active}
+                                          disabled={awaitingResponse}
+                                          title={
+                                            awaitingResponse
+                                              ? "Waiting for the supplier's answer"
+                                              : inDeskMix
+                                                ? `${DATA_DOMAIN_META[domain].label} — in this desk's standard mix`
+                                                : `${DATA_DOMAIN_META[domain].label} — outside the standard mix; the seller may counter`
+                                          }
+                                          onClick={() =>
+                                            setDomainPickByOffer((current) => {
+                                              const pick =
+                                                current[offer.id] ??
+                                                standardDomains;
+                                              const nextPick = pick.includes(
+                                                domain,
+                                              )
+                                                ? pick.filter(
+                                                    (picked) =>
+                                                      picked !== domain,
+                                                  )
+                                                : [...pick, domain];
+                                              return {
+                                                ...current,
+                                                [offer.id]: nextPick,
+                                              };
+                                            })
+                                          }
+                                          className={`min-h-11 rounded-md px-2 py-1 font-mono text-[0.6875rem] transition ${
+                                            active
+                                              ? "!border-mint !bg-mint/20 !text-mint hover:!border-mint hover:!bg-mint/28 hover:!text-mint"
+                                              : "!border-line/70 !bg-void/40 !text-muted hover:!border-line hover:!bg-void/60 hover:!text-bone"
+                                          } ${active || inDeskMix ? "" : "!border-dashed"} disabled:opacity-50`}
+                                        >
+                                          <span className="inline-flex items-center gap-1">
+                                            {active ? (
+                                              <Check
+                                                size="0.7rem"
+                                                weight="bold"
+                                                aria-hidden
+                                              />
+                                            ) : null}
+                                            {DATA_DOMAIN_META[domain].label}
+                                          </span>
+                                        </HudButton>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              </div>
+                            ) : null}
+
+                            {openNegotiation?.status === "countered" &&
+                            openNegotiation.counterTerms ? (
+                              <div className="flex flex-wrap gap-1.5">
                                 <HudButton
-                                  variant="danger"
-                                  disabled={Boolean(cancelDisabledReason)}
-                                  title={
-                                    cancelDisabledReason ??
-                                    `Cancel now · fee ${money(cancelFee)}`
-                                  }
+                                  variant="primary"
+                                  disabled={state.player.cash < counterDaily}
+                                  title="Sign the seller's counter terms"
                                   onClick={() =>
-                                    cancelDataSupplierContract(liveContract.id)
+                                    acceptDataSupplierCounter(
+                                      openNegotiation.id,
+                                    )
                                   }
                                 >
-                                  Cancel · {money(cancelFee)} fee
+                                  Accept counter
+                                </HudButton>
+                                <HudButton
+                                  variant="secondary"
+                                  disabled={state.player.cash < negotiatedDaily}
+                                  title={
+                                    state.player.cash < negotiatedDaily
+                                      ? `Need ${money(negotiatedDaily)} to re-counter`
+                                      : "Re-counter at your offer %"
+                                  }
+                                  onClick={() =>
+                                    counterDataSupplierOffer(
+                                      openNegotiation.id,
+                                      negotiatedTerms,
+                                    )
+                                  }
+                                >
+                                  Re-counter · {supplierOfferPercent}%
+                                </HudButton>
+                                <HudButton
+                                  variant="ghost"
+                                  title="Walk away from this negotiation"
+                                  onClick={() =>
+                                    rejectDataSupplierCounter(
+                                      openNegotiation.id,
+                                    )
+                                  }
+                                >
+                                  Decline
                                 </HudButton>
                               </div>
-                              {cancelDisabledReason ? (
-                                <BlockerList
-                                  items={[
-                                    {
-                                      text: cancelDisabledReason,
-                                      tone: "warning" as const,
-                                    },
-                                  ]}
-                                />
-                              ) : null}
+                            ) : null}
+
+                            {liveContracts.map((liveContract) => {
+                              const cancelFee =
+                                dataCancellationFee(liveContract);
+                              const cancelDisabledReason =
+                                state.player.cash + 1e-9 < cancelFee
+                                  ? `Need ${money(cancelFee)} for the cancellation fee`
+                                  : undefined;
+                              return (
+                                <div
+                                  key={liveContract.id}
+                                  className="space-y-1.5 rounded-md border border-line/60 bg-void/40 p-2"
+                                >
+                                  <div className="flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[0.6875rem] tabular-nums text-muted">
+                                    <span>
+                                      {formatTokens(
+                                        liveContract.dailyDeliveryMTok,
+                                      )}
+                                      /d
+                                    </span>
+                                    <span>
+                                      {money(liveContract.dailyPrice)}/d
+                                    </span>
+                                    <span>
+                                      {liveContract.daysRemaining}d left
+                                    </span>
+                                    <span>
+                                      Delivered{" "}
+                                      {formatTokens(
+                                        liveContract.deliveredMTok ?? 0,
+                                      )}
+                                    </span>
+                                    <span>
+                                      {formatMix(liveContract.domainMix)}
+                                    </span>
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <HudButton
+                                      variant="danger"
+                                      disabled={Boolean(cancelDisabledReason)}
+                                      title={
+                                        cancelDisabledReason ??
+                                        `Cancel now · fee ${money(cancelFee)}`
+                                      }
+                                      onClick={() =>
+                                        cancelDataSupplierContract(
+                                          liveContract.id,
+                                        )
+                                      }
+                                    >
+                                      Cancel · {money(cancelFee)} fee
+                                    </HudButton>
+                                  </div>
+                                  {cancelDisabledReason ? (
+                                    <BlockerList
+                                      items={[
+                                        {
+                                          text: cancelDisabledReason,
+                                          tone: "warning" as const,
+                                        },
+                                      ]}
+                                    />
+                                  ) : null}
+                                </div>
+                              );
+                            })}
+                          </div>
+                          {blockers.length > 0 ? (
+                            <div className="px-2.5 pb-2.5">
+                              <BlockerList items={blockers} />
                             </div>
-                          );
-                        })}
-                      </div>
-                      {blockers.length > 0 ? (
-                        <div className="px-2.5 pb-2.5">
-                          <BlockerList items={blockers} />
-                        </div>
-                      ) : null}
-                    </section>
-                  );
-                })}
+                          ) : null}
+                        </section>
+                      );
+                    })}
+                  </div>
+                </GameCard>
               </div>
-            </GameCard>
+            </details>
           </>
         )}
 
@@ -2005,32 +2306,49 @@ export function DataPanel({
               />
             </label>
 
-            <div className="mt-2 grid grid-cols-2 gap-x-3 sm:grid-cols-4">
-              <StatRow
-                label="Attempts / day"
-                value={formatTokens(synthEstimate.grossMTokPerDay)}
-              />
+            <div className="mt-2 grid grid-cols-2 gap-x-3">
               <StatRow
                 label="Accepted / day"
                 value={formatTokens(synthEstimate.acceptedMTokPerDay)}
               />
-              <StatRow label="Power" value={mw(synthEstimate.powerMw)} />
               <StatRow
                 label="Compute / day"
                 value={money(synthEstimate.dailyComputeCost)}
               />
             </div>
 
+            <details className="group mt-2 rounded-md border border-line/60 bg-void/25">
+              <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-bone">
+                <span>Generation detail</span>
+                <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
+                  {formatTokens(synthEstimate.grossMTokPerDay)} attempts ·{" "}
+                  {mw(synthEstimate.powerMw)}
+                </span>
+              </summary>
+              <div className="grid grid-cols-2 gap-x-3 border-t border-line/60 px-2.5 py-2">
+                <StatRow
+                  label="Attempts / day"
+                  value={formatTokens(synthEstimate.grossMTokPerDay)}
+                />
+                <StatRow label="Power" value={mw(synthEstimate.powerMw)} />
+              </div>
+            </details>
+
             <SynthTeacherRoutingTable
               state={state}
               estimate={synthEstimate}
               picks={synthTeacherPickByDomain}
-              onPick={(domain, modelId) =>
+              effortPicks={synthTeacherEffortPickByDomain}
+              onPick={(domain, modelId, effortId) => {
                 setSynthTeacherPickByDomain((current) => ({
                   ...current,
                   [domain]: modelId,
-                }))
-              }
+                }));
+                setSynthTeacherEffortPickByDomain((current) => ({
+                  ...current,
+                  [domain]: modelId ? effortId : "",
+                }));
+              }}
             />
 
             {!synthUnlocked ? (
@@ -2057,6 +2375,7 @@ export function DataPanel({
                 startSynthBudget({
                   researchShare: genShare,
                   teacherModelIds: synthTeacherIds,
+                  teacherEffortIds: synthTeacherEffortIds,
                 })
               }
             >
@@ -2192,7 +2511,7 @@ function MarketLotRow({
             {MARKET_LICENSE_LABELS[rights]}
           </StatusChip>
         </div>
-        <p className="mt-0.5 truncate text-[0.75rem] text-muted">
+        <p className="mt-0.5 hidden truncate text-[0.75rem] text-muted sm:block [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden">
           {offer.sellerName} · {DATA_SELLER_LABELS[offer.sellerKind]} ·{" "}
           {MARKET_SOURCE_LABELS[offer.source]}
         </p>
@@ -2209,7 +2528,7 @@ function MarketLotRow({
           <span>{offer.daysLeft}d left</span>
           <span>~{money(Math.round(dataOfferUnitPrice(offer)))}/MTok</span>
         </div>
-        <div className="mt-1.5">
+        <div className="mt-1.5 hidden min-[420px]:block [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:hidden">
           <MeterBar
             value={stockPct}
             detail={`${pct(stockPct, 0)} stock`}
@@ -2254,6 +2573,7 @@ function MarketLotRow({
                     : `Buy ${formatTokens(shown)} instantly`
             }
             onClick={() => onBuy(offer.id, shown)}
+            className="min-h-11 max-[419px]:w-full"
           >
             {buysAll ? "Buy all" : "Buy amount"} · {money(amountCost)}
           </HudButton>
@@ -2317,7 +2637,7 @@ function DomainStockCard({
             disabled={raw < 0.5}
             title={blockers[0]?.text?.toString()}
             onClick={onProcess}
-            className="!px-2 !py-1 text-[0.6875rem]"
+            className="!min-h-11 !px-2 !py-1 text-[0.6875rem]"
           >
             Clean
           </HudButton>
@@ -2330,14 +2650,14 @@ function DomainStockCard({
                 : prune.reason
             }
             onClick={onPrune}
-            className="!px-2 !py-1 text-[0.6875rem]"
+            className="!min-h-11 !px-2 !py-1 text-[0.6875rem]"
           >
             Prune
           </HudButton>
           <HudButton
             variant="ghost"
             onClick={onBuy}
-            className="!px-2 !py-1 text-[0.6875rem]"
+            className="!min-h-11 !px-2 !py-1 text-[0.6875rem]"
           >
             Buy
           </HudButton>
@@ -2365,36 +2685,41 @@ function DomainStockCard({
         />
       </div>
 
-      {cleanQuote ? (
-        <div className="mt-1 font-mono text-[0.625rem] tabular-nums text-muted">
-          Clean quote · {formatTokens(cleanQuote.amount)} · ~
-          {money(cleanQuote.cash)} · ~{num(cleanQuote.pfDays, 0)} PFd
-        </div>
-      ) : null}
-
-      <div className="mt-1.5 border-t border-line/60 pt-1.5 text-[0.6875rem] text-muted">
-        {!auditUnlocked ? (
-          <span>Audit corpus to reveal low-Q volume</span>
-        ) : prune.totalMTok >= 0.5 ? (
+      <details className="group mt-2 rounded-md border border-line/60 bg-void/25">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2 py-1.5 text-[0.6875rem] text-muted">
+          <span>Stock details</span>
           <span className="font-mono tabular-nums">
-            Low-Q {formatTokens(prune.totalMTok)} · {money(prune.cashCost)} ·{" "}
-            {num(prune.pfDays, 0)} PFd · {prune.researchersRequired}R
-            {` · ${prune.engineersRequired}E · ~${prune.estimatedDays}d`}
+            {dayIn > 0.01 ? `+${formatTokens(dayIn)} today` : "Costs & audit"}
           </span>
-        ) : (
-          <span>No low-quality stock</span>
-        )}
-      </div>
-      {pruneBlockers.length > 0 && auditUnlocked ? (
-        <div className="mt-1.5">
-          <BlockerList items={pruneBlockers} />
+        </summary>
+        <div className="border-t border-line/60 px-2 py-2">
+          {cleanQuote ? (
+            <div className="font-mono text-[0.625rem] tabular-nums text-muted">
+              Clean quote · {formatTokens(cleanQuote.amount)} · ~
+              {money(cleanQuote.cash)} · ~{num(cleanQuote.pfDays, 0)} PFd
+            </div>
+          ) : null}
+
+          <div className="mt-1.5 text-[0.6875rem] text-muted">
+            {!auditUnlocked ? (
+              <span>Audit corpus to reveal low-Q volume</span>
+            ) : prune.totalMTok >= 0.5 ? (
+              <span className="font-mono tabular-nums">
+                Low-Q {formatTokens(prune.totalMTok)} · {money(prune.cashCost)}{" "}
+                · {num(prune.pfDays, 0)} PFd · {prune.researchersRequired}R
+                {` · ${prune.engineersRequired}E · ~${prune.estimatedDays}d`}
+              </span>
+            ) : (
+              <span>No low-quality stock</span>
+            )}
+          </div>
+          {pruneBlockers.length > 0 && auditUnlocked ? (
+            <div className="mt-1.5">
+              <BlockerList items={pruneBlockers} />
+            </div>
+          ) : null}
         </div>
-      ) : null}
-      {dayIn > 0.01 ? (
-        <div className="mt-1 font-mono text-[0.6875rem] tabular-nums text-muted">
-          +{formatTokens(dayIn)} today
-        </div>
-      ) : null}
+      </details>
     </div>
   );
 }

@@ -103,9 +103,6 @@ export function MapPanel() {
       description="Fleet capacity, construction, and the selected parcel. Sites live in intel."
     >
       <div className="space-y-3">
-        <InfrastructureOverview />
-        <OverviewGovernance state={state} />
-
         {tile && tile.kind !== 'empty' ? (
           <GameCard
             tone={isOurs ? 'mint' : isRival ? 'train' : undefined}
@@ -124,20 +121,8 @@ export function MapPanel() {
               </StatusChip>
             }
           >
-            <div className="space-y-1">
+            <div className="space-y-1" aria-label="Selected building essentials">
               <StatRow label="Type" value={tileTypeLabel(tile.kind)} />
-              {isDcKind(tile.kind) ? (
-                <>
-                  <StatRow label="Size class" value={dcSizeLabel(tile.kind, tile.dcSize)} />
-                  <StatRow
-                    label="Campus role"
-                    value={tile.campusRole === 'pad' ? 'Footprint pad' : 'Anchor (racks)'}
-                  />
-                  {campusTiles.length > 1 ? (
-                    <StatRow label="Campus tiles" value={String(campusTiles.length)} />
-                  ) : null}
-                </>
-              ) : null}
               {!isScenicKind(tile.kind) ? <StatRow label="Level" value={`L${tile.level}`} /> : null}
               {isDcKind(tile.kind) && isDcAnchor(tile) ? (
                 <>
@@ -161,26 +146,47 @@ export function MapPanel() {
                     .join(' · ')}
                 />
               )}
-              {tile.capex > 0 ? <StatRow label="Capex sunk" value={money(tile.capex)} /> : null}
               {tile.opexPerDay > 0 && isOurs ? (
                 <StatRow
                   label="Opex"
                   value={`${money(tile.opexPerDay * (ECONOMY.facilityOpexMultiplier ?? 1))}/d`}
                 />
               ) : null}
-              {region ? (
-                <>
-                  <StatRow label="Energy mult" value={`×${region.energyPriceMult.toFixed(2)}`} />
-                  <StatRow
-                    label="Latency"
-                    value={`${(region.latencyToMarket * 100).toFixed(0)} (lower better)`}
-                  />
-                </>
-              ) : null}
             </div>
 
-            {tile.note ? (
-              <p className="mt-2 text-[0.8125rem] leading-snug text-muted">{tile.note}</p>
+            {isDcKind(tile.kind) || tile.capex > 0 || region || tile.note ? (
+              <details className="mt-3 rounded-md border border-line/60 bg-void/30">
+                <summary className="flex min-h-11 cursor-pointer touch-manipulation items-center px-3 text-[0.75rem] font-semibold text-muted">
+                  Site details
+                </summary>
+                <div className="space-y-1 border-t border-line/50 px-3 py-2">
+                  {isDcKind(tile.kind) ? (
+                    <>
+                      <StatRow label="Size" value={dcSizeLabel(tile.kind, tile.dcSize)} />
+                      <StatRow
+                        label="Campus role"
+                        value={tile.campusRole === 'pad' ? 'Footprint pad' : 'Anchor (racks)'}
+                      />
+                      {campusTiles.length > 1 ? (
+                        <StatRow label="Campus tiles" value={String(campusTiles.length)} />
+                      ) : null}
+                    </>
+                  ) : null}
+                  {tile.capex > 0 ? <StatRow label="Capex sunk" value={money(tile.capex)} /> : null}
+                  {region ? (
+                    <>
+                      <StatRow label="Energy cost" value={`×${region.energyPriceMult.toFixed(2)}`} />
+                      <StatRow
+                        label="Latency"
+                        value={`${(region.latencyToMarket * 100).toFixed(0)} · lower is better`}
+                      />
+                    </>
+                  ) : null}
+                  {tile.note ? (
+                    <p className="pt-1 text-[0.75rem] leading-snug text-muted">{tile.note}</p>
+                  ) : null}
+                </div>
+              </details>
             ) : null}
 
             {constructing ? (
@@ -199,7 +205,7 @@ export function MapPanel() {
                 <HudButton
                   type="button"
                   variant="ghost"
-                  className="w-full"
+                  className="w-full !min-h-11"
                   onClick={() => useGameStore.getState().openFleet()}
                 >
                   Track in fleet
@@ -219,7 +225,7 @@ export function MapPanel() {
                 <HudButton
                   type="button"
                   variant="secondary"
-                  className="w-full"
+                  className="w-full !min-h-11"
                   disabled={state.player.cash < upgradeCost}
                   title={
                     state.player.cash < upgradeCost
@@ -237,7 +243,7 @@ export function MapPanel() {
               <HudButton
                 type="button"
                 variant="ghost"
-                className="mt-3 w-full text-mint"
+                className="mt-3 w-full !min-h-11 text-mint"
                 onClick={() =>
                   useGameStore
                     .getState()
@@ -252,7 +258,7 @@ export function MapPanel() {
               <HudButton
                 type="button"
                 variant="ghost"
-                className="mt-3 w-full text-mint"
+                className="mt-3 w-full !min-h-11 text-mint"
                 onClick={() =>
                   useGameStore
                     .getState()
@@ -278,9 +284,12 @@ export function MapPanel() {
         ) : (
           <EmptyState
             title="No parcel selected"
-            description="Click the map for parcel details, or manage facilities above."
+            description="Tap the map for parcel details, or manage facilities below."
           />
         )}
+
+        <InfrastructureOverview />
+        <OverviewGovernance state={state} />
       </div>
     </PanelScaffold>
   )

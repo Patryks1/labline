@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
@@ -20,6 +22,21 @@ describe('Overview governance ownership', () => {
     expect(markup).toContain('aria-expanded="false"')
     expect(markup).toContain('aria-controls="overview-governance-details"')
     expect(markup).not.toContain('role="tablist"')
+  })
+
+  it('puts a concise selected building first and progressively discloses site context', () => {
+    const source = readFileSync(
+      fileURLToPath(new URL('./MapPanel.tsx', import.meta.url)),
+      'utf8',
+    )
+    const essentialsAt = source.indexOf('Selected building essentials')
+    const infrastructureAt = source.indexOf('<InfrastructureOverview />')
+
+    expect(essentialsAt).toBeGreaterThanOrEqual(0)
+    expect(infrastructureAt).toBeGreaterThan(essentialsAt)
+    expect(source).toContain('Site details')
+    expect(source).toContain('min-h-11 cursor-pointer touch-manipulation')
+    expect(source).not.toContain('<details open')
   })
 
   it('keeps the policy section and callbacks out of Infrastructure and Company', () => {

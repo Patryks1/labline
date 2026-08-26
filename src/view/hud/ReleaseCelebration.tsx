@@ -147,19 +147,29 @@ function ReleaseCelebrationDialog({
       titleId={`release-review-${event.id}`}
       eyebrow="Release review · list it"
       title={event.name}
-      description={`${review.model ? formatParams(review.model.paramsB) : event.family ?? 'Model'} · ${review.evidence ? `${BENCHMARK_SUITE_UI[review.suiteId].label} measured evaluation` : 'Public evaluation pending'}`}
+      description={(
+        <>
+          <span className="sm:hidden">
+            {review.model ? formatParams(review.model.paramsB) : event.family ?? 'Model'} · {review.evidence ? 'Evaluation ready' : 'Evaluation pending'}
+          </span>
+          <span className="hidden sm:inline">
+            {review.model ? formatParams(review.model.paramsB) : event.family ?? 'Model'} · {review.evidence ? `${BENCHMARK_SUITE_UI[review.suiteId].label} measured evaluation` : 'Public evaluation pending'}
+          </span>
+        </>
+      )}
       onClose={onClear}
       closeLabel="Close release review"
       maxWidthClass="max-w-6xl"
       footer={
         review.model ? (
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-[0.75rem] text-muted">
+            <p className="hud-mobile-detail text-[0.75rem] text-muted max-sm:hidden [@media(max-height:540px)]:hidden">
               Public on evals. Demand starts only after you list it.
             </p>
-            <div className="flex flex-wrap gap-2">
+            <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
               <HudButton type="button" variant="ghost" onClick={confirmHold}>
-                Release without selling
+                <span className="sm:hidden">Don't list</span>
+                <span className="hidden sm:inline">Release without selling</span>
               </HudButton>
               <HudButton
                 type="button"
@@ -167,7 +177,7 @@ function ReleaseCelebrationDialog({
                 className="sm:min-w-40"
                 onClick={sell ? confirmSell : confirmHold}
               >
-                {sell ? 'List it' : 'Release without selling'}
+                {sell ? 'List it' : <><span className="sm:hidden">Don't list</span><span className="hidden sm:inline">Release without selling</span></>}
               </HudButton>
             </div>
           </div>
@@ -183,7 +193,7 @@ function ReleaseCelebrationDialog({
         )
       }
     >
-      <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div className="mb-3 grid grid-cols-2 gap-2 sm:mb-4 sm:grid-cols-4">
         <MetricTile
           label="Release status"
           value={
@@ -210,7 +220,7 @@ function ReleaseCelebrationDialog({
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(20rem,0.82fr)_minmax(32rem,1.18fr)]">
-        <section className="rounded-lg border border-line/70 bg-panel-2/55 p-3.5" aria-labelledby={`release-curve-${event.id}`}>
+        <section className="hud-mobile-detail rounded-lg border border-line/70 bg-panel-2/55 p-3.5 max-sm:hidden [@media(max-height:540px)]:hidden" aria-labelledby={`release-curve-${event.id}`}>
           <div className="flex items-start justify-between gap-3">
             <div>
               <p className="hud-eyebrow">Training trace</p>
@@ -270,7 +280,7 @@ function ReleaseCelebrationDialog({
           </div>
           {review.evidence ? (
             <>
-              <div className="panel-scroll mt-3 overflow-x-auto rounded-md border border-line/60">
+              <div className="hud-mobile-detail panel-scroll mt-3 hidden overflow-x-auto overscroll-x-contain rounded-md border border-line/60 sm:block">
                 <table className="w-full min-w-[38rem] border-collapse text-left text-[0.75rem]">
                   <thead>
                     <tr className="border-b border-line/70 bg-void/55 font-mono text-[0.625rem] uppercase tracking-[0.11em] text-muted">
@@ -302,8 +312,31 @@ function ReleaseCelebrationDialog({
                   </tbody>
                 </table>
               </div>
-              <p className="mt-3 font-mono text-[0.625rem] tabular-nums text-muted">
+              <div data-testid="release-evidence-mobile" className="hud-mobile-summary mt-3 space-y-2 sm:hidden">
+                {review.evidence.metrics.map((metric) => (
+                  <article key={metric.metricId} className="rounded-md border border-line/60 bg-void/35 px-3 py-2.5">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <h4 className="truncate text-[0.8125rem] font-medium text-bone">{metric.label}</h4>
+                        <p className="mt-1 font-mono text-[0.625rem] text-muted">
+                          {metric.rival ? `Rank #${metric.rival.rank}/${metric.rival.fieldSize}` : 'No public peer'}
+                        </p>
+                      </div>
+                      <div className="shrink-0 text-right">
+                        <strong className="block font-mono text-sm tabular-nums text-mint">{metric.score.toFixed(1)}</strong>
+                        <span className={`font-mono text-[0.6875rem] tabular-nums ${metric.rival && metric.rival.delta >= 0 ? 'text-mint' : 'text-warning'}`}>
+                          {metric.rival ? `${metric.rival.delta >= 0 ? '+' : ''}${metric.rival.delta.toFixed(1)} vs peer` : 'Measured'}
+                        </span>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+              <p className="mt-2 font-mono text-[0.625rem] tabular-nums text-muted sm:mt-3">
+                <span className="sm:hidden">Day {review.evidence.report.completedDay} · {(review.evidence.report.confidence * 100).toFixed(0)}% confidence</span>
+                <span className="hidden sm:inline">
                 Report day {review.evidence.report.completedDay} · {review.evidence.report.request.mode.replaceAll('_', ' ')} · {money(review.evidence.report.quote.totalCost)} · {(review.evidence.report.confidence * 100).toFixed(0)}% confidence
+                </span>
               </p>
               {showEvalOrder && review.model ? (
                 <ReleaseEvaluationOrder
@@ -315,14 +348,14 @@ function ReleaseCelebrationDialog({
               ) : null}
             </>
           ) : (
-            <div className="mt-3 rounded-lg border border-research/25 bg-research/5 px-4 py-5">
+            <div className="mt-3 rounded-lg border border-research/25 bg-research/5 px-3 py-4 sm:px-4 sm:py-5">
               <ChartLineUp className="mx-auto text-research" size="1.5rem" />
               <strong className="mt-2 block text-center text-sm text-bone">
                 {pendingEvaluations.length > 0
                   ? 'Evaluation in flight'
                   : 'Public evaluation pending'}
               </strong>
-              <p className="mx-auto mt-1 max-w-lg text-center text-[0.75rem] leading-relaxed text-muted">
+              <p className="hud-mobile-detail mx-auto mt-1 max-w-lg text-center text-[0.75rem] leading-relaxed text-muted max-sm:hidden">
                 {pendingEvaluations.length > 0
                   ? `Results land on day ${Math.max(...pendingEvaluations.map((job) => job.readyDay))}. Latent scores stay hidden until the panel reports.`
                   : 'No measured report is retained for this exact model version yet. Commission a study here, or list it and measure later.'}
@@ -352,7 +385,7 @@ function ReleaseCelebrationDialog({
 
       {review.model ? (
         <section
-          className="mt-4 rounded-lg border border-line/70 bg-panel-2/55 p-3.5"
+          className="mt-3 rounded-lg border border-line/70 bg-panel-2/55 p-3 sm:mt-4 sm:p-3.5"
           aria-labelledby={`release-gtm-${event.id}`}
         >
           <p className="hud-eyebrow">Go to market</p>
@@ -360,23 +393,23 @@ function ReleaseCelebrationDialog({
             Sell, price the API, and tick plans
           </h3>
           <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(12rem,0.7fr)_minmax(16rem,1fr)_minmax(16rem,1fr)]">
-            <label className="flex cursor-pointer items-start gap-2 rounded-md border border-line/60 bg-void/35 px-3 py-2.5 text-[0.75rem] text-muted">
+            <label className="flex min-h-11 cursor-pointer items-start gap-2 rounded-md border border-line/60 bg-void/35 px-3 py-2.5 text-[0.75rem] text-muted">
               <input
                 type="checkbox"
-                className="mt-0.5 accent-mint"
+                className="mt-0.5 size-5 shrink-0 accent-mint"
                 checked={sell}
                 onChange={(event) => setSell(event.target.checked)}
               />
               <span>
                 <strong className="block text-bone">Sell this model</strong>
-                Off keeps it on the board without demand.
+                <span className="max-sm:hidden">Off keeps it on the board without demand.</span>
               </span>
             </label>
             <div className="rounded-md border border-line/60 bg-void/35 px-3 py-2.5">
               <label className="flex cursor-pointer items-center gap-2 text-[0.75rem] text-muted">
                 <input
                   type="checkbox"
-                  className="accent-mint"
+                  className="size-5 shrink-0 accent-mint"
                   checked={apiOn}
                   disabled={!sell}
                   onChange={(event) => setApiOn(event.target.checked)}
@@ -434,7 +467,7 @@ function ReleaseCelebrationDialog({
                 </label>
               </div>
               {hosting ? (
-                <p className="mt-2 text-[0.625rem] leading-relaxed text-muted">
+                <p className="hud-mobile-detail mt-2 text-[0.625rem] leading-relaxed text-muted max-sm:hidden [@media(max-height:540px)]:hidden">
                   {hosting.source === 'cloud_reference'
                     ? 'No serving replica on campus — floor is a cloud-rental quote for this size.'
                     : `Hosting floor from energy, racks, halls, and leases at this model's size (${review.model ? formatParams(review.model.paramsB) : 'model'} · ${num(hosting.capacityMTok)} MTok/day). Output costs more than input because decode is memory-bound.`}
@@ -443,7 +476,7 @@ function ReleaseCelebrationDialog({
             </div>
             <div className="rounded-md border border-line/60 bg-void/35 px-3 py-2.5">
               <p className="text-[0.75rem] font-medium text-bone">Plans</p>
-              <div className="mt-2 flex max-h-36 flex-col gap-1.5 overflow-y-auto">
+              <div className="mt-2 flex flex-col gap-1.5 sm:max-h-36 sm:overflow-y-auto [@media(max-height:540px)]:!max-h-none [@media(max-height:540px)]:!overflow-visible">
                 {plans.length === 0 ? (
                   <p className="text-[0.6875rem] text-muted">No plans yet.</p>
                 ) : (
@@ -452,11 +485,11 @@ function ReleaseCelebrationDialog({
                     return (
                       <label
                         key={plan.id}
-                        className="flex cursor-pointer items-center gap-2 text-[0.75rem] text-muted"
+                        className="flex min-h-11 cursor-pointer items-center gap-2 text-[0.75rem] text-muted"
                       >
                         <input
                           type="checkbox"
-                          className="accent-mint"
+                          className="size-5 shrink-0 accent-mint"
                           checked={checked}
                           disabled={!sell}
                           onChange={() =>

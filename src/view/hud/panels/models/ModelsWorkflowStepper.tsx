@@ -10,13 +10,12 @@ export type ModelsWorkflowStep =
 const STEPS: ReadonlyArray<{
   id: ModelsWorkflowStep;
   label: string;
-  compactLabel: string;
 }> = [
-  { id: "product", label: "Goal & I/O", compactLabel: "Goal" },
-  { id: "architecture", label: "Topology", compactLabel: "Arch" },
-  { id: "data", label: "Data", compactLabel: "Data" },
-  { id: "compute", label: "Compute", compactLabel: "Recipe" },
-  { id: "review", label: "Review", compactLabel: "Rev" },
+  { id: "product", label: "Goal & I/O" },
+  { id: "architecture", label: "Topology" },
+  { id: "data", label: "Data" },
+  { id: "compute", label: "Compute" },
+  { id: "review", label: "Review" },
 ];
 
 export const MODELS_WORKFLOW_STEPS = STEPS;
@@ -43,7 +42,8 @@ export function ModelsWorkflowStepper({
     <nav
       aria-label="Model workflow"
       data-model-workflow="true"
-      className="rounded-lg border border-line/60 bg-void/25 px-2.5 py-2"
+      data-mobile-layout="compact-steps"
+      className="rounded-lg border border-line/60 bg-void/25 px-1.5 py-2 sm:px-2.5"
     >
       <ol className="grid grid-cols-5 gap-1">
         {STEPS.map((step, index) => {
@@ -64,7 +64,7 @@ export function ModelsWorkflowStepper({
                 aria-pressed={active}
                 disabled={!onStepChange}
                 onClick={() => onStepChange?.(step.id)}
-                className={`!flex !min-h-11 !w-full !items-center !gap-1 !rounded-md !border-0 !px-1 !text-left !text-[0.6875rem] !font-semibold !uppercase !tracking-[0.1em] transition max-[360px]:!tracking-[0.04em] sm:!gap-1.5 sm:!px-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/45 disabled:cursor-default ${
+                className={`!flex !min-h-11 !w-full !items-center !justify-center !gap-1 !rounded-md !border-0 !px-1 !text-left !text-[0.6875rem] !font-semibold !uppercase !tracking-[0.1em] transition xl:!justify-start xl:!gap-1.5 xl:!px-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/45 disabled:cursor-default ${
                   active
                     ? "!bg-mint/10 !text-mint"
                     : complete
@@ -84,14 +84,8 @@ export function ModelsWorkflowStepper({
                 >
                   {complete && !active ? "✓" : index + 1}
                 </span>
-                <span className="min-w-0 whitespace-nowrap max-[360px]:hidden">
+                <span className="hidden min-w-0 whitespace-nowrap xl:inline">
                   {step.label}
-                </span>
-                <span
-                  aria-hidden
-                  className="hidden min-w-0 whitespace-nowrap max-[360px]:inline"
-                >
-                  {step.compactLabel}
                 </span>
               </HudButton>
             </li>
@@ -99,7 +93,7 @@ export function ModelsWorkflowStepper({
         })}
       </ol>
       {onStepChange ? (
-        <div className="mt-2 flex items-center justify-between gap-2 border-t border-line/45 pt-2">
+        <div className="mt-2 flex items-center justify-between gap-2 border-t border-line/45 pt-2 [@media(max-height:600px)]:hidden" data-short-landscape="hide-secondary-navigation">
           <HudButton
             type="button"
             variant="ghost"

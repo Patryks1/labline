@@ -93,13 +93,18 @@ export function ResponsiveDonut({
   })
 
   return (
-    <div className={`w-full min-w-0 ${breakpoint}:w-24 ${breakpoint}:shrink-0 ${className ?? ''}`}>
+    <div
+      className={`hud-chart-frame w-full min-w-0 ${breakpoint}:w-24 ${breakpoint}:shrink-0 ${className ?? ''}`}
+      data-mobile-chart="true"
+      data-chart-kind="donut"
+      data-swipe-ignore="true"
+    >
       <div className={`relative hidden h-24 w-24 max-w-full ${breakpoint}:block`}>
         <svg
           viewBox="0 0 88 88"
           width="88"
           height="88"
-          className="h-24 w-24 max-w-full touch-none"
+          className="h-24 w-24 max-w-full touch-pan-y"
           role="group"
           aria-roledescription="donut chart"
           aria-label={ariaLabel}
@@ -149,17 +154,31 @@ export function ResponsiveDonut({
       </div>
 
       <div className={`${breakpoint}:hidden`} role="group" aria-label={ariaLabel} aria-describedby={readoutId}>
-        <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-void/80">
-          {arcs.map((arc) => (
+        <div
+          className="relative flex h-11 w-full items-center overflow-x-auto"
+          data-mobile-scroll="true"
+          data-swipe-ignore="true"
+        >
+          <span
+            className="pointer-events-none absolute inset-x-0 top-1/2 h-2.5 -translate-y-1/2 rounded-full bg-void/80"
+            aria-hidden="true"
+          />
+          {arcs.map((arc, index) => (
             <button
               key={arc.id}
               type="button"
-              className="h-full min-w-0 p-0 transition-opacity"
-              style={{ width: `${total > 0 ? (arc.value / total) * 100 : 0}%`, background: arc.color }}
+              className="relative z-10 flex h-11 min-w-11 shrink-0 items-center p-0 transition-opacity"
+              style={{ width: `${total > 0 ? (arc.value / total) * 100 : 0}%` }}
               aria-label={sliceLabel(arc, valueFormatter)}
               aria-pressed={pinnedId === arc.id}
               {...sliceEvents(arc, arc.sourceIndex)}
-            />
+            >
+              <span
+                className={`block h-2.5 w-full ${index === 0 ? 'rounded-l-full' : ''} ${index === arcs.length - 1 ? 'rounded-r-full' : ''}`}
+                style={{ background: arc.color }}
+                aria-hidden="true"
+              />
+            </button>
           ))}
         </div>
         <div className="mt-1 flex items-baseline justify-between gap-2 font-mono text-[0.625rem] tabular-nums text-muted">

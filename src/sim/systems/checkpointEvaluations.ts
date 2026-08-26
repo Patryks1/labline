@@ -17,6 +17,7 @@ import { isLivePublicModel } from "../modelRelease";
 import { chargeExpense } from "./financeLedger";
 import {
   playerTrainingJobs,
+  playerTrainingResourcePlan,
   resolveTrainingBenchmarkEvaluation,
   withTrainingJobs,
 } from "./training";
@@ -150,7 +151,7 @@ export function scheduleCheckpointEvaluation(
       },
     },
     "info",
-    `${checkpoint.model.name} entered ${request.mode.replaceAll("_", " ")} evaluation: ${request.suiteIds.length} suite${request.suiteIds.length === 1 ? "" : "s"}, ${Math.round(pending.quote.accuracy * 100)}% measurement accuracy, results in ${pending.quote.durationDays} days.`,
+    `${checkpoint.model.name} entered ${request.mode.replaceAll("_", " ")} evaluation: ${request.suiteIds.length} suite${request.suiteIds.length === 1 ? "" : "s"}, ${Math.round(pending.quote.accuracy * 100)}% measurement accuracy, ${Math.max(0, pending.quote.computePfDays ?? 0).toFixed(2)} PF-days; earliest results in ${pending.quote.durationDays} days.`,
   );
 }
 
@@ -210,7 +211,7 @@ export function scheduleReleasedModelEvaluation(
       },
     },
     "info",
-    `${model.name} entered ${request.mode.replaceAll("_", " ")} evaluation: ${request.suiteIds.length} suite${request.suiteIds.length === 1 ? "" : "s"}, ${Math.round(pending.quote.accuracy * 100)}% measurement accuracy, results in ${pending.quote.durationDays} days.`,
+    `${model.name} entered ${request.mode.replaceAll("_", " ")} evaluation: ${request.suiteIds.length} suite${request.suiteIds.length === 1 ? "" : "s"}, ${Math.round(pending.quote.accuracy * 100)}% measurement accuracy, ${Math.max(0, pending.quote.computePfDays ?? 0).toFixed(2)} PF-days; earliest results in ${pending.quote.durationDays} days.`,
   );
 }
 
@@ -269,13 +270,63 @@ function legacyQueue(state: SimState): PrivateEvaluationJob[] {
 /** Resolve every due item; concurrent jobs never overwrite one another. */
 export function tickCheckpointEvaluations(state: SimState): SimState {
   const queue = legacyQueue(state);
-  const due = queue.filter((job) => state.day >= job.readyDay);
-  const remaining = queue.filter((job) => state.day < job.readyDay);
-  if (due.length === 0) {
+  const resources = playerTrainingResourcePlan(state);
+  const advanced = queue.map((job): PrivateEvaluationJob => {
+    const target =
+      job.kind === "training_benchmark"
+        ? job.pending.workload?.computePfDays
+        : job.pending.quote.computePfDays;
+    // Legacy saves are calendar-only. Do not invent physical work after sale.
+    if (target == null || !Number.isFinite(target)) return job;
+    const progress = Math.min(
+      Math.max(0, target),
+      Math.max(0, job.pending.computeProgressPfDays ?? 0) +
+        Math.max(
+          0,
+          resources.privateEvaluations[job.id]?.effectivePf ?? 0,
+        ),
+    );
     return {
+      ...job,
+      pending: { ...job.pending, computeProgressPfDays: progress },
+    } as PrivateEvaluationJob;
+  });
+  const computeComplete = (job: PrivateEvaluationJob): boolean => {
+    const target =
+      job.kind === "training_benchmark"
+        ? job.pending.workload?.computePfDays
+        : job.pending.quote.computePfDays;
+    return (
+      target == null ||
+      !Number.isFinite(target) ||
+      (job.pending.computeProgressPfDays ?? 0) + 1e-9 >= Math.max(0, target)
+    );
+  };
+  const due = advanced.filter(
+    (job) => state.day >= job.readyDay && computeComplete(job),
+  );
+  const remaining = advanced.filter(
+    (job) => state.day < job.readyDay || !computeComplete(job),
+  );
+  if (due.length === 0) {
+    const jobs = playerTrainingJobs(state).map((job) => ({
+      ...job,
+      pendingBenchmark: mirrorTrainingPending(remaining, job.id),
+    }));
+    const checkpoints = (state.player.trainingCheckpoints ?? []).map(
+      (checkpoint) => ({
+        ...checkpoint,
+        pendingEvaluation: mirrorCheckpointPending(remaining, checkpoint.id),
+      }),
+    );
+    return withTrainingJobs({
       ...state,
-      player: { ...state.player, privateEvaluationJobs: queue },
-    };
+      player: {
+        ...state.player,
+        privateEvaluationJobs: remaining,
+        trainingCheckpoints: checkpoints,
+      },
+    }, jobs);
   }
 
   let trainingJobs = playerTrainingJobs(state);

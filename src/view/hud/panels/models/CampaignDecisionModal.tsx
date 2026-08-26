@@ -39,6 +39,7 @@ export function CampaignDecisionModal({
       eyebrow={`${job.name} · ${(event.milestone * 100).toFixed(0)}% gate`}
       title={event.title}
       description={event.description}
+      mobileDescription={`Resolve by day ${event.decisionDeadlineDay}.`}
       onClose={onClose}
       closeLabel="Decide later"
       maxWidthClass="max-w-3xl"

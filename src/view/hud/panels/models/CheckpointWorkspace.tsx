@@ -88,13 +88,13 @@ export function CheckpointWorkspace({
   return (
     <div className="space-y-3">
       <section className="rounded-lg border border-mint/35 bg-mint/5 p-3">
-        <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex flex-col items-stretch justify-between gap-3 sm:flex-row sm:items-start">
           <div>
             <p className="hud-eyebrow">Checkpoint purpose</p>
             <h3 className="mt-1 text-sm font-semibold text-bone">
               Fork this snapshot onto a new data mix
             </h3>
-            <p className="mt-1 hidden max-w-3xl text-[0.6875rem] leading-5 text-muted sm:block">
+            <p className="hud-mobile-detail mt-1 max-w-3xl text-[0.6875rem] leading-5 text-muted">
               A checkpoint is a frozen weight file, not a save slot. Branch it
               into Code, Cyber, Chat, Agents, Reasoning, or Safety with
               independent data, compute, and post-training. The parent run keeps
@@ -109,7 +109,7 @@ export function CheckpointWorkspace({
               const latest = selectedGroup?.checkpoints.at(-1);
               if (latest) onBranch?.(latest.id);
             }}
-            className="min-h-11"
+            className="min-h-11 w-full sm:w-auto"
           >
             <GitFork size="0.875rem" />
             Branch from latest
@@ -117,21 +117,21 @@ export function CheckpointWorkspace({
         </div>
       </section>
 
-      <section className="rounded-lg border border-line/65 bg-panel-2/45 p-3">
-        <div className="flex flex-wrap items-start justify-between gap-3">
+      <details className="group rounded-lg border border-line/65 bg-panel-2/45" data-manual-checkpoint-disclosure="true">
+        <summary className="flex min-h-11 cursor-pointer list-none items-start justify-between gap-3 rounded-lg p-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
           <div>
             <p className="hud-eyebrow">Manual checkpoint</p>
             <h3 className="mt-1 text-sm font-semibold text-bone">
               Save the current weights without stopping the run
             </h3>
-            <p className="mt-1 hidden max-w-3xl text-[0.6875rem] leading-5 text-muted sm:block">
-              Save the exact current weights while the source run keeps going.
-              Select the checkpoint below when you are ready to branch a new
-              Code, Cyber, Chat, Agents, Reasoning, Safety, or custom model.
-            </p>
           </div>
-          <GitFork size="1.25rem" className="text-research" weight="duotone" />
-        </div>
+          <span className="font-mono text-[0.625rem] text-muted"><span className="group-open:hidden">Configure</span><span className="hidden group-open:inline">Hide</span> <span aria-hidden>⌄</span></span>
+        </summary>
+        <div className="border-t border-line/40 p-3">
+        <p className="hud-mobile-detail max-w-3xl text-[0.6875rem] leading-5 text-muted">
+          Save exact current weights while the source run keeps going, then
+          use the snapshot for a branch or evaluation.
+        </p>
         {jobs.length > 0 ? (
           <div className="mt-3 grid gap-2 lg:grid-cols-[minmax(12rem,0.8fr)_minmax(18rem,1.4fr)_auto] lg:items-end">
             <label className="text-[0.6875rem] text-muted">
@@ -188,7 +188,8 @@ export function CheckpointWorkspace({
             Existing checkpoints remain available below.
           </p>
         )}
-      </section>
+        </div>
+      </details>
 
       {selectedGroup ? (
         <>
@@ -197,12 +198,12 @@ export function CheckpointWorkspace({
             className="rounded-lg border border-line/65 bg-panel-2/45 p-2"
           >
             <p className="hud-eyebrow px-1 pb-1.5">Run histories</p>
-            <ul className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3">
+            <ul className="panel-scroll grid gap-1 max-xl:flex max-xl:snap-x max-xl:overflow-x-auto max-xl:overscroll-x-contain sm:grid-cols-2 xl:grid-cols-3" data-mobile-scroll="horizontal">
               {grouped.map((group) => {
                 const active = group.jobId === selectedGroup.jobId;
                 const latest = group.checkpoints.at(-1);
                 return (
-                  <li key={group.jobId}>
+                  <li key={group.jobId} className="max-xl:min-w-[12rem] max-xl:snap-start">
                     <HudButton
                       type="button"
                       variant="ghost"

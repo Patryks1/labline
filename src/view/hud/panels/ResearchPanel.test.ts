@@ -8,9 +8,15 @@ import { useGameStore } from "../../../store/gameStore";
 import { ResearchPanel, ResearchProgramQueue, researchPoolTileDetail, researchPoolTileValue } from "./ResearchPanel";
 import {
   RESEARCH_TREE_DEFAULT_ZOOM,
+  RESEARCH_TREE_MAX_ZOOM,
   researchCanvasFitScale,
 } from "./researchCanvasLayout";
-import { scrollMobileResearchSelection } from "./researchPanelMobile";
+import {
+  RESEARCH_COMPACT_MEDIA_QUERY,
+  researchPinchView,
+  researchTouchIntent,
+  scrollMobileResearchSelection,
+} from "./researchPanelMobile";
 import { layoutResearchTree } from "../../../sim/balance/researchLayout";
 import {
   initialResearchViewportNodeId,
@@ -26,11 +32,17 @@ describe("ResearchPanel mobile presentation", () => {
 
     const markup = renderToStaticMarkup(createElement(ResearchPanel));
 
-    expect(markup).toContain("overflow-y-auto overscroll-contain");
+    expect(markup).toContain('data-mobile-scroll-owner="workspace"');
+    expect(markup).toContain("overflow-visible");
     expect(markup).toContain("touch-pan-y");
-    expect(markup).toContain("sm:touch-none");
+    expect(markup).toContain("min-[901px]:touch-none");
     expect(markup).toContain("Reset research tree view");
-    expect(markup).toContain("tap select · Queue action · pinch/drag");
+    expect(markup).toContain("tap · swipe tree · pinch zoom");
+    expect(markup).toContain('data-mobile-gesture="swipe-pinch"');
+    expect(markup).toContain("max-[900px]:landscape:!h-[68dvh]");
+    expect(markup).toContain(
+      "[@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!h-[68dvh]",
+    );
     expect(markup).toContain('aria-roledescription="research tree"');
     expect(markup).toContain('aria-describedby="research-tree-summary"');
     expect(markup).toContain("Research prerequisite relationships:");
@@ -42,6 +54,13 @@ describe("ResearchPanel mobile presentation", () => {
     expect(markup).toContain("research-node-queue-action");
     expect(markup).toContain("research-tree-shell");
     expect(markup).toContain("--research-tree-zoom");
+    expect(markup).toContain("Pods &amp; queue");
+    expect(markup).toContain('aria-controls="research-pods-and-queue"');
+    expect(markup).toContain('data-mobile-collapsed="true"');
+    expect(markup).toContain('data-mobile-secondary-metrics="collapsed"');
+    expect(markup).not.toMatch(
+      /<details[^>]*data-mobile-secondary-metrics="collapsed"[^>]*\sopen(?:=|\s|>)/,
+    );
     expect(markup).toContain(
       'aria-keyshortcuts="Enter Shift+Enter Escape ArrowLeft ArrowRight ArrowUp ArrowDown"',
     );
@@ -95,6 +114,48 @@ describe("ResearchPanel mobile presentation", () => {
       block: "nearest",
       behavior: "smooth",
     });
+  });
+
+  it("treats short horizontal phone resolutions as compact", () => {
+    expect(RESEARCH_COMPACT_MEDIA_QUERY).toContain("max-width: 900px");
+    expect(RESEARCH_COMPACT_MEDIA_QUERY).toContain("max-width: 1180px");
+    expect(RESEARCH_COMPACT_MEDIA_QUERY).toContain("orientation: landscape");
+    expect(RESEARCH_COMPACT_MEDIA_QUERY).toContain("max-height: 600px");
+  });
+
+  it("reserves vertical one-finger gestures for the workspace", () => {
+    expect(researchTouchIntent(3, 2)).toBe("pending");
+    expect(researchTouchIntent(24, 8)).toBe("pan");
+    expect(researchTouchIntent(8, 24)).toBe("scroll");
+    expect(researchTouchIntent(12, 12)).toBe("scroll");
+  });
+
+  it("anchors and clamps two-finger tree zoom", () => {
+    const start = { x: 20, y: 30, scale: 0.6 };
+    const zoomed = researchPinchView(
+      start,
+      { x: 100, y: 100 },
+      { x: 200, y: 100 },
+      { x: 70, y: 120 },
+      { x: 230, y: 120 },
+      0.28,
+      RESEARCH_TREE_MAX_ZOOM,
+    );
+
+    expect(zoomed.scale).toBeCloseTo(0.96);
+    expect(zoomed.x).toBeCloseTo(-58);
+    expect(zoomed.y).toBeCloseTo(8);
+
+    const clamped = researchPinchView(
+      start,
+      { x: 100, y: 100 },
+      { x: 200, y: 100 },
+      { x: -500, y: 100 },
+      { x: 800, y: 100 },
+      0.28,
+      RESEARCH_TREE_MAX_ZOOM,
+    );
+    expect(clamped.scale).toBe(RESEARCH_TREE_MAX_ZOOM);
   });
 
   it("keeps the default tree readable while Fit remains an explicit overview", () => {

@@ -180,6 +180,101 @@ describe('capital stack', () => {
     expect(weakPreview.overusePenalty).toBeGreaterThan(0.5)
   })
 
+  it('recalculates model-pitch chance, dilution, and data drag for a custom ask', () => {
+    const state = createGame(32011)
+    const model = pitchModel('negotiable-frontier', 92, 2)
+    const prepared = updateLab(state, state.playerLabId, (lab) => ({
+      ...lab,
+      models: [model],
+    }))
+    const suggested = investorPitchPreview(prepared, model.id)
+    const low = investorPitchPreview(
+      prepared,
+      model.id,
+      prepared.playerLabId,
+      suggested.minimumCashRaised,
+    )
+    const high = investorPitchPreview(
+      prepared,
+      model.id,
+      prepared.playerLabId,
+      suggested.maximumCashRaised,
+    )
+
+    expect(low.cashRaised).toBe(suggested.minimumCashRaised)
+    expect(high.cashRaised).toBe(suggested.maximumCashRaised)
+    expect(high.postMoneyValuation).toBe(
+      high.preMoneyValuation + high.cashRaised,
+    )
+    expect(high.investorOwnership).toBeGreaterThan(low.investorOwnership)
+    expect(high.successChance).toBeLessThan(low.successChance)
+    expect(high.dataDrag).toBeGreaterThan(low.dataDrag)
+  })
+
+  it('settles and records the exact custom model-pitch amount', () => {
+    const model = pitchModel('custom-pitchable', 94)
+    let funded: ReturnType<typeof createGame> | undefined
+    for (let seed = 32_020; seed < 32_100 && !funded; seed += 1) {
+      const state = createGame(seed)
+      const prepared = updateLab(state, state.playerLabId, (lab) => ({
+        ...lab,
+        models: [model],
+      }))
+      const suggested = investorPitchPreview(prepared, model.id)
+      const amount = suggested.minimumCashRaised + 123_456
+      const quote = investorPitchPreview(
+        prepared,
+        model.id,
+        prepared.playerLabId,
+        amount,
+      )
+      const resolved = acceptInvestorPitch(
+        prepared,
+        model.id,
+        prepared.playerLabId,
+        amount,
+      )
+      const record = resolved.player.capital?.pitchHistory?.[0]
+      if (record?.outcome === 'funded') {
+        funded = resolved
+        const round = resolved.player.capital?.fundingRounds.at(-1)
+        const stake = resolved.player.capital?.capTable.find(
+          (item) => item.holderId === record.id,
+        )
+        expect(resolved.player.cash).toBe(prepared.player.cash + amount)
+        expect(record.requestedCashRaised).toBe(amount)
+        expect(record.cashRaised).toBe(amount)
+        expect(record.dataDrag).toBe(quote.dataDrag)
+        expect(round?.cashRaised).toBe(amount)
+        expect(round?.postMoneyValuation).toBe(
+          quote.preMoneyValuation + amount,
+        )
+        expect(stake?.ownership).toBeCloseTo(quote.investorOwnership, 12)
+      }
+    }
+    expect(funded).toBeDefined()
+  })
+
+  it('rejects an out-of-range model-pitch amount before consuming the pitch', () => {
+    const state = createGame(32012)
+    const model = pitchModel('bounded-pitch', 92)
+    const prepared = updateLab(state, state.playerLabId, (lab) => ({
+      ...lab,
+      models: [model],
+    }))
+    const preview = investorPitchPreview(prepared, model.id)
+    const resolved = acceptInvestorPitch(
+      prepared,
+      model.id,
+      prepared.playerLabId,
+      preview.maximumCashRaised + 1,
+    )
+
+    expect(resolved.player.cash).toBe(prepared.player.cash)
+    expect(resolved.player.capital?.pitchHistory).toEqual([])
+    expect(resolved.alerts[0]?.message).toContain('Choose a raise between')
+  })
+
   it('lists Instant-only models as a single pitch option', () => {
     const state = createGame(3202)
     const model = {

@@ -63,7 +63,11 @@ describe('BottomBar operations overflow', () => {
     expect(markup).toContain('operations-telemetry')
     expect(markup).toContain('operations-telemetry__served')
     expect(markup).toContain('operations-telemetry__actions')
-    expect(markup).toContain('title="Hover for breakdown"')
+    expect(markup).toContain('data-mobile-priority="primary"')
+    expect(markup).toContain('data-mobile-priority="secondary"')
+    expect(markup).toContain('data-mobile-priority="tertiary"')
+    expect(markup).toContain('data-mobile-disclosure="true"')
+    expect(markup).toContain('title="Open Train breakdown"')
     expect(markup).not.toContain('role="tooltip"')
   })
 

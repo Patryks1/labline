@@ -51,6 +51,11 @@ import {
   teacherCapabilityForDataDomain,
 } from "../balance/modelCapabilities";
 import {
+  peakSyntheticTeacherDomainCapability,
+  SYNTHETIC_GENERATION_CASH_PER_BILLED_MTOK,
+  syntheticTeacherGenerationEconomics,
+} from "../balance/syntheticTeacherEffort";
+import {
   syntheticJobQuality,
   syntheticTrainingProfile,
   teacherDomainStrength,
@@ -873,6 +878,8 @@ export interface SynthBudgetEstimate {
   powerMw: number;
   energyMWhPerDay: number;
   dailyComputeCost: number;
+  /** Token-generation charge included exactly once in dailyComputeCost. */
+  dailyTokenCashCost: number;
   costPerAcceptedMTok: number;
   kwhPerAcceptedMTok: number;
   domains: SynthDomainBudgetEstimate[];
@@ -883,23 +890,33 @@ export type SynthTeacherAssignment = "auto" | "assigned" | "fallback";
 export interface SynthDomainBudgetEstimate {
   domain: DataDomain;
   requestedTeacherId?: string;
+  requestedEffortId?: string;
   teacher: Model | null;
   autoTeacher: Model | null;
   assignment: SynthTeacherAssignment;
   validation?: string;
+  effortId: string;
+  effortName: string;
+  effortQuality: number;
+  thinkingTokenMultiplier: number;
+  billedTokenMultiplier: number;
+  computeIntensityMultiplier: number;
   domainCapability: number;
   modalityFit: number;
   toolFit: number;
   overallFit: number;
   researchPf: number;
   grossMTokPerDay: number;
+  generatedTokenMTokPerDay: number;
   usefulChance: number;
   hqChance: number;
   acceptedMTokPerDay: number;
   powerMw: number;
   energyMWhPerDay: number;
   dailyComputeCost: number;
+  dailyTokenCashCost: number;
   costPerAcceptedMTok: number;
+  pfPerAcceptedMTok: number;
   kwhPerAcceptedMTok: number;
   yieldDeltaMTokPerDay: number;
   costDeltaPerAcceptedMTok: number;
@@ -1062,6 +1079,7 @@ function synthDomainBudget(
   researchPf: number,
   powerMw: number,
   requestedTeacherId?: string,
+  requestedEffortId?: string,
   autoReference = false,
 ): Omit<
   SynthDomainBudgetEstimate,
@@ -1079,39 +1097,67 @@ function synthDomainBudget(
     return {
       domain,
       requestedTeacherId,
+      requestedEffortId,
       ...resolved,
+      effortId: "instant",
+      effortName: "Instant",
+      effortQuality: 1,
+      thinkingTokenMultiplier: 1,
+      billedTokenMultiplier: 1,
+      computeIntensityMultiplier: 1,
       domainCapability: 0,
       modalityFit: 0,
       toolFit: 0,
       overallFit: 0,
       researchPf,
       grossMTokPerDay: 0,
+      generatedTokenMTokPerDay: 0,
       usefulChance: 0,
       hqChance: 0,
       acceptedMTokPerDay: 0,
       powerMw,
       energyMWhPerDay: powerMw * 24,
       dailyComputeCost: 0,
+      dailyTokenCashCost: 0,
       costPerAcceptedMTok: 0,
+      pfPerAcceptedMTok: 0,
       kwhPerAcceptedMTok: 0,
     };
   }
-  const fit = synthTeacherFit(model, domain);
+  const baseFit = synthTeacherFit(model, domain);
+  const effortEconomics = syntheticTeacherGenerationEconomics({
+    model,
+    domain,
+    effortId: autoReference ? undefined : requestedEffortId,
+    acceptedMTok: 1,
+  });
+  const domainCapability = effortEconomics.effectiveDomainCapability;
+  const overallFit = clamp01(
+    baseFit.overallFit +
+      ((domainCapability - baseFit.domainCapability) / 100) * 0.58,
+  );
+  const effectiveResearchPf =
+    researchPf /
+    Math.max(
+      1,
+      effortEconomics.billedTokenMultiplier *
+        effortEconomics.computeIntensityMultiplier,
+    );
   const grossMTokPerDay = syntheticGenerationMTokPerDay({
     domain,
-    teacherDomainCapability: fit.domainCapability,
+    teacherDomainCapability: domainCapability,
     teacherReliability: model.quality.reliability,
-    researchPf,
+    researchPf: effectiveResearchPf,
     tier: "lq",
     activeParamsB: synthTeacherActiveParamsB(model),
     family: model.family,
   });
   const { usefulChance, hqChance } = synthAcceptanceChances({
     domain,
-    domainCapability: fit.domainCapability,
-    overallFit: fit.overallFit,
-    modalityFit: fit.modalityFit,
-    toolFit: fit.toolFit,
+    domainCapability,
+    overallFit,
+    modalityFit: baseFit.modalityFit,
+    toolFit: baseFit.toolFit,
     reliability: model.quality.reliability,
     researchPf,
   });
@@ -1119,22 +1165,41 @@ function synthDomainBudget(
   const energyMWhPerDay = powerMw * 24;
   const energyCost = energyMWhPerDay * energyPriceForState(state);
   const researchComputeCost = researchPf * ECONOMY.researchCashPerPfDay * 0.55;
-  const dailyComputeCost = energyCost + researchComputeCost;
+  const generatedTokenMTokPerDay =
+    grossMTokPerDay * effortEconomics.billedTokenMultiplier;
+  const dailyTokenCashCost =
+    generatedTokenMTokPerDay *
+    SYNTHETIC_GENERATION_CASH_PER_BILLED_MTOK;
+  const dailyComputeCost =
+    energyCost + researchComputeCost + dailyTokenCashCost;
   return {
     domain,
     requestedTeacherId,
+    requestedEffortId,
     ...resolved,
-    ...fit,
+    ...baseFit,
+    domainCapability,
+    overallFit,
+    effortId: effortEconomics.effortId,
+    effortName: effortEconomics.effortName,
+    effortQuality: effortEconomics.effortQuality,
+    thinkingTokenMultiplier: effortEconomics.thinkingTokenMultiplier,
+    billedTokenMultiplier: effortEconomics.billedTokenMultiplier,
+    computeIntensityMultiplier: effortEconomics.computeIntensityMultiplier,
     researchPf,
     grossMTokPerDay,
+    generatedTokenMTokPerDay,
     usefulChance,
     hqChance,
     acceptedMTokPerDay,
     powerMw,
     energyMWhPerDay,
     dailyComputeCost,
+    dailyTokenCashCost,
     costPerAcceptedMTok:
       acceptedMTokPerDay > 0 ? dailyComputeCost / acceptedMTokPerDay : 0,
+    pfPerAcceptedMTok:
+      acceptedMTokPerDay > 0 ? researchPf / acceptedMTokPerDay : 0,
     kwhPerAcceptedMTok:
       acceptedMTokPerDay > 0
         ? (energyMWhPerDay * 1_000) / acceptedMTokPerDay
@@ -1147,6 +1212,7 @@ export function estimateSynthBudget(
   state: SimState,
   researchShare: number,
   teacherModelIds: Partial<Record<DataDomain, string>> = {},
+  teacherEffortIds: Partial<Record<DataDomain, string>> = {},
 ): SynthBudgetEstimate {
   const share = Math.max(0.05, Math.min(0.5, researchShare));
   const researchPf = grossResearchPoolPf(state) * share;
@@ -1167,6 +1233,7 @@ export function estimateSynthBudget(
       domainPf,
       domainPowerMw,
       teacherModelIds[domain],
+      teacherEffortIds[domain],
     );
     const automatic = teacherModelIds[domain]
       ? synthDomainBudget(
@@ -1174,6 +1241,7 @@ export function estimateSynthBudget(
           domain,
           domainPf,
           domainPowerMw,
+          undefined,
           undefined,
           true,
         )
@@ -1209,6 +1277,10 @@ export function estimateSynthBudget(
     (sum, domain) => sum + domain.dailyComputeCost,
     0,
   );
+  const dailyTokenCashCost = domains.reduce(
+    (sum, domain) => sum + domain.dailyTokenCashCost,
+    0,
+  );
   const energyMWhPerDay = domains.reduce(
     (sum, domain) => sum + domain.energyMWhPerDay,
     0,
@@ -1224,6 +1296,7 @@ export function estimateSynthBudget(
     powerMw,
     energyMWhPerDay,
     dailyComputeCost,
+    dailyTokenCashCost,
     costPerAcceptedMTok:
       acceptedMTokPerDay > 0 ? dailyComputeCost / acceptedMTokPerDay : 0,
     kwhPerAcceptedMTok:
@@ -1240,6 +1313,7 @@ export function startSynthBudget(
   opts: {
     researchShare: number;
     teacherModelIds?: Partial<Record<DataDomain, string>>;
+    teacherEffortIds?: Partial<Record<DataDomain, string>>;
   },
 ): SimState {
   if (!state.player.researchUnlocked.includes("data_synth")) {
@@ -1253,6 +1327,7 @@ export function startSynthBudget(
     state,
     opts.researchShare,
     opts.teacherModelIds,
+    opts.teacherEffortIds,
   );
   if (!estimate.model)
     return alert(
@@ -1289,6 +1364,7 @@ export function startSynthBudget(
             ...job,
             researchShare: share,
             teacherModelIds: { ...(opts.teacherModelIds ?? {}) },
+            teacherEffortIds: { ...(opts.teacherEffortIds ?? {}) },
           }
         : job,
     );
@@ -1336,6 +1412,7 @@ export function startSynthBudget(
     qualityTier: "hq",
     autoPortfolio: true,
     teacherModelIds: { ...(opts.teacherModelIds ?? {}) },
+    teacherEffortIds: { ...(opts.teacherEffortIds ?? {}) },
     hqMTok: 0,
     lqMTok: 0,
     wastedMTok: 0,
@@ -1686,15 +1763,16 @@ export function tickData(state: SimState): SimState {
         liveState,
         job.researchShare,
         job.teacherModelIds,
+        job.teacherEffortIds,
       );
       if (!estimate.model || estimate.grossMTokPerDay <= 0) {
         synthQueue.push(job);
         continue;
       }
 
-      // Synthetic inference shares the research pool and pays the same
-      // accelerator/lab PF-day burden as research. Electricity remains visible
-      // separately in the estimate but is already settled by fleet operations.
+      // Synthetic inference shares the research pool, pays the PF-day burden,
+      // and is billed for every generated/reasoning token exactly once here.
+      // Electricity stays visible in the quote but fleet operations settle it.
       cash -= Math.max(
         0,
         estimate.dailyComputeCost -
@@ -1747,6 +1825,19 @@ export function tickData(state: SimState): SimState {
           teacherModelId: model.id,
           tier: "hq",
           day: state.day,
+          provenance: {
+            teacherEffortIds: [domainEstimate.effortId],
+            teacherEffortNames: [domainEstimate.effortName],
+            teacherThinkingTokenMultiplier:
+              domainEstimate.thinkingTokenMultiplier,
+            teacherEffortQuality: domainEstimate.effortQuality,
+            billedTokenMultiplier: domainEstimate.billedTokenMultiplier,
+            computeIntensityMultiplier:
+              domainEstimate.computeIntensityMultiplier,
+            generationCashPerAttemptedMTok:
+              domainEstimate.billedTokenMultiplier *
+              SYNTHETIC_GENERATION_CASH_PER_BILLED_MTOK,
+          },
         });
         const lqAssetSeed = syntheticDatasetAsset({
           id: `dataset-${job.id}-${domain}-${model.id}-lq`,
@@ -1757,15 +1848,25 @@ export function tickData(state: SimState): SimState {
           teacherModelId: model.id,
           tier: "lq",
           day: state.day,
+          provenance: {
+            teacherEffortIds: [domainEstimate.effortId],
+            teacherEffortNames: [domainEstimate.effortName],
+            teacherThinkingTokenMultiplier:
+              domainEstimate.thinkingTokenMultiplier,
+            teacherEffortQuality: domainEstimate.effortQuality,
+            billedTokenMultiplier: domainEstimate.billedTokenMultiplier,
+            computeIntensityMultiplier:
+              domainEstimate.computeIntensityMultiplier,
+            generationCashPerAttemptedMTok:
+              domainEstimate.billedTokenMultiplier *
+              SYNTHETIC_GENERATION_CASH_PER_BILLED_MTOK,
+          },
         });
         const hqQuality = Math.max(
           18,
           estimateSyntheticQuality({
             domain,
-            teacherDomainCapability: teacherCapabilityForDataDomain(
-              model,
-              domain,
-            ),
+            teacherDomainCapability: domainEstimate.domainCapability,
             provenance: hqAssetSeed.synthetic!,
           }).quality -
             freshness.capabilityGap * 0.35,
@@ -1774,10 +1875,7 @@ export function tickData(state: SimState): SimState {
           12,
           estimateSyntheticQuality({
             domain,
-            teacherDomainCapability: teacherCapabilityForDataDomain(
-              model,
-              domain,
-            ),
+            teacherDomainCapability: domainEstimate.domainCapability,
             provenance: lqAssetSeed.synthetic!,
           }).quality -
             freshness.capabilityGap * 0.5,
@@ -2052,6 +2150,8 @@ export interface ConsumeResult {
   /** 0–1 fraction of recipe that was low-quality synth */
   synthLqShare?: number;
   cashCost: number;
+  /** Fresh teacher inference work required by generated training tokens. */
+  syntheticGenerationPfDays?: number;
   nextData: LabData;
   trainMTok: number;
   verifyMTok: number;
@@ -2146,6 +2246,11 @@ export function consumeForLabData(
   if (planIn?.domainModels) plan.domainModels = { ...planIn.domainModels };
   if (planIn?.syntheticTeacherIds)
     plan.syntheticTeacherIds = { ...planIn.syntheticTeacherIds };
+  if (planIn?.syntheticTeacherEffortIds) {
+    plan.syntheticTeacherEffortIds = {
+      ...planIn.syntheticTeacherEffortIds,
+    };
+  }
 
   const weights = normalizeWeights(plan.weights);
   // Read-only clone for quality — stocks are never permanently depleted by pretrain
@@ -2333,6 +2438,8 @@ export function consumeForTraining(
     const lowQualityShareByDomain = { ...base.lowQualityShareByDomain };
     const syntheticProvenance: SyntheticFillRecord[] = [];
     let syntheticAdded = 0;
+    let syntheticGenerationPfDays = 0;
+    let syntheticGenerationCashCost = 0;
     let qualityAcc = 0;
     let qualityVolume = 0;
     const verifierBonus = hasCorpusSpecialists(state) ? 8 : 0;
@@ -2377,18 +2484,24 @@ export function consumeForTraining(
         eligibleTeachers.find((model) => model.id === selectedTeacherId) ??
         eligibleTeachers[0];
       if (!teacher) continue;
-      const teacherDomainCapability = teacherCapabilityForDataDomain(
-        teacher,
+      const requestedEffortId =
+        planIn?.syntheticTeacherEffortIds?.[domain];
+      const plannedGeneration = syntheticTeacherGenerationEconomics({
+        model: teacher,
         domain,
-      );
+        effortId: requestedEffortId,
+        acceptedMTok: short,
+      });
+      const teacherDomainCapability =
+        plannedGeneration.effectiveDomainCapability;
       const frontierDomainCapability = Math.max(
         teacherDomainCapability,
         ...state.player.models.map((model) =>
-          teacherCapabilityForDataDomain(model, domain),
+          peakSyntheticTeacherDomainCapability(model, domain),
         ),
         ...state.rivals.flatMap((rival) =>
           rival.models.map((model) =>
-            teacherCapabilityForDataDomain(model, domain),
+            peakSyntheticTeacherDomainCapability(model, domain),
           ),
         ),
       );
@@ -2413,18 +2526,28 @@ export function consumeForTraining(
         frontierCapability: frontierDomainCapability,
         teacherReliability: teacher.quality.reliability,
         dataQuality: domainStock.quality,
-        // Auto-fill is immediate and reserves no generation compute. Expansion
-        // beyond 2x therefore requires previously generated stock or an
-        // explicit synthesis job that actually burns research PF.
-        computePfDays: 0,
-        seed: `${state.seed}:${state.day}:${domain}:${teacher.id}`,
+        // Fresh synthetic expansion is real, billed inference work. The same
+        // PF quote is frozen onto the run and joins its training target.
+        computePfDays: plannedGeneration.computePfDays,
+        seed: `${state.seed}:${state.day}:${domain}:${teacher.id}:${plannedGeneration.effortId}`,
       });
       short = Math.min(short, profile.effectiveSyntheticMTok);
       if (short <= 0.01) continue;
+      const generation = syntheticTeacherGenerationEconomics({
+        model: teacher,
+        domain,
+        effortId: plannedGeneration.effortId,
+        acceptedMTok: short,
+      });
       const provenance = {
         teacherModelIds: [teacher.id],
         generationDepth: 1,
-        promptDiversity: Math.min(1, 0.65 + teacher.quality.reliability / 300),
+        promptDiversity: Math.min(
+          1,
+          0.6 +
+            teacher.quality.reliability / 350 +
+            generation.effortQuality * 0.12,
+        ),
         verifierStrength:
           domain === "code" || domain === "math" ? verifierBonus / 8 : 0,
         candidatesPerAccepted: verifierBonus > 0 ? 4 : 1,
@@ -2448,11 +2571,23 @@ export function consumeForTraining(
       lowQualityShareByDomain[domain] =
         qualityTier === "lq" ? short / Math.max(0.01, prior + short) : 0;
       syntheticAdded += short;
+      syntheticGenerationPfDays += generation.computePfDays;
+      syntheticGenerationCashCost += generation.cashCost;
       remainingGenerationBudget -= short;
       syntheticProvenance.push({
         domain,
         teacherModelId: teacher.id,
         teacherName: teacher.name,
+        teacherEffortId: generation.effortId,
+        teacherEffortName: generation.effortName,
+        teacherThinkingTokenMult: generation.thinkingTokenMultiplier,
+        teacherEffortQuality: generation.effortQuality,
+        billedTokenMultiplier: generation.billedTokenMultiplier,
+        teacherComputeIntensityMultiplier:
+          generation.computeIntensityMultiplier,
+        generatedTokenMTok: generation.generatedTokenMTok,
+        generationComputePfDays: generation.computePfDays,
+        generationCashCost: generation.cashCost,
         volumeMTok: short,
         quality,
         qualityTier,
@@ -2498,7 +2633,10 @@ export function consumeForTraining(
       synthHqUnits,
       synthLqUnits,
       synthLqShare,
-      cashCost: base.cashCost + syntheticAdded * 250,
+      cashCost: base.cashCost + syntheticGenerationCashCost,
+      syntheticGenerationPfDays:
+        (base.syntheticGenerationPfDays ?? 0) +
+        syntheticGenerationPfDays,
       trainMTok: actualVolume * trainShare,
       verifyMTok: actualVolume * (1 - trainShare),
       domainQuality,

@@ -272,13 +272,20 @@ export function LineChart({
   }
 
   return (
-    <div ref={boxRef} className="relative w-full" style={{ height }}>
+    <div
+      ref={boxRef}
+      className="hud-chart-frame relative w-full"
+      data-mobile-chart="true"
+      data-chart-compact={compact ? 'true' : 'false'}
+      data-swipe-ignore="true"
+      style={{ height }}
+    >
       {visible.length > 0 ? (
         <>
           <svg
             width={width}
             height={height}
-            className="block touch-none"
+            className="block touch-pan-y"
             role="group"
             aria-roledescription="line chart"
             aria-label={ariaLabel}
@@ -441,7 +448,7 @@ export function LineChart({
 
           {active ? (
             <div
-              className="pointer-events-none absolute top-0 z-10 rounded-md border border-line/70 bg-panel px-2 py-1 font-mono text-[0.6875rem] tabular-nums shadow-lg"
+              className="hud-chart-tooltip pointer-events-none absolute top-0 z-10 rounded-md border border-line/70 bg-panel px-2 py-1 font-mono text-[0.6875rem] tabular-nums shadow-lg"
               style={{
                 left: `${Math.min(Math.max((active.left / Math.max(1, width)) * 100, compact ? 10 : 12), compact ? 90 : 88)}%`,
                 top: `${Math.max(4, (active.top / Math.max(1, height)) * 100)}%`,

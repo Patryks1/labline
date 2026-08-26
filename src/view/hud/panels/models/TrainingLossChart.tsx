@@ -272,7 +272,7 @@ export function TrainingLossChart({
           </div>
         </div>
       </div>
-      <div data-training-chart-plot className="relative h-40 w-full overflow-visible">
+      <div data-training-chart-plot className="relative h-32 w-full overflow-visible sm:h-40">
       <svg
         viewBox={`0 0 ${width} ${height}`}
         role="group"
@@ -283,7 +283,7 @@ export function TrainingLossChart({
             : ''
         }`}
         aria-describedby={readoutId}
-        className="h-full w-full overflow-visible touch-none"
+        className="h-full w-full touch-pan-y overflow-visible"
         tabIndex={0}
         onPointerMove={(event) => {
           const selection = nearestSelection(event)

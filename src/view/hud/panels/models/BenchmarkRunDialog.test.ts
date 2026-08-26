@@ -29,6 +29,10 @@ describe('BenchmarkRunDialog', () => {
     expect(markup).toContain('Benchmark spend per suite')
     expect(markup).toContain('class="hud-range mt-2')
     expect(markup).toContain('Est. accuracy')
+    expect(markup).toContain('data-mobile-priority="quote-first"')
+    expect(markup).toContain('order-first')
+    expect(markup).toContain('hud-mobile-detail')
+    expect(markup).toContain('Pick suites and effort, check the live cost, then run.')
   })
 
   it('disables submission when the live total exceeds cash', () => {

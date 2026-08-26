@@ -47,9 +47,14 @@ export function InfrastructureOverview() {
   }
 
   return (
-    <div className="space-y-3">
+    <div className="min-w-0 touch-pan-y space-y-3">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <MetricTile label="Sites" value={String(live.length)} detail={`${construction.length} building`} />
+        <MetricTile
+          label="Sites"
+          value={String(live.length)}
+          detail={`${construction.length} building`}
+          mobileSummary={`${construction.length} active build`}
+        />
         <MetricTile label="Fleet compute" value={pf(fleet.flopsPf)} detail="actual PF" tone="positive" />
         <MetricTile
           label="Power"
@@ -61,6 +66,8 @@ export function InfrastructureOverview() {
           label="Staged hardware"
           value={num(stagedRackWidths, 0)}
           detail="rack-width units off-floor"
+          mobileSummary="off-floor"
+          mobilePriority={stagedRackWidths > 0 ? 'primary' : 'secondary'}
           tone={stagedRackWidths > 0 ? 'warning' : 'positive'}
         />
       </div>
@@ -68,6 +75,7 @@ export function InfrastructureOverview() {
       <GameCard
         eyebrow="Capacity"
         title="Fleet command"
+        mobileSummary={`${pf(fleet.flopsPf)} live · ${mw(snap.mwDemand)} draw`}
         actions={
           <StatusChip tone={host.shortOn === 'ok' ? 'positive' : 'warning'}>
             {host.shortOn === 'ok' ? 'balanced' : `short ${host.shortOn}`}
@@ -98,7 +106,11 @@ export function InfrastructureOverview() {
           live
           actions={<StatusChip tone="warning">{construction.length} active</StatusChip>}
         >
-          <div className="anim-stagger space-y-2">
+          <div
+            className="anim-stagger panel-scroll -mx-1 flex snap-x snap-mandatory gap-2 overflow-x-auto overscroll-x-contain px-1 pb-1 touch-pan-x touch-pan-y min-[1181px]:mx-0 min-[1181px]:block min-[1181px]:space-y-2 min-[1181px]:overflow-visible min-[1181px]:px-0 min-[1181px]:pb-0"
+            role="region"
+            aria-label="Construction projects; swipe horizontally to browse on touch screens"
+          >
             {construction.map((tile) => {
               const progress = tile.buildingProgress / Math.max(1, tile.buildingTarget)
               const left = Math.max(0, tile.buildingTarget - tile.buildingProgress)
@@ -108,7 +120,7 @@ export function InfrastructureOverview() {
                   type="button"
                   variant="ghost"
                   onClick={() => showOnMap(tile)}
-                  className="min-h-11 hover-lift w-full rounded-lg border border-amber/25 bg-amber/5 px-3 py-2 text-left transition hover:border-amber/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber/50"
+                  className="min-h-11 hover-lift w-[88%] shrink-0 snap-start rounded-lg border border-amber/25 bg-amber/5 px-3 py-2 text-left transition hover:border-amber/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber/50 min-[1181px]:w-full"
                 >
                   <span className="flex items-center justify-between gap-2 text-[0.8125rem]">
                     <strong className="inline-flex min-w-0 items-center gap-1.5 truncate text-bone">
@@ -187,6 +199,7 @@ function RackDeploymentPlanner({
     <GameCard
       eyebrow="Deployment"
       title="Deploy capacity"
+      mobileSummary={`${quote.maxRacks} racks can ship now`}
       tone="mint"
       actions={<StatusChip tone="positive">{quote.marketAvailable} avail</StatusChip>}
     >

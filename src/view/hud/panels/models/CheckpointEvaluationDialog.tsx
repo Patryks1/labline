@@ -15,6 +15,8 @@ import { money } from "../../format";
 import { HudButton } from "../../ui/HudPrimitives";
 import { ConsoleDialog } from "../../ui/ConsoleDialog";
 import { BENCHMARK_SUITE_UI } from "./benchmarkRunUi";
+import { benchmarkEffortRecipes } from "../../../../sim/balance/benchmarkCost";
+import { INSTANT_EFFORT_ID } from "../../../../sim/balance/modelProduct";
 
 const MODE_OPTIONS: ReadonlyArray<{
   id: CheckpointEvaluationMode;
@@ -93,26 +95,32 @@ export function CheckpointEvaluationDialog({
   );
   const eligibleKey = eligible.join("|");
   const firstEligibleSuite = eligible[0];
+  const effortRecipes = useMemo(
+    () => benchmarkEffortRecipes(candidate.model),
+    [candidate.model],
+  );
   const [selected, setSelected] = useState<BenchmarkSuiteId[]>(() =>
     eligible.slice(0, 1),
   );
   const [mode, setMode] = useState<CheckpointEvaluationMode>(initialMode);
   const [budgetTier, setBudgetTier] =
     useState<CheckpointEvaluationBudgetTier>("standard");
+  const [effortRecipeId, setEffortRecipeId] = useState(INSTANT_EFFORT_ID);
 
   useEffect(() => {
     if (!open) return;
     setSelected(firstEligibleSuite ? [firstEligibleSuite] : []);
     setMode(initialMode);
     setBudgetTier("standard");
+    setEffortRecipeId(INSTANT_EFFORT_ID);
     // eligibleKey resets the order when a different checkpoint supports a
     // different modality set without making array identity an effect input.
     void eligibleKey;
   }, [open, candidate.id, initialMode, eligibleKey, firstEligibleSuite]);
 
   const request = useMemo<CheckpointEvaluationRequest>(
-    () => ({ suiteIds: selected, budgetTier, mode }),
-    [selected, budgetTier, mode],
+    () => ({ suiteIds: selected, budgetTier, mode, effortRecipeId }),
+    [selected, budgetTier, mode, effortRecipeId],
   );
   const { quote, error } = useMemo(() => {
     if (selected.length === 0) {
@@ -149,6 +157,7 @@ export function CheckpointEvaluationDialog({
       eyebrow="Stealth evaluation order"
       title={`Evaluate ${candidate.model.name}`}
       description="Choose compatible suites, panel exposure and study depth. This produces noisy evidence only—it does not improve the weights or start serving customers."
+      mobileDescription="Choose suites, effort and review depth."
       onClose={onClose}
       closeLabel="Close checkpoint evaluation"
       maxWidthClass="max-w-5xl"
@@ -160,7 +169,7 @@ export function CheckpointEvaluationDialog({
             </span>{" "}
             · {money(cash)} cash available
           </div>
-          <div className="flex gap-2">
+          <div className="grid grid-cols-2 gap-2 [&_.hud-button]:!min-h-11 sm:flex sm:[&_.hud-button]:!w-auto">
             <HudButton type="button" variant="ghost" onClick={onClose}>
               Cancel
             </HudButton>
@@ -206,7 +215,7 @@ export function CheckpointEvaluationDialog({
                       selected.length === eligible.length ? [] : eligible,
                     )
                   }
-                  className="!min-h-11 !px-2 !py-1 font-mono text-[0.625rem] uppercase tracking-[0.12em] text-mint transition hover:text-bone focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/45 sm:!min-h-0"
+                  className="!min-h-11 !px-2 !py-1 font-mono text-[0.625rem] uppercase tracking-[0.12em] text-mint transition hover:text-bone focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/45 xl:!min-h-0"
                 >
                   {selected.length === eligible.length
                     ? "Clear all"
@@ -247,7 +256,7 @@ export function CheckpointEvaluationDialog({
                         <strong className="block text-[0.8125rem] text-bone">
                           {suite.label}
                         </strong>
-                        <span className="mt-1 block text-[0.6875rem] leading-relaxed text-muted">
+                        <span className="hud-mobile-detail mt-1 block text-[0.6875rem] leading-relaxed text-muted">
                           {suite.description}
                         </span>
                       </span>
@@ -283,7 +292,7 @@ export function CheckpointEvaluationDialog({
                     <strong className="block text-[0.8125rem] text-bone">
                       {option.label}
                     </strong>
-                    <span className="mt-1 block text-[0.6875rem] leading-5 text-muted">
+                    <span className="hud-mobile-detail mt-1 block text-[0.6875rem] leading-5 text-muted">
                       {option.description}
                     </span>
                     <span
@@ -292,6 +301,55 @@ export function CheckpointEvaluationDialog({
                       }`}
                     >
                       {option.risk}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend className="hud-eyebrow">Inference effort</legend>
+            <p className="mt-1 text-[0.6875rem] leading-5 text-muted">
+              Runs the selected trained recipe. Higher reasoning budgets bill
+              more generated tokens and reserve more Training PF/RAM.
+            </p>
+            <div
+              className="mt-2 grid gap-2 sm:grid-cols-2"
+              role="radiogroup"
+              aria-label="Checkpoint benchmark inference effort"
+            >
+              {effortRecipes.map((recipe) => {
+                const checked = effortRecipeId === recipe.id;
+                return (
+                  <label
+                    key={recipe.id}
+                    className={`cursor-pointer rounded-lg border p-3 transition focus-within:ring-2 focus-within:ring-mint/40 ${
+                      checked
+                        ? "border-mint/55 bg-mint/10"
+                        : "border-line/70 bg-void/35 hover:border-line"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name={`checkpoint-effort-${candidate.id}`}
+                      value={recipe.id}
+                      checked={checked}
+                      onChange={() => setEffortRecipeId(recipe.id)}
+                      className="sr-only"
+                    />
+                    <span className="flex items-center justify-between gap-2">
+                      <strong className="text-[0.8125rem] text-bone">
+                        {recipe.name}
+                      </strong>
+                      <span className="font-mono text-[0.6875rem] tabular-nums text-mint">
+                        {recipe.thinkingTokenMult.toFixed(1)}× budget
+                      </span>
+                    </span>
+                    <span className="hud-mobile-detail mt-1 block text-[0.6875rem] text-muted">
+                      {recipe.kind === "instant"
+                        ? "Official base inference"
+                        : "Private effort projection; not a public rank"}
                     </span>
                   </label>
                 );
@@ -329,7 +387,7 @@ export function CheckpointEvaluationDialog({
                         {money(option.spend)}/suite
                       </span>
                     </span>
-                    <span className="mt-1 block text-[0.6875rem] leading-5 text-muted">
+                    <span className="hud-mobile-detail mt-1 block text-[0.6875rem] leading-5 text-muted">
                       {option.description}
                     </span>
                   </label>
@@ -341,7 +399,8 @@ export function CheckpointEvaluationDialog({
 
         <aside
           aria-label="Checkpoint evaluation quote"
-          className="h-fit rounded-lg border border-line/70 bg-void/45 p-3.5 xl:sticky xl:top-0"
+          className="order-first h-fit rounded-lg border border-line/70 bg-void/45 p-3.5 xl:order-none xl:sticky xl:top-0"
+          data-mobile-priority="quote-first"
         >
           <div className="flex items-center gap-2 text-mint">
             <Flask size="1rem" weight="duotone" />
@@ -357,6 +416,10 @@ export function CheckpointEvaluationDialog({
                 <div className="flex items-center justify-between gap-3">
                   <dt className="text-muted">Blind panel</dt>
                   <dd className="text-bone">{money(quote.panelCost)}</dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-muted">Inference tasks</dt>
+                  <dd className="text-bone">{money(quote.inferenceCost ?? 0)}</dd>
                 </div>
                 <div className="flex items-center justify-between gap-3 border-t border-line/50 pt-2">
                   <dt className="text-muted">Total</dt>
@@ -376,6 +439,38 @@ export function CheckpointEvaluationDialog({
                   </span>
                   <strong className="mt-1 block font-mono text-sm tabular-nums text-mint">
                     {percent(quote.accuracy)}
+                  </strong>
+                </div>
+                <div className="rounded-md bg-panel-2/65 p-2">
+                  <span className="block text-[0.625rem] uppercase tracking-[0.1em] text-muted">
+                    Compute
+                  </span>
+                  <strong className="mt-1 block font-mono text-sm tabular-nums text-bone">
+                    {(quote.computePfDays ?? 0).toFixed(3)} PFd
+                  </strong>
+                </div>
+                <div className="rounded-md bg-panel-2/65 p-2">
+                  <span className="block text-[0.625rem] uppercase tracking-[0.1em] text-muted">
+                    Cost / task
+                  </span>
+                  <strong className="mt-1 block font-mono text-sm tabular-nums text-bone">
+                    {money(quote.costPerTask ?? 0)}
+                  </strong>
+                </div>
+                <div className="rounded-md bg-panel-2/65 p-2">
+                  <span className="block text-[0.625rem] uppercase tracking-[0.1em] text-muted">
+                    Speed
+                  </span>
+                  <strong className="mt-1 block font-mono text-sm tabular-nums text-bone">
+                    {(quote.estimatedTokensPerSecond ?? 0).toFixed(1)} tok/s
+                  </strong>
+                </div>
+                <div className="rounded-md bg-panel-2/65 p-2">
+                  <span className="block text-[0.625rem] uppercase tracking-[0.1em] text-muted">
+                    Task latency
+                  </span>
+                  <strong className="mt-1 block font-mono text-sm tabular-nums text-bone">
+                    {((quote.averageLatencyMs ?? 0) / 1_000).toFixed(1)}s
                   </strong>
                 </div>
                 <div className="rounded-md bg-panel-2/65 p-2">

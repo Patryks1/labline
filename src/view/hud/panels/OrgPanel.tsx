@@ -32,7 +32,10 @@ import {
   repayDebt as repayTypedDebt,
   requestEquityOffers,
 } from "../../../sim/systems/capital";
-import type { BankingProduct } from "../../../sim/systems/capital";
+import type {
+  BankingProduct,
+  InvestorPitchPreview,
+} from "../../../sim/systems/capital";
 import {
   marketingChannels,
   marketingReach,
@@ -86,11 +89,120 @@ export function CapitalActionSelector({
           variant="ghost"
           aria-pressed={active === id}
           onClick={() => onChange(id)}
-          className={`min-h-11 rounded-md px-2 py-1.5 text-[0.6875rem] transition sm:min-h-0 ${active === id ? "bg-panel-2 text-mint" : "text-muted hover:text-bone"}`}
+          className={`min-h-11 rounded-md px-2 py-1.5 text-[0.6875rem] transition lg:min-h-0 ${active === id ? "bg-panel-2 text-mint" : "text-muted hover:text-bone"}`}
         >
           {label}
         </HudButton>
       ))}
+    </div>
+  );
+}
+
+export function InvestorPitchAmountCard({
+  preview,
+  onAmountChange,
+  onPitch,
+}: {
+  preview: InvestorPitchPreview;
+  onAmountChange: (amount: number) => void;
+  onPitch: () => void;
+}) {
+  return (
+    <div
+      className="space-y-1.5 rounded border border-line/70 bg-void/35 p-2"
+      aria-live="polite"
+    >
+      {preview.defaultCashRaised > 0 ? (
+        <div className="grid grid-cols-1 items-end gap-2 min-[360px]:grid-cols-[minmax(0,1fr)_6rem]">
+          <SliderField
+            label="Raise amount"
+            value={preview.cashRaised}
+            min={preview.minimumCashRaised}
+            max={preview.maximumCashRaised}
+            step={preview.cashRaisedStep}
+            format={money}
+            colorClass="bg-mint"
+            accentClass="text-mint"
+            onChange={onAmountChange}
+          />
+          <label className="block text-[0.625rem] text-muted">
+            Amount ($M)
+            <input
+              type="number"
+              aria-label="Model pitch raise amount in millions"
+              min={preview.minimumCashRaised / 1_000_000}
+              max={preview.maximumCashRaised / 1_000_000}
+              step={preview.cashRaisedStep / 1_000_000}
+              value={Number((preview.cashRaised / 1_000_000).toFixed(3))}
+              onChange={(event) =>
+                onAmountChange(Number(event.target.value) * 1_000_000)
+              }
+              className="mt-0.5 min-h-11 w-full rounded border border-line bg-void px-1.5 font-mono text-[0.6875rem] text-bone outline-none focus:border-mint/60"
+            />
+          </label>
+        </div>
+      ) : null}
+      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+        <Stat
+          label="Chance"
+          value={`${(preview.successChance * 100).toFixed(0)}%`}
+          accent={preview.successChance >= 0.6 ? "text-mint" : "text-amber"}
+        />
+        <Stat
+          label="Raise"
+          value={preview.cashRaised > 0 ? money(preview.cashRaised) : "—"}
+        />
+        <Stat
+          label="Dilution"
+          value={
+            preview.investorOwnership > 0
+              ? `${(preview.investorOwnership * 100).toFixed(1)}%`
+              : "—"
+          }
+        />
+        <Stat
+          label="Data drag"
+          value={`${(preview.dataDrag * 100).toFixed(0)}%`}
+          accent={preview.dataDrag > 0.35 ? "text-amber" : "text-bone"}
+        />
+      </div>
+      <details className="group rounded border border-line/50 bg-void/25">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2 py-1.5 text-[0.625rem] marker:hidden lg:min-h-0">
+          <span className="font-medium text-bone">Valuation details</span>
+          <span className="font-mono text-muted">
+            {money(preview.preMoneyValuation)} pre · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span>
+          </span>
+        </summary>
+        <p className="border-t border-line/40 px-2 py-1.5 font-mono text-[0.625rem] leading-4 text-muted">
+          {preview.investorName} · {money(preview.preMoneyValuation)} pre /{" "}
+          {money(preview.postMoneyValuation)} post · frontier{" "}
+          {preview.frontierCapability.toFixed(0)} · confidence floor{" "}
+          {(preview.confidenceRequired * 100).toFixed(0)}%
+        </p>
+      </details>
+      {preview.reason ? (
+        <p
+          className="rounded border border-amber/25 bg-amber/5 px-2 py-1 text-[0.625rem] text-amber"
+          role="status"
+        >
+          {preview.reason}
+        </p>
+      ) : null}
+      <HudButton
+        type="button"
+        variant="primary"
+        data-pitch-raise-amount={preview.cashRaised}
+        disabled={!preview.eligible}
+        onClick={onPitch}
+        className="min-h-11 w-full rounded bg-mint/20 px-2 py-1.5 font-mono text-[0.6875rem] text-mint disabled:opacity-35 lg:min-h-0"
+        title={
+          preview.eligible
+            ? "Resolve the seeded investor pitch"
+            : preview.reason
+        }
+      >
+        Pitch {preview.modelName} for {money(preview.cashRaised)}
+      </HudButton>
     </div>
   );
 }
@@ -158,14 +270,52 @@ export function OrgPanel({
   const [buybackPct, setBuybackPct] = useState(1);
   const pitchOptions = useMemo(() => investorPitchOptions(state), [state]);
   const [pitchOptionId, setPitchOptionId] = useState<string | null>(null);
+  const [pitchRaiseAmounts, setPitchRaiseAmounts] = useState<
+    Record<string, number>
+  >({});
   const capital = useMemo(() => capitalSnapshot(state), [state]);
   const equityOffers = useMemo(() => requestEquityOffers(state), [state]);
   const selectedPitchOptionId = pitchOptions.some((option) => option.id === pitchOptionId)
     ? pitchOptionId
     : pitchOptions[0]?.id ?? null;
-  const pitchPreview = selectedPitchOptionId
+  const defaultPitchPreview = selectedPitchOptionId
     ? investorPitchPreview(state, selectedPitchOptionId)
     : null;
+  const pitchRaiseAmount = defaultPitchPreview
+    ? Math.min(
+        defaultPitchPreview.maximumCashRaised,
+        Math.max(
+          defaultPitchPreview.minimumCashRaised,
+          pitchRaiseAmounts[selectedPitchOptionId ?? ""] ??
+            defaultPitchPreview.defaultCashRaised,
+        ),
+      )
+    : 0;
+  const pitchPreview =
+    selectedPitchOptionId && defaultPitchPreview?.defaultCashRaised
+      ? investorPitchPreview(
+          state,
+          selectedPitchOptionId,
+          state.playerLabId,
+          pitchRaiseAmount,
+        )
+      : defaultPitchPreview;
+  const setPitchRaiseAmount = (amount: number) => {
+    if (
+      !selectedPitchOptionId ||
+      !defaultPitchPreview ||
+      !Number.isFinite(amount)
+    ) {
+      return;
+    }
+    setPitchRaiseAmounts((current) => ({
+      ...current,
+      [selectedPitchOptionId]: Math.min(
+        defaultPitchPreview.maximumCashRaised,
+        Math.max(defaultPitchPreview.minimumCashRaised, amount),
+      ),
+    }));
+  };
   const bankProducts = useMemo(() => bankingProducts(state), [state]);
   const featuredBankProducts = bankProducts.filter((product) =>
     FEATURED_BANK_KINDS.includes(product.kind as FeaturedBankKind),
@@ -262,8 +412,9 @@ export function OrgPanel({
         eyebrow="Growth"
         title="Marketing"
         description="Budget, channels, reach, brand."
+        mobileDescription="Spend and customer growth."
       >
-        <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 xl:grid-cols-[repeat(auto-fit,minmax(11rem,1fr))]">
+        <div className="grid grid-cols-2 gap-2" data-mobile-summary="marketing-performance">
           <MetricTile
             label="Brand trust"
             value={num(p.brandTrust, 0)}
@@ -274,12 +425,6 @@ export function OrgPanel({
             value={money(p.marketingSpendPerDay)}
             detail={`${pct(marketingMultiple, 0)} of revenue`}
             tone="positive"
-          />
-          <MetricTile
-            label="Demand equiv."
-            value={money(reach.demandEquivalentSpend)}
-            detail="/ day"
-            tone="serve"
           />
           <MetricTile
             label="Acquired customers"
@@ -321,6 +466,16 @@ export function OrgPanel({
             />
           </GameCard>
 
+          <details className="group overflow-hidden rounded-lg border border-line/70 bg-panel-2/55">
+            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 marker:hidden lg:min-h-0">
+              <span className="text-[0.8125rem] font-semibold text-bone">
+                Campaign diagnostics
+              </span>
+              <span className="shrink-0 font-mono text-[0.6875rem] text-muted">
+                {num(marketingOutcome.acquiredCustomers, 0)} won · {marketingOutcome.effectiveCac > 0 ? money(marketingOutcome.effectiveCac) : "—"} CAC · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span>
+              </span>
+            </summary>
+            <div className="space-y-3 border-t border-line/50 p-2.5">
           <CardGrid min="11rem" className="anim-stagger">
             <GameCard eyebrow="Reach" title="Web traffic" tone="mint">
               <div className="font-mono text-xl font-semibold tabular-nums text-bone">
@@ -411,6 +566,8 @@ export function OrgPanel({
               }))}
             />
           </GameCard>
+            </div>
+          </details>
         </div>
       </PanelScaffold>
     );
@@ -418,7 +575,7 @@ export function OrgPanel({
 
   const body = (
     <>
-      {!capitalWorkspace ? <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      {!capitalWorkspace ? <div className="grid grid-cols-2 gap-2 lg:grid-cols-3">
         <MetricTile
           label="Headcount"
           value={`${headcount}/${seats}`}
@@ -437,12 +594,14 @@ export function OrgPanel({
                 : "neutral"
           }
         />
-        <MetricTile
-          label="Brand trust"
-          value={num(p.brandTrust, 0)}
-          detail={`Net ${money(financeModel.current.net)}/d`}
-          tone={financeModel.current.net < 0 ? "danger" : "gold"}
-        />
+        <div className="col-span-2 lg:col-span-1">
+          <MetricTile
+            label="Brand trust"
+            value={num(p.brandTrust, 0)}
+            detail={`Net ${money(financeModel.current.net)}/d`}
+            tone={financeModel.current.net < 0 ? "danger" : "gold"}
+          />
+        </div>
       </div> : null}
 
       {!capitalWorkspace && distress !== "stable" && (
@@ -486,8 +645,13 @@ export function OrgPanel({
         {companyTab === "staff" ? (
           <>
             <HqOfficeSummary state={state} hqs={hqs} />
-            <GameCard eyebrow="Office-owned" title="Team management lives on the floor" tone="mint">
-              <p className="text-[0.8125rem] leading-5 text-muted">
+            <GameCard
+              eyebrow="Office-owned"
+              title="Team management lives on the floor"
+              mobileSummary="Open an HQ floor to hire and add seats."
+              tone="mint"
+            >
+              <p className="hud-mobile-detail text-[0.8125rem] leading-5 text-muted">
                 Open an HQ from the map or the floor list above to place desks,
                 inspect seat capacity, hire local staff, and poach specialists.
               </p>
@@ -554,17 +718,21 @@ export function OrgPanel({
                   </div>
                 )}
 
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between gap-2">
-                    <h4 className="text-[0.6875rem] font-medium uppercase tracking-wider text-muted">
-                      Cap table & buybacks
-                    </h4>
+                <details
+                  className="group overflow-hidden rounded-lg border border-line/60 bg-void/25"
+                  data-testid="capital-buyback-details"
+                >
+                  <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 marker:hidden lg:min-h-0">
+                    <span className="text-[0.75rem] font-medium text-bone">
+                      Cap table &amp; buybacks
+                    </span>
                     <span
                       className={`font-mono text-[0.6875rem] ${capital.founderOwnership < 0.1 ? "text-danger" : "text-muted"}`}
                     >
-                      loss below 5%
+                      founders {(capital.founderOwnership * 100).toFixed(1)}% · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span>
                     </span>
-                  </div>
+                  </summary>
+                  <div className="space-y-1.5 border-t border-line/50 p-2.5">
                   <SliderField
                     label="Stake to repurchase"
                     value={buybackPct}
@@ -614,7 +782,7 @@ export function OrgPanel({
                                   ),
                                 )
                               }
-                              className="min-h-11 shrink-0 rounded border border-amber/30 px-2 py-1 text-amber hover:bg-amber/10 disabled:opacity-35 sm:min-h-0"
+                              className="min-h-11 shrink-0 rounded border border-amber/30 px-2 py-1 text-amber hover:bg-amber/10 disabled:opacity-35 lg:min-h-0"
                             >
                               Buy {money(quote.cost)}
                             </HudButton>
@@ -632,7 +800,8 @@ export function OrgPanel({
                       ownership remains. Below 5% ends the run.
                     </div>
                   )}
-                </div>
+                  </div>
+                </details>
 
                 <div className="space-y-2 rounded-lg border border-mint/25 bg-mint/5 p-2">
                   <div className="flex items-start justify-between gap-2">
@@ -640,10 +809,13 @@ export function OrgPanel({
                       <h4 className="text-[0.75rem] font-medium text-bone">
                         Pitch a model to investors
                       </h4>
-                      <p className="mt-0.5 text-[0.625rem] leading-4 text-muted">
+                      <p className="hud-mobile-detail mt-0.5 text-[0.625rem] leading-4 text-muted">
                         Internal checkpoints and released models can unlock a
                         model-backed raise. Capability, reliability, thinking
                         level, and data freshness change the odds and dilution.
+                      </p>
+                      <p className="hud-mobile-summary mt-0.5 text-[0.625rem] text-muted">
+                        Pick a model and raise amount.
                       </p>
                     </div>
                     <span className="shrink-0 font-mono text-[0.625rem] uppercase tracking-wider text-mint">
@@ -664,7 +836,7 @@ export function OrgPanel({
                         id="investor-pitch-model"
                         value={selectedPitchOptionId ?? ""}
                         onChange={(event) => setPitchOptionId(event.target.value)}
-                        className="min-h-11 w-full rounded border border-line bg-void/60 px-2 text-[0.75rem] text-bone sm:min-h-0"
+                        className="min-h-11 w-full rounded border border-line bg-void/60 px-2 text-[0.75rem] text-bone lg:min-h-0"
                         aria-label="Model to pitch to investors"
                       >
                         {pitchOptions.map((option) => (
@@ -674,32 +846,20 @@ export function OrgPanel({
                         ))}
                       </HudSelect>
                       {pitchPreview ? (
-                        <div className="space-y-1.5 rounded border border-line/70 bg-void/35 p-2" aria-live="polite">
-                          <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-                            <Stat label="Chance" value={`${(pitchPreview.successChance * 100).toFixed(0)}%`} accent={pitchPreview.successChance >= 0.6 ? "text-mint" : "text-amber"} />
-                            <Stat label="Raise" value={pitchPreview.cashRaised > 0 ? money(pitchPreview.cashRaised) : "—"} />
-                            <Stat label="Dilution" value={pitchPreview.investorOwnership > 0 ? `${(pitchPreview.investorOwnership * 100).toFixed(1)}%` : "—"} />
-                            <Stat label="Data drag" value={`${(pitchPreview.overusePenalty * 100).toFixed(0)}%`} accent={pitchPreview.overusePenalty > 0.35 ? "text-amber" : "text-bone"} />
-                          </div>
-                          <p className="font-mono text-[0.625rem] leading-4 text-muted">
-                            {pitchPreview.investorName} · {money(pitchPreview.preMoneyValuation)} pre / {money(pitchPreview.postMoneyValuation)} post · frontier {pitchPreview.frontierCapability.toFixed(0)} · confidence floor {(pitchPreview.confidenceRequired * 100).toFixed(0)}%
-                          </p>
-                          {pitchPreview.reason ? (
-                            <p className="rounded border border-amber/25 bg-amber/5 px-2 py-1 text-[0.625rem] text-amber" role="status">
-                              {pitchPreview.reason}
-                            </p>
-                          ) : null}
-                          <HudButton
-                            type="button"
-                            variant="primary"
-                            disabled={!pitchPreview.eligible}
-                            onClick={() => setState(acceptInvestorPitch(state, pitchPreview.id))}
-                            className="min-h-11 w-full rounded bg-mint/20 px-2 py-1.5 font-mono text-[0.6875rem] text-mint disabled:opacity-35 sm:min-h-0"
-                            title={pitchPreview.eligible ? "Resolve the seeded investor pitch" : pitchPreview.reason}
-                          >
-                            Pitch {pitchPreview.modelName}
-                          </HudButton>
-                        </div>
+                        <InvestorPitchAmountCard
+                          preview={pitchPreview}
+                          onAmountChange={setPitchRaiseAmount}
+                          onPitch={() =>
+                            setState(
+                              acceptInvestorPitch(
+                                state,
+                                pitchPreview.id,
+                                state.playerLabId,
+                                pitchPreview.cashRaised,
+                              ),
+                            )
+                          }
+                        />
                       ) : null}
                     </>
                   )}
@@ -739,7 +899,7 @@ export function OrgPanel({
                           onClick={() =>
                             setState(acceptEquityOffer(state, offer))
                           }
-                          className="min-h-11 w-full shrink-0 rounded bg-mint/20 px-2 py-1 font-mono text-[0.6875rem] text-mint disabled:opacity-35 min-[420px]:min-h-0 min-[420px]:w-auto"
+                          className="min-h-11 w-full shrink-0 rounded bg-mint/20 px-2 py-1 font-mono text-[0.6875rem] text-mint disabled:opacity-35 min-[420px]:w-auto lg:min-h-0"
                         >
                           Raise {money(offer.cashRaised)}
                         </HudButton>
@@ -748,20 +908,19 @@ export function OrgPanel({
                   ))}
                 </div>
 
-                <div className="space-y-2 rounded-lg border border-amber/20 bg-amber/5 p-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <div>
-                      <h4 className="text-[0.75rem] font-medium text-bone">
-                        Bank offers
-                      </h4>
-                      <p className="mt-0.5 text-[0.625rem] text-muted">
-                        Specialist lenders. Choose the fit for your next move.
-                      </p>
-                    </div>
-                    <span className="shrink-0 font-mono text-[0.625rem] text-amber">
-                      Updates daily
+                <details
+                  className="group overflow-hidden rounded-lg border border-amber/20 bg-amber/5"
+                  data-testid="specialist-bank-details"
+                >
+                  <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 marker:hidden lg:min-h-0">
+                    <span className="text-[0.75rem] font-medium text-bone">
+                      Specialist bank offers
                     </span>
-                  </div>
+                    <span className="shrink-0 font-mono text-[0.625rem] text-amber">
+                      {featuredBankProducts.length} offers · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span>
+                    </span>
+                  </summary>
+                  <div className="space-y-2 border-t border-line/50 p-2">
                   <div className="space-y-1.5">
                     {featuredBankProducts.map((product) => (
                       <BankingOfferCard
@@ -788,14 +947,15 @@ export function OrgPanel({
                       <HudButton
                         type="button"
                         variant="ghost"
-                        className="min-h-11 shrink-0 px-2 text-[0.6875rem] text-mint hover:underline sm:min-h-0"
+                        className="min-h-11 shrink-0 px-2 text-[0.6875rem] text-mint hover:underline lg:min-h-0"
                         onClick={() => setState(repayTypedDebt(state, debt.id))}
                       >
                         Repay
                       </HudButton>
                     </div>
                   ))}
-                </div>
+                  </div>
+                </details>
               </section>
             ) : (
               <>
@@ -926,7 +1086,7 @@ export function OrgPanel({
                           type="button"
                           variant="ghost"
                           onClick={() => repayLoan(l.id)}
-                          className="min-h-11 shrink-0 rounded-lg border border-line px-2 py-1 text-[0.75rem] text-mint hover:bg-panel sm:min-h-0"
+                          className="min-h-11 shrink-0 rounded-lg border border-line px-2 py-1 text-[0.75rem] text-mint hover:bg-panel lg:min-h-0"
                         >
                           Pay off
                         </HudButton>
@@ -1110,6 +1270,11 @@ export function OrgPanel({
           ? "Ownership, credit, and recovery decisions."
           : "HQ capacity, hiring, and the people who run the lab."
       }
+      mobileDescription={
+        capitalWorkspace
+          ? "Raise, borrow, and protect ownership."
+          : "People, office capacity, and runway."
+      }
       actions={
         !capitalWorkspace ? (
           <StatusChip
@@ -1188,9 +1353,12 @@ function HqOfficeSummary({
         <div className="min-w-0">
           <p className="font-mono text-[0.625rem] uppercase tracking-[0.16em] text-mint">HQ floor plan</p>
           <h3 className="mt-1 text-[0.9375rem] font-semibold text-bone">Build a productive office</h3>
-          <p className="mt-1 max-w-[42rem] text-[0.75rem] leading-relaxed text-muted">
+          <p className="hud-mobile-detail mt-1 max-w-[42rem] text-[0.75rem] leading-relaxed text-muted">
             Furniture is persistent: desks add seats, and plants, copy stations,
             meeting rooms, and research walls improve the team&apos;s daily output.
+          </p>
+          <p className="hud-mobile-summary mt-1 text-[0.6875rem] text-muted">
+            Place furniture to add seats and output.
           </p>
         </div>
         <div className="shrink-0 text-left min-[460px]:text-right">
@@ -1211,7 +1379,7 @@ function HqOfficeSummary({
                   <div className="truncate text-[0.75rem] font-medium text-bone">{hq.name || "Headquarters"}</div>
                   <div className="font-mono text-[0.625rem] text-muted">{effects.objectCount} objects · +{effects.capacityBonus} seats · +{(effects.productivityBonus * 100).toFixed(1)}% output</div>
                 </div>
-                <HudButton type="button" variant="secondary" className="min-h-11 shrink-0 px-2 py-1 text-[0.6875rem] sm:min-h-0" onClick={() => open(facilityId)}>Open floor</HudButton>
+                <HudButton type="button" variant="secondary" className="min-h-11 shrink-0 px-2 py-1 text-[0.6875rem] lg:min-h-0" onClick={() => open(facilityId)}>Open floor</HudButton>
               </div>
             );
           })}
@@ -1442,7 +1610,7 @@ export function CompanyPulse({
                 aria-describedby="company-pulse-detail"
                 title={metrics[key].description}
                 onClick={() => setMetric(key)}
-                className={`min-h-11 rounded px-1.5 py-1 text-[0.5625rem] transition min-[420px]:min-h-0 ${activeMetric === key ? "bg-panel-2 text-bone" : "text-muted hover:text-bone"}`}
+                className={`min-h-11 rounded px-1.5 py-1 text-[0.5625rem] transition lg:min-h-0 ${activeMetric === key ? "bg-panel-2 text-bone" : "text-muted hover:text-bone"}`}
               >
                 {metrics[key].label}
               </HudButton>

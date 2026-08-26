@@ -1,4 +1,4 @@
-import type { MouseEvent as ReactMouseEvent } from 'react'
+import { useRef, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import {
   getBuildDef,
   isBuildableKind,
@@ -23,6 +23,7 @@ import {
   transportRoadClassAt,
 } from '../../sim/systems/transport'
 import { HudButton, HudCloseButton } from './ui/HudPrimitives'
+import { isSheetDismissSwipe } from './menu/mobileOverlayGestures'
 
 const ROAD_CLASS_LABELS = ['No road', 'Local', 'Collector', 'Arterial', 'Highway'] as const
 const MUNICIPAL_KIND_LABELS = {
@@ -55,6 +56,7 @@ export function TileInspector() {
   const setSelectedRivalId = useGameStore((s) => s.setSelectedRivalId)
   const setUiSelectedRivalId = useUiStore((s) => s.setSelectedRivalId)
   const setCommandView = useGameStore((s) => s.setCommandView)
+  const dismissSwipe = useRef<{ pointerId: number; x: number; y: number } | null>(null)
 
   if (!selected) return null
   const tile = mapTileAtAny(state, selected.x, selected.y)
@@ -173,6 +175,19 @@ export function TileInspector() {
 
   const shown = metrics.slice(0, 8)
 
+  const startDismissSwipe = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== 'touch') return
+    dismissSwipe.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const finishDismissSwipe = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = dismissSwipe.current
+    dismissSwipe.current = null
+    if (!start || start.pointerId !== event.pointerId) return
+    if (isSheetDismissSwipe(start, { x: event.clientX, y: event.clientY })) clearSelection()
+  }
+
   return (
     <div
       className={`tile-inspector hud-surface pointer-events-auto absolute z-40 rounded-lg p-3 transition-all ${
@@ -180,14 +195,25 @@ export function TileInspector() {
           ? 'ring-2 ring-danger/50'
           : ''
       }`}
+      data-swipe-dismiss="down"
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="flex items-start justify-between gap-2 border-b border-line/60 pb-2">
+      <div
+        className="touch-pan-x border-b border-line/60 pb-2"
+        onPointerDown={(event) => {
+          event.stopPropagation()
+          startDismissSwipe(event)
+        }}
+        onPointerUp={finishDismissSwipe}
+        onPointerCancel={() => { dismissSwipe.current = null }}
+      >
+        <span aria-hidden className="mx-auto mb-2 hidden h-1 w-10 rounded-full bg-line max-sm:block [@media(max-height:540px)]:block" />
+        <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <div className="font-mono text-[0.6875rem] uppercase tracking-[0.08em] text-muted">
             {statusLabel}
-            {region ? ` · ${region.name}` : ''}
+            {region ? <span className="max-sm:hidden [@media(max-height:540px)]:hidden"> · {region.name}</span> : null}
           </div>
           <div className="mt-0.5">
             {isOurs && isBuildableKind(tile.kind) ? (
@@ -217,11 +243,12 @@ export function TileInspector() {
             className="tile-inspector__close"
           />
         </div>
+        </div>
       </div>
 
       <div className="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 font-mono text-[0.75rem] text-muted">
-        {shown.map((row) => (
-          <div key={row.label} className="contents">
+        {shown.map((row, index) => (
+          <div key={row.label} className={`contents ${index >= 5 ? 'max-sm:hidden [@media(max-height:540px)]:hidden' : ''}`}>
             <span>{row.label}</span>
             <span className={`text-right ${row.tone ?? 'text-bone'}`}>{row.value}</span>
           </div>
@@ -240,7 +267,8 @@ export function TileInspector() {
           onClick={openSelectedFacility}
           onPointerDown={(e) => e.stopPropagation()}
         >
-          {isRival ? 'Inspect rival fleet' : 'Inspect site'}
+          <span className="sm:hidden">{isRival ? 'Rival fleet' : 'Open site'}</span>
+          <span className="hidden sm:inline">{isRival ? 'Inspect rival fleet' : 'Inspect site'}</span>
         </HudButton>
       )}
 

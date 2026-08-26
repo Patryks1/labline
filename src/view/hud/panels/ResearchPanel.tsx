@@ -11,11 +11,13 @@ import {
 } from "react";
 import {
   ArrowCounterClockwise,
+  CaretDown,
   CornersOut,
   Lock,
   Minus,
   Plus,
   Trash,
+  X,
 } from "@phosphor-icons/react";
 import {
   RESEARCH_NODES,
@@ -82,9 +84,17 @@ import {
   PanelScaffold,
   StatusChip,
 } from "../ui/HudPrimitives";
-import { scrollMobileResearchSelection } from "./researchPanelMobile";
+import {
+  RESEARCH_COMPACT_MEDIA_QUERY,
+  researchPinchView,
+  researchTouchIntent,
+  scrollMobileResearchSelection,
+  type ResearchGesturePoint,
+  type ResearchTouchIntent,
+} from "./researchPanelMobile";
 import {
   RESEARCH_TREE_DEFAULT_ZOOM,
+  RESEARCH_TREE_MAX_ZOOM,
   RESEARCH_TREE_MIN_ZOOM,
 } from "./researchCanvasLayout";
 import { consumeChartEscape } from "../ui/dataViz/chartInteraction";
@@ -159,6 +169,7 @@ export function ResearchPanel() {
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [queuedPulseId, setQueuedPulseId] = useState<string | null>(null);
+  const [queueExpanded, setQueueExpanded] = useState(false);
   const selectedMethodRef = useRef<HTMLDivElement | null>(null);
 
   const active = state.player.activeResearch;
@@ -274,7 +285,7 @@ export function ResearchPanel() {
   }, [centerResearchNode, focusRequest]);
 
   useEffect(() => {
-    if (!selectedId || !window.matchMedia("(max-width: 900px)").matches) return;
+    if (!selectedId || !window.matchMedia(RESEARCH_COMPACT_MEDIA_QUERY).matches) return;
     const frame = window.requestAnimationFrame(() => {
       scrollMobileResearchSelection(selectedMethodRef.current, true);
     });
@@ -316,30 +327,22 @@ export function ResearchPanel() {
       eyebrow="Leads · pods · methods"
       title="Research"
       description="Burn research PF and cash for unlocks."
+      mobileDescription="Spend PF for unlocks."
       actions={<StatusChip tone="research">{num(snap.pools.research, 2)} PF</StatusChip>}
-      className="research-panel-section"
+      className="research-panel-section [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!min-h-max [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!flex-none"
     >
-      <div className="research-panel-body flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain pb-2 xl:pb-0">
-        <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div
+        className="research-panel-body flex min-h-0 flex-1 flex-col gap-2 overflow-visible pb-2 min-[901px]:overflow-y-auto min-[901px]:overscroll-contain xl:pb-0 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!flex-none [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!overflow-visible"
+        data-mobile-scroll-owner="workspace"
+      >
+        <div className="mt-2 grid grid-cols-2 gap-2 min-[901px]:grid-cols-4">
           <MetricTile
             label="Pool"
             value={researchPoolTileValue(researchUsage)}
             detail={researchPoolTileDetail(researchUsage)}
+            mobileSummary={researchUsage.slices.length > 0 ? "working" : "idle"}
             title={researchPoolTileTitle(researchUsage)}
             tone="research"
-          />
-          <MetricTile
-            label="Burn today"
-            value={money(state.player.researchCashBurnToday ?? 0)}
-            tone={
-              (state.player.researchCashBurnToday ?? 0) > 0
-                ? "warning"
-                : "neutral"
-            }
-          />
-          <MetricTile
-            label="Unlocked"
-            value={`${unlockedCount}/${RESEARCH_NODES.length}`}
           />
           <MetricTile
             label="In flight"
@@ -349,11 +352,86 @@ export function ResearchPanel() {
             detail={`${queue.length} queued`}
             tone={activePrograms.length > 0 || active ? "research" : "neutral"}
           />
+          <div className="hidden min-[901px]:contents [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!hidden">
+            <MetricTile
+              label="Burn today"
+              value={money(state.player.researchCashBurnToday ?? 0)}
+              tone={
+                (state.player.researchCashBurnToday ?? 0) > 0
+                  ? "warning"
+                  : "neutral"
+              }
+              mobilePriority="secondary"
+            />
+            <MetricTile
+              label="Unlocked"
+              value={`${unlockedCount}/${RESEARCH_NODES.length}`}
+              mobilePriority="secondary"
+            />
+          </div>
         </div>
+
+        <details
+          className="group rounded-md border border-line/70 bg-panel-2/45 min-[901px]:hidden [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!block"
+          data-mobile-secondary-metrics="collapsed"
+        >
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-md px-3 py-2 text-[0.75rem] text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-research/60 [&::-webkit-details-marker]:hidden">
+            <span>More research metrics</span>
+            <span className="flex items-center gap-2 font-mono tabular-nums text-bone">
+              {unlockedCount}/{RESEARCH_NODES.length}
+              <CaretDown
+                aria-hidden
+                size="0.8rem"
+                className="transition-transform group-open:rotate-180"
+              />
+            </span>
+          </summary>
+          <dl className="grid grid-cols-2 gap-2 border-t border-line/60 px-3 py-2 text-[0.75rem]">
+            <div className="min-w-0">
+              <dt className="text-muted">Burn today</dt>
+              <dd className="truncate font-mono tabular-nums text-bone">
+                {money(state.player.researchCashBurnToday ?? 0)}
+              </dd>
+            </div>
+            <div className="min-w-0">
+              <dt className="text-muted">Unlocked</dt>
+              <dd className="font-mono tabular-nums text-bone">
+                {unlockedCount}/{RESEARCH_NODES.length}
+              </dd>
+            </div>
+          </dl>
+        </details>
 
       <div className="research-workbench-layout flex min-h-0 flex-1 flex-col gap-2 overflow-visible">
         <aside className="research-workbench-queue order-1 flex min-h-0 w-full shrink-0 flex-col gap-2">
-          <div className="panel-scroll min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain pr-0.5">
+          <HudButton
+            type="button"
+            variant="ghost"
+            aria-expanded={queueExpanded}
+            aria-controls="research-pods-and-queue"
+            className="!min-h-11 !w-full !justify-between !rounded-lg !border-line/80 !bg-panel-2/55 !px-3 text-left min-[901px]:!hidden [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!flex"
+            onClick={() => setQueueExpanded((expanded) => !expanded)}
+          >
+            <span className="min-w-0">
+              <span className="block text-[0.75rem] font-semibold text-bone">
+                Pods &amp; queue
+              </span>
+              <span className="block truncate text-[0.6875rem] font-normal text-muted">
+                {usesPodPrograms ? `${pods.length} pods · ` : ""}
+                {usesPodPrograms ? activePrograms.length : active ? 1 : 0} active · {queue.length} queued
+              </span>
+            </span>
+            <CaretDown
+              aria-hidden
+              size="0.9rem"
+              className={`shrink-0 transition-transform ${queueExpanded ? "rotate-180" : ""}`}
+            />
+          </HudButton>
+          <div
+            id="research-pods-and-queue"
+            className={`panel-scroll min-h-0 flex-1 space-y-2 overflow-visible pr-0.5 min-[901px]:block min-[901px]:overflow-y-auto min-[901px]:overscroll-contain [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!overflow-visible ${queueExpanded ? "block [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!block" : "hidden [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!hidden"}`}
+            data-mobile-collapsed={queueExpanded ? "false" : "true"}
+          >
             {usesPodPrograms ? (
               <>
                 <div className="flex flex-wrap items-center gap-2">
@@ -470,7 +548,7 @@ export function ResearchPanel() {
 
         <div className="research-workbench-main order-2 flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-visible">
           <div className="research-canvas-column grid min-h-0 flex-1 grid-cols-1 gap-2 overflow-visible">
-            <div className="research-tree-shell relative min-h-0">
+            <div className="research-tree-shell relative min-h-0 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!h-auto">
               <div
               ref={canvas.viewportRef}
               onPointerDown={canvas.onPointerDown}
@@ -478,11 +556,12 @@ export function ResearchPanel() {
               onPointerUp={canvas.onPointerUp}
               onPointerCancel={canvas.onPointerUp}
               onWheel={canvas.onWheel}
-                className="research-tree-stage relative touch-pan-y select-none overflow-hidden rounded-lg border border-line bg-void/90 cursor-grab data-[dragging=true]:cursor-grabbing sm:touch-none"
+              className="research-tree-stage relative touch-pan-y select-none overflow-hidden rounded-lg border border-line bg-void/90 cursor-grab data-[dragging=true]:cursor-grabbing max-[900px]:!h-[min(56dvh,26rem)] max-[900px]:!min-h-[20rem] max-[900px]:landscape:!h-[68dvh] max-[900px]:landscape:!min-h-[16rem] min-[901px]:touch-none [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!h-[68dvh] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!min-h-[16rem] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!touch-pan-y"
               role="group"
               aria-roledescription="research tree"
-              aria-label="Interactive research tree. Drag to pan and use the zoom controls to inspect methods."
+              aria-label="Interactive research tree. Swipe horizontally to pan, pinch with two fingers to zoom, or use the view controls."
               aria-describedby="research-tree-summary"
+              data-mobile-gesture="swipe-pinch"
             >
               <div id="research-tree-summary" className="sr-only">
                 Research tree with {layout.nodes.length} methods and {layout.edges.length} prerequisite connections. Select a method to inspect its requirements, effects, and queue actions.
@@ -501,7 +580,7 @@ export function ResearchPanel() {
                 </span>
                 <HudButton
                   variant="ghost"
-                  className="!h-11 !min-h-0 !w-11 !p-0 lg:!h-8 lg:!w-8"
+                  className="!h-11 !min-h-0 !w-11 !p-0 lg:!h-8 lg:!w-8 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!h-11 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!w-11"
                   onClick={() => canvas.zoomBy(0.84)}
                   aria-label="Zoom research tree out"
                 >
@@ -509,7 +588,7 @@ export function ResearchPanel() {
                 </HudButton>
                 <HudButton
                   variant="ghost"
-                  className="!h-11 !min-h-0 !w-11 !p-0 lg:!h-8 lg:!w-8"
+                  className="!h-11 !min-h-0 !w-11 !p-0 lg:!h-8 lg:!w-8 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!h-11 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!w-11"
                   onClick={() => canvas.zoomBy(1.19)}
                   aria-label="Zoom research tree in"
                 >
@@ -517,7 +596,7 @@ export function ResearchPanel() {
                 </HudButton>
                 <HudButton
                   variant="ghost"
-                  className="!h-11 !min-h-0 !w-11 !p-0 lg:!h-8 lg:!w-8"
+                  className="!h-11 !min-h-0 !w-11 !p-0 lg:!h-8 lg:!w-8 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!h-11 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!w-11"
                   onClick={canvas.fit}
                   title="Fit the full research tree"
                   aria-label="Fit the full research tree"
@@ -526,7 +605,7 @@ export function ResearchPanel() {
                 </HudButton>
                 <HudButton
                   variant="ghost"
-                  className="!h-11 !min-h-0 !w-11 !p-0 lg:!h-8 lg:!w-8"
+                  className="!hidden !h-11 !min-h-0 !w-11 !p-0 min-[901px]:!inline-flex lg:!h-8 lg:!w-8 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!hidden"
                   onClick={canvas.reset}
                   aria-label="Reset research tree view"
                   title="Reset view"
@@ -535,8 +614,8 @@ export function ResearchPanel() {
                 </HudButton>
               </div>
               <div className="pointer-events-none absolute bottom-2 left-2 z-20 rounded-md border border-line/70 bg-panel/85 px-2 py-1 font-mono text-[0.625rem] text-muted backdrop-blur-md">
-                <span className="sm:hidden">tap select · Queue action · pinch/drag</span>
-                <span className="hidden sm:inline">click select · double-click or Queue to queue</span>
+                <span className="min-[901px]:hidden [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!inline">tap · swipe tree · pinch zoom</span>
+                <span className="hidden min-[901px]:inline [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!hidden">click select · double-click or Queue to queue</span>
               </div>
               <div
                 ref={canvas.contentRef}
@@ -720,7 +799,7 @@ export function ResearchPanel() {
                                 </>
                               )}
                             </span>
-                            {sel && <span className="text-research">details beside</span>}
+                            {sel && <span className="text-research">details open</span>}
                           </span>
                         </span>
                       </button>
@@ -763,9 +842,10 @@ export function ResearchPanel() {
             {selected && status ? (
               <div
                 ref={selectedMethodRef}
-                className="research-method-detail absolute z-[25] min-w-0"
+                className="research-method-detail absolute z-[25] min-w-0 max-[900px]:!overflow-visible [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!static [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!mt-2 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!w-full [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!max-h-none [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!overflow-visible"
                 style={canvas.detailPosition(selected.id)}
                 onPointerDown={(event) => event.stopPropagation()}
+                data-mobile-scroll-owner="workspace"
               >
                 <ResearchMethodDetail
                   state={state}
@@ -783,6 +863,7 @@ export function ResearchPanel() {
                   snap={snap}
                   apply={apply}
                   startOrQueue={startOrQueue}
+                  onDismiss={() => setSelectedId(null)}
                   showTitle
                 />
               </div>
@@ -1122,6 +1203,7 @@ type ResearchMethodDetailProps = {
   snap: ReturnType<typeof computeSnapshot>;
   apply: (next: SimState) => void;
   startOrQueue: (id: string) => void;
+  onDismiss?: () => void;
   showTitle?: boolean;
 };
 
@@ -1141,6 +1223,7 @@ function ResearchMethodDetail({
   snap,
   apply,
   startOrQueue,
+  onDismiss,
   showTitle = true,
 }: ResearchMethodDetailProps) {
   const buttonClass = "min-h-11 w-full";
@@ -1160,7 +1243,21 @@ function ResearchMethodDetail({
             </h3>
           ) : null}
         </div>
-        <StatusChip tone={statusTone(status)}>{status}</StatusChip>
+        <div className="flex shrink-0 items-center gap-1">
+          <StatusChip tone={statusTone(status)}>{status}</StatusChip>
+          {onDismiss ? (
+            <HudButton
+              type="button"
+              variant="ghost"
+              aria-label="Close research method details"
+              title="Close details"
+              className="!h-11 !min-h-11 !w-11 !min-w-11 !p-0 min-[901px]:!h-8 min-[901px]:!min-h-8 min-[901px]:!w-8 min-[901px]:!min-w-8 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!h-11 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!min-h-11 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!w-11 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!min-w-11"
+              onClick={onDismiss}
+            >
+              <X aria-hidden size="0.85rem" weight="bold" />
+            </HudButton>
+          ) : null}
+        </div>
       </div>
 
       <div className="space-y-2">
@@ -1286,20 +1383,37 @@ function ResearchMethodDetail({
                 : "warning"
             }
           />
-          <StatRow
-            label="Rate now"
-            value={`${num(estimateResearchRate(state, selected.id).pfPerDay, 2)} PF/d`}
-            tone="research"
-          />
-          <StatRow label="Power" value={mw(snap.mwForecast.research)} />
         </div>
 
-        {selected.prereqs.length > 0 ? (
-          <p className="text-[0.75rem] text-muted">
-            Needs {selected.prereqs.map((prereq) => getResearchNode(prereq).name).join(", ")}
-          </p>
-        ) : null}
-        <EffectsLine effects={selected.effects} />
+        <details
+          className="group rounded-md border border-line/70 bg-void/35"
+          data-research-secondary-detail="collapsed"
+        >
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-md px-2.5 py-2 text-[0.75rem] font-medium text-bone focus-visible:outline focus-visible:outline-2 focus-visible:outline-research/60 [&::-webkit-details-marker]:hidden">
+            Requirements &amp; effects
+            <CaretDown
+              aria-hidden
+              size="0.8rem"
+              className="shrink-0 text-muted transition-transform group-open:rotate-180"
+            />
+          </summary>
+          <div className="space-y-2 border-t border-line/60 px-2.5 py-2">
+            <div className="grid grid-cols-2 gap-x-3">
+              <StatRow
+                label="Rate now"
+                value={`${num(estimateResearchRate(state, selected.id).pfPerDay, 2)} PF/d`}
+                tone="research"
+              />
+              <StatRow label="Power" value={mw(snap.mwForecast.research)} />
+            </div>
+            {selected.prereqs.length > 0 ? (
+              <p className="text-[0.75rem] text-muted">
+                Needs {selected.prereqs.map((prereq) => getResearchNode(prereq).name).join(", ")}
+              </p>
+            ) : null}
+            <EffectsLine effects={selected.effects} />
+          </div>
+        </details>
         {selected.riskLevel ? (
           <div className="rounded-md border border-danger/40 bg-danger/10 px-2.5 py-2">
             <div className="font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.12em] text-danger">
@@ -1316,6 +1430,23 @@ function ResearchMethodDetail({
 }
 
 type CanvasView = { x: number; y: number; scale: number };
+type CanvasPointer = {
+  point: ResearchGesturePoint;
+  pointerType: string;
+};
+type CanvasDrag = {
+  pointerId: number;
+  pointerType: string;
+  origin: ResearchGesturePoint;
+  previous: ResearchGesturePoint;
+  intent: ResearchTouchIntent;
+};
+type CanvasPinch = {
+  pointerIds: [number, number];
+  startA: ResearchGesturePoint;
+  startB: ResearchGesturePoint;
+  startView: CanvasView;
+};
 
 function useResearchCanvas(layout: ResearchTreeLayout) {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -1325,9 +1456,9 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
     y: 24,
     scale: RESEARCH_TREE_DEFAULT_ZOOM,
   });
-  const dragRef = useRef<{ pointerId: number; x: number; y: number } | null>(
-    null,
-  );
+  const activePointersRef = useRef(new Map<number, CanvasPointer>());
+  const dragRef = useRef<CanvasDrag | null>(null);
+  const pinchRef = useRef<CanvasPinch | null>(null);
   const [view, setView] = useState(viewRef.current);
 
   const applyView = useCallback((next: CanvasView) => {
@@ -1421,7 +1552,10 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
       if (!viewport) return;
       const bounds = viewport.getBoundingClientRect();
       const current = viewRef.current;
-      const nextScale = Math.max(RESEARCH_TREE_MIN_ZOOM, Math.min(1.6, current.scale * factor));
+      const nextScale = Math.max(
+        RESEARCH_TREE_MIN_ZOOM,
+        Math.min(RESEARCH_TREE_MAX_ZOOM, current.scale * factor),
+      );
       const anchorX = (clientX ?? bounds.left + bounds.width / 2) - bounds.left;
       const anchorY = (clientY ?? bounds.top + bounds.height / 2) - bounds.top;
       const contentX = (anchorX - current.x) / current.scale;
@@ -1442,35 +1576,155 @@ function useResearchCanvas(layout: ResearchTreeLayout) {
         (event.target as HTMLElement).closest("button, .research-method-detail")
       )
         return;
+      const bounds = event.currentTarget.getBoundingClientRect();
+      const point = {
+        x: event.clientX - bounds.left,
+        y: event.clientY - bounds.top,
+      };
+      activePointersRef.current.set(event.pointerId, {
+        point,
+        pointerType: event.pointerType,
+      });
+      event.currentTarget.setPointerCapture(event.pointerId);
+
+      const touchPointers = [...activePointersRef.current.entries()].filter(
+        ([, pointer]) => pointer.pointerType === "touch",
+      );
+      if (touchPointers.length >= 2) {
+        const [first, second] = touchPointers;
+        pinchRef.current = {
+          pointerIds: [first[0], second[0]],
+          startA: first[1].point,
+          startB: second[1].point,
+          startView: { ...viewRef.current },
+        };
+        dragRef.current = null;
+        event.currentTarget.dataset.dragging = "true";
+        event.currentTarget.dataset.gesture = "pinch";
+        event.preventDefault();
+        return;
+      }
+
       dragRef.current = {
         pointerId: event.pointerId,
-        x: event.clientX,
-        y: event.clientY,
+        pointerType: event.pointerType,
+        origin: point,
+        previous: point,
+        intent: event.pointerType === "touch" ? "pending" : "pan",
       };
-      event.currentTarget.dataset.dragging = "true";
-      event.currentTarget.setPointerCapture(event.pointerId);
+      if (event.pointerType !== "touch") {
+        event.currentTarget.dataset.dragging = "true";
+      }
+      event.currentTarget.dataset.gesture =
+        event.pointerType === "touch" ? "pending" : "pan";
     },
     [],
   );
 
   const onPointerMove = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
+      const activePointer = activePointersRef.current.get(event.pointerId);
+      if (!activePointer) return;
+      const bounds = event.currentTarget.getBoundingClientRect();
+      const point = {
+        x: event.clientX - bounds.left,
+        y: event.clientY - bounds.top,
+      };
+      activePointersRef.current.set(event.pointerId, {
+        ...activePointer,
+        point,
+      });
+
+      const pinch = pinchRef.current;
+      if (pinch) {
+        const first = activePointersRef.current.get(pinch.pointerIds[0]);
+        const second = activePointersRef.current.get(pinch.pointerIds[1]);
+        if (first && second) {
+          event.preventDefault();
+          applyView(
+            researchPinchView(
+              pinch.startView,
+              pinch.startA,
+              pinch.startB,
+              first.point,
+              second.point,
+              RESEARCH_TREE_MIN_ZOOM,
+              RESEARCH_TREE_MAX_ZOOM,
+            ),
+          );
+        }
+        return;
+      }
+
       const drag = dragRef.current;
       if (!drag || drag.pointerId !== event.pointerId) return;
-      const dx = event.clientX - drag.x;
-      const dy = event.clientY - drag.y;
-      dragRef.current = { ...drag, x: event.clientX, y: event.clientY };
+      const previous = drag.previous;
+      drag.previous = point;
+      if (drag.pointerType === "touch" && drag.intent === "pending") {
+        drag.intent = researchTouchIntent(
+          point.x - drag.origin.x,
+          point.y - drag.origin.y,
+        );
+        event.currentTarget.dataset.gesture = drag.intent;
+      }
+      if (drag.intent !== "pan") return;
+
+      const dx = point.x - previous.x;
+      const dy = point.y - previous.y;
+      if (drag.pointerType === "touch") event.preventDefault();
+      event.currentTarget.dataset.dragging = "true";
       const current = viewRef.current;
-      applyView({ ...current, x: current.x + dx, y: current.y + dy });
+      applyView({
+        ...current,
+        x: current.x + dx,
+        // A single vertical swipe belongs to the workspace. Two-finger
+        // gestures can still move the graph freely through researchPinchView.
+        y: current.y + (drag.pointerType === "touch" ? 0 : dy),
+      });
     },
     [applyView],
   );
 
   const onPointerUp = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
-      if (dragRef.current?.pointerId !== event.pointerId) return;
-      dragRef.current = null;
-      delete event.currentTarget.dataset.dragging;
+      activePointersRef.current.delete(event.pointerId);
+      const pinch = pinchRef.current;
+      if (pinch?.pointerIds.includes(event.pointerId)) {
+        pinchRef.current = null;
+        const remainingTouches = [...activePointersRef.current.entries()].filter(
+          ([, pointer]) => pointer.pointerType === "touch",
+        );
+        if (remainingTouches.length >= 2) {
+          const first = remainingTouches[0]!;
+          const second = remainingTouches[1]!;
+          pinchRef.current = {
+            pointerIds: [first[0], second[0]],
+            startA: first[1].point,
+            startB: second[1].point,
+            startView: { ...viewRef.current },
+          };
+          dragRef.current = null;
+          event.currentTarget.dataset.gesture = "pinch";
+        } else if (remainingTouches[0]) {
+          const remainingTouch = remainingTouches[0];
+          dragRef.current = {
+            pointerId: remainingTouch[0],
+            pointerType: "touch",
+            origin: remainingTouch[1].point,
+            previous: remainingTouch[1].point,
+            intent: "pending",
+          };
+          delete event.currentTarget.dataset.dragging;
+          event.currentTarget.dataset.gesture = "pending";
+        }
+      } else if (dragRef.current?.pointerId === event.pointerId) {
+        dragRef.current = null;
+      }
+
+      if (!pinchRef.current && !dragRef.current) {
+        delete event.currentTarget.dataset.dragging;
+        delete event.currentTarget.dataset.gesture;
+      }
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId);
       }

@@ -49,8 +49,14 @@ export function cloneLabData(data: LabData): LabData {
       verticalTags: [...asset.verticalTags],
       synthetic: asset.synthetic
         ? {
-            ...asset.synthetic,
-            teacherModelIds: [...asset.synthetic.teacherModelIds],
+          ...asset.synthetic,
+          teacherModelIds: [...asset.synthetic.teacherModelIds],
+          teacherEffortIds: asset.synthetic.teacherEffortIds
+            ? [...asset.synthetic.teacherEffortIds]
+            : undefined,
+          teacherEffortNames: asset.synthetic.teacherEffortNames
+            ? [...asset.synthetic.teacherEffortNames]
+            : undefined,
           }
         : undefined,
     })),
@@ -65,6 +71,9 @@ export function cloneLabData(data: LabData): LabData {
       ...job,
       teacherModelIds: job.teacherModelIds
         ? { ...job.teacherModelIds }
+        : undefined,
+      teacherEffortIds: job.teacherEffortIds
+        ? { ...job.teacherEffortIds }
         : undefined,
     })),
     dayCollectByDomain: { ...(data.dayCollectByDomain ?? {}) },

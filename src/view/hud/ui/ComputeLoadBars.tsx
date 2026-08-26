@@ -2,7 +2,7 @@
  * Live PF load bars shared by BottomBar, Plans, and model serving cards.
  * All numbers come from {@link buildComputeBreakdown} — no second ledger.
  */
-import { useMemo, useState, type ReactNode } from 'react'
+import { useId, useMemo, useState, type ReactNode } from 'react'
 import type { SimState } from '../../../sim/types'
 import { isInferenceOutage } from '../../../sim/balance/serveThrottle'
 import {
@@ -211,6 +211,7 @@ export function ServeModelLoadBar({
   defaultExpanded?: boolean
 }) {
   const [open, setOpen] = useState(defaultExpanded)
+  const detailId = `serve-model-load-detail-${useId().replace(/:/g, '')}`
   const apiShare = row.usedPf > 1e-12 ? row.apiUsedPf / row.usedPf : 0
   const tone = row.warn ? 'danger' : row.fill > 0.85 ? 'warning' : 'serve'
 
@@ -218,6 +219,7 @@ export function ServeModelLoadBar({
     <div
       className="serve-model-load rounded-md border border-line/50 bg-void/35 px-2 py-1.5"
       data-testid={`serve-model-load-${row.modelId}`}
+      data-swipe-ignore="true"
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
       onFocus={() => setOpen(true)}
@@ -230,7 +232,11 @@ export function ServeModelLoadBar({
       <div className="flex items-center justify-between gap-2">
         <button
           type="button"
-          className="min-w-0 flex-1 text-left text-[0.75rem] font-medium text-bone"
+          className="serve-model-load__toggle min-w-0 flex-1 text-left text-[0.75rem] font-medium text-bone"
+          data-mobile-disclosure="true"
+          aria-expanded={row.planMix.length > 0 ? open : undefined}
+          aria-controls={row.planMix.length > 0 ? detailId : undefined}
+          title={row.planMix.length > 0 ? `${open ? 'Hide' : 'Show'} ${row.name} usage mix` : undefined}
           onClick={() => setOpen((value) => !value)}
         >
           {row.name}
@@ -260,7 +266,7 @@ export function ServeModelLoadBar({
         ) : null}
       </div>
       {open && row.planMix.length > 0 ? (
-        <ul className="mt-1.5 space-y-1 border-t border-line/40 pt-1.5" role="list">
+        <ul id={detailId} className="mt-1.5 space-y-1 border-t border-line/40 pt-1.5" role="list">
           {row.planMix.map((entry) => (
             <li
               key={entry.kind === 'api' ? 'api' : entry.planId ?? entry.name}

@@ -18,6 +18,8 @@ import { HudMeter } from './HudPrimitives'
 export function GameCard({
   eyebrow,
   title,
+  mobileSummary,
+  mobilePriority = 'primary',
   actions,
   tone,
   live,
@@ -31,6 +33,10 @@ export function GameCard({
 }: {
   eyebrow?: string
   title?: ReactNode
+  /** Optional concise supporting copy shown only on compact screens. */
+  mobileSummary?: ReactNode
+  /** Allows compact layouts to retain primary cards ahead of supporting cards. */
+  mobilePriority?: 'primary' | 'secondary'
   actions?: ReactNode
   /** One accent per card. */
   tone?: 'mint' | 'train' | 'infer' | 'research' | 'danger' | 'gold'
@@ -65,6 +71,8 @@ export function GameCard({
       aria-pressed={isInteractive && selected !== undefined ? selected : undefined}
       data-interactive={interactive ? 'true' : undefined}
       data-selected={selected !== undefined ? String(selected) : undefined}
+      data-mobile-card="true"
+      data-mobile-priority={mobilePriority}
       role={isInteractive ? 'button' : undefined}
       tabIndex={isInteractive ? 0 : undefined}
       onClick={isInteractive ? onActivate : undefined}
@@ -73,20 +81,21 @@ export function GameCard({
         live ? 'live-glow border-transparent' : 'border-line/70'
       } ${interactive ? 'hud-card--interactive' : ''} ${selected ? 'hud-card--selected' : ''} ${className}`}
     >
-      {title || actions ? (
-        <header className="flex items-start justify-between gap-2 border-b border-line/50 px-3 pb-2 pt-2.5">
+      {title || actions || mobileSummary ? (
+        <header className="hud-card__header hud-section-header flex items-start justify-between gap-2 border-b border-line/50 px-3 pb-2 pt-2.5">
           <div className="min-w-0">
             {eyebrow ? <p className="hud-eyebrow">{eyebrow}</p> : null}
             {title ? (
-              <h3 id={headingId} className="mt-0.5 truncate text-sm font-semibold text-bone">
+              <h3 id={headingId} className="hud-card__title mt-0.5 truncate text-sm font-semibold text-bone">
                 {title}
               </h3>
             ) : null}
+            {mobileSummary ? <p className="hud-mobile-summary">{mobileSummary}</p> : null}
           </div>
-          {actions ? <div className="flex shrink-0 items-center gap-1.5">{actions}</div> : null}
+          {actions ? <div className="hud-card__actions flex shrink-0 items-center gap-1.5">{actions}</div> : null}
         </header>
       ) : null}
-      <div className={pad ? 'p-3' : ''}>{children}</div>
+      <div className={`hud-card__body${pad ? ' p-3' : ''}`}>{children}</div>
     </section>
   )
 }
@@ -126,7 +135,14 @@ export function SegmentedTabs({
 
   const moveFocus = (nextId: string) => {
     onChange(nextId)
-    const focus = () => tabRefs.current[nextId]?.focus()
+    const focus = () => {
+      const next = tabRefs.current[nextId]
+      next?.focus({ preventScroll: true })
+      const root = rootRef.current
+      if (next && root && root.scrollWidth > root.clientWidth) {
+        next.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+      }
+    }
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(focus)
     else focus()
   }
@@ -168,7 +184,10 @@ export function SegmentedTabs({
       ref={rootRef}
       role="tablist"
       aria-label={ariaLabel}
-      className="seg-tabs"
+      aria-orientation="horizontal"
+      data-mobile-scroll="true"
+      data-swipe-ignore="true"
+      className="seg-tabs hud-tab-row"
       style={{ gridTemplateColumns: `repeat(${Math.max(1, items.length)}, minmax(0, 1fr))` }}
     >
       {indicator ? (

@@ -6,7 +6,7 @@ import {
   buildModelProductProfile,
   instantRecipe,
 } from "../../../../sim/balance/modelProduct";
-import { EffortStudio } from "./EffortStudio";
+import { EffortStudio, LogThinkingBudgetField } from "./EffortStudio";
 
 describe("EffortStudio head tools", () => {
   it("puts compute share, loss, and efficiency sliders on existing head cards", () => {
@@ -66,6 +66,12 @@ describe("EffortStudio head tools", () => {
       }),
     );
     expect(html).toContain('data-effort-studio="true"');
+    expect(html).toMatch(/<details[^>]*data-effort-studio="true"/);
+    expect(html).not.toMatch(/<details[^>]*\sopen(?:=|\s|>)/);
+    expect(html).toMatch(/<summary[^>]*class="[^"]*min-h-11[^"]*"/);
+    expect(html).toContain("generated / reasoning budget");
+    expect(html).toContain("total billed");
+    expect(html).toContain("up to 100× generated");
     expect(html).toContain(`data-effort-head="${INSTANT_EFFORT_ID}"`);
     expect(html).toContain('data-effort-head="high"');
     expect(html).toContain("Train PF share");
@@ -74,5 +80,19 @@ describe("EffortStudio head tools", () => {
     expect(html).toContain("loss 5.04");
     expect(html).toContain("Continue train");
     expect(html).toContain("free");
+  });
+
+  it("exposes meaningful values for the logarithmic budget range", () => {
+    const html = renderToStaticMarkup(
+      createElement(LogThinkingBudgetField, {
+        value: 2.2,
+        billedMultiplier: 1.6,
+        onChange: () => undefined,
+      }),
+    );
+    expect(html).toContain("Generated / reasoning budget");
+    expect(html).toContain(
+      'aria-valuetext="2.2× generated; 1.6× total billed"',
+    );
   });
 });

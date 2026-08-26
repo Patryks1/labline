@@ -2,6 +2,7 @@ import type { TrainingJob } from "../../../../sim/types";
 import { money } from "../../format";
 import { HudButton, StatusChip } from "../../ui/HudPrimitives";
 import type { CheckpointUiRecord } from "./checkpointUi";
+import { effectiveEffortBoardUsdPerBaseMTok } from "../../data/benchmarkLeaderboard";
 
 const verdictLabel = (
   verdict: NonNullable<CheckpointUiRecord["review"]>["verdict"],
@@ -58,18 +59,19 @@ export function TrainingEvidencePanel({
     evidenceCheckpoints.length > 0;
 
   return (
-    <section
-      className="rounded-lg border border-research/35 bg-research/5 p-3"
+    <details
+      className="group rounded-lg border border-research/35 bg-research/5"
       aria-label={`${job.name} benchmark results and reviews`}
       data-training-evidence="true"
+      data-mobile-default-collapsed="true"
     >
-      <div className="flex flex-wrap items-start justify-between gap-2">
+      <summary className="flex min-h-11 cursor-pointer list-none flex-wrap items-start justify-between gap-2 rounded-lg p-3 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-research/60 [&::-webkit-details-marker]:hidden">
         <div className="min-w-0">
           <p className="hud-eyebrow text-research">Measure this checkpoint</p>
           <h4 className="mt-1 text-[0.875rem] font-semibold text-bone">
             Benchmarks &amp; reviews
           </h4>
-          <p className="mt-1 text-[0.6875rem] leading-5 text-muted">
+          <p className="hud-mobile-detail mt-1 text-[0.6875rem] leading-5 text-muted">
             Measuring does not train the model. It snapshots these weights,
             then the suites and blind review run while the source job keeps
             going.
@@ -82,8 +84,13 @@ export function TrainingEvidencePanel({
           {pendingReviews > 0 ? (
             <StatusChip tone="warning">{pendingReviews} in review</StatusChip>
           ) : null}
+          <span aria-hidden className="transition-transform group-open:rotate-180">
+            ⌄
+          </span>
         </div>
-      </div>
+      </summary>
+
+      <div className="border-t border-research/25 p-3 pt-1">
 
       {job.pendingBenchmark ? (
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber/35 bg-amber/8 px-2.5 py-2 text-[0.6875rem]">
@@ -132,11 +139,13 @@ export function TrainingEvidencePanel({
                   key={board.id}
                   label={board.name}
                   value={board.capability.toFixed(0)}
-                  detail={
-                    board.usdPerMTok != null
-                      ? `${board.tokenMult.toFixed(1)}× · ${money(board.usdPerMTok)}/MTok`
-                      : `${board.tokenMult.toFixed(1)}× tokens`
-                  }
+                  detail={(() => {
+                    const effectiveCost =
+                      effectiveEffortBoardUsdPerBaseMTok(board);
+                    return effectiveCost != null
+                      ? `${board.tokenMult.toFixed(1)}× · ${money(effectiveCost)}/base MTok`
+                      : `${board.tokenMult.toFixed(1)}× tokens`;
+                  })()}
                 />
               ))
             ) : latestSnapshot.effortCapabilities ? (
@@ -244,7 +253,8 @@ export function TrainingEvidencePanel({
           </HudButton>
         </div>
       ) : null}
-    </section>
+      </div>
+    </details>
   );
 }
 

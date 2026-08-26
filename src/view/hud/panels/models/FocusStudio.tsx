@@ -34,12 +34,25 @@ export function FocusStudio({
 }) {
   const value = normalizeFocus(focus);
   return (
-    <div
-      className="rounded-md border border-line/60 bg-void/30 p-2.5"
+    <details
+      className="group rounded-md border border-line/60 bg-void/30"
       data-focus-studio="true"
+      data-mobile-default-collapsed="true"
     >
-      <p className="hud-eyebrow">Specialize mix</p>
-      <p className="mt-1 text-[0.6875rem] leading-5 text-muted">
+      <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
+        <span>
+          <span className="hud-eyebrow block">Specialize mix</span>
+          <span className="mt-0.5 block text-[0.625rem] text-muted">
+            Optional domain bias
+          </span>
+        </span>
+        <span className="font-mono text-[0.625rem] text-muted">
+          <span className="group-open:hidden">Configure</span>
+          <span className="hidden group-open:inline">Hide</span>
+        </span>
+      </summary>
+      <div className="border-t border-line/40 p-2.5">
+      <p className="text-[0.6875rem] leading-5 text-muted">
         Push coding, science, research, or personality. Personality never
         rerolls capability — it only changes how people stay subscribed.
       </p>
@@ -66,6 +79,7 @@ export function FocusStudio({
           />
         ))}
       </div>
-    </div>
+      </div>
+    </details>
   );
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BenchmarkScores, Model } from "../types";
+import { instantRecipe } from "./modelProduct";
 import {
   createPendingCheckpointEvaluation,
   eligibleCheckpointEvaluationSuites,
@@ -111,6 +112,9 @@ describe("stealth checkpoint evaluation", () => {
     expect(external.durationDays).toBeGreaterThan(internal.durationDays);
     expect(external.accuracy).toBeGreaterThan(internal.accuracy);
     expect(external.leakRisk).toBeGreaterThan(0);
+    expect(external.computePfDays).toBeGreaterThan(0);
+    expect(external.workload?.taskCount).toBeGreaterThan(0);
+    expect(external.inferenceCost).toBeGreaterThan(0);
     expect(() =>
       quoteCheckpointEvaluation(checkpoint, {
         suiteIds: ["image_generation"],
@@ -118,6 +122,53 @@ describe("stealth checkpoint evaluation", () => {
         mode: "internal",
       }),
     ).toThrow(/not supported/);
+  });
+
+  it("quotes exact trained effort and rejects unknown recipe ids", () => {
+    const checkpoint = model("effort", 60, {
+      productProfile: {
+        lifecycle: "aligned",
+        focus: { coding: 0, science: 0, research: 0, personality: 0, chat: 0 },
+        personality: 50,
+        tokenEfficiency: 50,
+        defaultEffortId: "instant",
+        effortRecipes: [
+          instantRecipe(),
+          {
+            id: "max",
+            name: "Max",
+            kind: "trained",
+            thinkingTokenMult: 100,
+            trainPfDays: 100,
+            trainCash: 1_000_000,
+            trained: true,
+            quality: 0.9,
+            served: true,
+          },
+        ],
+      },
+    });
+    const instant = quoteCheckpointEvaluation(checkpoint, {
+      suiteIds: ["language"], budgetTier: "standard", mode: "internal",
+      effortRecipeId: "instant",
+    });
+    const max = quoteCheckpointEvaluation(checkpoint, {
+      suiteIds: ["language"], budgetTier: "standard", mode: "internal",
+      effortRecipeId: "max",
+    });
+    expect(max.workload!.billedTokens).toBeGreaterThan(instant.workload!.billedTokens * 10);
+    expect(max.computePfDays).toBeGreaterThan(instant.computePfDays! * 10);
+    expect(max.totalCost).toBeGreaterThan(instant.totalCost);
+    expect(() => quoteCheckpointEvaluation(checkpoint, {
+      suiteIds: ["language"], budgetTier: "standard", mode: "internal",
+      effortRecipeId: "unknown",
+    })).toThrow(/not trained/);
+    expect(createPendingCheckpointEvaluation(
+      checkpoint,
+      { suiteIds: ["language"], budgetTier: "standard", mode: "internal", effortRecipeId: "max" },
+      1,
+      5,
+    ).computeProgressPfDays).toBe(0);
   });
 
   it("is deterministic and higher spend narrows the same measurement, not a reroll", () => {

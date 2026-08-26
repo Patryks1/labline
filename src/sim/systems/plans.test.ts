@@ -139,6 +139,9 @@ function lumenFixture(heads: EffortRecipe[] = [
     shipped: true,
     release: "released",
     commerciallyOffered: true,
+    apiPricePerMTok: null,
+    apiPriceInPerMTok: 2,
+    apiPriceOutPerMTok: 10,
     productProfile: profileWithHeads(...heads),
   };
   const plan: SubPlan = {
@@ -197,10 +200,28 @@ describe("plan model entitlement thinking levels", () => {
     );
     expect(think.tokenMult).toBeGreaterThan(instant.tokenMult);
     expect(deep.tokenMult).toBeGreaterThan(think.tokenMult);
+    expect(think.billedTokenMult).toBeGreaterThan(instant.billedTokenMult);
+    expect(deep.billedTokenMult).toBeGreaterThan(think.billedTokenMult);
+    expect(think.computeTokenMult).toBeGreaterThan(think.billedTokenMult);
+    expect(deep.computeIntensityMult).toBeGreaterThan(
+      think.computeIntensityMult,
+    );
+    expect(think.blendedApiPricePerMTok).toBeGreaterThan(
+      instant.blendedApiPricePerMTok,
+    );
+    expect(deep.effectiveApiSpendPerBaseMTok).toBeGreaterThan(
+      think.effectiveApiSpendPerBaseMTok,
+    );
+    expect(think.includedMTokPerMonth).toBeGreaterThan(
+      instant.includedMTokPerMonth * (think.trafficShare / instant.trafficShare),
+    );
+    expect(deep.includedMTokPerMonth).toBeGreaterThan(
+      think.includedMTokPerMonth,
+    );
 
     const base = avgTokensPerInteraction("language");
     expect(think.tokensPerInteraction).toBeCloseTo(
-      base * think.tokenMult,
+      base * think.billedTokenMult,
       8,
     );
     expect(think.interactionsPerDay).toBeCloseTo(
@@ -209,10 +230,10 @@ describe("plan model entitlement thinking levels", () => {
         ECONOMY.daysPerMonth,
       8,
     );
-    // Same MTok slice would yield fewer msgs at higher token mult; with the
-    // default mix Instant still has the most daily messages.
+    // Request shares remain the source of message mix; billed MTok expands
+    // around those requests, so equal Think/Deep request shares stay equal.
     expect(instant.interactionsPerDay).toBeGreaterThan(think.interactionsPerDay);
-    expect(think.interactionsPerDay).toBeGreaterThan(deep.interactionsPerDay);
+    expect(think.interactionsPerDay).toBeCloseTo(deep.interactionsPerDay, 8);
   });
 
   it("keeps Instant-only models as a single bare-name row", () => {
@@ -263,7 +284,7 @@ describe("plan model entitlement thinking levels", () => {
     expect(fallback[0]!.effortId).toBe(INSTANT_EFFORT_ID);
   });
 
-  it("derives COGS from allocated MTok at a shared $/MTok unit price", () => {
+  it("raises COGS per billed MTok with effort compute intensity", () => {
     const { state, plan } = lumenFixture();
     const unit = 2.5;
     const rows = planModelEntitlements(state, plan, {
@@ -271,21 +292,24 @@ describe("plan model entitlement thinking levels", () => {
     });
     for (const row of rows) {
       expect(row.rawServingCostPerMonth).toBeCloseTo(
-        row.includedMTokPerMonth * row.expectedUtilization * unit,
+        row.includedMTokPerMonth *
+          row.expectedUtilization *
+          unit *
+          row.computeIntensityMult,
         8,
       );
     }
-    expect(rows[2]!.includedMTokPerMonth).toBeCloseTo(
+    expect(rows[2]!.includedMTokPerMonth).toBeGreaterThan(
       rows[1]!.includedMTokPerMonth,
-      8,
     );
-    // Equal request remainder shares → equal MTok/COGS; deeper burns msgs.
-    expect(rows[2]!.rawServingCostPerMonth).toBeCloseTo(
+    // Equal request remainder shares → deeper heads consume more billed
+    // MTok and more PF for each one.
+    expect(rows[2]!.rawServingCostPerMonth).toBeGreaterThan(
       rows[1]!.rawServingCostPerMonth!,
-      8,
     );
-    expect(rows[2]!.interactionsPerDay).toBeLessThan(
+    expect(rows[2]!.interactionsPerDay).toBeCloseTo(
       rows[1]!.interactionsPerDay,
+      8,
     );
   });
 

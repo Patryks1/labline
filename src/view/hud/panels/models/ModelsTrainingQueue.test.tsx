@@ -80,6 +80,8 @@ describe("ModelsTrainingQueue", () => {
     );
 
     expect(markup).toContain('data-run-count="10"');
+    expect(markup).toContain("touch-pan-y");
+    expect(markup).toContain("!overscroll-y-auto");
     expect(markup).toContain('aria-label="Runs, 10 in flight"');
     expect(markup).toContain("Run 10");
     expect(markup).toContain("1.00B");
@@ -133,6 +135,11 @@ describe("ModelsTrainingQueue", () => {
     expect(markup).not.toContain("Train model");
     expect(markup).not.toContain("Open the new model workflow");
     expect(markup).toContain('data-models-view-nav="true"');
+    expect(markup).toContain('data-mobile-scroll="horizontal"');
+    expect(markup).toContain('data-models-short-landscape="scroll"');
+    expect(markup).toContain('data-models-short-landscape="compact-runs"');
+    expect(markup).toContain("max-lg:snap-x");
+    expect(markup).toContain("max-lg:snap-start");
   });
 
   it("identifies checkpoint branches without hiding their independent progress", () => {

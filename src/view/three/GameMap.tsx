@@ -44,8 +44,10 @@ import {
   createMapCameraRotation,
   grabbedWorldPanDelta,
   hasPointerDragged,
+  mapFrustumAfterPinch,
   mapCameraPose,
   mapCameraDistanceScale,
+  mapPinchSample,
   mapViewportPlaneBounds,
   mapViewportPlaneFootprint,
   retargetMapCameraRotation,
@@ -106,6 +108,11 @@ interface DragState {
   anchorX: number
   anchorZ: number
   moved: boolean
+}
+
+interface TouchPoint {
+  x: number
+  y: number
 }
 
 interface PreviewState {
@@ -192,6 +199,9 @@ export function GameMap() {
       anchorZ: 0,
       moved: false,
     }
+    const touchPointers = new Map<number, TouchPoint>()
+    let pinchGesture: ReturnType<typeof mapPinchSample> | null = null
+    let multiTouchConsumedTap = false
 
     const ambient = new THREE.AmbientLight(0xfff6e8, 0.82)
     const sun = new THREE.DirectionalLight(0xfff2d6, 1.2)
@@ -778,6 +788,7 @@ export function GameMap() {
       const interactive =
         !!perfSession ||
         drag.active ||
+        pinchGesture !== null ||
         keys.size > 0 ||
         !rotationSample.complete ||
         viewportDirty ||
@@ -830,10 +841,28 @@ export function GameMap() {
 
     function onPointerDown(event: PointerEvent): void {
       if (event.button !== 0) return
-      const hit = pickGroundAt(event.clientX, event.clientY)
-      if (!hit) return
       event.preventDefault()
       mountRef.current?.focus({ preventScroll: true })
+      if (event.pointerType === 'touch') {
+        touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+        if (touchPointers.size >= 2) {
+          const [first, second] = Array.from(touchPointers.values())
+          if (first && second) pinchGesture = mapPinchSample(first.x, first.y, second.x, second.y)
+          multiTouchConsumedTap = true
+          drag.active = false
+          drag.onMap = false
+          drag.moved = true
+          clearBuildPreview()
+          renderer.setPixelRatio(activePixelRatio())
+          markInteraction()
+          return
+        }
+      }
+      const hit = pickGroundAt(event.clientX, event.clientY)
+      if (!hit) {
+        touchPointers.delete(event.pointerId)
+        return
+      }
       // Touch and keyboard users may not produce a hover move before the
       // placement tap. Refresh the same pre-placement context immediately;
       // selectTile remains the only authoritative placement callback on up.
@@ -850,6 +879,38 @@ export function GameMap() {
     }
 
     function onPointerMove(event: PointerEvent): void {
+      if (event.pointerType === 'touch' && touchPointers.has(event.pointerId)) {
+        touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      }
+      if (pinchGesture && touchPointers.size >= 2) {
+        event.preventDefault()
+        const [first, second] = Array.from(touchPointers.values())
+        if (!first || !second) return
+        const nextPinch = mapPinchSample(first.x, first.y, second.x, second.y)
+        const anchor = pickGroundAt(pinchGesture.centerX, pinchGesture.centerY)?.clone()
+        frustum = mapFrustumAfterPinch(
+          frustum,
+          pinchGesture.distance,
+          nextPinch.distance,
+          MIN_FRUSTUM,
+          MAX_FRUSTUM,
+        )
+        updateProjectionMatrix()
+        applyCamera()
+        const shifted = pickGroundAt(nextPinch.centerX, nextPinch.centerY)
+        if (anchor && shifted) {
+          const delta = grabbedWorldPanDelta(anchor.x, anchor.z, shifted.x, shifted.z)
+          target.x += delta.x
+          target.z += delta.z
+          clampTarget()
+          applyCamera()
+        }
+        pinchGesture = nextPinch
+        viewportDirty = true
+        clearBuildPreview()
+        markInteraction()
+        return
+      }
       if (drag.active && drag.onMap) {
         const hit = pickGroundAt(event.clientX, event.clientY)
         if (!hit) return
@@ -866,10 +927,23 @@ export function GameMap() {
         }
         return
       }
-      updateBuildPreview(event.clientX, event.clientY)
+      if (event.target === renderer.domElement) updateBuildPreview(event.clientX, event.clientY)
+      else clearBuildPreview()
     }
 
     function onPointerUp(event: PointerEvent): void {
+      if (event.pointerType === 'touch') touchPointers.delete(event.pointerId)
+      if (multiTouchConsumedTap) {
+        pinchGesture = null
+        drag.active = false
+        drag.onMap = false
+        drag.moved = false
+        clearBuildPreview()
+        renderer.setPixelRatio(activePixelRatio())
+        markInteraction()
+        if (touchPointers.size === 0) multiTouchConsumedTap = false
+        return
+      }
       const startedOnMap = drag.onMap
       const moved = drag.moved || hasPointerDragged(drag.x, drag.y, event.clientX, event.clientY)
       drag.active = false
@@ -891,7 +965,19 @@ export function GameMap() {
           store.selectTile(0, null)
         }
       }
-      updateBuildPreview(event.clientX, event.clientY)
+      if (event.target === renderer.domElement) updateBuildPreview(event.clientX, event.clientY)
+      else clearBuildPreview()
+    }
+
+    function onPointerCancel(event: PointerEvent): void {
+      touchPointers.delete(event.pointerId)
+      if (touchPointers.size === 0) multiTouchConsumedTap = false
+      pinchGesture = null
+      drag.active = false
+      drag.onMap = false
+      drag.moved = false
+      clearBuildPreview()
+      markInteraction()
     }
 
     function onPointerLeave(): void {
@@ -1167,8 +1253,7 @@ export function GameMap() {
       scheduleAnimation()
     })
 
-      renderer.domElement.addEventListener('pointerdown', onPointerDown)
-    renderer.domElement.addEventListener('pointermove', onPointerMove)
+    renderer.domElement.addEventListener('pointerdown', onPointerDown)
     renderer.domElement.addEventListener('pointerleave', onPointerLeave)
     renderer.domElement.addEventListener('wheel', onWheel, { passive: false })
     renderer.domElement.addEventListener('webglcontextlost', onWebglContextLost)
@@ -1179,6 +1264,7 @@ export function GameMap() {
       mount.addEventListener('focus', onMapFocus, true)
     window.addEventListener('pointermove', onPointerMove)
     window.addEventListener('pointerup', onPointerUp)
+    window.addEventListener('pointercancel', onPointerCancel)
     window.addEventListener('dragend', onBlueprintDragEnd)
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
@@ -1240,11 +1326,11 @@ export function GameMap() {
       document.removeEventListener('visibilitychange', onVisibilityChange)
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', onPointerUp)
+      window.removeEventListener('pointercancel', onPointerCancel)
       window.removeEventListener('dragend', onBlueprintDragEnd)
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
       renderer.domElement.removeEventListener('pointerdown', onPointerDown)
-      renderer.domElement.removeEventListener('pointermove', onPointerMove)
       renderer.domElement.removeEventListener('pointerleave', onPointerLeave)
       renderer.domElement.removeEventListener('wheel', onWheel)
       renderer.domElement.removeEventListener('webglcontextlost', onWebglContextLost)
@@ -1273,18 +1359,24 @@ export function GameMap() {
     <div
       ref={mountRef}
       tabIndex={0}
-      className={`absolute inset-0 outline-none ${buildMode || mapTool === 'destroy' ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
-      title="WASD / arrows to pan · Q/E rotate · T tilt · R reset view · drag · scroll zoom"
+      role="application"
+      aria-label="Interactive world map"
+      aria-describedby="world-map-gesture-help"
+      className={`absolute inset-0 touch-none select-none overscroll-none outline-none ${buildMode || mapTool === 'destroy' ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
+      title="Tap to select · drag to pan · pinch or scroll to zoom · Q/E rotate · T tilt"
     >
+      <span id="world-map-gesture-help" className="sr-only">
+        Tap a parcel to select it. Drag with one finger to pan and pinch with two fingers to zoom. Map gestures stay on the map and do not move open interface sheets.
+      </span>
       <div
         ref={placementTooltipRef}
         hidden
         className="build-placement-tooltip pointer-events-none absolute z-30 w-60 max-w-[calc(100%-1rem)] rounded-lg border border-mint/45 bg-void/95 px-2.5 py-2 font-mono shadow-xl backdrop-blur-md"
       >
         <span ref={placementLandRef} className="block text-[0.6875rem] font-semibold text-bone" />
-        <span ref={placementGradeRef} className="mt-0.5 block text-[0.5625rem] text-bone/70" />
-        <span ref={placementZoneRef} className="mt-1 block truncate text-[0.5625rem] text-bone/80" />
-        <span ref={placementUtilityRef} className="mt-0.5 block truncate text-[0.5625rem] text-muted" />
+        <span ref={placementGradeRef} className="mt-0.5 hidden text-[0.5625rem] text-bone/70 min-[901px]:block" />
+        <span ref={placementZoneRef} className="mt-1 hidden truncate text-[0.5625rem] text-bone/80 min-[901px]:block" />
+        <span ref={placementUtilityRef} className="mt-0.5 hidden truncate text-[0.5625rem] text-muted min-[901px]:block" />
         <span ref={placementStatusRef} className="build-placement-status mt-1 block text-[0.625rem] font-semibold text-amber" />
         <span ref={placementTotalRef} className="build-placement-total mt-0.5 block text-[0.5625rem] text-mint" />
       </div>

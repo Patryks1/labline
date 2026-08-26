@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { emptyBenchmarks } from "../balance/benchmarks";
+import { instantRecipe } from "../balance/modelProduct";
 import { teacherCapabilityForDataDomain } from "../balance/modelCapabilities";
 import {
   syntheticJobQuality,
   teacherDomainStrength,
 } from "../balance/syntheticTraining";
 import { createGame } from "../createGame";
+import { energyPriceForState } from "./map";
 import { roundTripState } from "../save";
 import type { Model, SimState } from "../types";
 import {
@@ -203,6 +205,119 @@ describe("synthetic data runtime", () => {
     expect(
       state.player.data.assets.some((asset) => asset.source === "synthetic"),
     ).toBe(true);
+  });
+
+  it("trades fixed-budget yield for trained thinking quality and freezes corpus effort provenance", () => {
+    const model: Model = {
+      ...teacher(),
+      paramsB: 0.1,
+      activeParamsB: 0.1,
+      productProfile: {
+        lifecycle: "reasoning",
+        focus: { coding: 0, science: 0, research: 0, personality: 0, chat: 0 },
+        personality: 60,
+        tokenEfficiency: 78,
+        effortRecipes: [
+          instantRecipe(),
+          {
+            id: "careful",
+            name: "Careful",
+            kind: "trained",
+            thinkingTokenMult: 6,
+            trainPfDays: 100,
+            trainCash: 2_000_000,
+            trained: true,
+            quality: 0.88,
+            served: true,
+            capabilityBias: 0.7,
+          },
+        ],
+        defaultEffortId: "instant",
+      },
+    };
+    let state = createGame(7_0401);
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        data: {
+          ...state.player.data,
+          autoProcess: false,
+          processQueue: [],
+        },
+      },
+    };
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        models: [model],
+        researchUnlocked: [...state.player.researchUnlocked, "data_synth"],
+        allocation: { training: 0.1, inference: 0.1, research: 0.8 },
+      },
+      rivals: [],
+    };
+    const instant = estimateSynthBudget(
+      state,
+      0.35,
+      { math: model.id },
+      { math: "instant" },
+    ).domains.find((route) => route.domain === "math")!;
+    const careful = estimateSynthBudget(
+      state,
+      0.35,
+      { math: model.id },
+      { math: "careful" },
+    ).domains.find((route) => route.domain === "math")!;
+
+    expect(careful.effortId).toBe("careful");
+    expect(careful.domainCapability).toBeGreaterThan(instant.domainCapability);
+    expect(careful.billedTokenMultiplier).toBeGreaterThan(
+      instant.billedTokenMultiplier,
+    );
+    expect(careful.computeIntensityMultiplier).toBeGreaterThan(1);
+    expect(careful.acceptedMTokPerDay).toBeLessThan(
+      instant.acceptedMTokPerDay,
+    );
+    expect(careful.pfPerAcceptedMTok).toBeGreaterThan(
+      instant.pfPerAcceptedMTok,
+    );
+
+    state = startSynthBudget(state, {
+      researchShare: 0.35,
+      teacherModelIds: { math: model.id },
+      teacherEffortIds: { math: "careful" },
+    });
+    const liveQuote = estimateSynthBudget(
+      state,
+      0.35,
+      { math: model.id },
+      { math: "careful" },
+    );
+    const cashBeforeTick = state.player.cash;
+    state = tickData(state);
+    const expectedNonEnergyCharge =
+      liveQuote.dailyComputeCost -
+      liveQuote.energyMWhPerDay * energyPriceForState(state);
+    expect(liveQuote.dailyTokenCashCost).toBeGreaterThan(0);
+    expect(cashBeforeTick - state.player.cash).toBeCloseTo(
+      expectedNonEnergyCharge,
+      6,
+    );
+    const asset = state.player.data.assets.find(
+      (candidate) =>
+        candidate.source === "synthetic" &&
+        (candidate.domainWeights.math ?? 0) > 0 &&
+        candidate.synthetic?.teacherEffortIds?.includes("careful"),
+    );
+    expect(asset?.synthetic?.teacherEffortIds).toEqual(["careful"]);
+    expect(asset?.synthetic?.teacherEffortNames).toEqual(["Careful"]);
+    expect(asset?.synthetic?.computeIntensityMultiplier ?? 0).toBeGreaterThan(
+      1,
+    );
+    expect(asset?.synthetic?.generationCashPerAttemptedMTok).toBeCloseTo(
+      careful.billedTokenMultiplier * 250,
+    );
   });
 
   it("routes each corpus to its persisted teacher and exposes fit-adjusted economics", () => {
@@ -491,6 +606,99 @@ describe("synthetic data runtime", () => {
     expect(result.syntheticUnits).toBeLessThanOrEqual(real * 0.5 + 1e-6);
     expect(total).toBeLessThan(10_000);
   });
+
+  it("freezes selected thinking recipe tokens, cash, PF, and quality in training provenance", () => {
+    const model: Model = {
+      ...teacher(),
+      productProfile: {
+        lifecycle: "reasoning",
+        focus: {
+          coding: 0,
+          science: 0,
+          research: 0,
+          personality: 0,
+          chat: 0,
+        },
+        personality: 60,
+        tokenEfficiency: 75,
+        effortRecipes: [
+          instantRecipe(),
+          {
+            id: "careful",
+            name: "Careful",
+            kind: "trained",
+            thinkingTokenMult: 5,
+            trainPfDays: 100,
+            trainCash: 2_000_000,
+            trained: true,
+            quality: 0.85,
+            served: false,
+            capabilityBias: 0.7,
+          },
+        ],
+        defaultEffortId: "instant",
+      },
+    };
+    let state = createGame(7_051);
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        models: [model],
+        researchUnlocked: [...state.player.researchUnlocked, "data_synth"],
+      },
+      rivals: [],
+    };
+    const result = consumeForTraining(
+      state,
+      {
+        totalMTok: 10_000,
+        totalUnits: 10_000,
+        weights: {
+          code: 0,
+          math: 0,
+          science: 0,
+          law: 0,
+          health: 0,
+          chat: 1,
+          image: 0,
+          video: 0,
+          audio: 0,
+        },
+        trainShare: 0.82,
+        allowSynthetic: true,
+        syntheticMultiplier: 0.5,
+        includeSynthHQ: true,
+        includeSynthLQ: false,
+        syntheticTeacherIds: { chat: model.id },
+        syntheticTeacherEffortIds: { chat: "careful" },
+      },
+      1,
+      "dense",
+    );
+    const provenance = result.syntheticProvenance?.find(
+      (record) => record.domain === "chat",
+    );
+
+    expect(provenance).toMatchObject({
+      teacherModelId: model.id,
+      teacherEffortId: "careful",
+      teacherEffortName: "Careful",
+      teacherThinkingTokenMult: 5,
+      teacherEffortQuality: 0.85,
+    });
+    expect(
+      provenance?.teacherComputeIntensityMultiplier ?? 0,
+    ).toBeGreaterThan(1);
+    expect(provenance?.billedTokenMultiplier ?? 0).toBeGreaterThan(1);
+    expect(provenance?.generatedTokenMTok ?? 0).toBeGreaterThan(
+      provenance?.volumeMTok ?? 0,
+    );
+    expect(provenance?.generationComputePfDays).toBeCloseTo(
+      result.syntheticGenerationPfDays ?? 0,
+    );
+    expect(provenance?.generationCashCost).toBeCloseTo(result.cashCost);
+  });
 });
 
 describe("targeted synthetic generation jobs", () => {
@@ -654,6 +862,10 @@ describe("targeted synthetic generation jobs", () => {
         chat: model.id,
         science: model.id,
       },
+      teacherEffortIds: {
+        chat: "instant",
+        science: "instant",
+      },
     });
 
     const restored = roundTripState(state);
@@ -663,6 +875,10 @@ describe("targeted synthetic generation jobs", () => {
     expect(job?.teacherModelIds).toEqual({
       chat: model.id,
       science: model.id,
+    });
+    expect(job?.teacherEffortIds).toEqual({
+      chat: "instant",
+      science: "instant",
     });
     expect(job?.researchShare).toBe(0.3);
   });

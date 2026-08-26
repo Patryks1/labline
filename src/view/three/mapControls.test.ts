@@ -6,8 +6,10 @@ import {
   createMapCameraRotation,
   grabbedWorldPanDelta,
   hasPointerDragged,
+  mapFrustumAfterPinch,
   mapCameraPose,
   mapCameraDistanceScale,
+  mapPinchSample,
   mapViewportPlaneBounds,
   mapViewportPlaneFootprint,
   nextMapCameraTilt,
@@ -94,6 +96,23 @@ describe('map drag controls', () => {
   it('keeps small pointer jitter as a click and starts dragging at the threshold', () => {
     expect(hasPointerDragged(100, 100, 102, 102)).toBe(false)
     expect(hasPointerDragged(100, 100, 100 + DRAG_START_DISTANCE_PX, 100)).toBe(true)
+  })
+
+  it('samples a two-finger midpoint and zooms an orthographic view in either direction', () => {
+    expect(mapPinchSample(20, 40, 80, 100)).toEqual({
+      centerX: 50,
+      centerY: 70,
+      distance: Math.hypot(60, 60),
+    })
+    expect(mapFrustumAfterPinch(12, 100, 150, 5, 30)).toBe(8)
+    expect(mapFrustumAfterPinch(12, 100, 50, 5, 30)).toBe(24)
+  })
+
+  it('clamps pinch zoom and ignores malformed coalesced pointer packets', () => {
+    expect(mapFrustumAfterPinch(6, 100, 1_000, 5, 30)).toBe(5)
+    expect(mapFrustumAfterPinch(28, 100, 10, 5, 30)).toBe(30)
+    expect(mapFrustumAfterPinch(12, 0, 20, 5, 30)).toBe(12)
+    expect(mapFrustumAfterPinch(12, 20, Number.NaN, 5, 30)).toBe(12)
   })
 
   it('pulls the camera back with wide orthographic zoom without moving it closer at normal zoom', () => {

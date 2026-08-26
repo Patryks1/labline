@@ -2,6 +2,9 @@ import { Funnel, MinusCircle } from '@phosphor-icons/react'
 import { useEffect, useId, useState, type ReactNode } from 'react'
 import { HudButton } from './HudPrimitives'
 
+export const COMPACT_FILTER_QUERY =
+  '(max-width: 900px), (orientation: landscape) and (max-height: 600px) and (max-width: 1180px)'
+
 export interface HudFilterOption {
   id: string
   label: ReactNode
@@ -54,7 +57,8 @@ export function HudFilterBar({
   const resolvedActiveCount = activeCount ?? selectedCount
 
   useEffect(() => {
-    const media = window.matchMedia('(max-width: 640px)')
+    if (typeof window.matchMedia !== 'function') return
+    const media = window.matchMedia(COMPACT_FILTER_QUERY)
     const sync = () => setExpanded(!media.matches)
     sync()
     media.addEventListener?.('change', sync)
@@ -66,6 +70,8 @@ export function HudFilterBar({
       className={`hud-filter-bar ${className}`}
       aria-label={ariaLabel}
       data-expanded={expanded ? 'true' : 'false'}
+      data-mobile-collapsible="true"
+      data-swipe-ignore="true"
     >
       <header className="hud-filter-bar__header">
         <div className="hud-filter-bar__summary">
@@ -75,7 +81,7 @@ export function HudFilterBar({
             {resolvedActiveCount > 0 ? `${resolvedActiveCount} active` : 'All'}
           </span>
         </div>
-        <div className="hud-filter-bar__actions">
+        <div className="hud-filter-bar__actions hud-filter-bar__controls">
           <button
             type="button"
             className="hud-filter-bar__toggle"
@@ -110,7 +116,13 @@ export function HudFilterBar({
                 <span className="hud-filter-bar__description">{group.description}</span>
               ) : null}
             </legend>
-            <div className="hud-filter-bar__options" role="group" aria-label={`${group.label} filters`}>
+            <div
+              className="hud-filter-bar__options"
+              role="group"
+              aria-label={`${group.label} filters`}
+              data-mobile-scroll="true"
+              data-swipe-ignore="true"
+            >
               {group.options.map((option) => (
                 <button
                   key={option.id}

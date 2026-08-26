@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
 import { buildScaledModel } from '../balance/modelBuild'
+import { DATA_DOMAINS } from '../balance/data'
+import { instantRecipe } from '../balance/modelProduct'
 import { playerTrainingJobs, startTraining } from './training'
 import type { SimState } from '../types'
 
@@ -73,6 +75,64 @@ describe('distill teacher synthetic fill', () => {
     expect(job!.dataPlan.syntheticProvenance?.length).toBe(provenance.length)
   })
 
+  it('uses the selected teacher recipe for distill quality, billed cash, and training PF', () => {
+    const configured = (seed: number) => {
+      const setup = withTeacher(richState(seed))
+      const model = setup.state.player.models.find(
+        (candidate) => candidate.id === setup.teacherId,
+      )!
+      model.productProfile = {
+        ...model.productProfile!,
+        effortRecipes: [
+          instantRecipe(),
+          {
+            id: 'careful', name: 'Careful', kind: 'trained',
+            thinkingTokenMult: 6, trainPfDays: 100, trainCash: 2_000_000,
+            trained: true, quality: 0.88, served: true, capabilityBias: 0.7,
+          },
+        ],
+        defaultEffortId: 'instant',
+      }
+      return setup
+    }
+    const run = (effortId: string) => {
+      const { state, teacherId } = configured(7_311)
+      const effortIds = Object.fromEntries(
+        DATA_DOMAINS.map((domain) => [domain, effortId]),
+      )
+      return playerTrainingJobs(startTraining(state, {
+        name: `Student-${effortId}`,
+        family: 'dense',
+        paramsB: 2,
+        mode: 'distill',
+        teacherId,
+        distillTeacherShare: 0.05,
+        dataPlan: {
+          ...oversubscribedPlan(2),
+          syntheticTeacherEffortIds: effortIds,
+        },
+      }))[0]!
+    }
+    const instant = run('instant')
+    const careful = run('careful')
+    const provenance = careful.syntheticProvenance ?? []
+    const generationPf = provenance.reduce(
+      (sum, record) => sum + (record.generationComputePfDays ?? 0),
+      0,
+    )
+
+    expect(careful.dataPlan.syntheticTeacherEffortIds).toMatchObject({
+      code: 'careful', math: 'careful', chat: 'careful',
+    })
+    expect(provenance.length).toBeGreaterThan(0)
+    expect(provenance.every((record) => record.teacherEffortId === 'careful')).toBe(true)
+    expect(provenance.every((record) => (record.billedTokenMultiplier ?? 0) > 1)).toBe(true)
+    expect(provenance.every((record) => (record.teacherComputeIntensityMultiplier ?? 0) > 1)).toBe(true)
+    expect(generationPf).toBeGreaterThan(0)
+    expect(careful.targetPfDays).toBeGreaterThan(instant.targetPfDays)
+    expect(careful.cashSunk).toBeGreaterThan(instant.cashSunk)
+  })
+
   it('does not fill past the corpus in distill without a multiplier', () => {
     const { state, teacherId } = withTeacher(richState(732))
     const next = startTraining(state, {
@@ -124,9 +184,8 @@ describe('distill teacher synthetic fill', () => {
 
     const job = playerTrainingJobs(next)[0]
     expect(job).toBeTruthy()
-    // Auto-fill at train start reserves no generation compute, so expansion
-    // past ~2× real is compute-gated — still past the owned corpus, just not
-    // the full oversubscribed recipe volume.
+    // Fresh auto-fill now reserves real generation compute and remains bounded
+    // by the selected teacher's useful synthetic headroom.
     expect(job!.syntheticUnits).toBeGreaterThan(400)
     expect(job!.syntheticProvenance?.length).toBeGreaterThan(0)
   })

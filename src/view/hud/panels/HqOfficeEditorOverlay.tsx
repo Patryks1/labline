@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
@@ -54,8 +54,19 @@ import { useGameStore } from "../../../store/gameStore";
 import { money, num } from "../format";
 import { BlockerList, MeterBar, StatRow } from "../ui/kit";
 import { HudButton, HudInput, MetricTile, StatusChip } from "../ui/HudPrimitives";
+import { isOfficeTapGesture } from "../menu/mobileOverlayGestures";
 
 type OfficeMode = string | null;
+type MobileFloorView = "floor" | "controls";
+
+const EDITOR_FOCUSABLE = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
 
 const cloneLayout = (layout: HqOfficeLayout): HqOfficeLayout => ({
   ...layout,
@@ -94,8 +105,10 @@ export function HqOfficeEditorOverlay() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mode, setMode] = useState<OfficeMode>(null);
   const [workspace, setWorkspace] = useState<"floor" | "team">("floor");
+  const [mobileFloorView, setMobileFloorView] = useState<MobileFloorView>("floor");
   const [message, setMessage] = useState("Choose an object, then click an open cell on the floor.");
   const idCounter = useRef(1);
+  const editorRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!facilityId) return;
@@ -104,12 +117,36 @@ export function HqOfficeEditorOverlay() {
     setSelectedId(null);
     setMode(null);
     setWorkspace("floor");
+    setMobileFloorView("floor");
     setMessage("Choose an object, then click an open cell on the floor.");
     idCounter.current = Math.max(
       0,
       ...initial.objects.map((object) => Number(object.id.match(/:(\d+)$/)?.[1] ?? 0)),
     ) + 1;
   }, [facilityId, persisted, kind]);
+
+  useEffect(() => {
+    if (!facilityId) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const frame = window.requestAnimationFrame(() => {
+      const closeButton = editorRef.current?.querySelector<HTMLElement>(
+        '[aria-label="Close HQ editor and return to map"]',
+      );
+      (closeButton ?? editorRef.current)?.focus();
+    });
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      close();
+    };
+    window.addEventListener("keydown", closeOnEscape, true);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("keydown", closeOnEscape, true);
+      previous?.focus();
+    };
+  }, [close, facilityId]);
 
   const analysis = useMemo(
     () => (draft ? analyzeHqOfficeLayout(draft) : null),
@@ -209,32 +246,65 @@ export function HqOfficeEditorOverlay() {
     setMessage(`Fit-out saved${result.netCost ? ` · ${money(result.netCost)}` : ""}. Productivity is live now.`);
   };
 
+  const trapEditorFocus = (event: ReactKeyboardEvent<HTMLElement>) => {
+    event.stopPropagation();
+    if (event.key !== "Tab") return;
+    const focusable = [...(editorRef.current?.querySelectorAll<HTMLElement>(EDITOR_FOCUSABLE) ?? [])]
+      .filter((element) => element.offsetParent !== null);
+    if (!focusable.length) {
+      event.preventDefault();
+      editorRef.current?.focus();
+      return;
+    }
+    const first = focusable[0]!;
+    const last = focusable[focusable.length - 1]!;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   if (!facilityId || !draft || !analysis || !quote) return null;
   return (
-    <section className="pointer-events-auto fixed inset-0 z-[70] flex min-h-0 flex-col overflow-hidden bg-void/95 text-bone backdrop-blur-sm">
-      <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-line bg-panel/95 px-4 py-3 sm:px-6">
+    <section
+      ref={editorRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="hq-office-editor-title"
+      tabIndex={-1}
+      onKeyDown={trapEditorFocus}
+      className="pointer-events-auto fixed inset-0 z-[70] flex min-h-0 flex-col overflow-hidden bg-void/95 text-bone outline-none backdrop-blur-sm"
+    >
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line bg-panel/95 pb-2 pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] pt-[max(0.5rem,env(safe-area-inset-top))] sm:gap-3 sm:px-6 sm:py-3 [@media(max-height:540px)]:flex-nowrap [@media(max-height:540px)]:py-1.5">
         <div className="min-w-0">
           <p className="font-mono text-[0.625rem] uppercase tracking-[0.2em] text-mint">HQ fit-out</p>
-          <h1 className="truncate text-lg font-semibold tracking-[-0.03em] sm:text-xl">Make the office earn its footprint</h1>
-          <p className="mt-0.5 text-[0.75rem] text-muted">Place desks, plants, copy stations, and collaboration space inside the headquarters.</p>
+          <h1 id="hq-office-editor-title" className="truncate text-base font-semibold tracking-[-0.03em] sm:text-xl">Make the office earn its footprint</h1>
+          <p className="mt-0.5 text-[0.75rem] text-muted max-sm:hidden [@media(max-height:540px)]:hidden">Place desks, plants, copy stations, and collaboration space inside the headquarters.</p>
         </div>
-        <div className="flex flex-wrap items-center justify-end gap-1.5">
+        <div className="flex w-full shrink-0 items-center justify-end gap-1.5 min-[420px]:w-auto">
           <div className="flex rounded-md border border-line bg-void/45 p-1" role="group" aria-label="Office workspace">
-            <HudButton type="button" variant="ghost" aria-pressed={workspace === "floor"} className={`min-h-9 px-2.5 text-[0.6875rem] ${workspace === "floor" ? "bg-mint/10 text-mint" : "border-transparent"}`} onClick={() => setWorkspace("floor")}>
-              <Desk size="0.95rem" /> Floor plan
+            <HudButton type="button" variant="ghost" aria-pressed={workspace === "floor"} className={`min-h-11 px-2.5 text-[0.6875rem] ${workspace === "floor" ? "bg-mint/10 text-mint" : "border-transparent"}`} onClick={() => setWorkspace("floor")}>
+              <Desk size="0.95rem" /> <span className="max-sm:hidden">Floor plan</span><span className="sm:hidden">Floor</span>
             </HudButton>
-            <HudButton type="button" variant="ghost" aria-pressed={workspace === "team"} className={`min-h-9 px-2.5 text-[0.6875rem] ${workspace === "team" ? "bg-mint/10 text-mint" : "border-transparent"}`} onClick={() => setWorkspace("team")}>
-              <UsersThree size="0.95rem" /> Team & hiring
+            <HudButton type="button" variant="ghost" aria-pressed={workspace === "team"} className={`min-h-11 px-2.5 text-[0.6875rem] ${workspace === "team" ? "bg-mint/10 text-mint" : "border-transparent"}`} onClick={() => setWorkspace("team")}>
+              <UsersThree size="0.95rem" /> <span className="max-sm:hidden">Team & hiring</span><span className="sm:hidden">Team</span>
             </HudButton>
           </div>
-          <HudButton type="button" variant="ghost" className="shrink-0 gap-1.5 px-3" onClick={close}>
-            <ArrowLeft size="1rem" weight="bold" /> Back to map
+          <HudButton type="button" variant="ghost" aria-label="Close HQ editor and return to map" className="shrink-0 gap-1.5 px-3" onClick={close}>
+            <ArrowLeft size="1rem" weight="bold" /> <span className="max-sm:hidden">Back to map</span><span className="sm:hidden">Map</span>
           </HudButton>
         </div>
       </header>
 
-      {workspace === "floor" ? <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden lg:grid-cols-[minmax(0,1fr)_22rem]">
-        <div className="relative min-h-[20rem] overflow-hidden border-b border-line bg-[#09151a] lg:border-b-0 lg:border-r">
+      {workspace === "floor" ? <div className="flex min-h-0 flex-1 flex-col overflow-hidden lg:grid lg:grid-cols-[minmax(0,1fr)_22rem]" data-mobile-workspace={mobileFloorView}>
+        <nav className="grid shrink-0 grid-cols-2 border-b border-line bg-panel/95 p-1 lg:hidden" aria-label="Floor editor view">
+          <HudButton type="button" variant="ghost" aria-pressed={mobileFloorView === "floor"} onClick={() => setMobileFloorView("floor")} className={`min-h-11 ${mobileFloorView === "floor" ? "bg-mint/10 text-mint" : "text-muted"}`}>Floor</HudButton>
+          <HudButton type="button" variant="ghost" aria-pressed={mobileFloorView === "controls"} onClick={() => setMobileFloorView("controls")} className={`min-h-11 ${mobileFloorView === "controls" ? "bg-mint/10 text-mint" : "text-muted"}`}>Objects & save</HudButton>
+        </nav>
+        <div className={`${mobileFloorView === "floor" ? "block" : "hidden"} relative min-h-0 flex-1 overflow-hidden border-b border-line bg-[#09151a] lg:block lg:border-b-0 lg:border-r`}>
           <HqOfficeScene
             layout={draft}
             selectedId={selectedId}
@@ -242,12 +312,12 @@ export function HqOfficeEditorOverlay() {
             onSelect={setSelectedId}
             onPlace={place}
           />
-          <div className="pointer-events-none absolute left-3 top-3 rounded border border-line/80 bg-panel/90 px-2.5 py-2 text-[0.6875rem] text-muted">
-            <span className="font-mono text-mint">{draft.width}×{draft.depth}</span> grid · click to place · drag to orbit
+          <div className="pointer-events-none absolute left-[max(0.5rem,env(safe-area-inset-left))] top-2 rounded border border-line/80 bg-panel/90 px-2.5 py-2 text-[0.6875rem] text-muted">
+            <span className="font-mono text-mint">{draft.width}×{draft.depth}</span> grid · <span className="sm:hidden">tap to place · drag to orbit</span><span className="hidden sm:inline">click to place · drag to orbit</span>
           </div>
         </div>
 
-        <aside className="min-h-0 overflow-y-auto bg-panel/90 p-3 sm:p-4">
+        <aside className={`${mobileFloorView === "controls" ? "block" : "hidden"} panel-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain bg-panel/90 py-3 pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] touch-pan-y sm:py-4 sm:pl-[max(1rem,env(safe-area-inset-left))] sm:pr-[max(1rem,env(safe-area-inset-right))] lg:block`}>
           <div className="grid grid-cols-2 gap-2">
             <MetricTile label="Objects" value={num(analysis.objectCount, 0)} />
             <MetricTile label="New seats" value={`+${num(analysis.capacityBonus, 0)}`} tone="positive" />
@@ -260,7 +330,7 @@ export function HqOfficeEditorOverlay() {
               <MagicWand size="1rem" weight="duotone" className="mt-0.5 shrink-0 text-mint" />
               <div>
                 <h2 className="text-[0.8125rem] font-semibold text-bone">Automatic layouts</h2>
-                <p className="mt-0.5 text-[0.6875rem] leading-5 text-muted">Draft a complete floor using the same objects and placement rules as manual editing.</p>
+                <p className="mt-0.5 text-[0.6875rem] leading-5 text-muted max-sm:hidden [@media(max-height:540px)]:hidden">Draft a complete floor using the same objects and placement rules as manual editing.</p>
               </div>
             </div>
             <div className="grid gap-1.5">
@@ -273,7 +343,7 @@ export function HqOfficeEditorOverlay() {
                   className="min-h-11 w-full justify-start border border-line/70 bg-void/30 px-2.5 py-2 text-left"
                 >
                   <span className="block text-[0.75rem] font-semibold text-bone">{preset.label}</span>
-                  <span className="mt-0.5 block text-[0.625rem] font-normal leading-4 text-muted">{preset.description}</span>
+                  <span className="mt-0.5 block text-[0.625rem] font-normal leading-4 text-muted max-sm:hidden [@media(max-height:540px)]:hidden">{preset.description}</span>
                 </HudButton>
               ))}
             </div>
@@ -323,17 +393,19 @@ export function HqOfficeEditorOverlay() {
                   <HudButton type="button" variant="danger" className="min-h-11 text-[0.6875rem]" onClick={removeSelected}><Trash size="0.9rem" /> Remove</HudButton>
                 </div>
               </>
-            ) : <p className="text-[0.75rem] text-muted">Click a model on the floor to inspect or remove it.</p>}
+            ) : <p className="text-[0.75rem] text-muted"><span className="sm:hidden">Tap an object on the floor to edit it.</span><span className="hidden sm:inline">Click a model on the floor to inspect or remove it.</span></p>}
           </div>
 
           {!analysis.valid ? <div className="mt-3"><BlockerList items={analysis.hardErrors.map((text) => ({ text, tone: "danger" as const }))} /></div> : null}
           {analysis.warnings.length > 0 ? <p className="mt-2 text-[0.6875rem] text-amber">{analysis.warnings[0]}</p> : null}
-          <p className="mt-3 rounded-md border border-line/60 bg-panel-2/50 px-2.5 py-2 text-[0.6875rem] leading-relaxed text-muted">Fit-out purchases are charged once on save. Furniture adds a small daily facilities cost and its productivity/capacity effects feed the simulation immediately.</p>
+          <p className="mt-3 rounded-md border border-line/60 bg-panel-2/50 px-2.5 py-2 text-[0.6875rem] leading-relaxed text-muted max-sm:hidden [@media(max-height:540px)]:hidden">Fit-out purchases are charged once on save. Furniture adds a small daily facilities cost and its productivity/capacity effects feed the simulation immediately.</p>
           <MeterBar label="Cash after fit-out" value={Math.max(0, Math.min(1, (state.player.cash - quote.netCost) / Math.max(1, state.player.cash)))} detail={money(Math.max(0, state.player.cash - quote.netCost))} tone={quote.netCost > state.player.cash ? "danger" : "positive"} />
-          <HudButton type="button" variant="primary" disabled={!dirty || !analysis.valid || quote.netCost > state.player.cash} className="mt-3 min-h-11 w-full" onClick={apply}>
-            {dirty ? `Save fit-out · ${quote.netCost ? money(quote.netCost) : "no charge"}` : "Fit-out saved"}
-          </HudButton>
-          <p className="mt-2 min-h-8 text-[0.6875rem] text-muted" aria-live="polite">{message}</p>
+          <div className="sticky bottom-0 z-10 -mx-3 mt-3 border-t border-line/70 bg-panel/95 py-2 pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] pb-[max(0.25rem,env(safe-area-inset-bottom))] shadow-[0_-12px_30px_rgba(7,17,23,.82)] backdrop-blur sm:-mx-4 sm:pl-[max(1rem,env(safe-area-inset-left))] sm:pr-[max(1rem,env(safe-area-inset-right))] lg:static lg:mx-0 lg:border-0 lg:bg-transparent lg:p-0 lg:shadow-none [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!sticky [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!-mx-4 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!border-t [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!bg-panel/95 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!pl-[max(1rem,env(safe-area-inset-left))] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!pr-[max(1rem,env(safe-area-inset-right))] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!pb-[max(0.25rem,env(safe-area-inset-bottom))] [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!pt-2 [@media(max-width:1180px)_and_(orientation:landscape)_and_(max-height:600px)]:!shadow-[0_-12px_30px_rgba(7,17,23,.82)]">
+            <HudButton type="button" variant="primary" disabled={!dirty || !analysis.valid || quote.netCost > state.player.cash} className="min-h-11 w-full" onClick={apply}>
+              {dirty ? `Save fit-out · ${quote.netCost ? money(quote.netCost) : "no charge"}` : "Fit-out saved"}
+            </HudButton>
+            <p className="mt-1.5 min-h-8 text-[0.6875rem] text-muted lg:mt-2" aria-live="polite">{message}</p>
+          </div>
         </aside>
       </div> : <OfficeTeamPanel facilityId={facilityId} />}
     </section>
@@ -646,7 +718,27 @@ function HqOfficeScene({
       raycaster.setFromCamera(pointer, camera);
       return raycaster.intersectObject(floor)[0]?.point;
     };
+    let press: { pointerId: number; x: number; y: number; moved: boolean } | null = null;
     const down = (event: PointerEvent) => {
+      if (!event.isPrimary) return;
+      press = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
+    };
+    const move = (event: PointerEvent) => {
+      if (!press || press.pointerId !== event.pointerId || press.moved) return;
+      press.moved = !isOfficeTapGesture(press, { x: event.clientX, y: event.clientY });
+    };
+    const cancelPress = (event: PointerEvent) => {
+      if (press?.pointerId === event.pointerId) press = null;
+    };
+    const up = (event: PointerEvent) => {
+      const start = press;
+      press = null;
+      if (
+        !start ||
+        start.pointerId !== event.pointerId ||
+        start.moved ||
+        !isOfficeTapGesture(start, { x: event.clientX, y: event.clientY })
+      ) return;
       const rect = canvas.getBoundingClientRect();
       pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
       raycaster.setFromCamera(pointer, camera);
@@ -665,6 +757,9 @@ function HqOfficeScene({
     renderRef.current = render;
     controls.addEventListener("change", render);
     canvas.addEventListener("pointerdown", down);
+    canvas.addEventListener("pointermove", move);
+    canvas.addEventListener("pointerup", up);
+    canvas.addEventListener("pointercancel", cancelPress);
     const resize = () => {
       const width = Math.max(1, canvas.clientWidth);
       const height = Math.max(1, canvas.clientHeight);
@@ -686,6 +781,9 @@ function HqOfficeScene({
       controls.removeEventListener("change", render);
       controls.dispose();
       canvas.removeEventListener("pointerdown", down);
+      canvas.removeEventListener("pointermove", move);
+      canvas.removeEventListener("pointerup", up);
+      canvas.removeEventListener("pointercancel", cancelPress);
       scene.traverse((object) => {
         if (object instanceof THREE.Mesh || object instanceof THREE.Line) {
           object.geometry.dispose();
@@ -698,5 +796,5 @@ function HqOfficeScene({
       renderRef.current = () => undefined;
     };
   }, [layout, mode, onPlace, onSelect, selectedId]);
-  return <canvas ref={canvasRef} className="h-full min-h-[20rem] w-full touch-none" aria-label="Interactive HQ office floor" />;
+  return <canvas ref={canvasRef} className="h-full min-h-0 w-full touch-none" aria-label="Interactive HQ office floor" />;
 }

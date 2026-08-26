@@ -94,32 +94,42 @@ describe("PlansPanel mobile presentation", () => {
         entitlements: [
           {
             modelId: "mobile-plan-model",
-            effortId: "instant",
-            name: "Pocket Aster",
+            effortId: "deep",
+            name: "Pocket Aster-Deep",
             kind: "language",
             trafficShare: 1,
-            blendedApiPricePerMTok: 0.8,
+            blendedApiPricePerMTok: 4.2,
+            effectiveApiSpendPerBaseMTok: 15.29,
             includedMTokPerMonth: 24,
-            tokensPerInteraction: 2_000,
-            tokenMult: 1,
-            interactionsPerDay: 400,
+            tokensPerInteraction: 5_460,
+            tokenMult: 9.8,
+            billedTokenMult: 3.64,
+            computeTokenMult: 8.3,
+            computeIntensityMult: 2.28,
+            interactionsPerDay: 147,
             expectedUtilization: 0.72,
-            apiEquivalentValuePerMonth: 19.2,
-            rawServingCostPerMonth: 3.4,
+            apiEquivalentValuePerMonth: 100.8,
+            rawServingCostPerMonth: 7.75,
           },
         ],
       }),
     );
 
     expect(markup).toContain("mobile-entitlements-");
-    expect(markup).toContain("Pocket Aster");
-    expect(markup).toContain("sm:hidden");
-    expect(markup).toContain("hidden overflow-x-auto sm:block");
+    expect(markup).toContain("desktop-entitlements-mobile-plan");
+    expect(markup).toContain("Pocket Aster-Deep");
+    expect(markup).toContain("9.8× generated");
+    expect(markup).toContain("3.6× billed");
+    expect(markup).toContain("8.3× compute");
+    expect(markup).toContain("List $4.20/MTok");
+    expect(markup).toContain("API value $100.80/mo");
+    expect(markup).toContain("lg:hidden");
+    expect(markup).toContain("hidden overflow-x-auto lg:block");
   });
 });
 
 describe("PlansPanel navigation and capacity summary", () => {
-  it("keeps usage information outside the section tabs", () => {
+  it("keeps the serving health summary visible and collapses dense routing diagnostics", () => {
     const ledger: ComputeLedger = {
       day: 42,
       labId: "player",
@@ -176,9 +186,11 @@ describe("PlansPanel navigation and capacity summary", () => {
     );
 
     expect(markup).toContain("Capacity at a glance");
-    expect(markup).not.toContain("Capacity routing details");
-    expect(markup).not.toContain("<details");
-    expect(markup).not.toContain("<summary");
+    expect(markup).toContain('data-testid="plans-capacity-details"');
+    expect(markup).toContain("Routing &amp; compute controls");
+    expect(markup).toContain("<details");
+    expect(markup).toContain("<summary");
+    expect(markup).not.toContain("<details open");
     expect(markup).toContain("API channel");
     expect(markup).toContain("Serving compute allocation");
     expect(markup).toContain("plans-compute-allocation__lane-short");

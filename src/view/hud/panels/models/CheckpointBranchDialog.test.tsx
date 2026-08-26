@@ -57,6 +57,9 @@ describe("CheckpointBranchDialog", () => {
     expect(markup).toContain("Start branch");
     expect(markup).toContain('data-checkpoint-branch-workflow="true"');
     expect(markup).toContain('data-focus-studio="true"');
+    expect(markup).toContain('data-mobile-default-collapsed="true"');
+    expect(markup).not.toMatch(/<details[^>]*\sopen(?:=|\s|>)/);
+    expect(markup).toContain("Start an independent child from this snapshot.");
     expect(markup).toContain("Specialize mix");
     expect(markup).not.toContain(">×<");
     expect(markup).not.toContain("data-custom-mix-editor");

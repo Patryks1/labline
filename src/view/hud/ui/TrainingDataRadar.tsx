@@ -15,6 +15,11 @@ import {
   MAX_POST_TRAIN_SHARE,
   MIN_POST_TRAIN_SHARE,
 } from "../../../sim/balance/modelProduct";
+import {
+  parseSyntheticTeacherSelectValue,
+  syntheticTeacherSelectOptions,
+  syntheticTeacherSelectValue,
+} from "./trainingSyntheticTeacherOptions";
 import { HudButton, HudInput, HudRange, HudSelect } from "./HudPrimitives";
 import {
   RECIPE_VERIFY_META,
@@ -70,10 +75,13 @@ function labelAnchor(index: number) {
   const uy = Math.sin(angle);
   let tx = "-50%";
   let ty = "-50%";
-  if (ux > 0.42) tx = "-6%";
-  else if (ux < -0.42) tx = "-94%";
-  if (uy > 0.5) ty = "-12%";
-  else if (uy < -0.5) ty = "-88%";
+  // Keep edge labels inside the chart instead of translating them past it.
+  // The previous anchors were mirrored, which clipped the left/top spokes on
+  // phone-sized panels.
+  if (ux > 0.42) tx = "-94%";
+  else if (ux < -0.42) tx = "-6%";
+  if (uy > 0.5) ty = "-88%";
+  else if (uy < -0.5) ty = "-12%";
   return {
     left: `${50 + ux * 47}%`,
     top: `${50 + uy * 47}%`,
@@ -97,6 +105,7 @@ function VolumeRow({
   onCommit,
   onCancel,
   onNudge,
+  importance = "primary",
 }: {
   label: string;
   color: string;
@@ -111,6 +120,7 @@ function VolumeRow({
   onCommit: () => void;
   onCancel: () => void;
   onNudge?: (direction: -1 | 1) => void;
+  importance?: "primary" | "secondary";
 }) {
   const swatch = (
     <i
@@ -120,8 +130,11 @@ function VolumeRow({
   );
   if (editing) {
     return (
-      <label className="training-data-radar-pop__row">
-        <span className="training-data-radar-pop__edit">
+      <label
+        className="training-data-radar-pop__row min-w-0 @max-[33.99rem]:!min-h-11"
+        data-mobile-priority={importance}
+      >
+        <span className="training-data-radar-pop__edit min-w-0 @max-[33.99rem]:!min-h-11">
           {swatch}
           <span>{label}</span>
           <HudInput
@@ -148,8 +161,12 @@ function VolumeRow({
   }
   if (!editable) {
     return (
-      <div className="training-data-radar-pop__row" data-readonly="true">
-        <span className="training-data-radar-pop__edit">
+      <div
+        className="training-data-radar-pop__row min-w-0 @max-[33.99rem]:!min-h-11"
+        data-readonly="true"
+        data-mobile-priority={importance}
+      >
+        <span className="training-data-radar-pop__edit min-w-0 @max-[33.99rem]:!min-h-11">
           {swatch}
           <span>{label}</span>
           <span className="font-mono text-[0.75rem] tabular-nums">{valueLabel}</span>
@@ -158,10 +175,13 @@ function VolumeRow({
     );
   }
   return (
-    <div className="training-data-radar-pop__row training-data-radar-pop__row--edit">
+    <div
+      className="training-data-radar-pop__row training-data-radar-pop__row--edit min-w-0 @max-[33.99rem]:!min-h-11"
+      data-mobile-priority={importance}
+    >
       <button
         type="button"
-        className="training-data-radar-pop__edit"
+        className="training-data-radar-pop__edit min-w-0 touch-manipulation @max-[33.99rem]:!min-h-11"
         aria-label={ariaEdit}
         onClick={onStart}
       >
@@ -170,7 +190,10 @@ function VolumeRow({
         <span className="font-mono text-[0.75rem] tabular-nums">{valueLabel}</span>
       </button>
       {onNudge ? (
-        <span className="training-data-radar-pop__nudge">
+        <span
+          className="training-data-radar-pop__nudge [&>button]:touch-manipulation @max-[33.99rem]:[&>button]:!h-11 @max-[33.99rem]:[&>button]:!w-11"
+          data-touch-target="volume-nudge"
+        >
           <button
             type="button"
             aria-label={`${ariaEdit} down`}
@@ -216,6 +239,7 @@ export function TrainingDataRadar({
   reservedMTokByDomain,
   teachers,
   syntheticTeacherIds,
+  syntheticTeacherEffortIds,
   includeSynthHQ,
   includeSynthLQ,
   onOwnedChange,
@@ -240,6 +264,7 @@ export function TrainingDataRadar({
   reservedMTokByDomain?: Partial<Record<DataDomain, number>>;
   teachers: Model[];
   syntheticTeacherIds: Partial<Record<DataDomain, string>>;
+  syntheticTeacherEffortIds: Partial<Record<DataDomain, string>>;
   includeSynthHQ: boolean;
   includeSynthLQ: boolean;
   onOwnedChange: (recipe: {
@@ -248,7 +273,11 @@ export function TrainingDataRadar({
     realMTok: number;
     synthMTok: number;
   }) => void;
-  onTeacherChange: (domain: DataDomain, teacherId: string | undefined) => void;
+  onTeacherChange: (
+    domain: DataDomain,
+    teacherId: string | undefined,
+    effortId: string | undefined,
+  ) => void;
   onOpenPlanLibrary?: () => void;
   trainShare?: number;
   onTrainShareChange?: (share: number) => void;
@@ -262,6 +291,7 @@ export function TrainingDataRadar({
   } | null>(null);
   const dragCeilingRef = useRef<number | null>(null);
   const dragZoomRef = useRef<number | null>(null);
+  const domainSwipeRef = useRef<{ x: number; y: number } | null>(null);
   const [selected, setSelected] = useState<DataDomain>("code");
   const [zoom, setZoom] = useState(1);
   const [dragging, setDragging] = useState<{
@@ -270,6 +300,31 @@ export function TrainingDataRadar({
   } | null>(null);
   const [editing, setEditing] = useState<VolumeKey | null>(null);
   const [draft, setDraft] = useState("");
+
+  const selectAdjacentDomain = (direction: -1 | 1) => {
+    const current = DATA_DOMAINS.indexOf(selected);
+    const next =
+      (current + direction + DATA_DOMAINS.length) % DATA_DOMAINS.length;
+    setSelected(DATA_DOMAINS[next] ?? selected);
+  };
+  const syntheticTeacherOptions = useMemo(
+    () => syntheticTeacherSelectOptions(teachers, selected),
+    [teachers, selected],
+  );
+  const selectedTeacherId = syntheticTeacherIds[selected];
+  const selectedTeacherOption = selectedTeacherId
+    ? syntheticTeacherOptions.find(
+        (option) =>
+          option.teacherId === selectedTeacherId &&
+          option.effortId ===
+            (syntheticTeacherEffortIds[selected] ?? "instant"),
+      ) ??
+      syntheticTeacherOptions.find(
+        (option) =>
+          option.teacherId === selectedTeacherId &&
+          option.effortId === "instant",
+      )
+    : undefined;
 
   const propsBase = useMemo(
     () => baseVolumes ?? allocationsFromMix(baseWeights, baseMTok),
@@ -344,6 +399,7 @@ export function TrainingDataRadar({
     data.stocks,
     includeSynthHQ,
     includeSynthLQ,
+    postAlloc,
     reservedMTokByDomain,
     syntheticHeadroomMTok,
     syntheticMultiplier,
@@ -671,6 +727,7 @@ export function TrainingDataRadar({
     color: string;
     value: number;
     editable: boolean;
+    importance: "primary" | "secondary";
   }[] = [
     {
       key: "all",
@@ -678,6 +735,7 @@ export function TrainingDataRadar({
       color: "#e8f2f2",
       value: selectedSpoke.mid,
       editable: true,
+      importance: "primary",
     },
     {
       key: "base",
@@ -685,6 +743,7 @@ export function TrainingDataRadar({
       color: RECIPE_ZONE_META.base.stroke,
       value: selectedSpoke.base,
       editable: !freezeBaseLayer,
+      importance: "primary",
     },
     {
       key: "post",
@@ -692,6 +751,7 @@ export function TrainingDataRadar({
       color: RECIPE_ZONE_META.post.stroke,
       value: selectedSpoke.post,
       editable: true,
+      importance: "primary",
     },
     {
       key: "verify",
@@ -699,6 +759,7 @@ export function TrainingDataRadar({
       color: RECIPE_VERIFY_META.stroke,
       value: selectedVerify,
       editable: false,
+      importance: "secondary",
     },
     ...(syntheticUnlocked
       ? [
@@ -708,6 +769,7 @@ export function TrainingDataRadar({
             color: RECIPE_ZONE_META.synth.stroke,
             value: selectedSpoke.synth,
             editable: true,
+            importance: "primary" as const,
           },
         ]
       : []),
@@ -715,13 +777,14 @@ export function TrainingDataRadar({
 
   return (
     <section
-      className="rounded-xl border border-line/80 bg-void/35"
+      className="min-w-0 overflow-hidden rounded-xl border border-line/80 bg-void/35"
       aria-label="Training data radar"
       data-freeze-base={freezeBaseLayer ? "true" : "false"}
+      data-mobile-responsive="true"
     >
-      <div className="flex flex-wrap items-end justify-between gap-2 border-b border-line/70 px-3 py-2">
+      <div className="flex min-w-0 flex-wrap items-end justify-between gap-2 border-b border-line/70 px-2 py-2 sm:px-3">
         {onTrainShareChange && trainShare != null ? (
-          <label className="min-w-[12rem] flex-1 text-[0.6875rem] text-muted">
+          <label className="min-w-0 basis-full flex-1 text-[0.6875rem] text-muted sm:min-w-[12rem] sm:basis-auto">
             <span className="flex justify-between gap-2 font-mono tabular-nums">
               <span>Verify {(verifyShare * 100).toFixed(0)}%</span>
               <span className="text-bone">
@@ -745,11 +808,16 @@ export function TrainingDataRadar({
         ) : (
           <span />
         )}
-        <div className="flex flex-wrap gap-1">
+        <div
+          className="-mx-1 flex w-[calc(100%+0.5rem)] snap-x snap-mandatory gap-1 overflow-x-auto overscroll-x-contain px-1 pb-0.5 touch-auto [scrollbar-width:none] sm:mx-0 sm:w-auto sm:flex-wrap sm:overflow-visible sm:px-0 sm:pb-0"
+          role="toolbar"
+          aria-label="Radar actions"
+          data-mobile-swipe="toolbar"
+        >
           <HudButton
             type="button"
             variant="ghost"
-            className="!min-h-9 !px-2.5 !text-[0.6875rem]"
+            className="shrink-0 snap-start touch-manipulation !min-h-11 !px-3 !text-[0.6875rem] sm:!min-h-9 sm:!px-2.5"
             aria-label="Zoom out"
             onClick={() =>
               setZoom((current) => clampRecipeZoom(current / 1.35))
@@ -760,7 +828,7 @@ export function TrainingDataRadar({
           <HudButton
             type="button"
             variant="ghost"
-            className="!min-h-9 !px-2.5 !text-[0.6875rem]"
+            className="shrink-0 snap-start touch-manipulation !min-h-11 !px-3 !text-[0.6875rem] sm:!min-h-9 sm:!px-2.5"
             aria-label="Fit recipe"
             onClick={() => {
               setAxisCeiling(stockCeiling);
@@ -772,7 +840,7 @@ export function TrainingDataRadar({
           <HudButton
             type="button"
             variant="ghost"
-            className="!min-h-9 !px-2.5 !text-[0.6875rem]"
+            className="shrink-0 snap-start touch-manipulation !min-h-11 !px-3 !text-[0.6875rem] sm:!min-h-9 sm:!px-2.5"
             aria-label="Zoom in"
             onClick={() =>
               setZoom((current) => clampRecipeZoom(current * 1.35))
@@ -783,7 +851,7 @@ export function TrainingDataRadar({
           <HudButton
             type="button"
             variant="ghost"
-            className="!min-h-9 !px-2.5 !text-[0.6875rem]"
+            className="shrink-0 snap-start touch-manipulation !min-h-11 !px-3 !text-[0.6875rem] sm:!min-h-9 sm:!px-2.5"
             aria-label="Focus selected domain"
             title="Zoom this domain's tokens. Other domains keep their amounts."
             onClick={() =>
@@ -795,7 +863,7 @@ export function TrainingDataRadar({
           <HudButton
             type="button"
             variant="ghost"
-            className="!min-h-9 !px-2.5 !text-[0.6875rem]"
+            className="shrink-0 snap-start touch-manipulation !min-h-11 !px-3 !text-[0.6875rem] sm:!min-h-9 sm:!px-2.5"
             onClick={useAllData}
             title={
               freezeBaseLayer
@@ -809,7 +877,7 @@ export function TrainingDataRadar({
             <HudButton
               type="button"
               variant="ghost"
-              className="!min-h-9 !px-2.5 !text-[0.6875rem]"
+              className="shrink-0 snap-start touch-manipulation !min-h-11 !px-3 !text-[0.6875rem] sm:!min-h-9 sm:!px-2.5"
               onClick={onOpenPlanLibrary}
             >
               Load plan
@@ -818,14 +886,25 @@ export function TrainingDataRadar({
         </div>
       </div>
 
-      <div className="training-data-radar-layout grid min-w-0 gap-3 p-3">
-        <div className="min-w-0">
-          <div className="training-data-radar-chart">
+      <div className="training-data-radar-layout grid min-w-0 gap-2 p-2 sm:gap-3 sm:p-3">
+        <div
+          className="training-data-radar-mobile-body grid min-w-0 gap-2 @min-[34rem]:grid-cols-[minmax(15rem,1.15fr)_minmax(13rem,0.85fr)] @min-[34rem]:items-start @min-[34rem]:gap-3"
+          data-mobile-layout="portrait-stack horizontal-split"
+        >
+          <div
+            className="training-data-radar-chart max-w-full @min-[34rem]:row-span-4 [@media_(orientation:landscape)_and_(max-height:540px)]:!max-w-[min(26rem,68dvh)]"
+            style={{
+              paddingInline: "clamp(1.6rem, 9cqi, 2.6rem)",
+              paddingTop: "clamp(1.7rem, 8cqi, 2.45rem)",
+              paddingBottom: "clamp(1.65rem, 8cqi, 2.3rem)",
+            }}
+          >
           <svg
             ref={svgRef}
             viewBox={`0 0 ${SIZE} ${SIZE}`}
-            className="block h-auto w-full touch-none overflow-visible"
+            className="block h-auto w-full touch-pan-y overflow-visible"
             role="group"
+            data-touch-surface="scroll-and-drag"
             aria-label={
               freezeBaseLayer
                 ? "Further-training mix radar. Base mix is read-only."
@@ -1051,7 +1130,7 @@ export function TrainingDataRadar({
                       cy={pos.y}
                       r={handle.hit}
                       fill="transparent"
-                      className="cursor-grab outline-none active:cursor-grabbing"
+                      className="touch-none cursor-grab outline-none active:cursor-grabbing"
                       tabIndex={0}
                       role="slider"
                       aria-label={`${DATA_DOMAIN_META[domain].label} ${handle.label}`}
@@ -1135,8 +1214,10 @@ export function TrainingDataRadar({
               <button
                 key={`label-${domain}`}
                 type="button"
-                className={`training-data-radar-label${active ? " is-active" : ""}`}
+                className={`training-data-radar-label min-h-10 min-w-11 touch-manipulation${active ? " is-active" : ""}`}
                 data-radar-label={domain}
+                data-touch-target="domain"
+                aria-pressed={active}
                 style={labelAnchor(index)}
                 title={domainAvailabilityTooltip(
                   availabilityByDomain[domain],
@@ -1145,24 +1226,62 @@ export function TrainingDataRadar({
                 onClick={() => setSelected(domain)}
               >
                 <span>{DATA_DOMAIN_META[domain].label}</span>
-                <strong>{compactTok(spoke.mid)}</strong>
+                <strong className="@max-[22rem]:sr-only">
+                  {compactTok(spoke.mid)}
+                </strong>
               </button>
             );
           })}
           </div>
           <div
-            className="training-data-radar-pop"
+            className="training-data-radar-pop min-w-0 overflow-hidden touch-pan-y @min-[34rem]:col-start-2 @min-[34rem]:row-start-1 @min-[34rem]:mt-0"
             data-radar-pop="true"
+            data-mobile-swipe="domains"
             role="dialog"
             aria-label={`${selectedLabel} recipe volumes`}
+            aria-description="Swipe left or right to review another data domain"
+            onTouchStart={(event) => {
+              if (event.touches.length !== 1) {
+                domainSwipeRef.current = null;
+                return;
+              }
+              const touch = event.touches[0];
+              domainSwipeRef.current = touch
+                ? { x: touch.clientX, y: touch.clientY }
+                : null;
+            }}
+            onTouchEnd={(event) => {
+              const start = domainSwipeRef.current;
+              const end = event.changedTouches[0];
+              domainSwipeRef.current = null;
+              if (!start || !end) return;
+              const deltaX = end.clientX - start.x;
+              const deltaY = end.clientY - start.y;
+              if (
+                Math.abs(deltaX) < 48 ||
+                Math.abs(deltaX) < Math.abs(deltaY) * 1.25
+              )
+                return;
+              selectAdjacentDomain(deltaX < 0 ? 1 : -1);
+            }}
+            onTouchCancel={() => {
+              domainSwipeRef.current = null;
+            }}
           >
             <div className="training-data-radar-pop__head">
-              <strong className="text-[0.75rem] text-bone">{selectedLabel}</strong>
-              <span className="font-mono text-[0.625rem] tabular-nums text-muted">
-                {compactTok(selectedSpoke.mid)}
+              <strong className="min-w-0 truncate text-[0.75rem] text-bone" aria-live="polite">
+                {selectedLabel}
+              </strong>
+              <span className="flex shrink-0 items-center gap-2">
+                <span className="text-[0.5625rem] text-muted @min-[34rem]:hidden">
+                  Swipe ↔
+                </span>
+                <span className="font-mono text-[0.625rem] tabular-nums text-muted">
+                  {compactTok(selectedSpoke.mid)}
+                </span>
               </span>
             </div>
-            <div className="training-data-radar-pop__rows">
+            <div className="training-data-radar-pop__rows min-w-0">
             {selectedRows.map((row) => (
               <VolumeRow
                 key={row.key}
@@ -1187,6 +1306,7 @@ export function TrainingDataRadar({
                   setEditing(null);
                   setDraft("");
                 }}
+                importance={row.importance}
                 onNudge={
                   row.editable
                     ? (direction) => {
@@ -1211,8 +1331,9 @@ export function TrainingDataRadar({
             </div>
           </div>
           <div
-            className="training-data-radar-legend mt-3 text-[0.6875rem]"
+            className="training-data-radar-legend mt-1 min-w-0 text-[0.6875rem] @min-[34rem]:col-start-2 @min-[34rem]:row-start-2 @min-[34rem]:mt-0"
             data-radar-legend="true"
+            data-mobile-priority="secondary"
           >
             {(
               [
@@ -1237,7 +1358,7 @@ export function TrainingDataRadar({
                 />
                 <span>
                   <strong className="block text-bone">{meta.label}</strong>
-                  <span className="text-[0.625rem] leading-snug text-muted">
+                  <span className="text-[0.625rem] leading-snug text-muted @max-[33.99rem]:sr-only">
                     {meta.blurb}
                   </span>
                 </span>
@@ -1245,22 +1366,55 @@ export function TrainingDataRadar({
             ))}
           </div>
           {syntheticUnlocked ? (
-            <label className="mt-3 block text-[0.6875rem] text-muted">
-              Synthetic teacher
+            <label
+              className="mt-1 block min-w-0 overflow-hidden text-[0.6875rem] text-muted @min-[34rem]:col-start-2 @min-[34rem]:row-start-3 @min-[34rem]:mt-0"
+              data-mobile-priority="primary"
+            >
+              <span className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+                <span className="text-bone">Teacher + thinking</span>
+                <span
+                  className="min-w-0 truncate font-mono text-[0.625rem] tabular-nums text-muted"
+                  data-teacher-economics="true"
+                  title={selectedTeacherOption?.label}
+                >
+                  {selectedTeacherOption
+                    ? `cap ${selectedTeacherOption.effectiveCapability.toFixed(0)} · q ${Math.round(selectedTeacherOption.effortQuality * 100)}% · ${selectedTeacherOption.billedTokenMultiplier.toFixed(1)}× tokens · ${selectedTeacherOption.computeIntensityMultiplier.toFixed(2)}× PF`
+                    : "Auto · Instant"}
+                </span>
+              </span>
               <HudSelect
-                value={syntheticTeacherIds[selected] ?? ""}
-                onChange={(event) =>
-                  onTeacherChange(selected, event.target.value || undefined)
+                aria-label={`Synthetic teacher and thinking recipe for ${DATA_DOMAIN_META[selected].label} corpus`}
+                data-touch-target="teacher-effort"
+                value={
+                  selectedTeacherOption
+                    ? syntheticTeacherSelectValue(
+                        selectedTeacherOption.teacherId,
+                        selectedTeacherOption.effortId,
+                      )
+                    : ""
                 }
-                className="mt-1 w-full min-w-0 text-xs"
+                onChange={(event) => {
+                  const parsed = parseSyntheticTeacherSelectValue(
+                    event.target.value,
+                  );
+                  onTeacherChange(
+                    selected,
+                    parsed?.teacherId,
+                    parsed?.effortId,
+                  );
+                }}
+                className="mt-1 w-full min-w-0 touch-manipulation truncate !min-h-11 text-xs"
               >
-                <option value="">Default teacher</option>
-                {teachers.map((teacher) => (
-                  <option key={teacher.id} value={teacher.id}>
-                    {teacher.name} · cap {teacher.capability.toFixed(0)}
+                <option value="">Default teacher · Instant</option>
+                {syntheticTeacherOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
                   </option>
                 ))}
               </HudSelect>
+              <span className="mt-1 block text-[0.625rem] leading-snug text-muted">
+                Thinking increases billed tokens and inference PF.
+              </span>
             </label>
           ) : null}
         </div>

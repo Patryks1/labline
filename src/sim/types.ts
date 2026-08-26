@@ -279,6 +279,14 @@ export interface EffortRecipe {
   targetPfDays?: number;
   /** Live observed loss while this head is receiving compute. */
   loss?: number;
+  /** Frozen terminal loss once the current fitting pass completes. */
+  finalLoss?: number;
+  /** Deterministic per-head seed; persisted so reloads cannot reroll outcomes. */
+  outcomeSeed?: number;
+  /** 0–1 resolved yield from compute, loss, data, reliability, and seeded RNG. */
+  optimizationYield?: number;
+  /** Resolved proportional source-capability lift, hard-capped at 0.2. */
+  realizedLiftPct?: number;
 }
 
 export interface EffortBoard {
@@ -287,8 +295,19 @@ export interface EffortBoard {
   trained: boolean;
   served: boolean;
   capability: number;
+  /** @deprecated Generated/reasoning multiplier; use generatedTokenMult. */
   tokenMult: number;
+  generatedTokenMult?: number;
+  /** Total billable text tokens with prompt input held fixed. */
+  billedTokenMult?: number;
+  /** Compute-equivalent work versus an Instant request. */
+  computeTokenMult?: number;
+  /** PF per billed token versus Instant. */
+  computeIntensityMult?: number;
+  /** Base provider serving cost for one Instant billed MTok. */
   usdPerMTok: number | null;
+  /** Provider COGS per Instant-equivalent base MTok after compute expansion. */
+  effectiveUsdPerBaseMTok?: number | null;
   math: number;
   coding: number;
   science: number;
@@ -736,6 +755,8 @@ export interface TrainingBenchmarkRequest {
   suiteIds: BenchmarkSuiteId[];
   /** Uniform spend for every selected suite. Each suite validates its own bounds. */
   spendPerSuite: number;
+  /** Trained inference recipe used for text/reasoning tasks. Legacy means Instant. */
+  effortRecipeId?: string;
 }
 
 /** A suite-level noisy estimate produced by a paid checkpoint evaluation. */
@@ -1241,6 +1262,15 @@ export type DatasetSource =
 export interface SyntheticProvenance {
   method?: "imitation" | "filtered" | "verifier" | "curriculum";
   teacherModelIds: string[];
+  /** Model-owned thinking recipes used to create this immutable corpus lot. */
+  teacherEffortIds?: string[];
+  teacherEffortNames?: string[];
+  teacherThinkingTokenMultiplier?: number;
+  teacherEffortQuality?: number;
+  billedTokenMultiplier?: number;
+  computeIntensityMultiplier?: number;
+  /** Frozen cash charged per attempted synthetic MTok for this recipe. */
+  generationCashPerAttemptedMTok?: number;
   generationDepth: number;
   promptDiversity: number;
   verifierStrength: number;
@@ -1407,6 +1437,8 @@ export interface SynthGenJob {
    * rewriting the historical synthetic assets they produced.
    */
   teacherModelIds?: Partial<Record<DataDomain, string>>;
+  /** Per-corpus model-owned thinking recipe; missing legacy entries use Instant. */
+  teacherEffortIds?: Partial<Record<DataDomain, string>>;
   /** Cumulative useful output split by generated quality. */
   hqMTok?: number;
   lqMTok?: number;
@@ -1521,6 +1553,12 @@ export interface TrainingDataPlan {
   domainModels?: Partial<Record<DataDomain, string>>;
   /** Optional synthetic teacher override per domain. Missing entries use the best eligible model. */
   syntheticTeacherIds?: Partial<Record<DataDomain, string>>;
+  /**
+   * Trained inference recipe used by each selected synthetic teacher. Recipe
+   * ids are model-owned and may be player-authored; missing legacy entries use
+   * the model's implicit Instant recipe.
+   */
+  syntheticTeacherEffortIds?: Partial<Record<DataDomain, string>>;
   /** Requested generated-token expansion relative to attributed real data (0–7×; 8× total). */
   syntheticMultiplier?: number;
   /** V3: unique/repeated exposure used for saturation and memorization risk. */
@@ -1702,6 +1740,21 @@ export interface SyntheticFillRecord {
   domain: DataDomain;
   teacherModelId?: string;
   teacherName?: string;
+  /** Frozen model-owned thinking recipe; missing on legacy records means Instant. */
+  teacherEffortId?: string;
+  teacherEffortName?: string;
+  teacherThinkingTokenMult?: number;
+  /** Realized 0–1 recipe quality at generation time. */
+  teacherEffortQuality?: number;
+  /** Generated/billed tokens per accepted synthetic token. */
+  billedTokenMultiplier?: number;
+  /** Extra physical work per generated reasoning token versus Instant. */
+  teacherComputeIntensityMultiplier?: number;
+  /** Total generated and billed tokens, including hidden reasoning. */
+  generatedTokenMTok?: number;
+  /** Frozen inference work and cash charged for this generated slice. */
+  generationComputePfDays?: number;
+  generationCashCost?: number;
   volumeMTok: number;
   quality: number;
   qualityTier: "hq" | "lq";
@@ -1926,6 +1979,14 @@ export interface TrainingBenchmarkPending {
   confidence?: number;
   /** Loss frozen with the evaluated weights; later training cannot rewrite it. */
   capturedLoss?: number;
+  /** Frozen trained recipe. Missing on legacy saves means Instant. */
+  effortRecipeId?: string;
+  /** Real inference work and pricing captured when the run was scheduled. */
+  workload?: import("./balance/benchmarkCost").BenchmarkRunEstimate;
+  /** API-equivalent inference value included in totalCost. */
+  inferenceCost?: number;
+  /** Training-pool PF completed. Missing preserves legacy calendar-only work. */
+  computeProgressPfDays?: number;
 }
 
 /**
@@ -2071,6 +2132,10 @@ export interface TrainingJob {
   productProfile?: ModelProductProfile;
   /** In-flight named effort head (not Instant). */
   effortTrain?: EffortTrainProgress;
+  /** Dedicated effort-only fitting run against an existing model's weights. */
+  effortOnlySourceModelId?: string;
+  /** Recipe installed back into effortOnlySourceModelId when fitting completes. */
+  effortOnlyRecipeId?: string;
   /** @deprecated */
   dataMix: DataMix;
   dataPlan: TrainingDataPlan;
@@ -2209,6 +2274,9 @@ export interface TrainingBenchmarkSnapshot {
   /** Capability at each trained reasoning effort. */
   effortCapabilities?: Partial<Record<string, number>>;
   effortBoards?: EffortBoard[];
+  /** Frozen inference recipe used by this measurement. Legacy means Instant. */
+  effortRecipeId?: string;
+  workload?: import("./balance/benchmarkCost").BenchmarkRunEstimate;
 }
 
 export interface ModelEconomics {
@@ -2947,6 +3015,10 @@ export interface InvestorPitchRecord {
   day: number;
   outcome: InvestorPitchOutcome;
   successChance: number;
+  /** Amount requested by the lab, retained even when the pitch is declined. */
+  requestedCashRaised?: number;
+  /** Amount-aware data/freshness concession shown when the pitch was made. */
+  dataDrag?: number;
   cashRaised: number;
   preMoneyValuation: number;
   postMoneyValuation: number;

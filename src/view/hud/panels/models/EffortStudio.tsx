@@ -10,6 +10,7 @@ import {
   applyEffortLiftFromRecipe,
   defaultEffortIdOf,
   effortReasoningUnlocked,
+  effortRequestMultipliers,
   gymQualityByKind,
   migrateEffortRecipes,
   previewEffortRecipe,
@@ -108,18 +109,51 @@ export function EffortStudio({
       }),
     [baseCap, newBias, profile.personality, profile.tokenEfficiency, quote.quality, thinking],
   );
+  const newRequest = useMemo(
+    () =>
+      effortRequestMultipliers(
+        {
+          kind: "trained",
+          thinkingTokenMult: thinking,
+          capabilityBias: newBias,
+        },
+        profile.tokenEfficiency,
+      ),
+    [newBias, profile.tokenEfficiency, thinking],
+  );
+  const activeCount = recipes.filter(
+    (recipe) =>
+      (recipe.progressPfDays ?? 0) + 1e-9 < (recipe.targetPfDays ?? 0),
+  ).length;
 
   return (
-    <div
-      className="rounded-md border border-line/60 bg-void/30 p-2.5"
+    <details
+      className="group rounded-md border border-line/60 bg-void/30 p-2.5"
       data-effort-studio="true"
     >
-      <p className="hud-eyebrow">Effort heads</p>
-      <p className="mt-1 text-[0.6875rem] leading-5 text-muted">
-        Instant is always free to serve. Split Train PF across heads, watch
-        loss, and slide each toward capability (costly) or efficiency (cheaper
-        tokens).
-      </p>
+      <summary className="min-h-11 cursor-pointer list-none rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-mint/70">
+        <span className="flex items-center justify-between gap-2">
+          <span>
+            <span className="hud-eyebrow block">Effort heads</span>
+            <span className="mt-0.5 block text-[0.6875rem] text-muted">
+              Configure generated / reasoning budgets · {trainedCount} trained · up to {THINKING_TOKEN_MAX}× generated
+              {activeCount > 0 ? ` · ${activeCount} fitting` : ""}
+            </span>
+          </span>
+          <span className="text-[0.6875rem] text-mint">
+            <span className="group-open:hidden">Show</span>
+            <span className="hidden group-open:inline">Hide</span>
+          </span>
+        </span>
+      </summary>
+      <div className="mt-2 border-t border-line/50 pt-2">
+        <p className="hud-mobile-detail text-[0.6875rem] leading-5 text-muted">
+          Instant is always free to serve. Split Train PF across heads, watch
+          loss, and slide each toward capability (costly) or efficiency (cheaper
+          tokens). Prompt tokens stay fixed; generated and hidden-reasoning
+          tokens are billed at the output rate and count toward total billed
+          tokens.
+        </p>
       <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
         {recipes.map((recipe) => (
           <EffortHeadCard
@@ -185,13 +219,9 @@ export function EffortStudio({
                 placeholder="Think"
               />
             </label>
-            <SliderField
-              label="Thinking budget"
+            <LogThinkingBudgetField
               value={thinking}
-              min={THINKING_TOKEN_MIN}
-              max={THINKING_TOKEN_MAX}
-              step={0.1}
-              format={(value) => `${value.toFixed(1)}× tokens`}
+              billedMultiplier={newRequest.billedTokenMultiplier}
               onChange={setThinking}
             />
             <SliderField
@@ -211,7 +241,7 @@ export function EffortStudio({
               max={1}
               step={0.05}
               format={biasLabel}
-              sublabel={`${newPreview.tokenMult.toFixed(1)}× tokens · cap ${
+              sublabel={`${newPreview.tokenMult.toFixed(1)}× generated · ${newRequest.billedTokenMultiplier.toFixed(1)}× billed · cap ${
                 baseCap > 0
                   ? `${Math.round(newPreview.capability)} (${newPreview.capDelta >= 0 ? "+" : ""}${Math.round(newPreview.capDelta)})`
                   : "—"
@@ -225,7 +255,7 @@ export function EffortStudio({
             <HudButton
               type="button"
               variant="primary"
-              className="!min-h-9 w-full !text-[0.75rem]"
+              className="!min-h-11 w-full !text-[0.75rem]"
               onClick={() =>
                 startEffort({
                   id: subjectId,
@@ -242,7 +272,47 @@ export function EffortStudio({
           </div>
         )}
       </div>
-    </div>
+      </div>
+    </details>
+  );
+}
+
+export function LogThinkingBudgetField({
+  value,
+  billedMultiplier,
+  onChange,
+}: {
+  value: number;
+  billedMultiplier: number;
+  onChange: (value: number) => void;
+}) {
+  const position =
+    Math.log(Math.max(THINKING_TOKEN_MIN, value) / THINKING_TOKEN_MIN) /
+    Math.log(THINKING_TOKEN_MAX / THINKING_TOKEN_MIN);
+  return (
+    <SliderField
+      label="Generated / reasoning budget"
+      value={position}
+      min={0}
+      max={1}
+      step={0.001}
+      format={() => `${value.toFixed(1)}× generated`}
+      ariaValueText={`${value.toFixed(1)}× generated; ${billedMultiplier.toFixed(1)}× total billed`}
+      sublabel={
+        <span className="font-mono text-[0.625rem] text-muted">
+          Prompt fixed · {billedMultiplier.toFixed(1)}× total billed
+        </span>
+      }
+      onChange={(nextPosition) => {
+        const raw =
+          THINKING_TOKEN_MIN *
+          Math.pow(
+            THINKING_TOKEN_MAX / THINKING_TOKEN_MIN,
+            nextPosition,
+          );
+        onChange(Math.round(raw * 10) / 10);
+      }}
+    />
   );
 }
 
@@ -276,6 +346,7 @@ function EffortHeadCard({
   const gyms = useGameStore((s) => s.state.player.postTrainGyms);
   const researchUnlocked = useGameStore((s) => s.state.player.researchUnlocked);
   const tokens = serveTokenMultiplierForRecipe(recipe, profile.tokenEfficiency);
+  const request = effortRequestMultipliers(recipe, profile.tokenEfficiency);
   const benches = dummyBenches(baseCap, profile.personality);
   const lifted =
     baseCap > 0
@@ -330,7 +401,7 @@ function EffortHeadCard({
       >
         {lifted && baseCap > 0 ? `cap ${Math.round(lifted.capability)} · ` : null}
         {freeServe ? "free · " : null}
-        {tokens.toFixed(1)}× tokens
+        {tokens.toFixed(1)}× generated · {request.billedTokenMultiplier.toFixed(1)}× billed
         {recipe.loss != null ? ` · loss ${recipe.loss.toFixed(2)}` : null}
       </p>
       {training || (recipe.progressPfDays ?? 0) > 0 ? (
@@ -370,7 +441,7 @@ function EffortHeadCard({
                       ? `${Math.round(preview.capability)} (${preview.capDelta >= 0 ? "+" : ""}${Math.round(preview.capDelta)})`
                       : "—"
                   }`
-                : `${preview.tokenMult.toFixed(1)}× tokens · cap ${
+                : `${preview.tokenMult.toFixed(1)}× generated · ${request.billedTokenMultiplier.toFixed(1)}× billed · cap ${
                     baseCap > 0
                       ? `${Math.round(preview.capability)} (${preview.capDelta >= 0 ? "+" : ""}${Math.round(preview.capDelta)})`
                       : "—"
@@ -391,7 +462,7 @@ function EffortHeadCard({
         <HudButton
           type="button"
           variant="ghost"
-          className="!min-h-8 !px-2 !text-[0.625rem]"
+          className="!min-h-11 !px-2 !text-[0.625rem] xl:!min-h-9"
           disabled={!recipe.trained}
           onClick={onToggleServe}
         >
@@ -401,7 +472,7 @@ function EffortHeadCard({
           <HudButton
             type="button"
             variant="ghost"
-            className="!min-h-8 !px-2 !text-[0.625rem]"
+            className="!min-h-11 !px-2 !text-[0.625rem] xl:!min-h-9"
             onClick={onDefault}
           >
             Make default
@@ -411,7 +482,7 @@ function EffortHeadCard({
           <HudButton
             type="button"
             variant="ghost"
-            className="!min-h-8 !px-2 !text-[0.625rem]"
+            className="!min-h-11 !px-2 !text-[0.625rem] xl:!min-h-9"
             data-effort-continue={recipe.id}
             onClick={onContinue}
           >

@@ -174,4 +174,37 @@ describe("model archive", () => {
     expect(next.player.models.find((row) => row.id === draft.id)?.archived).toBeFalsy();
     expect(next.alerts[0]?.message).toMatch(/Only public models/);
   });
+
+  it("refuses to hide the source of an active safety campaign", () => {
+    const { state, model } = releasedSpark(4415);
+    const campaigning: SimState = {
+      ...state,
+      player: {
+        ...state.player,
+        safetyCampaign: {
+          id: "safe-active",
+          modelId: model.id,
+          modelName: model.name,
+          intensity: "standard",
+          assignedResearchers: 3,
+          minimumResearchers: 2,
+          targetTrainingPfDays: 10,
+          targetResearchPfDays: 6,
+          progressTrainingPfDays: 1,
+          progressResearchPfDays: 1,
+          cashBudget: 1_000_000,
+          cashSpent: 1_000_000,
+          safetyDataMTok: 20,
+          safetyDataQuality: 80,
+          startDay: state.day,
+        },
+      },
+    };
+
+    const next = archiveModel(campaigning, model.id);
+    expect(next.player.models.find((row) => row.id === model.id)?.archived).toBeFalsy();
+    expect(isLivePublicModel(next.player.models.find((row) => row.id === model.id)!)).toBe(true);
+    expect(next.player.safetyCampaign?.modelId).toBe(model.id);
+    expect(next.alerts[0]?.message).toMatch(/active safety campaign before archiving/);
+  });
 });

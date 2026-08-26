@@ -10,6 +10,7 @@ import { blendApiPrice } from "./balance/pricing";
 import { buildScaledModel } from "./balance/modelBuild";
 import type { TrainingCheckpointCandidate } from "./types";
 import { scheduleCheckpointEvaluation } from "./systems/checkpointEvaluations";
+import { startTraining } from "./systems/training";
 import { TERRAIN_KIND, tileId } from "./world";
 import {
   SAVE_FORMAT,
@@ -167,6 +168,167 @@ describe("save / load v13", () => {
       effortId: "medium",
       modelName: "Solace-Think",
     });
+  });
+
+  it("migrates effort recipes and synthetic teacher effort selections everywhere they persist", () => {
+    const started = startTraining(createGame(10_018), {
+      name: "Legacy reasoning run",
+      family: "dense",
+      paramsB: 1,
+    });
+    const originalJob = started.player.trainingJob!;
+    const originalPlan = originalJob.plan!;
+    const productProfile = {
+      lifecycle: "reasoning" as const,
+      focus: { coding: 0, science: 0, research: 0, personality: 0, chat: 0 },
+      personality: 55,
+      tokenEfficiency: 50,
+      effortRecipes: [
+        {
+          id: "think",
+          name: "Think",
+          kind: "trained" as const,
+          thinkingTokenMult: 250,
+          trainPfDays: 10,
+          trainCash: 20,
+          trained: true,
+          quality: 0.75,
+          served: true,
+          capabilityBias: 4,
+          trainComputeShare: -1,
+          progressPfDays: -3,
+          targetPfDays: -5,
+          finalLoss: -2,
+          outcomeSeed: -2,
+          optimizationYield: 4,
+          realizedLiftPct: 0.8,
+        },
+      ],
+      defaultEffortId: "deleted-head",
+    };
+    const teacherSelections = {
+      chat: " think ",
+      math: "   ",
+      retired_domain: "deep",
+    } as never;
+    const pendingBenchmark = {
+      id: "legacy-calendar-benchmark",
+      startedDay: started.day,
+      readyDay: started.day + 2,
+      progress: 0.2,
+      stage: "base" as const,
+    };
+    const job = {
+      ...originalJob,
+      productProfile,
+      dataPlan: {
+        ...originalJob.dataPlan,
+        syntheticTeacherEffortIds: teacherSelections,
+      },
+      plan: {
+        ...originalPlan,
+        dataRecipe: {
+          ...originalPlan.dataRecipe,
+          syntheticTeacherEffortIds: teacherSelections,
+        },
+      },
+      pendingBenchmark,
+    };
+    const model = {
+      ...buildScaledModel({
+        id: "legacy-effort-checkpoint-model",
+        name: "Legacy effort checkpoint",
+        paramsB: 1,
+        family: "dense",
+        day: started.day,
+        dataCoverage: 2,
+        dataQuality: 70,
+        postTrain: "none",
+        shipped: false,
+        release: "internal",
+      }),
+      sourceTrainingJobId: job.id,
+      productProfile,
+    };
+    const checkpoint: TrainingCheckpointCandidate = {
+      id: "legacy-effort-checkpoint",
+      sourceJobId: job.id,
+      lineageId: job.lineageId ?? job.id,
+      ownerModelId: model.id,
+      ordinal: 1,
+      kind: "manual",
+      milestone: 0.2,
+      capturedDay: started.day,
+      stage: "base",
+      status: "stealth",
+      model,
+      telemetry: {
+        progressPfDays: job.targetPfDays * 0.2,
+        targetPfDays: job.targetPfDays,
+        progress: 0.2,
+        daysElapsed: 1,
+        stage: "base",
+        stageProgress: 0.2,
+        loss: 4,
+        energyMWh: 1,
+      },
+    };
+    const restored = roundTripState({
+      ...started,
+      player: {
+        ...started.player,
+        models: [model],
+        trainingJobs: [job],
+        trainingJob: job,
+        trainingCheckpoints: [checkpoint],
+        privateEvaluationJobs: [
+          {
+            id: pendingBenchmark.id,
+            kind: "training_benchmark",
+            subjectId: job.id,
+            scheduledDay: pendingBenchmark.startedDay,
+            readyDay: pendingBenchmark.readyDay,
+            pending: pendingBenchmark,
+          },
+        ],
+      },
+    });
+
+    const restoredJob = restored.player.trainingJobs![0]!;
+    expect(restoredJob.dataPlan.syntheticTeacherEffortIds).toEqual({
+      chat: "think",
+    });
+    expect(restoredJob.plan!.dataRecipe.syntheticTeacherEffortIds).toEqual({
+      chat: "think",
+    });
+    expect(restoredJob.pendingBenchmark?.computeProgressPfDays).toBeUndefined();
+    expect(
+      restored.player.privateEvaluationJobs?.[0]?.pending
+        .computeProgressPfDays,
+    ).toBeUndefined();
+
+    const checkpointProfile =
+      restored.player.trainingCheckpoints![0]!.model.productProfile;
+    for (const profile of [restoredJob.productProfile, checkpointProfile]) {
+      expect(profile?.defaultEffortId).toBe("instant");
+      expect(profile?.effortRecipes[0]).toMatchObject({
+        id: "instant",
+        kind: "instant",
+        thinkingTokenMult: 1,
+      });
+      expect(profile?.effortRecipes.find((recipe) => recipe.id === "think"))
+        .toMatchObject({
+          thinkingTokenMult: 100,
+          capabilityBias: 1,
+          trainComputeShare: 0,
+          progressPfDays: 0,
+          targetPfDays: 0,
+          finalLoss: 0,
+          outcomeSeed: 4_294_967_294,
+          optimizationYield: 1,
+          realizedLiftPct: 0.2,
+        });
+    }
   });
 
   it("caps partially migrated oversized day-one cloud launch pools", () => {

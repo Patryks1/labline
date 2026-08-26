@@ -61,6 +61,10 @@ describe("CheckpointEvaluationDialog", () => {
     expect(markup).toContain("Confidence");
     expect(markup).toContain("No external leak surface");
     expect(markup).toContain("hud-button--ghost");
+    expect(markup).toContain('data-mobile-priority="quote-first"');
+    expect(markup).toContain("order-first");
+    expect(markup).toContain("hud-mobile-detail");
+    expect(markup).toContain("Choose suites, effort and review depth.");
   });
 
   it("disables scheduling when the quoted study is unaffordable", () => {

@@ -7,6 +7,10 @@ import {
   MOBILE_MORE_SECTIONS,
   MOBILE_MORE_UTILITIES,
   MOBILE_PRIMARY_TABS,
+  classifyShellSwipe,
+  isShellGesturePointer,
+  isShellGestureSafeTarget,
+  mobilePrimaryPanelForSwipe,
   rebalanceComputeAllocation,
 } from './mobileShellContracts'
 
@@ -115,5 +119,45 @@ describe('mobile command shell contracts', () => {
         0,
       ),
     ).toEqual({ training: 0, inference: 0, research: 0 })
+  })
+
+  it('recognises deliberate down and horizontal swipes but ignores scroll-like ambiguity', () => {
+    const start = { x: 120, y: 40, timeMs: 100 }
+
+    expect(classifyShellSwipe(start, { x: 124, y: 108, timeMs: 360 })).toBe('down')
+    expect(classifyShellSwipe(start, { x: 48, y: 44, timeMs: 320 })).toBe('left')
+    expect(classifyShellSwipe(start, { x: 192, y: 42, timeMs: 320 })).toBe('right')
+    expect(classifyShellSwipe(start, { x: 121, y: -35, timeMs: 320 })).toBeNull()
+    expect(classifyShellSwipe(start, { x: 151, y: 72, timeMs: 320 })).toBeNull()
+    expect(classifyShellSwipe(start, { x: 120, y: 108, timeMs: 1_100 })).toBeNull()
+  })
+
+  it('moves between adjacent primary destinations without wrapping', () => {
+    expect(mobilePrimaryPanelForSwipe('build', 'left')).toBe('models')
+    expect(mobilePrimaryPanelForSwipe('models', 'right')).toBe('build')
+    expect(mobilePrimaryPanelForSwipe('data', 'left')).toBeNull()
+    expect(mobilePrimaryPanelForSwipe('build', 'right')).toBeNull()
+    expect(mobilePrimaryPanelForSwipe('research', 'left')).toBeNull()
+  })
+
+  it('only starts touch or pen gestures on an explicit, non-interactive handle', () => {
+    const target = (blocked: boolean, hasSurface = true) => ({
+      closest: (selector: string) => {
+        if (selector === '[data-shell-gesture-surface="true"]') {
+          return hasSurface ? {} : null
+        }
+        return blocked ? {} : null
+      },
+    }) as unknown as EventTarget
+
+    expect(isShellGesturePointer('touch', 0)).toBe(true)
+    expect(isShellGesturePointer('pen', 0)).toBe(true)
+    expect(isShellGesturePointer('mouse', 0)).toBe(false)
+    expect(isShellGesturePointer('', 0)).toBe(false)
+    expect(isShellGesturePointer('touch', 2)).toBe(false)
+    expect(isShellGestureSafeTarget(target(false))).toBe(true)
+    expect(isShellGestureSafeTarget(target(true))).toBe(false)
+    expect(isShellGestureSafeTarget(target(false, false))).toBe(false)
+    expect(isShellGestureSafeTarget(null)).toBe(false)
   })
 })

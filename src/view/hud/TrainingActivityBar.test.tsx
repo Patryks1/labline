@@ -21,6 +21,7 @@ describe('TrainingActivityBar', () => {
     expect(markup).not.toContain('Training idle')
     expect(markup).toContain('>Models</button>')
     expect(markup).toContain('data-open-models="true"')
+    expect(markup).toContain('data-mobile-summary="training"')
     expect(markup).not.toContain('training-activity-bar__surface hud-surface pointer-events-auto')
   })
 

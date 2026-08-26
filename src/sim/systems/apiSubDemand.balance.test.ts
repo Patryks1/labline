@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { emptyBenchmarks } from "../balance/benchmarks";
-import { ECONOMY, SEGMENTS } from "../balance/economy";
+import {
+  ECONOMY,
+  liftMarketTokenDemand,
+  SEGMENTS,
+} from "../balance/economy";
 import { apiDemandPricePenalty } from "../balance/pricing";
+import { apiEffortChoice } from "../balance/effortEconomics";
 import { createGame } from "../createGame";
 import type { Model, SimState } from "../types";
 import { syncLabIndex } from "./labEngine";
 import { collectOffers, tickMarket } from "./market";
+import { planAllowanceMTokPerMonth } from "./plans";
 import { offerUtility, peersInPriceBand, segmentShares } from "./marketScore";
 import {
   apiQualityCompetitivenessMultiplier,
@@ -146,6 +152,14 @@ function parityState(seed = 9_401): SimState {
 }
 
 describe("API vs subscription demand balance", () => {
+  it("lifts token work by exactly 1.25x without changing its audience input", () => {
+    const wonCustomers = 8_000;
+    const baselineMTok = wonCustomers * 0.004;
+    expect(ECONOMY.tokenDemandMultiplier).toBe(1.25);
+    expect(liftMarketTokenDemand(baselineMTok)).toBe(baselineMTok * 1.25);
+    expect(wonCustomers).toBe(8_000);
+  });
+
   it("raises API base intensity so peer-priced API can compete with seats", () => {
     expect(ECONOMY.apiBaseMTokPerUserDay).toBeGreaterThanOrEqual(0.028);
     expect(ECONOMY.apiBaseMTokPerUserDay).toBeLessThanOrEqual(0.04);
@@ -311,5 +325,374 @@ describe("API vs subscription demand balance", () => {
       .filter((plan) => !plan.isFree)
       .reduce((sum, plan) => sum + plan.dayMTok, 0);
     expect(paidSubMTok).toBeGreaterThan(0);
+  });
+
+  it("reconciles effort billing, revenue, PF, bandwidth, and COGS to one token ledger", () => {
+    const base = parityState(9_403);
+    const model = base.player.models[0]!;
+    const state: SimState = {
+      ...base,
+      player: {
+        ...base.player,
+        models: [
+          {
+            ...model,
+            apiPricePerMTok: null,
+            apiPriceInPerMTok: 1,
+            apiPriceOutPerMTok: 5,
+            productProfile: {
+              lifecycle: "reasoning",
+              focus: {
+                coding: 0,
+                science: 0,
+                research: 0,
+                personality: 0,
+                chat: 0,
+              },
+              personality: 65,
+              tokenEfficiency: 70,
+              defaultEffortId: "max",
+              effortRecipes: [
+                {
+                  id: "instant",
+                  name: "Instant",
+                  kind: "instant",
+                  thinkingTokenMult: 1,
+                  trainPfDays: 0,
+                  trainCash: 0,
+                  trained: true,
+                  quality: 1,
+                  served: true,
+                },
+                {
+                  id: "max",
+                  name: "Max",
+                  kind: "trained",
+                  thinkingTokenMult: 32,
+                  trainPfDays: 160,
+                  trainCash: 8_000_000,
+                  trained: true,
+                  quality: 0.9,
+                  served: true,
+                  capabilityBias: 0.65,
+                },
+              ],
+            },
+          },
+        ],
+      },
+    };
+    const settled = tickMarket(state);
+    const apiItems = (settled.lastMarket.computeLedger?.items ?? []).filter(
+      (item) => item.channel === "api",
+    );
+    expect(apiItems.length).toBeGreaterThan(0);
+    const billedMTok = apiItems.reduce(
+      (sum, item) =>
+        sum +
+        (item.billed.inputMTok ?? 0) +
+        (item.billed.cachedInputMTok ?? 0) +
+        (item.billed.outputMTok ?? 0) +
+        (item.billed.reasoningMTok ?? 0),
+      0,
+    );
+    const tokenRevenue = apiItems.reduce(
+      (sum, item) =>
+        sum +
+        ((item.billed.inputMTok ?? 0) +
+          (item.billed.cachedInputMTok ?? 0)) *
+          1 +
+        ((item.billed.outputMTok ?? 0) +
+          (item.billed.reasoningMTok ?? 0)) *
+          5,
+      0,
+    );
+    const ledgerRevenue = apiItems.reduce(
+      (sum, item) => sum + item.revenue,
+      0,
+    );
+    const ledgerPf = apiItems.reduce(
+      (sum, item) => sum + item.servedPfDays,
+      0,
+    );
+    const usagePf = (settled.lastMarket.apiModelUsage ?? []).reduce(
+      (sum, usage) => sum + usage.dayInferPf,
+      0,
+    );
+    expect(billedMTok).toBeCloseTo(settled.lastMarket.apiDayMTok, 7);
+    expect(tokenRevenue).toBeCloseTo(settled.lastMarket.apiDayRevenue, 7);
+    expect(ledgerRevenue).toBeCloseTo(settled.lastMarket.apiDayRevenue, 7);
+    expect(ledgerPf).toBeCloseTo(usagePf, 7);
+    expect(
+      settled.lastMarket.apiDayCogs + 1e-9,
+    ).toBeGreaterThanOrEqual(billedMTok * ECONOMY.bandwidthPerMTok);
+
+    const planItems = (settled.lastMarket.computeLedger?.items ?? []).filter(
+      (item) => item.channel === "subscription",
+    );
+    expect(planItems.length).toBeGreaterThan(0);
+    const planBilledMTok = planItems.reduce(
+      (sum, item) =>
+        sum +
+        (item.billed.inputMTok ?? 0) +
+        (item.billed.cachedInputMTok ?? 0) +
+        (item.billed.outputMTok ?? 0) +
+        (item.billed.reasoningMTok ?? 0),
+      0,
+    );
+    const planInputMTok = planItems.reduce(
+      (sum, item) =>
+        sum +
+        (item.billed.inputMTok ?? 0) +
+        (item.billed.cachedInputMTok ?? 0),
+      0,
+    );
+    const planOutputMTok = planItems.reduce(
+      (sum, item) =>
+        sum +
+        (item.billed.outputMTok ?? 0) +
+        (item.billed.reasoningMTok ?? 0),
+      0,
+    );
+    const planPf = planItems.reduce(
+      (sum, item) => sum + item.servedPfDays,
+      0,
+    );
+    expect(planBilledMTok).toBeCloseTo(
+      settled.lastMarket.planStats.reduce(
+        (sum, plan) => sum + plan.dayMTok,
+        0,
+      ),
+      7,
+    );
+    expect(planPf).toBeCloseTo(
+      settled.lastMarket.planStats.reduce(
+        (sum, plan) => sum + plan.dayInferPf,
+        0,
+      ),
+      7,
+    );
+    expect(planOutputMTok / Math.max(1e-12, planInputMTok)).toBeGreaterThan(
+      0.35 / 0.65,
+    );
+    for (const plan of settled.lastMarket.planStats) {
+      const configured = state.player.pricing.plans.find(
+        (candidate) => candidate.id === plan.planId,
+      )!;
+      expect(
+        plan.dayMTok / Math.max(1e-12, plan.subscribers),
+      ).toBeLessThanOrEqual(
+        (plan.allowanceMTokMonth ?? planAllowanceMTokPerMonth(configured)) /
+          ECONOMY.daysPerMonth +
+          1e-9,
+      );
+      if (plan.isFree) {
+        expect(plan.dayRevenue).toBe(0);
+      } else {
+        const serviceCredit =
+          (plan.serveFraction ?? 1) >= 0.97
+            ? 1
+            : 0.5 + 0.5 * (plan.serveFraction ?? 1);
+        expect(plan.dayRevenue).toBeCloseTo(
+          (plan.subscribers * configured.pricePerMonth * serviceCredit) /
+            ECONOMY.daysPerMonth,
+          7,
+        );
+      }
+    }
+  });
+
+  it("settles subscription work from each plan's enabled effort recipes", () => {
+    const base = parityState(9_406);
+    const source = base.player.models[0]!;
+    const model: Model = {
+      ...source,
+      productProfile: {
+        lifecycle: "reasoning",
+        focus: {
+          coding: 0,
+          science: 0,
+          research: 0,
+          personality: 0,
+          chat: 0,
+        },
+        personality: 65,
+        tokenEfficiency: 70,
+        defaultEffortId: "max",
+        effortRecipes: [
+          {
+            id: "instant",
+            name: "Instant",
+            kind: "instant",
+            thinkingTokenMult: 1,
+            trainPfDays: 0,
+            trainCash: 0,
+            trained: true,
+            quality: 1,
+            served: true,
+          },
+          {
+            id: "max",
+            name: "Max",
+            kind: "trained",
+            thinkingTokenMult: 32,
+            trainPfDays: 160,
+            trainCash: 8_000_000,
+            trained: true,
+            quality: 0.9,
+            served: true,
+            capabilityBias: 0.65,
+          },
+        ],
+      },
+    };
+    const settleWithPolicy = (maxEnabled: boolean) =>
+      tickMarket({
+        ...base,
+        player: {
+          ...base.player,
+          models: [model],
+          pricing: {
+            ...base.player.pricing,
+            plans: base.player.pricing.plans.map((plan) => ({
+              ...plan,
+              effortPolicyByModel: {
+                [model.id]: {
+                  instant: { enabled: !maxEnabled },
+                  max: { enabled: maxEnabled },
+                },
+              },
+            })),
+          },
+        },
+      });
+    const subscriptionRates = (settled: SimState) => {
+      const items = (settled.lastMarket.computeLedger?.items ?? []).filter(
+        (item) => item.channel === "subscription",
+      );
+      const input = items.reduce(
+        (sum, item) =>
+          sum +
+          (item.billed.inputMTok ?? 0) +
+          (item.billed.cachedInputMTok ?? 0),
+        0,
+      );
+      const generated = items.reduce(
+        (sum, item) =>
+          sum +
+          (item.billed.outputMTok ?? 0) +
+          (item.billed.reasoningMTok ?? 0),
+        0,
+      );
+      const billed = input + generated;
+      const pf = items.reduce((sum, item) => sum + item.servedPfDays, 0);
+      expect(items.length).toBeGreaterThan(0);
+      return {
+        generatedPerInput: generated / Math.max(1e-12, input),
+        pfPerMTok: pf / Math.max(1e-12, billed),
+      };
+    };
+
+    const instant = subscriptionRates(settleWithPolicy(false));
+    const max = subscriptionRates(settleWithPolicy(true));
+    expect(instant.generatedPerInput).toBeCloseTo(0.14 / 0.86, 7);
+    expect(max.generatedPerInput).toBeGreaterThan(
+      instant.generatedPerInput * 5,
+    );
+    expect(max.pfPerMTok).toBeGreaterThan(instant.pfPerMTok);
+  });
+
+  it("lets a competitively priced reasoning recipe win demand from realized quality", () => {
+    const instantState = parityState(9_404);
+    const source = instantState.player.models[0]!;
+    const cheapSource = {
+      ...source,
+      apiPricePerMTok: null,
+      apiPriceInPerMTok: 0.04,
+      apiPriceOutPerMTok: 0.04,
+    };
+    const baseState: SimState = {
+      ...instantState,
+      player: {
+        ...instantState.player,
+        models: [cheapSource],
+      },
+    };
+    const effortState: SimState = {
+      ...baseState,
+      player: {
+        ...baseState.player,
+        models: [
+          {
+            ...cheapSource,
+            productProfile: {
+              lifecycle: "reasoning",
+              focus: {
+                coding: 0,
+                science: 0,
+                research: 0,
+                personality: 0,
+                chat: 0,
+              },
+              personality: 65,
+              tokenEfficiency: 80,
+              defaultEffortId: "think",
+              effortRecipes: [
+                {
+                  id: "instant",
+                  name: "Instant",
+                  kind: "instant",
+                  thinkingTokenMult: 1,
+                  trainPfDays: 0,
+                  trainCash: 0,
+                  trained: true,
+                  quality: 1,
+                  served: true,
+                },
+                {
+                  id: "think",
+                  name: "Think",
+                  kind: "trained",
+                  thinkingTokenMult: 6,
+                  trainPfDays: 80,
+                  trainCash: 2_000_000,
+                  trained: true,
+                  quality: 0.95,
+                  served: true,
+                  capabilityBias: 0.5,
+                },
+              ],
+            },
+          },
+        ],
+      },
+    };
+    const instant = tickMarket(baseState);
+    const effort = tickMarket(effortState);
+    const choice = apiEffortChoice({
+      model: effortState.player.models[0]!,
+      kind: "reasoning",
+      ratioToPeer: 0.01,
+      priceElasticity: 0.8,
+      priceIn: 0.04,
+      priceOut: 0.04,
+    });
+    const baseOffers = collectOffers(baseState);
+    const effectiveOffers = baseOffers.map((offer) =>
+      offer.labId === baseState.playerLabId
+        ? {
+            ...offer,
+            capability: choice.realizedCapability,
+            benchmarks: choice.realizedBenchmarks,
+            apiPrice: offer.apiPrice * choice.effectiveTaskPriceMultiplier,
+          }
+        : offer,
+    );
+    expect(segmentShares(effectiveOffers, "startup_api")[0]).toBeGreaterThan(
+      segmentShares(baseOffers, "startup_api")[0]!,
+    );
+    expect(effort.lastMarket.apiDemandMTok ?? 0).toBeGreaterThan(
+      instant.lastMarket.apiDemandMTok ?? 0,
+    );
   });
 });

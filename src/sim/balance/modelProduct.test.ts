@@ -6,7 +6,12 @@ import {
   buildEffortPolicies,
   buildModelProductProfile,
   effortBoardsFor,
+  effortCapabilityLiftCeilingPct,
+  effortCashCost,
+  effortComputeIntensityForTokenMultiplier,
+  effortEconomics,
   effortLevelUnlocked,
+  effortRequestMultipliers,
   effortViewFor,
   effortViewForRecipe,
   focusToMix,
@@ -18,8 +23,15 @@ import {
   migrateEffortRecipes,
   personalityEngagement,
   planPersonalityDissatisfaction,
+  priceSensitiveEffortChoice,
   quoteEffortTraining,
   scorePersonality,
+  LEGACY_EFFORT_HEAD_COST_PER_PF_DAY,
+  EFFORT_HEAD_COST_PER_PF_DAY,
+  LEGACY_MAX_THINKING_TOKEN_MULT,
+  THINKING_TOKEN_MAX,
+  modelSupportsEffortHeads,
+  resolveEffortTrainingOutcome,
   servedEffortTokenMultiplier,
   serveTokenMultiplier,
   serveTokenMultiplierForRecipe,
@@ -336,6 +348,7 @@ describe("model product profile", () => {
         {
           ...instantRecipe(),
           trainComputeShare: 0.4,
+          targetPfDays: 10,
         },
         {
           id: "high",
@@ -348,6 +361,8 @@ describe("model product profile", () => {
           quality: 0.7,
           served: true,
           trainComputeShare: 0.1,
+          progressPfDays: 0,
+          targetPfDays: 10,
         },
       ],
       10,
@@ -393,7 +408,16 @@ describe("model product profile", () => {
     const instant = boards.find((board) => board.id === INSTANT_EFFORT_ID);
     const named = boards.find((board) => board.id === "medium");
     expect(instant?.tokenMult).toBeLessThan(named?.tokenMult ?? 0);
-    expect(instant?.usdPerMTok).toBeLessThan(named?.usdPerMTok ?? 0);
+    expect(instant?.usdPerMTok).toBe(named?.usdPerMTok);
+    expect(instant?.billedTokenMult).toBe(1);
+    expect(named?.billedTokenMult).toBeGreaterThan(1);
+    expect(named?.computeIntensityMult).toBeGreaterThan(1);
+    expect(named?.effectiveUsdPerBaseMTok).toBeCloseTo(
+      1.2 * (named?.computeTokenMult ?? 0),
+    );
+    expect(named?.effectiveUsdPerBaseMTok ?? 0).toBeGreaterThan(
+      instant?.effectiveUsdPerBaseMTok ?? 0,
+    );
     expect(effortViewForRecipe({
       capability: 40,
       benchmarks: {
@@ -411,5 +435,190 @@ describe("model product profile", () => {
       foundation,
     );
     expect(specialized.chat).toBeGreaterThan(foundation.chat);
+  });
+
+  it("supports continuous 100x budgets with steeply diminishing capability", () => {
+    expect(THINKING_TOKEN_MAX).toBe(100);
+    expect(effortComputeIntensityForTokenMultiplier(2.5)).toBeCloseTo(1.25);
+    expect(effortComputeIntensityForTokenMultiplier(6)).toBeCloseTo(1.6);
+    expect(
+      effortComputeIntensityForTokenMultiplier(
+        LEGACY_MAX_THINKING_TOKEN_MULT,
+      ),
+    ).toBeCloseTo(2.25);
+    expect(effortComputeIntensityForTokenMultiplier(100)).toBeCloseTo(2.75);
+    const legacyMax = effortCapabilityLiftCeilingPct(32);
+    const max = effortCapabilityLiftCeilingPct(100);
+    expect(legacyMax).toBeGreaterThan(0.199);
+    expect(max).toBeLessThanOrEqual(0.2);
+    expect(max - legacyMax).toBeLessThan(0.0005);
+  });
+
+  it("charges 2x retired fitting economics and resolves outcomes deterministically", () => {
+    expect(EFFORT_HEAD_COST_PER_PF_DAY).toBe(
+      LEGACY_EFFORT_HEAD_COST_PER_PF_DAY * 2,
+    );
+    expect(effortCashCost(10, 1)).toBe(
+      LEGACY_EFFORT_HEAD_COST_PER_PF_DAY * 20,
+    );
+    const input = {
+      recipeId: "max-head",
+      thinkingTokenMult: 100,
+      progressPfDays: 500,
+      targetPfDays: 100,
+      requiredPfDays: 100,
+      finalLoss: 2.8,
+      dataQuality: 90,
+      reliability: 90,
+      outcomeSeed: 42,
+      capabilityBias: 1,
+    };
+    const first = resolveEffortTrainingOutcome(input);
+    expect(resolveEffortTrainingOutcome(input)).toEqual(first);
+    expect(first.realizedLiftPct).toBeLessThanOrEqual(0.2);
+    const lifted = applyEffortLiftFromRecipe(
+      50,
+      {
+        mmlu: 50,
+        coding: 50,
+        math: 50,
+        vision: 0,
+        law: 0,
+        health: 0,
+        science: 50,
+        multilingual: 0,
+        agents: 50,
+        safety: 50,
+        personality: 50,
+      },
+      {
+        kind: "trained",
+        trained: true,
+        thinkingTokenMult: 100,
+        quality: first.quality,
+        realizedLiftPct: first.realizedLiftPct,
+      },
+    );
+    expect(lifted.capability).toBeLessThanOrEqual(60);
+  });
+
+  it("keeps prompts fixed while billing generated work and raising compute", () => {
+    const instant = effortRequestMultipliers(instantRecipe(), 100);
+    const deep = effortRequestMultipliers(
+      {
+        kind: "trained",
+        thinkingTokenMult: 6,
+        capabilityBias: 0.5,
+      },
+      100,
+    );
+    expect(instant.billedTokenMultiplier).toBe(1);
+    expect(deep.generatedTokenMultiplier).toBeCloseTo(6);
+    expect(deep.billedTokenMultiplier).toBeCloseTo(0.65 + 0.35 * 6);
+    expect(deep.computeTokenMultiplier).toBeCloseTo(
+      0.65 + 0.35 * 6 * 1.6,
+    );
+    expect(deep.computeIntensityMultiplier).toBeGreaterThan(1);
+  });
+
+  it("charges internal entitlement compute once per base query envelope", () => {
+    const recipe = {
+      id: "deep-econ",
+      name: "Deep",
+      kind: "trained" as const,
+      thinkingTokenMult: 6,
+      trainPfDays: 1,
+      trainCash: 1,
+      trained: true,
+      quality: 1,
+      served: true,
+      capabilityBias: 0.5,
+    };
+    const request = effortRequestMultipliers(recipe, 100);
+    const economics = effortEconomics(recipe, 100, 10, 2);
+    expect(economics.tokenMult).toBeCloseTo(
+      request.generatedTokenMultiplier,
+    );
+    expect(economics.billedTokenMult).toBeCloseTo(
+      request.billedTokenMultiplier,
+    );
+    expect(economics.computeTokenMult).toBeCloseTo(
+      request.computeTokenMultiplier,
+    );
+    expect(economics.pfPerMTok).toBeCloseTo(
+      2 * request.computeTokenMultiplier,
+    );
+    expect(economics.usdPerMTok).toBeCloseTo(
+      (2 * request.computeTokenMultiplier * 10) /
+        request.billedTokenMultiplier,
+    );
+    expect(economics.usdPer1kQueries).toBeCloseTo(
+      (800 / 1_000_000) * 2 * request.computeTokenMultiplier * 10,
+    );
+  });
+
+  it("exposes price fallback and blocks useless media-only heads", () => {
+    const profile = {
+      ...buildModelProductProfile({ chatShare: 0.2, chatQuality: 60 }),
+      effortRecipes: [
+        instantRecipe(),
+        {
+          id: "deep",
+          name: "Deep",
+          kind: "trained" as const,
+          thinkingTokenMult: 32,
+          trainPfDays: 100,
+          trainCash: 1,
+          trained: true,
+          quality: 1,
+          served: true,
+          realizedLiftPct: 0.19,
+        },
+      ],
+    };
+    const model = {
+      capability: 50,
+      benchmarks: {
+        mmlu: 50,
+        coding: 50,
+        math: 50,
+        vision: 0,
+        law: 0,
+        health: 0,
+        science: 50,
+        multilingual: 0,
+        agents: 50,
+        safety: 50,
+        personality: 50,
+      },
+      productProfile: profile,
+      family: "dense" as const,
+      productPreset: "language" as const,
+      modalities: ["text" as const],
+    };
+    const affordable = priceSensitiveEffortChoice({
+      model,
+      ratioToPeer: 0.25,
+      priceElasticity: 0.6,
+    });
+    const expensive = priceSensitiveEffortChoice({
+      model,
+      ratioToPeer: 12,
+      priceElasticity: 2,
+    });
+    expect(expensive.shares[INSTANT_EFFORT_ID]).toBeGreaterThan(
+      affordable.shares[INSTANT_EFFORT_ID] ?? 0,
+    );
+    expect(expensive.billedTokenMultiplier).toBeLessThan(
+      affordable.billedTokenMultiplier,
+    );
+    expect(expensive.complaintPressure).toBeGreaterThan(0);
+    expect(
+      modelSupportsEffortHeads({
+        family: "diffusion",
+        productPreset: "image_generation",
+        modalities: ["image"],
+      }),
+    ).toBe(false);
   });
 });

@@ -341,7 +341,7 @@ export function ActiveTrainingCard({
           }
           onFocus={setSpineFocus}
         />
-        <p className="font-mono text-[0.6875rem] leading-5 text-muted">
+        <p className="hud-mobile-detail font-mono text-[0.6875rem] leading-5 text-muted">
           You are here: {campaignStageLabel(job)}. Train, evaluate, align, and
           launch from one run. Benchmarks and snapshots are optional; alignment
           uses the reserved recipe mix and attached gyms.
@@ -384,11 +384,11 @@ export function ActiveTrainingCard({
             {resources ? (
               <>
                 <p
-                  className={
+                  className={`${
                     resources.bottleneck === "none"
                       ? "text-muted"
                       : "text-danger"
-                  }
+                  } ${resources.bottleneck === "none" ? "hud-mobile-detail" : ""}`}
                 >
                   HBM {num(resources.ramAllocatedGb)} /{" "}
                   {num(resources.ramRequiredGb)} GB · host RAM{" "}
@@ -396,11 +396,11 @@ export function ActiveTrainingCard({
                   {num(resources.systemRamRequiredGb)} GB
                 </p>
                 <p
-                  className={
+                  className={`${
                     resources.bottleneck === "none"
                       ? "text-muted"
                       : "text-danger"
-                  }
+                  } ${resources.bottleneck === "none" ? "hud-mobile-detail" : ""}`}
                 >
                   Bottleneck:{" "}
                   {resources.bottleneck === "none"
@@ -566,9 +566,17 @@ export function ActiveTrainingCard({
         </section>
 
         {onSetLabs ? (
-          <div className="rounded-md border border-line/60 bg-void/30 p-2.5">
-            <p className="hud-eyebrow">Gyms on this run</p>
-            <div className="mt-2">
+          <details
+            className="group rounded-md border border-line/60 bg-void/30"
+            data-run-gyms-disclosure="true"
+          >
+            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
+              <span className="hud-eyebrow">Gyms on this run</span>
+              <span className="font-mono text-[0.625rem] text-muted">
+                {job.attachedGymKinds?.length ?? 0} attached · <span className="group-open:hidden">Edit</span><span className="hidden group-open:inline">Hide</span>
+              </span>
+            </summary>
+            <div className="border-t border-line/40 p-2.5">
               <TrainingLabsPicker
                 gyms={gyms}
                 researchUnlocked={unlocked}
@@ -576,7 +584,7 @@ export function ActiveTrainingCard({
                 onChange={(kinds) => onSetLabs(job.id, kinds)}
               />
             </div>
-          </div>
+          </details>
         ) : null}
 
         {diagnosticStall ? (
@@ -667,35 +675,49 @@ export function ActiveTrainingCard({
           />
         ) : null}
 
-        {economics || snapshots.length > 0 ? (
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            {economics ? (
-              <>
-                <StatRow label="Setup" value={money(economics.setupCost)} />
-                <StatRow label="Data" value={money(economics.dataCost)} />
+        <details
+          className="group rounded-md border border-line/50 bg-void/25"
+          data-run-telemetry-disclosure="true"
+          data-shell-gesture-ignore="true"
+        >
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
+            <span className="hud-eyebrow">Loss, cost &amp; energy</span>
+            <span className="font-mono text-[0.625rem] tabular-nums text-muted">
+              {currentLoss == null ? "No loss yet" : `loss ${currentLoss.toFixed(2)}`} · <span className="group-open:hidden">Details</span><span className="hidden group-open:inline">Hide</span>
+            </span>
+          </summary>
+          <div className="border-t border-line/40 p-2.5">
+            {economics || snapshots.length > 0 ? (
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {economics ? (
+                  <>
+                    <StatRow label="Setup" value={money(economics.setupCost)} />
+                    <StatRow label="Data" value={money(economics.dataCost)} />
+                    <StatRow
+                      label="Training"
+                      value={money(economics.trainingCostAccrued)}
+                      tone="warning"
+                    />
+                  </>
+                ) : null}
                 <StatRow
-                  label="Training"
-                  value={money(economics.trainingCostAccrued)}
-                  tone="warning"
+                  label="Funded plan"
+                  value={`${Math.min(100, recommendedProgress * 100).toFixed(2)}%`}
                 />
-              </>
+              </div>
             ) : null}
-            <StatRow
-              label="Funded plan"
-              value={`${Math.min(100, recommendedProgress * 100).toFixed(2)}%`}
+
+            <TrainingLossChart
+              history={job.lossHistory ?? []}
+              failed={job.failed ?? false}
+              energyMWh={chartMWh}
+              mwDays={chartMwDays}
+              energyEstimated={energyEstimated}
+              benchmarks={snapshots}
+              checkpoints={checkpointMarkers}
             />
           </div>
-        ) : null}
-
-        <TrainingLossChart
-          history={job.lossHistory ?? []}
-          failed={job.failed ?? false}
-          energyMWh={chartMWh}
-          mwDays={chartMwDays}
-          energyEstimated={energyEstimated}
-          benchmarks={snapshots}
-          checkpoints={checkpointMarkers}
-        />
+        </details>
 
         {!job.failed ? (
           <label className="block text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
@@ -714,7 +736,10 @@ export function ActiveTrainingCard({
           </label>
         ) : null}
 
-        <div className="sticky bottom-0 z-20 -mx-3 grid grid-cols-2 gap-2 border-y border-line/60 bg-panel-2/95 px-3 py-2 shadow-[0_-0.5rem_1.5rem_rgba(0,0,0,0.25)] backdrop-blur-md sm:static sm:z-auto sm:mx-0 sm:flex sm:flex-wrap sm:border-0 sm:bg-transparent sm:p-0 sm:shadow-none sm:backdrop-blur-none">
+        <div
+          className="sticky bottom-0 z-20 -mx-3 grid grid-cols-2 gap-2 border-y border-line/60 bg-panel-2/95 px-3 py-2 shadow-[0_-0.5rem_1.5rem_rgba(0,0,0,0.25)] backdrop-blur-md min-[560px]:grid-cols-3 [&_.hud-button]:!min-h-11 [&_.hud-button]:!w-full xl:static xl:z-auto xl:mx-0 xl:flex xl:flex-wrap xl:border-0 xl:bg-transparent xl:p-0 xl:shadow-none xl:backdrop-blur-none xl:[&_.hud-button]:!w-auto"
+          data-mobile-actions="sticky-grid"
+        >
           {job.failed ? (
             <>
               {job.failureRecoveryCheckpointId ? (
@@ -811,11 +836,11 @@ export function ActiveTrainingCard({
                 {cancelConfirm ? "Confirm delete" : "Delete run"}
               </HudButton>
               {!minimum.completeReady && launchable ? (
-                <p className="col-span-2 basis-full text-[0.75rem] text-amber">
+                <p className="col-span-2 basis-full text-[0.75rem] text-amber min-[560px]:col-span-3">
                   {haircutCopy}
                 </p>
               ) : releaseDisabledReason ? (
-                <p className="col-span-2 basis-full text-[0.75rem] text-amber">
+                <p className="col-span-2 basis-full text-[0.75rem] text-amber min-[560px]:col-span-3">
                   {releaseDisabledReason}
                 </p>
               ) : null}
@@ -895,11 +920,11 @@ export function ActiveTrainingCard({
                 {cancelConfirm ? "Confirm cancel" : "Cancel"}
               </HudButton>
               {launchable ? (
-                <p className="col-span-2 basis-full text-[0.75rem] text-amber">
+                <p className="col-span-2 basis-full text-[0.75rem] text-amber min-[560px]:col-span-3">
                   {haircutCopy}
                 </p>
               ) : releaseDisabledReason ? (
-                <p className="col-span-2 basis-full text-[0.75rem] text-muted">
+                <p className="col-span-2 basis-full text-[0.75rem] text-muted min-[560px]:col-span-3">
                   Launch locked: {releaseDisabledReason}
                 </p>
               ) : null}
@@ -933,18 +958,20 @@ export function ActiveTrainingCard({
         ) : null}
 
         {done ? (
-          <div
+          <details
             data-campaign-stage="specialize"
-            className="rounded-md border border-research/25 bg-research/5 p-2.5"
+            className="group rounded-md border border-research/25 bg-research/5"
+            data-specialize-disclosure="true"
           >
-            <div className="mb-1.5 flex items-center justify-between gap-2">
+            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-research/60 [&::-webkit-details-marker]:hidden">
               <span className="text-[0.8125rem] font-semibold text-bone">
                 Specialize
               </span>
               <span className="font-mono text-[0.6875rem] text-muted">
-                cash + gym quality gate the pass
+                SFT · RLHF · process · tools · <span className="group-open:hidden">Configure</span><span className="hidden group-open:inline">Hide</span>
               </span>
-            </div>
+            </summary>
+            <div className="border-t border-research/20 p-2.5">
             <p className="mb-2 text-[0.6875rem] leading-5 text-muted">
               SFT, RLHF, process, and tools are paid campaigns. Fund gyms first
               or you will burn extra PF-days for weaker outcomes. Continue-train
@@ -1036,7 +1063,8 @@ export function ActiveTrainingCard({
                 label="Unlock Process Reward Models for the next stage"
               />
             ) : null}
-          </div>
+            </div>
+          </details>
         ) : null}
       </div>
     </GameCard>

@@ -13,6 +13,7 @@ import {
   setEffortHeadComputeShare,
   startEffortTraining,
   startTraining,
+  tickTraining,
 } from "./training";
 
 function richState(seed: number): SimState {
@@ -212,7 +213,7 @@ describe("per-head effort training", () => {
               domain,
               { ...stock, processed: stock.processed + 2_000 },
             ]),
-          ),
+          ) as NonNullable<typeof state.player.data>["stocks"],
           lifetimeProcessed: state.player.data!.lifetimeProcessed + 8_000,
         },
       },
@@ -292,14 +293,12 @@ describe("per-head effort training", () => {
           ...nextJob,
           progressPfDays: nextJob.targetPfDays,
           daysElapsed: Math.max(nextJob.minCalendarDays ?? 0, 30),
-          stage: "done",
         },
         trainingJobs: [
           {
             ...nextJob,
             progressPfDays: nextJob.targetPfDays,
             daysElapsed: Math.max(nextJob.minCalendarDays ?? 0, 30),
-            stage: "done",
           },
         ],
       },
@@ -317,7 +316,7 @@ describe("per-head effort training", () => {
     ).toBeGreaterThan(instantBefore.trainPfDays);
   });
 
-  it("keeps sibling heads when Continue train runs on a released Instant", () => {
+  it("queues released-head work on shared Training PF and keeps siblings", () => {
     let state = startTraining(richState(4405), {
       name: "Released Heads",
       family: "dense",
@@ -372,13 +371,31 @@ describe("per-head effort training", () => {
     const instantAfter = after.find(
       (recipe) => recipe.id === INSTANT_EFFORT_ID,
     )!;
-    expect(instantAfter.trainPfDays).toBeGreaterThan(instantBefore.trainPfDays);
-    expect(instantAfter.progressPfDays ?? 0).toBeGreaterThan(
+    expect(instantAfter.trainPfDays).toBe(instantBefore.trainPfDays);
+    expect(instantAfter.progressPfDays ?? 0).toBe(
       instantBefore.progressPfDays ?? 0,
     );
     expect(instantAfter.targetPfDays ?? 0).toBeGreaterThan(
       instantBefore.targetPfDays ?? 0,
     );
+    expect(state.player.trainingJob?.effortOnlySourceModelId).toBe(model.id);
+    for (let day = 0; day < 60 && state.player.trainingJob; day += 1) {
+      state = tickTraining(state);
+    }
+    const completed = migrateEffortRecipes(
+      state.player.models.find((candidate) => candidate.id === model.id)
+        ?.productProfile,
+    );
+    const completedInstant = completed.find(
+      (recipe) => recipe.id === INSTANT_EFFORT_ID,
+    )!;
+    expect(completedInstant.trainPfDays).toBeGreaterThan(
+      instantBefore.trainPfDays,
+    );
+    expect(completedInstant.progressPfDays ?? 0).toBeGreaterThan(
+      instantBefore.progressPfDays ?? 0,
+    );
+    expect(completed.some((recipe) => recipe.name === "Think")).toBe(true);
   });
 });
 

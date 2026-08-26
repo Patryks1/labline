@@ -93,11 +93,17 @@ export function RadarChart({
     : 'No radar axis selected.'
 
   return (
-    <figure className={compact ? 'rounded-lg border border-line/70 bg-void/35 p-1.5' : 'rounded-xl border border-line/70 bg-void/35 p-2.5'}>
-      <div className={compact ? 'grid gap-1.5 grid-cols-[minmax(0,1fr)_8rem]' : 'grid gap-2 lg:grid-cols-[minmax(0,1fr)_11rem]'}>
+    <figure
+      className={`hud-chart-frame ${compact ? 'rounded-lg border border-line/70 bg-void/35 p-1.5' : 'rounded-xl border border-line/70 bg-void/35 p-2.5'}`}
+      data-mobile-chart="true"
+      data-chart-kind="radar"
+      data-chart-compact={compact ? 'true' : 'false'}
+      data-swipe-ignore="true"
+    >
+      <div className={`hud-radar-layout ${compact ? 'grid gap-1.5 grid-cols-[minmax(0,1fr)_8rem]' : 'grid gap-2 lg:grid-cols-[minmax(0,1fr)_11rem]'}`}>
         <svg
           viewBox={geometry.viewBox}
-          className={`mx-auto w-full overflow-visible touch-none ${compact ? 'max-w-[14rem]' : 'max-w-[28rem]'}`}
+          className={`hud-radar-plot mx-auto w-full overflow-visible touch-pan-y ${compact ? 'max-w-[14rem]' : 'max-w-[28rem]'}`}
           role="group"
           aria-roledescription="radar chart"
           aria-label={ariaLabel ?? `${suiteId.replaceAll('_', ' ')} radar chart`}
@@ -215,7 +221,7 @@ export function RadarChart({
           })}
         </svg>
 
-        <figcaption className={compact ? 'min-h-20 border-l border-line/60 pl-2 pt-0 text-[0.9em]' : 'min-h-32 border-t border-line/60 pt-2 lg:border-l lg:border-t-0 lg:pl-3 lg:pt-0'}>
+        <figcaption className={`hud-radar-readout ${compact ? 'min-h-20 border-l border-line/60 pl-2 pt-0 text-[0.9em]' : 'min-h-32 border-t border-line/60 pt-2 lg:border-l lg:border-t-0 lg:pl-3 lg:pt-0'}`}>
           <div className="text-[0.625rem] uppercase tracking-[0.16em] text-muted">Axis readout</div>
           <div className="mt-1 flex items-start justify-between gap-2">
             <strong className="min-w-0 flex-1 text-[0.8125rem] font-medium leading-snug text-bone">{activeMetric?.label}</strong>
@@ -227,7 +233,7 @@ export function RadarChart({
               style={{ width: `${Math.max(0, Math.min(100, activeScore))}%` }}
             />
           </div>
-          <dl className="mt-2 space-y-1 text-[0.6875rem] leading-snug">
+          <dl className="hud-mobile-detail mt-2 space-y-1 text-[0.6875rem] leading-snug">
             <div>
               <dt className="text-muted">Strongest driver</dt>
               <dd className="text-bone">{activeProfile?.positive ?? 'Model capability and matching data'}</dd>
@@ -238,7 +244,7 @@ export function RadarChart({
             </div>
           </dl>
           {comparisonEntries.length > 0 ? (
-            <ul className="mt-2 space-y-0.5 font-mono text-[0.625rem] text-muted">
+            <ul className="hud-mobile-detail mt-2 space-y-0.5 font-mono text-[0.625rem] text-muted">
               {comparisonEntries.map((entry, index) => (
                 <li key={entry.id ?? `${entry.label}-${index}`}>
                   <span style={entry.color ? { color: entry.color } : undefined}>━━</span> {entry.label}

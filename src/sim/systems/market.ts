@@ -1,6 +1,7 @@
 import {
   DEMAND_MODEL_VERSION,
   ECONOMY,
+  liftMarketTokenDemand,
   SEGMENTS,
   WORLD_POPULATION,
 } from "../balance/economy";
@@ -48,6 +49,7 @@ import {
   inferenceCapacityMTok,
   inferencePfAvailable,
   inferencePfDemand,
+  pfPerMTokForModel,
   planActualMTokPerUser,
   planUsageUtilization,
   settleComputeLedger,
@@ -102,7 +104,13 @@ import { activeBalanceTuning } from "../balance/tuning";
 import {
   computeWorkKindForProduct,
   nativeWorkFromEquivalentMTok,
+  nativeWorkFromEquivalentMTokAtEffort,
 } from "../balance/workload";
+import {
+  apiEffortChoice,
+  planEffortMix,
+  routedApiEffortChoices,
+} from "../balance/effortEconomics";
 import { currentMarketingOutcome } from "./marketing";
 import {
   bestModelOnPlan,
@@ -135,6 +143,7 @@ import {
   planSegmentAffinityWeight,
   planSubsidyRatio,
   planDemandShockMultiplier,
+  planEnabledEffortRecipes,
   rivalNearestValueRatio,
   isApiAcceptingNew,
   isPlanAcceptingNew,
@@ -1091,7 +1100,14 @@ export function nextServicePain(
 export interface OfferDemandBucket {
   offer: MarketOffer;
   model: Model;
+  /** Actual billable token volume after the selected effort mix. */
   apiMTok: number;
+  /** Instant-equivalent customer work before generated-token expansion. */
+  apiBaseMTok?: number;
+  /** Base work multiplied by the effort mix's generated-token multiplier. */
+  apiGeneratedMTok?: number;
+  /** Base work multiplied by the effort mix's physical compute multiplier. */
+  apiComputeMTok?: number;
   subscriptionMTok: number;
   /**
    * Active subscription seats already converted with {@link PLAN_SEAT_CONVERSION}.
@@ -1173,14 +1189,16 @@ export function rivalPlanDemandPerUser(
     const launchEngagement = 1 + Math.max(0, shock - 1) * 0.15;
     const perUser = Math.min(
       allowance / ECONOMY.daysPerMonth,
-      planActualMTokPerUser(
-        plan,
-        ECONOMY.basePlanUsageMTokPerDay,
-        utilization,
-        allowance,
-      ) *
-        qualityEngagement *
-        launchEngagement,
+      liftMarketTokenDemand(
+        planActualMTokPerUser(
+          plan,
+          ECONOMY.basePlanUsageMTokPerDay,
+          utilization,
+          allowance,
+        ) *
+          qualityEngagement *
+          launchEngagement,
+      ),
     );
     return sum + perUser * (rawWeights[index]! / Math.max(1e-9, weightTotal));
   }, 0);
@@ -1200,22 +1218,25 @@ export function settleRivalOfferDemand(
     (sum, bucket) => sum + bucket.apiMTok + bucket.subscriptionMTok,
     0,
   );
-  const demandPf = buckets.reduce(
-    (sum, bucket) =>
-      sum +
-      inferencePfDemand(
-        bucket.apiMTok + bucket.subscriptionMTok,
-        bucket.model,
-        servingEfficiency,
-      ),
-    0,
-  );
+  const demandPf = buckets
+    .map((bucket) => {
+      const apiComputeMTok = bucket.apiComputeMTok ?? bucket.apiMTok;
+      return (
+        apiComputeMTok *
+          pfPerMTokForModel(bucket.model, servingEfficiency) +
+        inferencePfDemand(
+          bucket.subscriptionMTok,
+          bucket.model,
+          servingEfficiency,
+        )
+      );
+    })
+    .sort((a, b) => a - b)
+    .reduce((sum, work) => sum + work, 0);
   const workItems = buckets.flatMap((bucket, index) => {
-    const apiWork = inferencePfDemand(
-      bucket.apiMTok,
-      bucket.model,
-      servingEfficiency,
-    );
+    const apiWork =
+      (bucket.apiComputeMTok ?? bucket.apiMTok) *
+      pfPerMTokForModel(bucket.model, servingEfficiency);
     const subscriptionWork = inferencePfDemand(
       bucket.subscriptionMTok,
       bucket.model,
@@ -1366,6 +1387,11 @@ export function tickMarket(state: SimState): SimState {
       {
         offer,
         apiMTok: 0,
+        apiBaseMTok: 0,
+        apiGeneratedMTok: 0,
+        apiComputeMTok: 0,
+        apiRatioWeightedMTok: 0,
+        apiElasticityWeightedMTok: 0,
         subscriptionMTok: 0,
         subscriptionUsers: 0,
       },
@@ -1528,7 +1554,7 @@ export function tickMarket(state: SimState): SimState {
 
   const frontierTaskBoost =
     1 + Math.max(0, frontier - 20) * ECONOMY.marketGrowthPerCapability * 0.35;
-  const apiBase = ECONOMY.apiBaseMTokPerUserDay;
+  const apiBase = liftMarketTokenDemand(ECONOMY.apiBaseMTokPerUserDay);
   // Prior overload softens freeload / sticky traffic before we recompute pain
   const painDemandDamp = Math.max(0.35, 1 - priorPain * 0.55);
   const metroDemand = cityPopulationDemandMultiplier(state);
@@ -1557,7 +1583,17 @@ export function tickMarket(state: SimState): SimState {
       });
       continue;
     }
-    const effectiveOffer = (offer: MarketOffer) =>
+    const modelByOffer = new Map(
+      segmentOffers.map((offer) => [
+        marketOfferKey(offer.labId, offer.modelId),
+        offer.labId === state.playerLabId
+          ? playerOfferModel(state, offer)
+          : state.rivals
+              .find((rival) => rival.id === offer.labId)
+              ?.models.find((model) => model.id === offer.modelId),
+      ]),
+    );
+    const baseEffectiveOffer = (offer: MarketOffer) =>
       segDef.prefersSub
         ? offer
         : {
@@ -1567,6 +1603,94 @@ export function tickMarket(state: SimState): SimState {
             tokPerSec: offer.apiTokPerSec ?? offer.tokPerSec,
             benchmarks: offer.apiBenchmarks ?? offer.benchmarks,
           };
+    const effortByOffer = new Map<
+      string,
+      ReturnType<typeof apiEffortChoice>
+    >();
+    if (!segDef.prefersSub) {
+      for (const offer of segmentOffers) {
+        const key = marketOfferKey(offer.labId, offer.modelId);
+        const model = modelByOffer.get(key);
+        if (!model) continue;
+        const scoredOffer = baseEffectiveOffer(offer);
+        const peerOffers = segmentOffers
+          .filter(
+            (peer) =>
+              !(peer.labId === offer.labId && peer.modelId === offer.modelId),
+          )
+          .map(baseEffectiveOffer);
+        const kind = commercialModelKind(model);
+        const monopolyAnchor = blendApiPrice(
+          model.suggestedApiPriceIn ?? model.costApiPriceIn ?? 0.5,
+          model.suggestedApiPriceOut ?? model.costApiPriceOut ?? 2,
+        );
+        const initialPricing = analyzeApiPricing({
+          price: offer.apiPrice,
+          marginalCost: 0,
+          capability: scoredOffer.capability,
+          featureScore: scoredOffer.modalities.length * 18,
+          tokPerSec: scoredOffer.tokPerSec,
+          kind,
+          peers:
+            peerOffers.length > 0
+              ? peerOffers.map((peer) => ({
+                  price: peer.apiPrice,
+                  capability: peer.capability,
+                  featureScore: peer.modalities.length * 18,
+                  tokPerSec: peer.tokPerSec,
+                }))
+              : [
+                  {
+                    price: monopolyAnchor,
+                    capability: scoredOffer.capability,
+                    featureScore: scoredOffer.modalities.length * 18,
+                    tokPerSec: scoredOffer.tokPerSec,
+                  },
+                ],
+        });
+        const ownerPricing =
+          offer.labId === state.playerLabId
+            ? state.player.pricing
+            : state.rivals.find((rival) => rival.id === offer.labId)?.pricing;
+        const prices = modelOfferApiInOut(
+          ownerPricing ?? state.player.pricing,
+          model,
+        );
+        const surge =
+          offer.labId === state.playerLabId
+            ? postedApiSurgeMultiplier(state)
+            : 1;
+        effortByOffer.set(
+          key,
+          apiEffortChoice({
+            model,
+            kind,
+            ratioToPeer: initialPricing.ratioToPeer ?? 1,
+            priceElasticity:
+              SEGMENT_API_PRICE_ELASTICITY[segState.id] ??
+              DEFAULT_API_PRICE_ELASTICITY,
+            priceIn: prices.priceIn * surge,
+            priceOut: prices.priceOut * surge,
+            baseCapability: scoredOffer.capability,
+            baseBenchmarks: scoredOffer.benchmarks,
+          }),
+        );
+      }
+    }
+    const effectiveOffer = (offer: MarketOffer): MarketOffer => {
+      const base = baseEffectiveOffer(offer);
+      const effort = effortByOffer.get(
+        marketOfferKey(offer.labId, offer.modelId),
+      );
+      return effort
+        ? {
+            ...base,
+            capability: effort.realizedCapability,
+            benchmarks: effort.realizedBenchmarks,
+            apiPrice: base.apiPrice * effort.effectiveTaskPriceMultiplier,
+          }
+        : base;
+    };
     const segmentFrontier = segmentOffers.reduce(
       (highest, offer) => Math.max(highest, effectiveOffer(offer).capability),
       20,
@@ -1592,10 +1716,10 @@ export function tickMarket(state: SimState): SimState {
     const utils = segmentOffers.map((o) => {
       const scoredOffer = effectiveOffer(o);
       const bandPeers = peersInPriceBand(
-        o,
-        segmentOffers,
+        scoredOffer,
+        segmentOffers.map(effectiveOffer),
         segDef.prefersSub,
-      ).map((peer) => effectiveOffer(peer));
+      );
       let u = offerUtility(scoredOffer, segState.id, {
         frontier: segmentFrontier,
         qualityFrontier: segmentQualityFrontier,
@@ -1607,12 +1731,9 @@ export function tickMarket(state: SimState): SimState {
           (peer) => !(peer.labId === o.labId && peer.modelId === o.modelId),
         )
         .map((peer) => effectiveOffer(peer));
-      const scoredModel =
-        o.labId === state.playerLabId
-          ? playerOfferModel(state, o)
-          : state.rivals
-              .find((rival) => rival.id === o.labId)
-              ?.models.find((model) => model.id === o.modelId);
+      const scoredModel = modelByOffer.get(
+        marketOfferKey(o.labId, o.modelId),
+      );
       const kind = scoredModel ? commercialModelKind(scoredModel) : "language";
       // Monopoly anchor: with no rival offers in the segment there is no peer
       // median, but demand must still respond to absolute price. Judge the
@@ -1646,7 +1767,9 @@ export function tickMarket(state: SimState): SimState {
               },
             ];
       const pricingStatus = analyzeApiPricing({
-        price: segDef.prefersSub ? o.subPrice : o.apiPrice,
+        price: segDef.prefersSub
+          ? scoredOffer.subPrice
+          : scoredOffer.apiPrice,
         marginalCost: 0,
         capability: scoredOffer.capability,
         featureScore: scoredOffer.modalities.length * 18,
@@ -1828,19 +1951,19 @@ export function tickMarket(state: SimState): SimState {
       if (!segDef.prefersSub && offerPain > 0.08) {
         mtok *= Math.max(0.35, 1 - offerPain * 0.55);
       }
+      let apiBaseMTok = 0;
+      let apiGeneratedTokenMultiplier = 1;
+      let apiComputeTokenMultiplier = 1;
+      let apiRatioToPeer = 1;
+      let apiPriceElasticity = DEFAULT_API_PRICE_ELASTICITY;
       if (!segDef.prefersSub) {
-        const model =
-          offer.labId === state.playerLabId
-            ? state.player.models.find(
-                (candidate) => candidate.id === offer.modelId,
-              )
-            : state.rivals
-                .find((rival) => rival.id === offer.labId)
-                ?.models.find((candidate) => candidate.id === offer.modelId);
+        const key = marketOfferKey(offer.labId, offer.modelId);
+        const model = modelByOffer.get(key);
         const kind = model ? commercialModelKind(model) : "language";
-        const pricingStatus = pricingByOffer.get(
-          marketOfferKey(offer.labId, offer.modelId),
-        );
+        const pricingStatus = pricingByOffer.get(key);
+        apiPriceElasticity =
+          SEGMENT_API_PRICE_ELASTICITY[segState.id] ??
+          DEFAULT_API_PRICE_ELASTICITY;
         // Realized token demand responds to the peer-relative price with a
         // per-segment elasticity: premiums beyond the tolerated ratio collapse
         // MTok toward a 2% trickle; mild undercuts earn up to +15%.
@@ -1853,9 +1976,7 @@ export function tickMarket(state: SimState): SimState {
           kind,
           capabilityLead: pricingStatus?.capabilityLead,
           featureLead: pricingStatus?.featureLead,
-          elasticity:
-            SEGMENT_API_PRICE_ELASTICITY[segState.id] ??
-            DEFAULT_API_PRICE_ELASTICITY,
+          elasticity: apiPriceElasticity,
         });
         // Peak pricing is an explicit demand control, not just a revenue
         // multiplier. At aggressive uplifts the API audience walks away even
@@ -1863,6 +1984,22 @@ export function tickMarket(state: SimState): SimState {
         // from leaving the demand ledger falsely saturated.
         if (offer.labId === state.playerLabId) {
           mtok *= peakPricingDemandMultiplier(postedApiSurgeMultiplier(state));
+        }
+        apiBaseMTok = mtok;
+        const effort = effortByOffer.get(key);
+        apiRatioToPeer =
+          (pricingStatus?.ratioToPeer ?? 1) /
+          Math.max(1, effort?.effectiveTaskPriceMultiplier ?? 1);
+        if (effort) {
+          apiGeneratedTokenMultiplier = effort.generatedTokenMultiplier;
+          apiComputeTokenMultiplier = effort.computeTokenMultiplier;
+          mtok = apiBaseMTok * effort.billedTokenMultiplier;
+          if (offer.labId === state.playerLabId) {
+            playerPricingComplaintPressure = Math.max(
+              playerPricingComplaintPressure,
+              effort.complaintPressure,
+            );
+          }
         }
         if (
           offer.labId === state.playerLabId &&
@@ -1912,6 +2049,14 @@ export function tickMarket(state: SimState): SimState {
           wonDemand.subscriptionUsers += users * PLAN_SEAT_CONVERSION;
         } else {
           wonDemand.apiMTok += mtok;
+          wonDemand.apiBaseMTok += apiBaseMTok;
+          wonDemand.apiGeneratedMTok +=
+            apiBaseMTok * apiGeneratedTokenMultiplier;
+          wonDemand.apiComputeMTok +=
+            apiBaseMTok * apiComputeTokenMultiplier;
+          wonDemand.apiRatioWeightedMTok += apiBaseMTok * apiRatioToPeer;
+          wonDemand.apiElasticityWeightedMTok +=
+            apiBaseMTok * apiPriceElasticity;
         }
       }
 
@@ -1959,6 +2104,11 @@ export function tickMarket(state: SimState): SimState {
       for (const demand of demandByOffer.values()) {
         if (demand.offer.labId !== "player") continue;
         demand.apiMTok *= scale;
+        demand.apiBaseMTok *= scale;
+        demand.apiGeneratedMTok *= scale;
+        demand.apiComputeMTok *= scale;
+        demand.apiRatioWeightedMTok *= scale;
+        demand.apiElasticityWeightedMTok *= scale;
       }
     }
   }
@@ -2083,10 +2233,13 @@ export function tickMarket(state: SimState): SimState {
     grandfatheredSubscribers: number;
     subscribers: number;
     maxSeats: number;
+    /** Instant-equivalent plan work before output/reasoning expansion. */
+    baseRawMTok: number;
     rawMTok: number;
     usageRate: number;
     model: ReturnType<typeof bestModelOnPlan>;
     modelMix: ReturnType<typeof planModelTrafficMix>;
+    effortByModelId: Record<string, ReturnType<typeof planEffortMix>>;
     demandPf: number;
     priceTooHigh: number;
     allowanceMTokMonth: number;
@@ -2292,23 +2445,52 @@ export function tickMarket(state: SimState): SimState {
     // Closing free: paid take-rate bonus (conversion funnel)
     if (!free && !freePlanOn) subscribers *= 1.35;
     const dailyAllowance = effectiveAllowanceMTok / ECONOMY.daysPerMonth;
-    let perUser = Math.min(
-      dailyAllowance,
-      planActualMTokPerUser(
-        plan,
-        ECONOMY.basePlanUsageMTokPerDay,
-        usageRate,
-        effectiveAllowanceMTok,
-      ) *
-        qualityEngagement *
-        (1 +
-          Math.max(0, planDemandShockMultiplier(plan, state.day) - 1) * 0.15),
+    const effortByModelId = Object.fromEntries(
+      modelMix.map((lane) => [
+        lane.model.id,
+        planEffortMix({
+          model: lane.model,
+          kind: commercialModelKind(lane.model),
+          recipes: planEnabledEffortRecipes(plan, lane.model),
+        }),
+      ]),
     );
-    if (free && priorPain > 0.08) perUser *= painDemandDamp;
+    const planBilledTokenMultiplier =
+      modelMix.length > 0
+        ? modelMix.reduce(
+            (sum, lane) =>
+              sum +
+              lane.share *
+                (effortByModelId[lane.model.id]?.billedTokenMultiplier ?? 1),
+            0,
+          )
+        : 1;
+    let basePerUser = Math.min(
+      dailyAllowance / Math.max(1, planBilledTokenMultiplier),
+      liftMarketTokenDemand(
+        planActualMTokPerUser(
+          plan,
+          ECONOMY.basePlanUsageMTokPerDay,
+          usageRate,
+          effectiveAllowanceMTok,
+        ) *
+          qualityEngagement *
+          (1 +
+            Math.max(0, planDemandShockMultiplier(plan, state.day) - 1) *
+              0.15),
+      ),
+    );
+    if (free && priorPain > 0.08) basePerUser *= painDemandDamp;
+    const perUser = basePerUser * planBilledTokenMultiplier;
+    const baseRawMTok = subscribers * basePerUser;
     const rawMTok = subscribers * perUser;
     const demandPf = modelMix.reduce(
       (sum, item) =>
-        sum + inferencePfDemand(rawMTok * item.share, item.model, serveEff),
+        sum +
+        baseRawMTok *
+          item.share *
+          (effortByModelId[item.model.id]?.computeTokenMultiplier ?? 1) *
+          pfPerMTokForModel(item.model, serveEff),
       0,
     );
     const planMax = maxSeatsForPlan(
@@ -2343,9 +2525,11 @@ export function tickMarket(state: SimState): SimState {
       frontierProximity: sota,
       model: planModel,
       modelMix,
+      effortByModelId,
       demandPf,
       priceTooHigh,
       perUser,
+      basePerUser,
       cap,
       effectiveAllowanceMTok,
       subsidyGbp,
@@ -2421,10 +2605,15 @@ export function tickMarket(state: SimState): SimState {
             0,
             subscribers - Math.min(demandSubscribers, configuredCap),
           );
+    const baseRawMTok = subscribers * b.basePerUser;
     const rawMTok = subscribers * b.perUser;
     const demandPf = b.modelMix.reduce(
       (sum, item) =>
-        sum + inferencePfDemand(rawMTok * item.share, item.model, serveEff),
+        sum +
+        baseRawMTok *
+          item.share *
+          (b.effortByModelId[item.model.id]?.computeTokenMultiplier ?? 1) *
+          pfPerMTokForModel(item.model, serveEff),
       0,
     );
     const allowanceMTokMonth = planAllowanceMTokPerMonth(b.plan);
@@ -2440,10 +2629,12 @@ export function tickMarket(state: SimState): SimState {
       grandfatheredSubscribers,
       subscribers,
       maxSeats: b.planMax,
+      baseRawMTok,
       rawMTok,
       usageRate: b.usageRate,
       model: b.model,
       modelMix: b.modelMix,
+      effortByModelId: b.effortByModelId,
       demandPf,
       priceTooHigh: b.priceTooHigh,
       allowanceMTokMonth,
@@ -2462,7 +2653,7 @@ export function tickMarket(state: SimState): SimState {
       const parts = collapseRouterShares(
         apiRouterParts(router, state.player.models, demand.offer.apiPrice),
       );
-      return parts.flatMap((part) => {
+      const members = parts.flatMap((part) => {
         const model = state.player.models.find(
           (candidate) => candidate.id === part.model.id && isPublic(candidate),
         );
@@ -2476,13 +2667,57 @@ export function tickMarket(state: SimState): SimState {
         );
         return [
           {
+            partShare: part.share,
             model,
             serveModel,
             precision,
-            demandMTok: demand.apiMTok * part.share,
+            kind: commercialModelKind(model),
+            ...modelApiInOut(state, model.id),
           },
         ];
       });
+      const ratioToPeer =
+        demand.apiBaseMTok > 1e-12
+          ? demand.apiRatioWeightedMTok / demand.apiBaseMTok
+          : 1;
+      const priceElasticity =
+        demand.apiBaseMTok > 1e-12
+          ? demand.apiElasticityWeightedMTok / demand.apiBaseMTok
+          : DEFAULT_API_PRICE_ELASTICITY;
+      const resolved = routedApiEffortChoices({
+        members,
+        ratioToPeer,
+        priceElasticity,
+      }).map((member) => {
+        const baseDemandMTok = demand.apiBaseMTok * member.partShare;
+        return {
+          model: member.model,
+          serveModel: member.serveModel,
+          precision: member.precision,
+          demandMTok:
+            baseDemandMTok * member.effort.billedTokenMultiplier,
+          baseDemandMTok,
+          generatedTokenMultiplier:
+            member.effort.generatedTokenMultiplier,
+          computeDemandMTok:
+            baseDemandMTok * member.effort.computeTokenMultiplier,
+        };
+      });
+      demand.apiMTok = resolved.reduce(
+        (sum, member) => sum + member.demandMTok,
+        0,
+      );
+      demand.apiGeneratedMTok = resolved.reduce(
+        (sum, member) =>
+          sum +
+          member.baseDemandMTok * member.generatedTokenMultiplier,
+        0,
+      );
+      demand.apiComputeMTok = resolved.reduce(
+        (sum, member) => sum + member.computeDemandMTok,
+        0,
+      );
+      return resolved;
     }
     const model = state.player.models.find(
       (candidate) => candidate.id === demand.offer.modelId,
@@ -2494,8 +2729,27 @@ export function tickMarket(state: SimState): SimState {
       precision,
       state.player.researchUnlocked,
     );
-    return [{ model, serveModel, precision, demandMTok: demand.apiMTok }];
+    return [
+      {
+        model,
+        serveModel,
+        precision,
+        demandMTok: demand.apiMTok,
+        baseDemandMTok: demand.apiBaseMTok,
+        generatedTokenMultiplier:
+          demand.apiBaseMTok > 1e-12
+            ? demand.apiGeneratedMTok / demand.apiBaseMTok
+            : 1,
+        computeDemandMTok: demand.apiComputeMTok,
+      },
+    ];
   });
+  const concretePlayerApiMTok = playerApiBucketsRaw.reduce(
+    (sum, bucket) => sum + bucket.demandMTok,
+    0,
+  );
+  totalDemandMTok += concretePlayerApiMTok - playerApiMTok;
+  playerApiMTok = concretePlayerApiMTok;
   // Trickle-down: with the API channel saturated, half of each endpoint's
   // unserved demand retries on the lab's OTHER listed models — cheaper models
   // (more MTok per PF) catch more of the overflow. Capacity still binds in
@@ -2508,7 +2762,8 @@ export function tickMarket(state: SimState): SimState {
       bucket,
       pfPerMTok: Math.max(
         1e-12,
-        inferencePfDemand(1, bucket.serveModel, serveEff),
+        pfPerMTokForModel(bucket.serveModel, serveEff) *
+          (bucket.computeDemandMTok / Math.max(1e-12, bucket.demandMTok)),
       ),
     }));
     const totalPf = rates.reduce(
@@ -2535,16 +2790,25 @@ export function tickMarket(state: SimState): SimState {
         );
         gain += (moved[j]! * (1 / item.pfPerMTok)) / Math.max(1e-12, wTotal);
       }
+      const demandMTok = item.bucket.demandMTok - moved[i]! + gain;
+      const demandScale =
+        item.bucket.demandMTok > 1e-12
+          ? demandMTok / item.bucket.demandMTok
+          : 1;
       return {
         ...item.bucket,
-        demandMTok: item.bucket.demandMTok - moved[i]! + gain,
+        demandMTok,
+        baseDemandMTok: item.bucket.baseDemandMTok * demandScale,
+        computeDemandMTok: item.bucket.computeDemandMTok * demandScale,
       };
     });
   })();
   const planDemandMTok = buckets.reduce((s, b) => s + b.rawMTok, 0);
   const apiDemandPf = playerApiBuckets.reduce(
     (sum, bucket) =>
-      sum + inferencePfDemand(bucket.demandMTok, bucket.serveModel, serveEff),
+      sum +
+      bucket.computeDemandMTok *
+        pfPerMTokForModel(bucket.serveModel, serveEff),
     0,
   );
   const planDemandPf = buckets.reduce(
@@ -2558,21 +2822,21 @@ export function tickMarket(state: SimState): SimState {
     id: `api:${index}`,
     channel: "api",
     requestedUnits: bucket.demandMTok,
-    requestedWorkPfDays: inferencePfDemand(
-      bucket.demandMTok,
-      bucket.serveModel,
-      serveEff,
-    ),
+    requestedWorkPfDays:
+      bucket.computeDemandMTok *
+      pfPerMTokForModel(bucket.serveModel, serveEff),
     priority: 70,
   }));
   const planLedgerItems = buckets.flatMap((bucket) =>
     bucket.modelMix.map((lane) => {
-      const requestedUnits = bucket.rawMTok * lane.share;
-      const requestedWorkPfDays = inferencePfDemand(
-        requestedUnits,
-        lane.model,
-        serveEff,
-      );
+      const effort = bucket.effortByModelId[lane.model.id];
+      const baseRequestedMTok = bucket.baseRawMTok * lane.share;
+      const requestedUnits =
+        baseRequestedMTok * (effort?.billedTokenMultiplier ?? 1);
+      const requestedWorkPfDays =
+        baseRequestedMTok *
+        (effort?.computeTokenMultiplier ?? 1) *
+        pfPerMTokForModel(lane.model, serveEff);
       return {
         id: `plan:${bucket.plan.id}:${lane.model.id}`,
         channel: "subscription",
@@ -2591,6 +2855,9 @@ export function tickMarket(state: SimState): SimState {
       model: Model;
       apiIndex?: number;
       planId?: string;
+      baseRequestedMTok?: number;
+      generatedTokenMultiplier?: number;
+      billedTokenMultiplier?: number;
     }
   >();
   playerApiBuckets.forEach((bucket, index) => {
@@ -2602,10 +2869,14 @@ export function tickMarket(state: SimState): SimState {
   });
   for (const bucket of buckets) {
     for (const lane of bucket.modelMix) {
+      const effort = bucket.effortByModelId[lane.model.id];
       computeWorkMeta.set(`plan:${bucket.plan.id}:${lane.model.id}`, {
         channel: "subscription",
         model: lane.model,
         planId: bucket.plan.id,
+        baseRequestedMTok: bucket.baseRawMTok * lane.share,
+        generatedTokenMultiplier: effort?.generatedTokenMultiplier ?? 1,
+        billedTokenMultiplier: effort?.billedTokenMultiplier ?? 1,
       });
     }
   }
@@ -2761,10 +3032,12 @@ export function tickMarket(state: SimState): SimState {
     attributedServeOps / denomMTok + ECONOMY.bandwidthPerMTok;
 
   const apiModelSettlement = playerApiBuckets.map((bucket, index) => {
-    const dayMTok =
-      computeLedger.rows.find((row) => row.id === `api:${index}`)
-        ?.servedUnits ?? 0;
-    const dayInferPf = inferencePfDemand(dayMTok, bucket.serveModel, serveEff);
+    const row = computeLedger.rows.find((item) => item.id === `api:${index}`);
+    const dayMTok = row?.servedUnits ?? 0;
+    const servedFraction =
+      bucket.demandMTok > 1e-12 ? dayMTok / bucket.demandMTok : 0;
+    const dayBaseMTok = bucket.baseDemandMTok * servedFraction;
+    const dayInferPf = row?.servedWorkPfDays ?? 0;
     const { priceIn, priceOut } = modelApiInOut(state, bucket.model.id);
     const surge = postedApiSurgeMultiplier(state);
     const productKind = commercialModelKind(bucket.model);
@@ -2772,10 +3045,12 @@ export function tickMarket(state: SimState): SimState {
       model: bucket.model,
       precision: bucket.precision,
       dayMTok,
+      dayBaseMTok,
+      generatedTokenMultiplier: bucket.generatedTokenMultiplier,
       dayInferPf,
       dayRevenue: apiRevenueForCommercialWork(
         productKind,
-        dayMTok,
+        dayBaseMTok,
         priceIn * surge,
         priceOut * surge,
         {
@@ -2783,6 +3058,7 @@ export function tickMarket(state: SimState): SimState {
           perAudioMinute: bucket.model.apiPricePerAudioMinute,
           perVideoSecond: bucket.model.apiPricePerVideoSecond,
         },
+        bucket.generatedTokenMultiplier,
       ),
     };
   });
@@ -2831,7 +3107,7 @@ export function tickMarket(state: SimState): SimState {
           computeWorkMeta.get(candidate.id)?.model.id === item.model.id,
       );
       const modelMTok = row?.servedUnits ?? 0;
-      const modelPf = inferencePfDemand(modelMTok, item.model, serveEff);
+      const modelPf = row?.servedWorkPfDays ?? 0;
       return {
         modelId: item.model.id,
         name: item.model.name,
@@ -3014,6 +3290,7 @@ export function tickMarket(state: SimState): SimState {
       const planId = meta?.planId;
       const apiSettlement =
         apiIndex >= 0 ? apiModelSettlement[apiIndex] : undefined;
+      const apiBucket = apiIndex >= 0 ? playerApiBuckets[apiIndex] : undefined;
       const apiUsage = apiIndex >= 0 ? apiModelUsage[apiIndex] : undefined;
       const planSettlement = planId
         ? planStats.find((plan) => plan.planId === planId)
@@ -3033,6 +3310,27 @@ export function tickMarket(state: SimState): SimState {
         : "language";
       const channel =
         meta?.channel ?? (row.channel === "api" ? "api" : "subscription");
+      const nativeWork = (units: number) =>
+        apiBucket
+          ? nativeWorkFromEquivalentMTokAtEffort(
+              productKind,
+              apiBucket.baseDemandMTok *
+                (units / Math.max(1e-12, apiBucket.demandMTok)),
+              apiBucket.generatedTokenMultiplier,
+            )
+          : meta?.baseRequestedMTok != null
+            ? nativeWorkFromEquivalentMTokAtEffort(
+                productKind,
+                meta.baseRequestedMTok *
+                  (units /
+                    Math.max(
+                      1e-12,
+                      meta.baseRequestedMTok *
+                        (meta.billedTokenMultiplier ?? 1),
+                    )),
+                meta.generatedTokenMultiplier ?? 1,
+              )
+          : nativeWorkFromEquivalentMTok(productKind, units);
       return {
         id: `${state.day}:${row.id}`,
         labId: state.playerLabId,
@@ -3040,13 +3338,10 @@ export function tickMarket(state: SimState): SimState {
         kind: computeWorkKindForProduct(channel, productKind),
         modelId: meta?.model.id ?? apiSettlement?.model.id,
         planId,
-        requested: nativeWorkFromEquivalentMTok(
-          productKind,
-          row.requestedUnits,
-        ),
-        admitted: nativeWorkFromEquivalentMTok(productKind, row.admittedUnits),
-        served: nativeWorkFromEquivalentMTok(productKind, row.servedUnits),
-        billed: nativeWorkFromEquivalentMTok(productKind, row.billedUnits),
+        requested: nativeWork(row.requestedUnits),
+        admitted: nativeWork(row.admittedUnits),
+        served: nativeWork(row.servedUnits),
+        billed: nativeWork(row.billedUnits),
         requestedPfDays: row.requestedWorkPfDays,
         servedPfDays: row.servedWorkPfDays,
         revenue:

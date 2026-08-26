@@ -164,8 +164,9 @@ export function PowerPanel() {
       eyebrow="Infrastructure"
       title="Power"
       description="Grid MW, utility contracts, and surplus export."
+      mobileDescription="Supply, cost, and utility deals."
     >
-      <div className="space-y-3">
+      <div className="min-w-0 touch-pan-y space-y-3">
         <GameCard
           eyebrow="Power mix"
           title="Where the MW come from"
@@ -251,29 +252,10 @@ export function PowerPanel() {
           />
           <div className="mt-2 space-y-0.5">
             <StatRow label="Physical demand" value={mw(balance.demandMw)} />
-            <StatRow label="On-site generation" value={mw(resolved.mwGeneration)} />
-            <StatRow
-              label="Firm contract draw"
-              value={mw(resolved.mwContractImport)}
-            />
-            <StatRow
-              label="Spot draw"
-              value={mw(bill.spotMw)}
-              tone={bill.spotMw > 0 ? "warning" : "neutral"}
-            />
-            <StatRow
-              label="Interconnect limit"
-              value={mw(resolved.mwInterconnect)}
-            />
             <StatRow
               label="Brownout shortfall"
               value={mw(short)}
               tone={short > 0.05 ? "danger" : "positive"}
-            />
-            <StatRow
-              label="Export"
-              value={mw(balance.exportMw)}
-              tone="positive"
             />
             <StatRow
               label="Daily power cost"
@@ -281,9 +263,51 @@ export function PowerPanel() {
               strong
             />
           </div>
+          <details className="group mt-2 rounded-md border border-line/60 bg-void/30">
+            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-muted marker:hidden">
+              <span>Power flow details</span>
+              <span className="shrink-0 font-mono tabular-nums text-bone">
+                {mw(resolved.mwGeneration)} on-site
+              </span>
+            </summary>
+            <div className="space-y-0.5 border-t border-line/60 px-2.5 py-2">
+              <StatRow label="On-site generation" value={mw(resolved.mwGeneration)} />
+              <StatRow
+                label="Firm contract draw"
+                value={mw(resolved.mwContractImport)}
+              />
+              <StatRow
+                label="Spot draw"
+                value={mw(bill.spotMw)}
+                tone={bill.spotMw > 0 ? "warning" : "neutral"}
+              />
+              <StatRow
+                label="Interconnect limit"
+                value={mw(resolved.mwInterconnect)}
+              />
+              <StatRow
+                label="Export"
+                value={mw(balance.exportMw)}
+                tone="positive"
+              />
+            </div>
+          </details>
         </GameCard>
 
-        <PowerEfficiencyCard state={state} />
+        <details className="group rounded-lg border border-line/70 bg-panel-2/45">
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5 marker:hidden">
+            <span>
+              <span className="hud-eyebrow block">Efficiency</span>
+              <strong className="mt-0.5 block text-sm text-bone">Power → compute</strong>
+            </span>
+            <span className="shrink-0 font-mono text-[0.75rem] tabular-nums text-mint">
+              {pf(snap.effectiveFlopsPf)}
+            </span>
+          </summary>
+          <div className="border-t border-line/60 p-2">
+            <PowerEfficiencyCard state={state} />
+          </div>
+        </details>
 
         <SegmentedTabs
           ariaLabel="Power sections"
@@ -478,10 +502,10 @@ export function UtilityContractsCard({ state }: { state: SimState }) {
               />
             </div>
             <div className="mt-2 grid grid-cols-2 gap-1.5">
-              <HudButton type="button" variant="ghost" onClick={row.onRenew}>
+              <HudButton type="button" variant="ghost" className="min-h-11" onClick={row.onRenew}>
                 Renew
               </HudButton>
-              <HudButton type="button" variant="danger" onClick={row.onBreak}>
+              <HudButton type="button" variant="danger" className="min-h-11" onClick={row.onBreak}>
                 Break
               </HudButton>
             </div>
@@ -768,8 +792,8 @@ function ContractDesk({
         status={conversation.status}
       />
 
-      <div className="space-y-2 p-3">
-        <label className="flex items-center gap-2 rounded-md border border-line/70 bg-void/55 px-2 py-1.5">
+      <div className="min-w-0 space-y-2 p-2.5">
+        <label className="flex flex-col items-stretch gap-1 rounded-md border border-line/70 bg-void/55 px-2 py-1.5 min-[420px]:flex-row min-[420px]:items-center min-[420px]:gap-2">
           <span className="shrink-0 font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
             Chat with
           </span>
@@ -778,7 +802,7 @@ function ContractDesk({
             onChange={(event) =>
               resetNegotiation({ cityId: event.target.value })
             }
-            className="min-h-11 min-w-0 flex-1 border-0 bg-transparent text-right text-[0.8125rem] font-medium text-bone outline-none"
+            className="min-h-11 min-w-0 w-full flex-1 border-0 bg-transparent text-left text-[0.8125rem] font-medium text-bone outline-none min-[420px]:text-right"
             aria-label="City utility"
           >
             {deskCities.map(({ city }) => (
@@ -823,7 +847,7 @@ function ContractDesk({
           </HudButton>
         </div>
 
-        <div className="space-y-2 rounded-lg border border-line/60 bg-void/35 p-2">
+        <div className="panel-scroll max-h-[min(15rem,35dvh)] space-y-2 overflow-y-auto overscroll-y-auto rounded-lg border border-line/60 bg-void/35 p-2 touch-pan-y">
           <NegotiationMessage
             side="provider"
             name={`${activeQuote?.cityName ?? selectedCity?.city.name ?? "City"} Utility`}

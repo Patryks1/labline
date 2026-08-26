@@ -2,6 +2,12 @@ import * as THREE from 'three'
 
 export const DRAG_START_DISTANCE_PX = 5
 
+export interface MapPinchSample {
+  centerX: number
+  centerY: number
+  distance: number
+}
+
 export type MapCameraHeading = 0 | 1 | 2 | 3
 export type MapCameraTilt = 'low' | 'standard' | 'high'
 
@@ -331,4 +337,51 @@ export function hasPointerDragged(
   currentY: number,
 ): boolean {
   return Math.hypot(currentX - startX, currentY - startY) >= DRAG_START_DISTANCE_PX
+}
+
+/**
+ * Resolve the midpoint and span for a two-finger gesture. Keeping this math
+ * outside the renderer makes touch zoom deterministic and easy to regression
+ * test without a WebGL surface.
+ */
+export function mapPinchSample(
+  firstX: number,
+  firstY: number,
+  secondX: number,
+  secondY: number,
+): MapPinchSample {
+  return {
+    centerX: (firstX + secondX) / 2,
+    centerY: (firstY + secondY) / 2,
+    distance: Math.hypot(secondX - firstX, secondY - firstY),
+  }
+}
+
+/**
+ * Convert a pinch span change into an orthographic frustum change. Fingers
+ * moving apart zoom in (a smaller frustum); moving together zooms out. Invalid
+ * or zero-distance packets retain the current scale instead of poisoning the
+ * camera projection.
+ */
+export function mapFrustumAfterPinch(
+  currentFrustum: number,
+  previousDistance: number,
+  nextDistance: number,
+  minFrustum: number,
+  maxFrustum: number,
+): number {
+  const safeMin = Number.isFinite(minFrustum) ? minFrustum : 1
+  const safeMax = Number.isFinite(maxFrustum) ? Math.max(safeMin, maxFrustum) : safeMin
+  const safeCurrent = Number.isFinite(currentFrustum)
+    ? Math.max(safeMin, Math.min(safeMax, currentFrustum))
+    : safeMin
+  if (
+    !Number.isFinite(previousDistance) ||
+    !Number.isFinite(nextDistance) ||
+    previousDistance <= 0 ||
+    nextDistance <= 0
+  ) {
+    return safeCurrent
+  }
+  return Math.max(safeMin, Math.min(safeMax, safeCurrent * previousDistance / nextDistance))
 }

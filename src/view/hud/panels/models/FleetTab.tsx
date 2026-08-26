@@ -1,3 +1,4 @@
+import { useEffect, useState, type ReactNode } from "react";
 import type {
   Model,
   ModelFinanceRow,
@@ -71,6 +72,60 @@ function FleetServingEconomics({ finance }: { finance: ModelFinanceRow }) {
   );
 }
 
+function FleetEvidenceDisclosure({
+  status,
+  summary,
+  children,
+}: {
+  status: "archived" | "released" | "internal";
+  summary: string;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return false;
+    }
+    return !window.matchMedia("(max-width: 1279px), (max-height: 600px)").matches;
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const query = window.matchMedia(
+      "(max-width: 1279px), (max-height: 600px)",
+    );
+    const sync = () => setOpen(!query.matches);
+    sync();
+    query.addEventListener?.("change", sync);
+    return () => query.removeEventListener?.("change", sync);
+  }, []);
+
+  return (
+    <details
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+      className="group mt-3 min-w-0 border-t border-line/50"
+      data-fleet-radar={status}
+      data-fleet-evidence-disclosure="compact"
+    >
+      <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 py-2 text-[0.6875rem] text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 xl:hidden [@media(max-height:600px)]:!flex [&::-webkit-details-marker]:hidden">
+        <span>Evaluation profile</span>
+        <span className="font-mono text-bone">
+          {summary} · <span className="group-open:hidden">Show radar</span>
+          <span className="hidden group-open:inline">Hide</span>
+        </span>
+      </summary>
+      <div
+        className="min-w-0 overflow-hidden pt-3 max-xl:border-t max-xl:border-line/40 [@media(max-height:600px)]:border-t [@media(max-height:600px)]:border-line/40"
+        data-shell-gesture-ignore="true"
+      >
+        {children}
+      </div>
+    </details>
+  );
+}
+
 export function FleetTab({
   internal,
   released,
@@ -86,6 +141,7 @@ export function FleetTab({
   onDistill,
   onSetDefaultEffort,
   onSetServedEffort,
+  activeSafetyCampaignModelId,
   safetySlot,
   checkpointEvidence,
   modelFinance = [],
@@ -107,6 +163,8 @@ export function FleetTab({
   onDistill: (model: Model) => void;
   onSetDefaultEffort?: (id: string, effort: string) => void;
   onSetServedEffort?: (id: string, effort: string, served: boolean) => void;
+  /** The active campaign source must remain visible until the campaign ends. */
+  activeSafetyCampaignModelId?: string | null;
   safetySlot?: React.ReactNode;
   /** Persisted, noisy evidence for models promoted from stealth checkpoints. */
   checkpointEvidence?: Readonly<Record<string, CheckpointUiRecord>>;
@@ -116,34 +174,24 @@ export function FleetTab({
   day?: number;
 }) {
   const financeById = new Map(modelFinance.map((row) => [row.modelId, row]));
-  const fleet = [...internal, ...released, ...archived].sort(compareFleetFinishDay);
+  const publicModels = [...released].sort((a, b) => {
+    const activeDelta =
+      Number(financeById.get(b.id)?.isActive || b.id === pricingId) -
+      Number(financeById.get(a.id)?.isActive || a.id === pricingId);
+    return activeDelta || compareFleetFinishDay(a, b);
+  });
+  const privateModels = [...internal].sort(compareFleetFinishDay);
+  const archivedModels = [...archived].sort(compareFleetFinishDay);
+  const fleetCount = publicModels.length + privateModels.length + archivedModels.length;
 
-  return (
-    <div className="panel-swap space-y-4">
-      <section className="space-y-2">
-        <div className="flex items-center justify-between gap-2">
-          <div>
-            <p className="hud-eyebrow">Fleet</p>
-            <h3 className="text-sm font-semibold text-bone">Trained models</h3>
-            <p className="mt-1 text-[0.6875rem] leading-5 text-muted">
-              After release, set list prices in Plans → API and add the model
-              to a router to serve.
-            </p>
-          </div>
-          <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
-            {fleet.length}
-          </span>
-        </div>
-        {fleet.length === 0 ? (
-          <EmptyState
-            title="No trained models"
-            description="Finish a job with Keep internal or Release. Archive takes a live model off serving without deleting the weights."
-          />
-        ) : (
-          <CardGrid min="min(32rem, 100%)" className="anim-stagger">
-            {fleet.map((source) => {
+  const renderFleet = (models: readonly Model[]) => (
+    <CardGrid min="min(32rem, 100%)" className="anim-stagger">
+      {models.map((source) => {
               const model = normalizeModelEvaluations(source);
               const status = fleetStatus(source);
+              const archiveBlocked =
+                status === "released" &&
+                activeSafetyCampaignModelId === source.id;
               const freshness =
                 status === "released"
                   ? modelFreshnessLabel(modelAgeDays(model.releaseDay, day))
@@ -198,9 +246,19 @@ export function FleetTab({
                     ? "ring-1 ring-line/80"
                     : "ring-1 ring-mint/40";
               return (
-                <GameCard
+                <div
                   key={model.id}
-                  className={`hover-lift ${selected ? selectedRing : ""}`}
+                  className="contents"
+                  data-archived-card={
+                    status === "archived" ? "true" : undefined
+                  }
+                >
+                <GameCard
+                  className={`hover-lift ${selected ? selectedRing : ""} ${
+                    status === "archived"
+                      ? "!border-line/50 !bg-panel-2/45 [&>header]:!border-line/40 [&>header]:bg-void/15"
+                      : ""
+                  }`}
                   tone={
                     finance?.isActive
                       ? "mint"
@@ -210,10 +268,12 @@ export function FleetTab({
                           ? "mint"
                           : undefined
                   }
+                  mobilePriority={status === "archived" ? "secondary" : "primary"}
+                  mobileSummary={`${statusLabel} · cap ${model.capability.toFixed(0)} · ${speed.toFixed(0)} t/s`}
                   eyebrow={
                     evidence
-                      ? `${statusLabel} · measured checkpoint · Day ${model.releaseDay}`
-                      : `${statusLabel} · ${tier!.label} · Day ${model.releaseDay}${freshness ? ` · ${freshness}` : ""}`
+                      ? `${statusLabel === "internal" ? "private" : statusLabel} · measured checkpoint · Day ${model.releaseDay}`
+                      : `${statusLabel === "internal" ? "private" : statusLabel} · ${tier!.label} · Day ${model.releaseDay}${freshness ? ` · ${freshness}` : ""}`
                   }
                   title={
                     <span className="inline-flex min-w-0 items-center gap-2">
@@ -222,18 +282,20 @@ export function FleetTab({
                         variant="ghost"
                         onClick={() => onSelect(model.id)}
                         aria-label={`Select ${model.name}`}
-                        className="!min-h-11 !min-w-0 !flex-1 !justify-start !truncate !border-0 !bg-transparent !px-0 !py-0 !text-left !font-semibold !text-bone hover:!bg-transparent sm:!min-h-0"
+                        className={`!min-h-11 !min-w-0 !flex-1 !justify-start !truncate !border-0 !bg-transparent !px-0 !py-0 !text-left !font-semibold hover:!bg-transparent xl:!min-h-0 ${
+                          status === "archived" ? "!text-muted" : "!text-bone"
+                        }`}
                       >
                         {model.name}
                       </HudButton>
                       {status === "archived" ? (
-                        <StatusChip tone="neutral">ARCHIVED</StatusChip>
+                        <span className="hud-mobile-detail hidden sm:inline-flex"><StatusChip tone="neutral">ARCHIVED</StatusChip></span>
                       ) : null}
                       {status === "released" && finance?.isActive ? (
-                        <StatusChip tone="positive">ACTIVE</StatusChip>
+                        <span className="hud-mobile-detail hidden sm:inline-flex"><StatusChip tone="positive">ACTIVE</StatusChip></span>
                       ) : null}
                       {status === "released" && !finance?.isActive ? (
-                        <StatusChip tone="gold">RELEASED</StatusChip>
+                        <span className="hud-mobile-detail hidden sm:inline-flex"><StatusChip tone="gold">RELEASED</StatusChip></span>
                       ) : null}
                     </span>
                   }
@@ -247,14 +309,17 @@ export function FleetTab({
                     </StatusChip>
                   }
                 >
-                  <HudButton
-                    type="button"
-                    variant="ghost"
-                    onClick={() => onSelect(model.id)}
-                    aria-label={`Select ${model.name}`}
-                    className="!h-auto !min-h-11 !w-full !justify-start !rounded-none !border-0 !bg-transparent !p-0 !text-left !text-bone hover:!bg-transparent"
+                  <div
+                    className={
+                      status === "archived"
+                        ? "opacity-60 grayscale-[0.65] saturate-50"
+                        : undefined
+                    }
+                    data-archived-visual={
+                      status === "archived" ? "muted" : undefined
+                    }
                   >
-                    <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
+                    <div className="grid min-h-11 grid-cols-2 gap-x-3 gap-y-0.5">
                       <StatRow
                         label={evidence ? "Eval score" : "Suite"}
                         value={
@@ -282,10 +347,24 @@ export function FleetTab({
                         label="Speed"
                         value={`${speed.toFixed(1)} t/s`}
                       />
+                    </div>
+                    <div className="hud-mobile-detail mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5">
                       <StatRow label="Family" value={model.family} />
+                      <StatRow label="Scale" value={`${num(model.paramsB, 2)}B`} />
+                      <StatRow
+                        label="Profile"
+                        value={model.productPreset?.replaceAll("_", " ") ?? "general"}
+                      />
                     </div>
                     {model.economics ? (
-                      <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-0.5 border-t border-line/40 pt-2">
+                      <details className="group mt-2 rounded-md border border-line/50 bg-void/25">
+                        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2 py-1.5 text-[0.6875rem] text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
+                          <span>Lifetime economics</span>
+                          <span className="font-mono tabular-nums text-bone">
+                            {money(model.economics.lifetimeNet)} · <span className="group-open:hidden">Details</span><span className="hidden group-open:inline">Hide</span>
+                          </span>
+                        </summary>
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 border-t border-line/40 p-2">
                         <StatRow
                           label="Setup"
                           value={money(model.economics.trainingInitialCost)}
@@ -318,7 +397,8 @@ export function FleetTab({
                               model.economics.lifetimeEnterpriseRevenue,
                           )}
                         />
-                      </div>
+                        </div>
+                      </details>
                     ) : null}
                     <div className="mt-2">
                       <MeterBar
@@ -334,8 +414,15 @@ export function FleetTab({
                         tone="positive"
                       />
                     </div>
-                  </HudButton>
-                  <div className="mt-3 border-t border-line/50 pt-3">
+                  </div>
+                  <FleetEvidenceDisclosure
+                    status={status}
+                    summary={
+                      evidence
+                        ? `${Math.round(evidence.confidence * 100)}% confidence`
+                        : `${suiteScore!.toFixed(1)} suite`
+                    }
+                  >
                     {evidence ? (
                       <div
                         aria-label={`${model.name} persisted checkpoint evidence`}
@@ -374,7 +461,7 @@ export function FleetTab({
                         ariaLabel={`${model.name} evaluation radar`}
                       />
                     )}
-                  </div>
+                  </FleetEvidenceDisclosure>
                   <div className="mt-3">
                     <EffortStudio
                       subjectId={model.id}
@@ -395,14 +482,22 @@ export function FleetTab({
                     />
                   </div>
                   {status === "released" && finance ? (
-                    <div className="mt-3 space-y-2 border-t border-line/50 pt-3">
-                      <FleetServingEconomics finance={finance} />
+                    <details className="group mt-3 border-t border-line/50 pt-2" data-serving-economics="collapsed">
+                      <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 rounded-md px-2 py-1.5 text-[0.6875rem] text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
+                        <span>Serving today</span>
+                        <span className="font-mono tabular-nums text-bone">
+                          {money(finance.dayApiRevenue + finance.daySubRevenue)} revenue · <span className="group-open:hidden">Details</span><span className="hidden group-open:inline">Hide</span>
+                        </span>
+                      </summary>
+                      <div className="space-y-2 px-2 pb-2">
+                        <FleetServingEconomics finance={finance} />
                       {finance.note ? (
                         <p className="text-[0.8125rem] leading-snug text-muted">
                           {finance.note}
                         </p>
                       ) : null}
-                    </div>
+                      </div>
+                    </details>
                   ) : null}
                   {status === "archived" ? (
                     <p className="mt-3 text-[0.6875rem] leading-5 text-muted">
@@ -410,7 +505,10 @@ export function FleetTab({
                       restore to the public fleet.
                     </p>
                   ) : null}
-                  <div className="mt-3 grid grid-cols-2 gap-1.5 border-t border-line/50 pt-3 sm:flex sm:flex-wrap">
+                  <div
+                    className="mt-3 grid grid-cols-2 gap-1.5 border-t border-line/50 pt-3 [&_.hud-button]:!min-h-11 [&_.hud-button]:!w-full sm:flex sm:flex-wrap sm:[&_.hud-button]:!w-auto"
+                    data-fleet-actions={status}
+                  >
                     <HudButton
                       type="button"
                       variant="secondary"
@@ -443,10 +541,16 @@ export function FleetTab({
                       <HudButton
                         type="button"
                         variant="ghost"
+                        disabled={archiveBlocked}
+                        title={
+                          archiveBlocked
+                            ? "Finish or cancel this model's active safety campaign before archiving it."
+                            : undefined
+                        }
                         className="!px-2 !py-1 text-[0.6875rem]"
                         onClick={() => onArchive(model.id)}
                       >
-                        Archive
+                        {archiveBlocked ? "Safety active" : "Archive"}
                       </HudButton>
                     ) : null}
                     {status === "archived" && onRestore ? (
@@ -477,9 +581,112 @@ export function FleetTab({
                     <div className="mt-3">{safetySlot}</div>
                   ) : null}
                 </GameCard>
-              );
-            })}
-          </CardGrid>
+                </div>
+        );
+      })}
+    </CardGrid>
+  );
+
+  return (
+    <div className="panel-swap space-y-4">
+      <section className="space-y-4">
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-line/60 bg-panel-2/45 p-3">
+          <div className="min-w-0">
+            <p className="hud-eyebrow">Fleet</p>
+            <h3 className="mt-0.5 text-sm font-semibold text-bone">
+              Trained models
+            </h3>
+            <p className="hud-mobile-detail mt-1 text-[0.6875rem] leading-5 text-muted">
+              Public models can serve customers. Private checkpoints stay in
+              your lab. Archived weights remain available for future training.
+            </p>
+          </div>
+          <span className="shrink-0 rounded border border-line/70 px-2 py-1 font-mono text-[0.6875rem] tabular-nums text-muted">
+            {fleetCount} total
+          </span>
+        </div>
+
+        {fleetCount === 0 ? (
+          <EmptyState
+            title="No trained models"
+            description="Finish a job with Keep internal or Release. Archive takes a live model off serving without deleting the weights."
+          />
+        ) : (
+          <>
+            <section className="space-y-2" aria-labelledby="public-fleet-heading">
+              <div className="flex items-end justify-between gap-3 border-b border-line/60 pb-2">
+                <div>
+                  <p className="hud-eyebrow">Serving</p>
+                  <h4 id="public-fleet-heading" className="mt-0.5 text-[0.8125rem] font-semibold text-bone">
+                    Public fleet
+                  </h4>
+                  <p className="hud-mobile-detail mt-0.5 text-[0.6875rem] text-muted">
+                    Released models eligible for API, plans, and routers.
+                  </p>
+                </div>
+                <StatusChip tone={publicModels.length > 0 ? "positive" : "neutral"}>
+                  {publicModels.length} live
+                </StatusChip>
+              </div>
+              {publicModels.length > 0 ? (
+                renderFleet(publicModels)
+              ) : (
+                <p className="rounded-md border border-dashed border-line/70 p-3 text-[0.6875rem] text-muted">
+                  No public models. Release a private checkpoint when it is ready.
+                </p>
+              )}
+            </section>
+
+            <section className="space-y-2" aria-labelledby="private-fleet-heading">
+              <div className="flex items-end justify-between gap-3 border-b border-line/60 pb-2">
+                <div>
+                  <p className="hud-eyebrow">Lab</p>
+                  <h4 id="private-fleet-heading" className="mt-0.5 text-[0.8125rem] font-semibold text-bone">
+                    Private checkpoints
+                  </h4>
+                  <p className="hud-mobile-detail mt-0.5 text-[0.6875rem] text-muted">
+                    Internal weights that are not visible to customers.
+                  </p>
+                </div>
+                <StatusChip tone="neutral">{privateModels.length} private</StatusChip>
+              </div>
+              {privateModels.length > 0 ? (
+                renderFleet(privateModels)
+              ) : (
+                <p className="rounded-md border border-dashed border-line/70 p-3 text-[0.6875rem] text-muted">
+                  No private checkpoints.
+                </p>
+              )}
+            </section>
+
+            {archivedModels.length > 0 ? (
+              <details
+                className="group rounded-lg border border-line/65 bg-void/20"
+                data-fleet-archive-disclosure="true"
+              >
+                <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left hover:bg-panel-2/45 focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
+                  <span>
+                    <span className="hud-eyebrow">Storage</span>
+                    <span className="mt-0.5 block text-[0.8125rem] font-semibold text-muted">
+                      Archived models
+                    </span>
+                    <span className="mt-0.5 block text-[0.6875rem] text-muted/80">
+                      Off-market weights ·
+                      <span className="ml-1 group-open:hidden">Show archived models</span>
+                      <span className="ml-1 hidden group-open:inline">Hide archived models</span>
+                    </span>
+                  </span>
+                  <span className="inline-flex items-center gap-2">
+                    <StatusChip tone="neutral">{archivedModels.length} archived</StatusChip>
+                    <span aria-hidden className="text-muted transition-transform group-open:rotate-180">⌄</span>
+                  </span>
+                </summary>
+                <div className="border-t border-line/50 p-3">
+                  {renderFleet(archivedModels)}
+                </div>
+              </details>
+            ) : null}
+          </>
         )}
       </section>
     </div>

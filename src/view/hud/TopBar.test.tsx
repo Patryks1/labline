@@ -19,6 +19,9 @@ describe('TopBar shell semantics', () => {
     expect(markup).toContain('aria-controls="kpi-history-popover"')
     expect(markup).not.toContain('50.00/100')
     expect(markup).toContain('/100')
+    expect(markup.match(/data-mobile-priority="primary"/g)?.length).toBeGreaterThanOrEqual(3)
+    expect(markup).toContain('data-mobile-priority="secondary"')
+    expect(markup).toContain('data-mobile-priority="tertiary"')
   })
 
 })

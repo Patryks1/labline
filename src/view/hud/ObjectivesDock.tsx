@@ -1,9 +1,10 @@
 import { CheckCircle, Crosshair, WarningCircle } from '@phosphor-icons/react'
-import { useMemo } from 'react'
+import { useMemo, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { useGameStore } from '../../store/gameStore'
 import { useUiStore } from '../../store/uiStore'
 import { buildObjectives, type Objective } from './objectives'
 import { StatusChip } from './ui/HudPrimitives'
+import { isSheetDismissSwipe, type GesturePoint } from './menu/mobileOverlayGestures'
 
 export function ObjectivesButton() {
   const state = useGameStore((s) => s.state)
@@ -46,6 +47,7 @@ export function ObjectivesDock() {
     () => buildObjectives(state, !state.onboardingDismissed),
     [state],
   )
+  const dismissSwipe = useRef<(GesturePoint & { pointerId: number }) | null>(null)
 
   if (!open) return null
 
@@ -55,9 +57,33 @@ export function ObjectivesDock() {
     setOpen(false)
   }
 
+  const startDismissSwipe = (event: ReactPointerEvent<HTMLElement>) => {
+    if (event.pointerType !== 'touch') return
+    dismissSwipe.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const finishDismissSwipe = (event: ReactPointerEvent<HTMLElement>) => {
+    const start = dismissSwipe.current
+    dismissSwipe.current = null
+    if (!start || start.pointerId !== event.pointerId) return
+    if (isSheetDismissSwipe(start, { x: event.clientX, y: event.clientY })) setOpen(false)
+  }
+
   return (
-    <aside className="objectives-dock hud-surface pointer-events-auto absolute z-40 w-[21rem] rounded-lg p-3">
-      <div className="relative z-10 flex items-start justify-between gap-3">
+    <aside
+      className="objectives-dock hud-surface pointer-events-auto absolute z-40 flex w-[21rem] min-h-0 flex-col overflow-hidden rounded-lg p-3"
+      style={{ overflow: 'hidden' }}
+      data-swipe-dismiss="down"
+    >
+      <div
+        className="relative z-10 shrink-0 touch-pan-x"
+        onPointerDown={startDismissSwipe}
+        onPointerUp={finishDismissSwipe}
+        onPointerCancel={() => { dismissSwipe.current = null }}
+      >
+        <span aria-hidden className="mx-auto mb-2 hidden h-1 w-10 rounded-full bg-line max-sm:block [@media(max-height:540px)]:block" />
+        <div className="flex items-start justify-between gap-3">
         <div>
           <p className="hud-eyebrow">Mission control</p>
           <h2 className="mt-1 text-[1rem] font-semibold tracking-tight text-bone">Next decisions</h2>
@@ -69,9 +95,10 @@ export function ObjectivesDock() {
         >
           Done
         </button>
+        </div>
       </div>
 
-      <div className="relative z-10 mt-3 space-y-2">
+      <div className="panel-scroll relative z-10 mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain pr-0.5 touch-pan-y">
         {objectives.length > 0 ? objectives.map((objective) => (
           <button
             key={objective.id}
@@ -85,7 +112,7 @@ export function ObjectivesDock() {
               </span>
               <span className="min-w-0 flex-1">
                 <span className="block text-[0.8125rem] font-semibold text-bone">{objective.title}</span>
-                <span className="mt-1 block text-[0.75rem] leading-snug text-muted">{objective.description}</span>
+                <span className="mt-1 block text-[0.75rem] leading-snug text-muted max-sm:hidden [@media(max-height:540px)]:hidden">{objective.description}</span>
                 <span className="mt-2 flex items-center justify-between gap-2">
                   <StatusChip tone={objective.severity === 'danger' ? 'danger' : objective.severity === 'warning' ? 'warning' : 'positive'}>
                     {objective.progress}
@@ -102,7 +129,7 @@ export function ObjectivesDock() {
         )}
       </div>
 
-      <div className="relative z-10 mt-3 flex items-center justify-between border-t border-line/60 pt-3">
+      <div className="relative z-10 mt-3 flex shrink-0 items-center justify-between border-t border-line/60 pt-3 max-sm:hidden [@media(max-height:540px)]:hidden">
         <span className="text-[0.6875rem] text-muted">Starter guidance</span>
         <button
           type="button"

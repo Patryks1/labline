@@ -49,6 +49,8 @@ import {
   MOBILE_MORE_SECTIONS,
   MOBILE_MORE_UTILITIES,
   MOBILE_PRIMARY_TABS,
+  mobilePrimaryPanelForSwipe,
+  useShellSwipeGesture,
 } from './mobileShellContracts'
 import { normalizeTrainingJobs } from './trainingJobViewModel'
 import { selectFinanceDashboardReadouts } from './data/financeDashboardModel'
@@ -139,6 +141,13 @@ export function LeftRail({
   const mobileMoreCloseRef = useRef<HTMLButtonElement>(null)
   const mobileMoreDialogRef = useRef<HTMLElement>(null)
   const shellActive = useMemo(() => shellPanelForPanel(active), [active])
+  const activeWorkspaceLabel = useMemo(
+    () =>
+      SHELL_NAV_GROUPS.flatMap((group) => group.items).find(
+        (item) => item.id === shellActive,
+      )?.label ?? 'Workspace',
+    [shellActive],
+  )
 
   const badges = useMemo(() => {
     const training = normalizeTrainingJobs(state).length > 0
@@ -257,6 +266,18 @@ export function LeftRail({
     mobileMoreOpen ||
     (open && !MOBILE_PRIMARY_TABS.some((tab) => tab.id === active))
 
+  const nextPrimaryPanel = mobilePrimaryPanelForSwipe(active, 'left')
+  const previousPrimaryPanel = mobilePrimaryPanelForSwipe(active, 'right')
+  const canSwipePrimary = nextPrimaryPanel != null || previousPrimaryPanel != null
+  const workspaceGesture = useShellSwipeGesture<HTMLDivElement>({
+    onDown: () => setOpen(false),
+    onLeft: nextPrimaryPanel ? () => handleTab(nextPrimaryPanel) : undefined,
+    onRight: previousPrimaryPanel ? () => handleTab(previousPrimaryPanel) : undefined,
+  })
+  const mobileMoreGesture = useShellSwipeGesture<HTMLDivElement>({
+    onDown: () => setMobileMoreOpen(false),
+  })
+
   return (
     <div className="workspace-shell pointer-events-none">
       {/* Icon rail: Build action pinned on top, then grouped one-level destinations */}
@@ -360,9 +381,43 @@ export function LeftRail({
         className={`workspace-drawer workspace-drawer--reserve-operations hud-surface pointer-events-auto relative col-start-2 m-2 ml-1 flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg transition-opacity duration-200 ease-out ${
           open ? 'opacity-100' : 'pointer-events-none opacity-0'
         }`}
+        role="region"
+        aria-label={`${activeWorkspaceLabel} workspace`}
+        aria-describedby={open ? 'workspace-mobile-gesture-hint' : undefined}
       >
         {open && (
           <>
+            <div
+              className="workspace-drawer__mobile-header hidden"
+              data-mobile-shell-only="true"
+            >
+              <div
+                {...workspaceGesture}
+                className="workspace-drawer__gesture-zone"
+                data-shell-gesture-surface="true"
+                aria-hidden="true"
+              >
+                <span className="mobile-sheet-grabber" />
+                <span className="workspace-drawer__gesture-hint">
+                  {canSwipePrimary
+                    ? 'Swipe down to close · sideways to switch'
+                    : 'Swipe down to close'}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="workspace-drawer__mobile-close"
+                onClick={() => setOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+            <p id="workspace-mobile-gesture-hint" className="sr-only">
+              On a touch screen, swipe down from the top handle to close this workspace.
+              {canSwipePrimary
+                ? ' Swipe sideways on the handle to move between primary workspaces.'
+                : null}
+            </p>
             <div
               className={`workspace-drawer__body workspace-drawer__body--shell-reserved panel-scroll relative z-10 min-h-0 flex-1 p-4 ${
                 active === 'research'
@@ -435,7 +490,20 @@ export function LeftRail({
             role="dialog"
             aria-modal="true"
             aria-labelledby="mobile-more-title"
+            aria-describedby="mobile-more-gesture-description"
           >
+            <div
+              {...mobileMoreGesture}
+              className="mobile-more-gesture-zone hidden"
+              data-shell-gesture-surface="true"
+              aria-hidden="true"
+            >
+              <span className="mobile-sheet-grabber" />
+              <span className="mobile-more-gesture-hint">Swipe down to close</span>
+            </div>
+            <p id="mobile-more-gesture-description" className="sr-only">
+              Swipe down from the top handle to close this menu.
+            </p>
             <header>
               <div>
                 <p className="hud-eyebrow">Navigate</p>

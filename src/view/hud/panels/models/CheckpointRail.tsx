@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowCircleUp,
   ArrowCounterClockwise,
@@ -78,10 +78,33 @@ export function CheckpointRail({
   );
   const [discardConfirmId, setDiscardConfirmId] = useState<string | null>(null);
   const [rollbackConfirmId, setRollbackConfirmId] = useState<string | null>(null);
+  const historyRef = useRef<HTMLOListElement>(null);
   const activeId = selectedId ?? localSelectedId;
   const selected =
     checkpoints.find((checkpoint) => checkpoint.id === activeId) ??
     checkpoints.at(-1);
+
+  useEffect(() => {
+    const history = historyRef.current;
+    const active = history?.querySelector<HTMLElement>(
+      '[aria-pressed="true"]',
+    );
+    const item = active?.closest<HTMLElement>("li");
+    if (!history || !item) return;
+    const left = item.offsetLeft;
+    const right = left + item.offsetWidth;
+    const visibleLeft = history.scrollLeft;
+    const visibleRight = visibleLeft + history.clientWidth;
+    const nextLeft =
+      left < visibleLeft
+        ? Math.max(0, left - 8)
+        : right > visibleRight
+          ? right - history.clientWidth + 8
+          : visibleLeft;
+    if (nextLeft !== visibleLeft) {
+      history.scrollTo?.({ left: nextLeft, behavior: "smooth" });
+    }
+  }, [activeId]);
 
   if (!selected) {
     return (
@@ -126,7 +149,7 @@ export function CheckpointRail({
           >
             {title}
           </h3>
-          <p className="mt-1 text-[0.6875rem] leading-5 text-muted">
+          <p className="hud-mobile-detail mt-1 text-[0.6875rem] leading-5 text-muted">
             A checkpoint is a saved copy of one run at a specific moment. Pick
             one to compare, keep in Fleet, or use as the start of a separate
             child model.
@@ -140,8 +163,10 @@ export function CheckpointRail({
       </div>
 
       <ol
+        ref={historyRef}
         aria-label="Checkpoint history"
-        className="panel-scroll relative mt-3 flex gap-2 overflow-x-auto pb-1 before:absolute before:left-4 before:right-4 before:top-4 before:h-px before:bg-line/70"
+        className="panel-scroll relative mt-3 flex snap-x snap-mandatory gap-2 overflow-x-auto overscroll-x-contain pb-1 touch-auto before:absolute before:left-4 before:right-4 before:top-4 before:h-px before:bg-line/70"
+        data-mobile-scroll="horizontal"
       >
         {checkpoints.map((checkpoint, index) => {
           const active = checkpoint.id === selected.id;
@@ -149,7 +174,7 @@ export function CheckpointRail({
           return (
             <li
               key={checkpoint.id}
-              className="relative min-w-[10.5rem] flex-1 pt-3"
+              className="relative min-w-[10.5rem] flex-1 snap-start pt-3"
             >
               <HudButton
                 type="button"
@@ -412,7 +437,17 @@ export function CheckpointRail({
           ) : null}
         </div>
 
-        <div className="space-y-3">
+        <details className="group rounded-md border border-line/60 bg-void/20" data-checkpoint-evidence-disclosure="true">
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
+            <span>
+              <span className="hud-eyebrow block">Evidence &amp; review</span>
+              <span className="mt-0.5 block text-[0.6875rem] text-bone">
+                {evaluationEstimate == null ? "Not measured" : `${evaluationEstimate.toFixed(1)} score`} · {review?.verdict ?? "no verdict"}
+              </span>
+            </span>
+            <span className="font-mono text-[0.625rem] text-muted"><span className="group-open:hidden">Open</span><span className="hidden group-open:inline">Hide</span> <span aria-hidden>⌄</span></span>
+          </summary>
+        <div className="space-y-3 border-t border-line/40 p-3">
           <section
             aria-label={`${selected.label} benchmark evidence`}
             className="rounded-md border border-line/60 bg-void/30 p-3"
@@ -539,11 +574,12 @@ export function CheckpointRail({
             ) : null}
           </section>
         </div>
+        </details>
       </div>
 
       {selected.evidenceReports.length > 0 ? (
         <details className="mt-3 rounded-md border border-line/60 bg-void/30">
-          <summary className="cursor-pointer list-none px-3 py-2.5 text-[0.75rem] font-semibold text-bone transition hover:bg-panel-2/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-mint/45">
+          <summary className="flex min-h-11 cursor-pointer list-none items-center px-3 py-2.5 text-[0.75rem] font-semibold text-bone transition hover:bg-panel-2/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-mint/45">
             Evidence ledger · {selected.evidenceReports.length} report
             {selected.evidenceReports.length === 1 ? "" : "s"} · consensus
           </summary>
@@ -553,13 +589,12 @@ export function CheckpointRail({
               measurement accuracy and confidence. Re-running an evaluation
               adds evidence; it does not replace an inconvenient result.
             </p>
-            {selected.evidenceReports.map((report, reportIndex) => (
+            {selected.evidenceReports.map((report) => (
               <details
                 key={report.id}
-                open={reportIndex === selected.evidenceReports.length - 1}
                 className="rounded-md border border-line/50 bg-panel/25"
               >
-                <summary className="cursor-pointer list-none px-3 py-2 font-mono text-[0.6875rem] tabular-nums text-bone focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-mint/45">
+                <summary className="flex min-h-11 cursor-pointer list-none items-center px-3 py-2 font-mono text-[0.6875rem] tabular-nums text-bone focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-mint/45">
                   Day {report.day} · {checkpointReviewModeLabel(report.mode)} ·{" "}
                   {money(report.totalCost)} · {clampedPercent(report.confidence)}%
                   conf. · {clampedPercent(report.leakRisk)}% leak
@@ -588,7 +623,26 @@ export function CheckpointRail({
                           {clampedPercent(suite.confidence)}% confidence
                         </span>
                       </div>
-                      <div className="panel-scroll overflow-x-auto">
+                      <div className="grid gap-2 xl:hidden" aria-label={`${suite.label} metric results`}>
+                        {suite.metrics.map((metric) => (
+                          <div key={metric.id} className="rounded-md border border-line/45 bg-void/25 p-2.5">
+                            <div className="flex items-start justify-between gap-2">
+                              <span className="text-[0.6875rem] font-semibold text-bone">{metric.label}</span>
+                              <span className="shrink-0 font-mono text-[0.6875rem] tabular-nums text-bone">{metric.score.toFixed(1)}</span>
+                            </div>
+                            <p className="mt-1 font-mono text-[0.625rem] tabular-nums text-muted">
+                              interval {metric.low.toFixed(1)}–{metric.high.toFixed(1)}
+                            </p>
+                            <p className="mt-1 text-[0.625rem] leading-4 text-muted">
+                              {metric.rival
+                                ? `${metric.rival.delta >= 0 ? "+" : ""}${metric.rival.delta.toFixed(1)} vs ${metric.rival.name} · rank ${metric.rival.rank}/${metric.rival.fieldSize}`
+                                : "No same-metric peer"}
+                              {` · contamination ${clampedPercent(metric.contaminationSignal)}%`}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="panel-scroll hidden overflow-x-auto xl:block" role="region" aria-label={`${suite.label} metric table`} tabIndex={0}>
                         <table className="w-full min-w-[39rem] border-collapse text-left text-[0.6875rem]">
                           <thead className="font-mono text-[0.625rem] uppercase tracking-[0.09em] text-muted">
                             <tr className="border-b border-line/50">
@@ -661,7 +715,7 @@ export function CheckpointRail({
       <div
         role="group"
         aria-label={`Actions for ${selected.label}`}
-        className="mt-3 grid grid-cols-2 gap-2 border-t border-line/50 pt-3 sm:flex sm:flex-wrap"
+        className="mt-3 grid grid-cols-2 gap-2 border-t border-line/50 pt-3 [&_.hud-button]:!min-h-11 [&_.hud-button]:!w-full xl:flex xl:flex-wrap xl:[&_.hud-button]:!w-auto"
       >
         <BenchmarkEntryPoint
           context={{ kind: "checkpoint", id: selected.id }}
@@ -732,7 +786,7 @@ export function CheckpointRail({
               setDiscardConfirmId(selected.id);
             }
           }}
-          className="sm:ml-auto"
+          className="xl:ml-auto"
         >
           <Trash size="0.875rem" />
           {discardConfirmId === selected.id ? "Confirm discard" : "Discard"}

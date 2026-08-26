@@ -185,8 +185,15 @@ export interface InvestorPitchPreview {
   capabilityScore: number
   qualityScore: number
   overusePenalty: number
+  /** Amount-aware data/freshness concession attached to this ask. */
+  dataDrag: number
   successChance: number
+  /** Current quoted ask; defaults to the investor's suggested cheque. */
   cashRaised: number
+  defaultCashRaised: number
+  minimumCashRaised: number
+  maximumCashRaised: number
+  cashRaisedStep: number
   preMoneyValuation: number
   postMoneyValuation: number
   investorOwnership: number
@@ -361,6 +368,41 @@ function roundedMillion(value: number): number {
   return Math.round(Math.max(0, value) / 1_000_000) * 1_000_000
 }
 
+export interface InvestorPitchAmountBounds {
+  min: number
+  max: number
+  step: number
+  defaultAmount: number
+}
+
+/** A bounded negotiation range that always contains the legacy/default ask. */
+export function investorPitchAmountBounds(
+  defaultAmount: number,
+  preMoneyValuation: number,
+): InvestorPitchAmountBounds {
+  const suggested = Math.max(
+    1_000_000,
+    Number.isFinite(defaultAmount) ? Math.round(defaultAmount) : 1_000_000,
+  )
+  const step =
+    suggested >= 1_000_000_000
+      ? 10_000_000
+      : suggested >= 100_000_000
+        ? 5_000_000
+        : 1_000_000
+  const roundToStep = (value: number) => Math.round(value / step) * step
+  const min = Math.max(step, roundToStep(suggested * 0.25))
+  const valuationCeiling = roundToStep(
+    Math.max(suggested, preMoneyValuation) * 0.75,
+  )
+  const max = Math.max(
+    suggested,
+    min,
+    Math.min(roundToStep(suggested * 3), valuationCeiling),
+  )
+  return { min, max, step, defaultAmount: suggested }
+}
+
 function ineligiblePitchPreview(
   state: SimState,
   optionId: string,
@@ -395,8 +437,13 @@ function ineligiblePitchPreview(
     capabilityScore: clamp(capability / Math.max(1, frontier), 0, 1.2),
     qualityScore: 0,
     overusePenalty: model ? pitchModelOverusePenalty(model) : 0,
+    dataDrag: model ? pitchModelOverusePenalty(model) : 0,
     successChance: 0,
     cashRaised: 0,
+    defaultCashRaised: 0,
+    minimumCashRaised: 0,
+    maximumCashRaised: 0,
+    cashRaisedStep: 1_000_000,
     preMoneyValuation: Math.max(0, lab.finance.valuation),
     postMoneyValuation: Math.max(0, lab.finance.valuation),
     investorOwnership: 0,
@@ -419,6 +466,7 @@ export function investorPitchPreview(
   state: SimState,
   optionId: string,
   labId: LabId = state.playerLabId,
+  requestedCashRaised?: number,
 ): InvestorPitchPreview {
   const target = decodeInvestorPitchOptionId(optionId)
   const encodedId = encodeInvestorPitchOptionId(target.modelId, target.effortId)
@@ -478,7 +526,7 @@ export function investorPitchPreview(
     1.2,
   )
   const confidence = clamp(capital.investorConfidence, 0, 1)
-  const successChance = clamp(
+  const baseSuccessChance = clamp(
     0.18 + confidence * 0.34 + strength * 0.42 - overusePenalty * 0.2,
     0.08,
     0.94,
@@ -497,14 +545,60 @@ export function investorPitchPreview(
     0.025,
     0.24,
   )
-  const cashRaised = roundedMillion(
-    clamp(valuation * chequeMultiple, 8_000_000, 900_000_000),
+  const disclosedLiftRatio = Math.max(
+    0,
+    (capability - model.capability) / Math.max(1, model.capability),
+  )
+  // Keep trained-head disclosures economically monotonic after $1M rounding.
+  // The premium is intentionally modest and capped: stronger thinking raises
+  // the suggested cheque without letting inference effort dominate valuation.
+  const effortChequePremium = valuation * Math.min(0.05, disclosedLiftRatio * 0.4)
+  const defaultCashRaised = roundedMillion(
+    clamp(
+      valuation * chequeMultiple + effortChequePremium,
+      8_000_000,
+      900_000_000,
+    ),
+  )
+  const amountBounds = investorPitchAmountBounds(
+    defaultCashRaised,
+    preMoneyValuation,
+  )
+  const amountIsValid =
+    requestedCashRaised == null ||
+    (Number.isFinite(requestedCashRaised) &&
+      requestedCashRaised >= amountBounds.min &&
+      requestedCashRaised <= amountBounds.max)
+  const cashRaised =
+    requestedCashRaised == null || !amountIsValid
+      ? defaultCashRaised
+      : Math.round(requestedCashRaised)
+  const amountRatio = cashRaised / Math.max(1, defaultCashRaised)
+  const successChance = clamp(
+    baseSuccessChance +
+      Math.max(0, 1 - amountRatio) * 0.1 -
+      Math.max(0, amountRatio - 1) * 0.18,
+    0.03,
+    0.97,
+  )
+  const dataDrag = clamp(
+    overusePenalty + (amountRatio - 1) * 0.08,
+    0,
+    1,
   )
   const postMoneyValuation = preMoneyValuation + cashRaised
   const investorOwnership = cashRaised / Math.max(1, postMoneyValuation)
   const optionPoolTopUp = clamp(0.005 + overusePenalty * 0.045 + (1 - strength) * 0.02, 0, 0.08)
-  const confidenceRequired = clamp(0.62 - strength * 0.22 + overusePenalty * 0.1, 0.3, 0.78)
-  const eligible = confidence >= confidenceRequired
+  const confidenceRequired = clamp(
+    0.62 -
+      strength * 0.22 +
+      overusePenalty * 0.1 +
+      Math.max(0, amountRatio - 1) * 0.04 -
+      Math.max(0, 1 - amountRatio) * 0.02,
+    0.3,
+    0.86,
+  )
+  const eligible = amountIsValid && confidence >= confidenceRequired
   const hasNamedHeads = recipes.some((item) => item.kind !== 'instant')
   return {
     id: encodedId,
@@ -513,9 +607,11 @@ export function investorPitchPreview(
     effortName: recipe.name,
     modelName: pitchDisclosureName(model, recipe, hasNamedHeads),
     eligible,
-    reason: eligible
-      ? undefined
-      : `Investor confidence ${(confidence * 100).toFixed(0)}% is below the ${(
+    reason: !amountIsValid
+      ? `Choose a raise between $${(amountBounds.min / 1_000_000).toFixed(0)}M and $${(amountBounds.max / 1_000_000).toFixed(0)}M.`
+      : eligible
+        ? undefined
+        : `Investor confidence ${(confidence * 100).toFixed(0)}% is below the ${(
           confidenceRequired *
           100
         ).toFixed(0)}% threshold for this pitch.`,
@@ -525,8 +621,13 @@ export function investorPitchPreview(
     capabilityScore,
     qualityScore,
     overusePenalty,
+    dataDrag,
     successChance,
     cashRaised,
+    defaultCashRaised,
+    minimumCashRaised: amountBounds.min,
+    maximumCashRaised: amountBounds.max,
+    cashRaisedStep: amountBounds.step,
     preMoneyValuation,
     postMoneyValuation,
     investorOwnership,
@@ -568,8 +669,14 @@ export function acceptInvestorPitch(
   state: SimState,
   optionId: string,
   labId: LabId = state.playerLabId,
+  requestedCashRaised?: number,
 ): SimState {
-  const preview = investorPitchPreview(state, optionId, labId)
+  const preview = investorPitchPreview(
+    state,
+    optionId,
+    labId,
+    requestedCashRaised,
+  )
   const notify = (next: SimState, severity: 'info' | 'warn', message: string) =>
     labId === state.playerLabId
       ? pushAlert(next, severity, message)
@@ -599,6 +706,8 @@ export function acceptInvestorPitch(
     day: state.day,
     outcome: funded ? 'funded' : 'declined',
     successChance: preview.successChance,
+    requestedCashRaised: preview.cashRaised,
+    dataDrag: preview.dataDrag,
     cashRaised: funded ? preview.cashRaised : 0,
     preMoneyValuation: preview.preMoneyValuation,
     postMoneyValuation: funded ? preview.postMoneyValuation : preview.preMoneyValuation,

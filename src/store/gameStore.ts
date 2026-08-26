@@ -560,6 +560,7 @@ interface GameStore {
   startSynthBudget: (opts: {
     researchShare: number;
     teacherModelIds?: Partial<Record<DataDomain, string>>;
+    teacherEffortIds?: Partial<Record<DataDomain, string>>;
   }) => void;
   cancelSynthGen: (jobId: string) => void;
   dismissOnboarding: () => void;

@@ -24,10 +24,13 @@ export function ModelsEmptyWorkbench({
         <h3 className="mt-1 text-[1.0625rem] font-semibold text-bone">
           No campaign yet
         </h3>
-        <p className="mt-1.5 max-w-xl text-[0.8125rem] leading-5 text-muted">
+        <p className="hud-mobile-detail mt-1.5 max-w-xl text-[0.8125rem] leading-5 text-muted">
           Two phases. Train a raw base on code, math, and science, then spend
           chat tokens in post-training to make a usable model. Weight files
           only exist if you save them.
+        </p>
+        <p className="hud-mobile-summary mt-1 text-[0.75rem] text-muted">
+          Train a base, align it, then launch.
         </p>
       </div>
       <ol
@@ -45,17 +48,17 @@ export function ModelsEmptyWorkbench({
             <strong className="mt-1 block text-[0.8125rem] text-bone">
               {step.label}
             </strong>
-            <span className="mt-0.5 block text-[0.625rem] leading-4 text-muted">
+            <span className="hud-mobile-detail mt-0.5 block text-[0.625rem] leading-4 text-muted">
               {step.hint}
             </span>
           </li>
         ))}
       </ol>
-      <div className="flex flex-wrap gap-1.5">
+      <div className="grid grid-cols-2 gap-1.5 [&_.hud-button]:!min-h-11 [&_.hud-button]:!w-full sm:flex sm:flex-wrap sm:[&_.hud-button]:!w-auto">
         <HudButton
           type="button"
           variant="primary"
-          className="min-h-11"
+          className="col-span-2 min-h-11 sm:col-span-1"
           data-action="empty-start-campaign"
           onClick={onStartCampaign}
         >

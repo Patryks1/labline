@@ -2,7 +2,9 @@ import { createElement, type ComponentProps } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import { DATA_DOMAINS, createEmptyLabData, emptyDomainStock } from '../../../sim/balance/data'
-import type { DataDomain } from '../../../sim/types'
+import { emptyBenchmarks } from '../../../sim/balance/benchmarks'
+import { instantRecipe } from '../../../sim/balance/modelProduct'
+import type { DataDomain, Model } from '../../../sim/types'
 import { TrainingDataRadar } from './TrainingDataRadar'
 import {
   domainAvailabilityTooltip,
@@ -21,6 +23,32 @@ function blankAllocations(fill = 10): Record<DataDomain, number> {
   ) as Record<DataDomain, number>
 }
 
+function thinkingTeacher(): Model {
+  return {
+    id: 'teacher-thinking', name: 'Glyph Route', family: 'dense', paramsB: 7,
+    capability: 50, modalities: ['text'],
+    quality: { reasoning: 52, coding: 50, chat: 58, image: 0, video: 0, safety: 65, reliability: 72 },
+    benchmarks: { ...emptyBenchmarks(), coding: 52, math: 50, science: 48, agents: 40 },
+    productProfile: {
+      lifecycle: 'reasoning',
+      focus: { coding: 0, science: 0, research: 0, personality: 0, chat: 0 },
+      personality: 50, tokenEfficiency: 80,
+      effortRecipes: [
+        instantRecipe(),
+        { id: 'think', name: 'Think', kind: 'trained', thinkingTokenMult: 2.5, trainPfDays: 50, trainCash: 1_000_000, trained: true, quality: 0.7, served: true },
+        { id: 'deep', name: 'Deep', kind: 'trained', thinkingTokenMult: 6, trainPfDays: 90, trainCash: 2_000_000, trained: true, quality: 0.82, served: false },
+      ],
+      defaultEffortId: 'instant',
+    },
+    postTrain: 'process', trainComputeSpent: 80, releaseDay: 1,
+    shipped: true, release: 'released', tokPerSecMult: 1, inferCostMult: 1,
+    apiPricePerMTok: 2, apiPriceInPerMTok: 1, apiPriceOutPerMTok: 3,
+    suggestedApiPrice: 2, suggestedApiPriceIn: 1, suggestedApiPriceOut: 3,
+    costApiPriceIn: 0.2, costApiPriceOut: 0.8,
+    distilled: false, trainMode: 'pretrain',
+  }
+}
+
 function radarProps(
   overrides: Partial<ComponentProps<typeof TrainingDataRadar>> = {},
 ) {
@@ -32,6 +60,7 @@ function radarProps(
     data: createEmptyLabData(),
     teachers: [],
     syntheticTeacherIds: {},
+    syntheticTeacherEffortIds: {},
     includeSynthHQ: false,
     includeSynthLQ: false,
     onOwnedChange: vi.fn(),
@@ -105,6 +134,29 @@ describe('training data radar', () => {
     expect(markup).not.toContain('aria-label="Data phase"')
   })
 
+  it('renders distinct model × trained-recipe teacher choices with domain economics', () => {
+    const markup = renderToStaticMarkup(
+      createElement(TrainingDataRadar, radarProps({
+        syntheticUnlocked: true,
+        teachers: [thinkingTeacher()],
+        syntheticTeacherIds: { code: 'teacher-thinking' },
+        syntheticTeacherEffortIds: { code: 'think' },
+      })),
+    )
+
+    expect(markup).toContain('aria-label="Synthetic teacher and thinking recipe for Code corpus"')
+    expect(markup).toContain('value="teacher-thinking::effort::think" selected=""')
+    expect(markup).toContain('value="teacher-thinking::effort::deep"')
+    expect(markup).toContain('Glyph Route · Think · cap')
+    expect(markup).toContain('/ q 70%')
+    expect(markup).toContain('× billed')
+    expect(markup).toContain('× PF intensity')
+    expect(markup).toContain('PF/accepted MTok')
+    expect(markup).toContain('data-touch-target="teacher-effort"')
+    expect(markup).toContain('data-teacher-economics="true"')
+    expect(markup).toContain('Thinking increases billed tokens and inference PF.')
+  })
+
   it('freezes the teal base on further-train so only Align is interactive', () => {
     const markup = renderToStaticMarkup(
       createElement(TrainingDataRadar, radarProps({ freezeBaseLayer: true })),
@@ -153,6 +205,41 @@ describe('training data radar', () => {
     expect(markup).toContain('aria-label="Edit Code synth"')
     expect(markup).not.toContain('aria-label="Edit Code verify"')
     expect(markup).not.toContain('aria-label="Code post-train MTok"')
+  })
+
+  it('stacks cleanly in portrait with bounded labels and touch-first controls', () => {
+    const markup = renderToStaticMarkup(
+      createElement(TrainingDataRadar, radarProps({ syntheticUnlocked: true })),
+    )
+
+    expect(markup).toContain('data-mobile-responsive="true"')
+    expect(markup).toContain('data-mobile-layout="portrait-stack horizontal-split"')
+    expect(markup).toContain('role="toolbar"')
+    expect(markup).toContain('aria-label="Radar actions"')
+    expect(markup).toContain('data-mobile-swipe="toolbar"')
+    expect(markup).toContain('snap-x')
+    expect(markup).toContain('overflow-x-auto')
+    expect(markup).toContain('data-touch-surface="scroll-and-drag"')
+    expect(markup).toContain('touch-pan-y')
+    expect(markup).toContain('data-touch-target="domain"')
+    expect(markup).toContain('data-touch-target="volume-nudge"')
+    expect(markup).toContain('data-mobile-priority="secondary"')
+    expect(markup).toContain('data-radar-label="code"')
+    expect(markup).toContain('style="left:50%;top:3%;transform:translate(-50%, -12%)"')
+  })
+
+  it('uses a compact horizontal split and swipeable domain readout', () => {
+    const markup = renderToStaticMarkup(
+      createElement(TrainingDataRadar, radarProps()),
+    )
+
+    expect(markup).toContain('@min-[34rem]:grid-cols-[minmax(15rem,1.15fr)_minmax(13rem,0.85fr)]')
+    expect(markup).toContain('@min-[34rem]:row-span-4')
+    expect(markup).toContain('@min-[34rem]:col-start-2')
+    expect(markup).toContain('data-mobile-swipe="domains"')
+    expect(markup).toContain('aria-description="Swipe left or right to review another data domain"')
+    expect(markup).toContain('Swipe ↔')
+    expect(markup).toContain('@max-[33.99rem]:sr-only')
   })
 
   it('moves one domain without silently changing any other token allocation', () => {

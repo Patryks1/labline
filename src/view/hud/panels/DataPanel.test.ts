@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { createGame } from "../../../sim/createGame";
 import { buildScaledModel } from "../../../sim/balance/modelBuild";
+import { instantRecipe } from "../../../sim/balance/modelProduct";
 import {
   DATA_DOMAINS,
   dataOfferPurchasableMTok,
@@ -11,8 +12,11 @@ import {
 } from "../../../sim/systems/data";
 import { useGameStore } from "../../../store/gameStore";
 import {
+  DATA_COMPACT_SECONDARY_CLASS,
   DATA_MARKET_FILTER_GRID_CLASS,
   DATA_MARKET_FILTER_SELECT_CLASS,
+  DATA_PANEL_SWIPE_CLASS,
+  DATA_WIDE_SECONDARY_CLASS,
   DataPanel,
   SynthTeacherRoutingTable,
 } from "./DataPanel";
@@ -45,8 +49,64 @@ describe("DataPanel market wiring", () => {
     expect(marketMarkup).toContain("Data type filter");
     expect(marketMarkup).toContain("hud-button");
     expect(DATA_MARKET_FILTER_GRID_CLASS).toContain("xl:grid-cols-3");
+    expect(DATA_MARKET_FILTER_GRID_CLASS).toContain("orientation:landscape");
+    expect(DATA_MARKET_FILTER_GRID_CLASS).toContain("max-h-[44vh]");
     expect(DATA_MARKET_FILTER_GRID_CLASS).not.toContain("lg:grid-cols-4");
     expect(DATA_MARKET_FILTER_SELECT_CLASS).toContain("w-full");
+    expect(DATA_MARKET_FILTER_SELECT_CLASS).toContain("min-h-11");
+    expect(marketMarkup).toContain("touch-auto flex-nowrap");
+  });
+
+  it("prioritizes mobile KPIs and collapses secondary stock detail", () => {
+    useGameStore.setState({ state: createGame(6_411) });
+    const markup = renderToStaticMarkup(createElement(DataPanel));
+
+    expect(markup).toContain('data-testid="data-critical-metrics"');
+    expect(markup).toContain('data-testid="data-mobile-secondary"');
+    expect(markup).toContain('data-testid="data-touch-tabs"');
+    expect(markup).toContain('data-testid="data-swipe-surface"');
+    expect(markup).toContain("Corpus, buying &amp; synthetic data.");
+    expect(markup).toContain("More corpus stats");
+    expect(markup).toContain("Collection breakdown");
+    expect(markup).toContain("Stock details");
+    expect(markup).toContain("touch-auto");
+    expect(markup).toContain("touch-pan-y");
+    expect(markup).not.toContain("<details open");
+    expect(DATA_COMPACT_SECONDARY_CLASS).toContain("sm:hidden");
+    expect(DATA_COMPACT_SECONDARY_CLASS).toContain("orientation:landscape");
+    expect(DATA_COMPACT_SECONDARY_CLASS).toContain("max-height:600px");
+    expect(DATA_COMPACT_SECONDARY_CLASS).toContain("max-width:1180px");
+    expect(DATA_WIDE_SECONDARY_CLASS).toContain("sm:block");
+    expect(DATA_WIDE_SECONDARY_CLASS).toContain("orientation:landscape");
+    expect(DATA_PANEL_SWIPE_CLASS).toContain("touch-pan-y");
+  });
+
+  it("keeps secondary source, market, and synth controls behind compact disclosures", () => {
+    useGameStore.setState({ state: createGame(6_412) });
+    const Panel = DataPanel as unknown as (props: {
+      initialTab?: "stocks" | "sources" | "market" | "synth";
+    }) => ReactElement;
+
+    const sourcesMarkup = renderToStaticMarkup(
+      createElement(Panel, { initialTab: "sources" }),
+    );
+    const marketMarkup = renderToStaticMarkup(
+      createElement(Panel, { initialTab: "market" }),
+    );
+    const synthMarkup = renderToStaticMarkup(
+      createElement(Panel, { initialTab: "synth" }),
+    );
+
+    expect(sourcesMarkup).toContain("Top domains");
+    expect(marketMarkup).toContain("Last market fill");
+    expect(marketMarkup).toContain("Supplier contracts");
+    expect(marketMarkup).toContain("touch-auto flex-nowrap");
+    expect(synthMarkup).toContain("Generation detail");
+    expect(synthMarkup).toContain("Corpus routing");
+    expect(synthMarkup).toContain("min-h-11 w-full");
+    expect(sourcesMarkup).not.toContain("<details open");
+    expect(marketMarkup).not.toContain("<details open");
+    expect(synthMarkup).not.toContain("<details open");
   });
 
   it("surfaces hygiene consequences, domain buying, and compact market actions", () => {
@@ -114,33 +174,58 @@ describe("DataPanel market wiring", () => {
 
   it("renders one accessible teacher route per corpus with causal unit economics", () => {
     const state = createGame(6_408);
-    state.player.models = [
-      buildScaledModel({
-        id: "ui-synth-teacher",
-        name: "Glyph Route",
-        paramsB: 3,
-        family: "omni",
-        day: state.day,
-        dataCoverage: 3,
-        dataQuality: 78,
-        postTrain: "tools",
-        release: "released",
-        shipped: true,
-      }),
-    ];
+    const model = buildScaledModel({
+      id: "ui-synth-teacher",
+      name: "Glyph Route",
+      paramsB: 3,
+      family: "omni",
+      day: state.day,
+      dataCoverage: 3,
+      dataQuality: 78,
+      postTrain: "tools",
+      release: "released",
+      shipped: true,
+    });
+    model.productProfile = {
+      ...model.productProfile!,
+      effortRecipes: [
+        instantRecipe(),
+        {
+          id: "think",
+          name: "Think",
+          kind: "trained",
+          thinkingTokenMult: 2.5,
+          trainPfDays: 50,
+          trainCash: 1_000_000,
+          trained: true,
+          quality: 0.72,
+          served: true,
+        },
+      ],
+      defaultEffortId: "instant",
+    };
+    state.player.models = [model];
     state.player.researchUnlocked = [
       ...state.player.researchUnlocked,
       "data_synth",
     ];
-    const estimate = estimateSynthBudget(state, 0.25);
+    const estimate = estimateSynthBudget(
+      state,
+      0.25,
+      { code: model.id },
+      { code: "think" },
+    );
     const picks = Object.fromEntries(
       DATA_DOMAINS.map((domain) => [domain, ""]),
     ) as Record<(typeof DATA_DOMAINS)[number], string>;
+    picks.code = model.id;
+    const effortPicks = { ...picks, code: "think" };
     const markup = renderToStaticMarkup(
       createElement(SynthTeacherRoutingTable, {
         state,
         estimate,
         picks,
+        effortPicks,
         onPick: () => undefined,
       }),
     );
@@ -149,10 +234,18 @@ describe("DataPanel market wiring", () => {
     expect(markup).toContain("teacher size");
     expect(markup).toContain("Teacher for Code corpus");
     expect(markup).toContain("Teacher for Video corpus");
-    expect(markup).toContain("Auto · Glyph Route");
+    expect(markup).toContain("Auto · Glyph Route · Instant");
+    expect(markup).toContain('value="ui-synth-teacher::effort::think"');
+    expect(markup).toContain('class="bg-void" selected=""');
+    expect(markup).toContain("Glyph Route · Think · cap");
+    expect(markup).toContain("× billed");
+    expect(markup).toContain("× PF intensity");
     expect(markup).toContain("/MTok");
     expect(markup).toContain("kWh/MTok");
     expect(markup).toContain("sm:flex-row");
-    expect(markup).toContain("sm:grid-cols-");
+    expect(markup).toContain("min-[520px]:grid-cols-");
+    expect(markup).toContain("min-h-11 w-full");
+    expect(markup).toContain("<details");
+    expect(markup).not.toContain("<details open");
   });
 });

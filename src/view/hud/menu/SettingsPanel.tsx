@@ -61,10 +61,10 @@ export function SettingsPanel({ gameplay, cheats }: { gameplay?: GameplaySetting
   ]
 
   return (
-    <div className="settings-panel mt-5 grid min-h-0 gap-4 md:grid-cols-[9rem_minmax(0,1fr)]">
+    <div className="settings-panel mt-3 grid min-h-0 gap-3 sm:mt-5 sm:gap-4 md:grid-cols-[9rem_minmax(0,1fr)]">
       <nav
         aria-label="Settings sections"
-        className="settings-section-nav flex gap-1 border border-line/80 bg-void/45 p-1 md:block md:space-y-1"
+        className="settings-section-nav panel-scroll flex snap-x snap-mandatory gap-1 overflow-x-auto overscroll-x-contain border border-line/80 bg-void/45 p-1 touch-auto md:block md:space-y-1 md:overflow-visible"
       >
         {categories.map((item) => (
           <HudButton
@@ -74,7 +74,7 @@ export function SettingsPanel({ gameplay, cheats }: { gameplay?: GameplaySetting
             aria-current={category === item.id ? 'page' : undefined}
             onClick={() => setCategory(item.id)}
             variant="ghost"
-            className={`min-h-11 min-w-[6rem] flex-1 justify-start px-2.5 text-left text-[0.75rem] font-semibold transition md:w-full md:min-w-0 md:flex-none ${
+            className={`min-h-11 min-w-[6rem] flex-1 snap-start justify-center px-2.5 text-center text-[0.75rem] font-semibold transition md:w-full md:min-w-0 md:flex-none md:justify-start md:text-left ${
               category === item.id
                 ? 'bg-mint/15 text-mint shadow-[inset_2px_0_0_#48d7d1]'
                 : 'text-muted hover:bg-panel-2/70 hover:text-bone'
@@ -89,7 +89,7 @@ export function SettingsPanel({ gameplay, cheats }: { gameplay?: GameplaySetting
         role="region"
         id={`settings-panel-${category}`}
         aria-labelledby={`settings-tab-${category}`}
-        className="min-w-0"
+        className="min-w-0 pb-[max(0.25rem,env(safe-area-inset-bottom))] md:pb-0"
       >
         {category === 'interface' && <InterfaceSettings />}
         {category === 'video' && <VideoSettings />}
@@ -111,15 +111,15 @@ function InterfaceSettings() {
   return (
     <div className="space-y-3">
       <SettingCard icon={<Monitor size="1.15rem" />} title="Interface scale" description="Auto follows display height without enlarging controls on ultrawide screens.">
-        <div className="mt-3 flex items-center justify-between gap-3">
-          <div className="grid flex-1 grid-cols-4 gap-1.5">
+        <div className="mt-3 flex flex-col gap-2 min-[420px]:flex-row min-[420px]:items-center min-[420px]:justify-between min-[420px]:gap-3">
+          <div className="grid flex-1 grid-cols-2 gap-1.5 min-[420px]:grid-cols-4">
             {INTERFACE_SCALE_OPTIONS.map((option) => (
               <button
                 key={String(option.value)}
                 type="button"
                 aria-pressed={interfaceScale === option.value}
                 onClick={() => setInterfaceScale(option.value)}
-                className={`min-h-10 border px-2 font-mono text-[0.6875rem] transition ${
+                className={`min-h-11 border px-2 font-mono text-[0.6875rem] transition ${
                   interfaceScale === option.value
                     ? 'border-mint/50 bg-mint/15 text-mint'
                     : 'border-line bg-void/35 text-muted hover:text-bone'
@@ -129,7 +129,7 @@ function InterfaceSettings() {
               </button>
             ))}
           </div>
-          <span className="status-chip status-chip--positive shrink-0">{Math.round(resolvedScale * 100)}%</span>
+          <span className="status-chip status-chip--positive self-end min-[420px]:shrink-0 min-[420px]:self-auto">{Math.round(resolvedScale * 100)}%</span>
         </div>
       </SettingCard>
 
@@ -142,7 +142,7 @@ function InterfaceSettings() {
         <ArrowsOut size="1.15rem" className="shrink-0 text-mint" />
         <span className="min-w-0 flex-1">
           <strong className="block text-[0.875rem] text-bone">Reduce interface motion</strong>
-          <span className="mt-1 block text-[0.75rem] text-muted">Remove panel transitions and animated status changes.</span>
+          <span className="mt-1 block text-[0.75rem] text-muted max-sm:hidden [@media(max-height:540px)]:hidden">Remove panel transitions and animated status changes.</span>
         </span>
         <span className={`status-chip ${reducedMotion ? 'status-chip--positive' : ''}`}>{reducedMotion ? 'On' : 'Off'}</span>
       </button>
@@ -193,7 +193,7 @@ function VideoSettings() {
         <Cloud size="1.15rem" weight={cloudsVisible ? 'fill' : 'duotone'} className="shrink-0 text-mint" />
         <span className="min-w-0 flex-1">
           <strong className="block text-[0.875rem] text-bone">World clouds</strong>
-          <span className="mt-1 block text-[0.75rem] text-muted">Show the decorative cloud layer above the game map.</span>
+          <span className="mt-1 block text-[0.75rem] text-muted max-sm:hidden [@media(max-height:540px)]:hidden">Show the decorative cloud layer above the game map.</span>
         </span>
         <span className={`status-chip ${cloudsVisible ? 'status-chip--positive' : ''}`}>{cloudsVisible ? 'On' : 'Off'}</span>
       </button>
@@ -226,7 +226,7 @@ function AudioSettings() {
         {muted ? <SpeakerSlash size="1.15rem" className="text-mint" /> : <SpeakerHigh size="1.15rem" className="text-mint" />}
         <span className="min-w-0 flex-1">
           <strong className="block text-[0.875rem] text-bone">Mute all audio</strong>
-          <span className="mt-1 block text-[0.75rem] text-muted">Keep individual channel levels while silencing playback.</span>
+          <span className="mt-1 block text-[0.75rem] text-muted max-sm:hidden [@media(max-height:540px)]:hidden">Keep individual channel levels while silencing playback.</span>
         </span>
         <span className={`status-chip ${muted ? 'status-chip--positive' : ''}`}>{muted ? 'Muted' : 'On'}</span>
       </button>
@@ -291,7 +291,7 @@ function GameplaySettings({ gameplay }: { gameplay: GameplaySettingsContext }) {
               >
                 <span className="min-w-0 flex-1">
                   <span className="block text-[0.8125rem] text-bone">{label}</span>
-                  <span className="mt-0.5 block text-[0.6875rem] text-muted">{description}</span>
+                  <span className="mt-0.5 block text-[0.6875rem] text-muted max-sm:hidden [@media(max-height:540px)]:hidden">{description}</span>
                 </span>
                 <span className={`status-chip ${enabled ? 'status-chip--positive' : ''}`}>{enabled ? 'On' : 'Off'}</span>
               </button>
@@ -309,7 +309,7 @@ function GameplaySettings({ gameplay }: { gameplay: GameplaySettingsContext }) {
         <Eye size="1.15rem" className="shrink-0 text-mint" />
         <span className="min-w-0 flex-1">
           <strong className="block text-[0.875rem] text-bone">Starter objectives</strong>
-          <span className="mt-1 block text-[0.75rem] text-muted">Show the guided launch sequence in mission control.</span>
+          <span className="mt-1 block text-[0.75rem] text-muted max-sm:hidden [@media(max-height:540px)]:hidden">Show the guided launch sequence in mission control.</span>
         </span>
         <span className={`status-chip ${!gameplay.onboardingDismissed ? 'status-chip--positive' : ''}`}>
           {gameplay.onboardingDismissed ? 'Hidden' : 'Visible'}
@@ -421,12 +421,12 @@ function CheatSettings({ cheats }: { cheats: CheatSettingsContext }) {
 
 function SettingCard({ icon, title, description, children }: { icon: ReactNode; title: string; description: string; children: ReactNode }) {
   return (
-    <section className="border border-line/70 bg-panel-2/70 p-3.5">
+    <section className="border border-line/70 bg-panel-2/70 p-3 sm:p-3.5">
       <div className="flex items-start gap-3">
         <span className="mt-0.5 shrink-0 text-mint">{icon}</span>
         <div className="min-w-0 flex-1">
           <h3 className="text-[0.875rem] font-semibold text-bone">{title}</h3>
-          <p className="mt-1 text-[0.75rem] leading-snug text-muted">{description}</p>
+          <p className="mt-1 text-[0.75rem] leading-snug text-muted max-sm:hidden [@media(max-height:540px)]:hidden">{description}</p>
           {children}
         </div>
       </div>

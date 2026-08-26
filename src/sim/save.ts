@@ -539,6 +539,11 @@ function normalizeCapitalStack(
         effortId,
         day: Math.max(0, Math.floor(Number(record.day) || 0)),
         successChance: Math.max(0, Math.min(1, Number(record.successChance) || 0)),
+        requestedCashRaised: Math.max(
+          0,
+          Number(record.requestedCashRaised) || Number(record.cashRaised) || 0,
+        ),
+        dataDrag: Math.max(0, Math.min(1, Number(record.dataDrag) || 0)),
         cashRaised: Math.max(0, Number(record.cashRaised) || 0),
         preMoneyValuation: Math.max(0, Number(record.preMoneyValuation) || 0),
         postMoneyValuation: Math.max(0, Number(record.postMoneyValuation) || 0),
@@ -721,6 +726,60 @@ const LEGACY_TRAINING_NUMERICS: TrainingNumerics = {
   recipeVersion: 1,
 };
 
+function normalizeModelProductProfile(
+  profile: Model["productProfile"],
+): Model["productProfile"] {
+  if (!profile) return undefined;
+  const effortRecipes = migrateEffortRecipes(profile);
+  return {
+    ...profile,
+    effortRecipes,
+    defaultEffortId: defaultEffortIdOf({ ...profile, effortRecipes }),
+  };
+}
+
+function normalizeSyntheticTeacherEffortIds(
+  value: unknown,
+): TrainingDataPlan["syntheticTeacherEffortIds"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(
+        ([domain, recipeId]) =>
+          SYNTH_DOMAIN_KEYS.has(domain) &&
+          typeof recipeId === "string" &&
+          recipeId.trim().length > 0,
+      )
+      .map(([domain, recipeId]) => [domain, (recipeId as string).trim()]),
+  );
+}
+
+function normalizeTrainingDataPlan(
+  dataPlan: TrainingDataPlan,
+): TrainingDataPlan {
+  return {
+    ...dataPlan,
+    // Soft-migrate synthetic teacher/corpus selection fields. Recipe ids are
+    // model-owned, so deleted/unknown ids remain a runtime Instant fallback.
+    syntheticTeacherIds: dataPlan.syntheticTeacherIds
+      ? { ...dataPlan.syntheticTeacherIds }
+      : undefined,
+    syntheticTeacherEffortIds: normalizeSyntheticTeacherEffortIds(
+      dataPlan.syntheticTeacherEffortIds,
+    ),
+    syntheticMultiplier:
+      dataPlan.syntheticMultiplier != null &&
+      Number.isFinite(dataPlan.syntheticMultiplier)
+        ? Math.max(0, Math.min(7, dataPlan.syntheticMultiplier))
+        : undefined,
+    syntheticProvenance: ensureArray<
+      NonNullable<TrainingDataPlan["syntheticProvenance"]>[number]
+    >(dataPlan.syntheticProvenance),
+  };
+}
+
 function normalizeTrainingJob(job: TrainingJob): TrainingJob {
   const backbone = job.backbone ?? backboneFromFamily(job.family);
   const rawPreset = job.productPreset ?? presetFromFamily(job.family);
@@ -766,29 +825,21 @@ function normalizeTrainingJob(job: TrainingJob): TrainingJob {
   ) {
     completedPostTrainStages.add(job.postTrain);
   }
-  const dataPlan = job.dataPlan
+  const dataPlan = normalizeTrainingDataPlan(job.dataPlan);
+  const plan = job.plan
     ? {
-        ...job.dataPlan,
-        // Soft-migrate synthetic teacher/corpus selection fields.
-        syntheticTeacherIds: job.dataPlan.syntheticTeacherIds
-          ? { ...job.dataPlan.syntheticTeacherIds }
-          : undefined,
-        syntheticMultiplier:
-          job.dataPlan.syntheticMultiplier != null &&
-          Number.isFinite(job.dataPlan.syntheticMultiplier)
-            ? Math.max(0, Math.min(7, job.dataPlan.syntheticMultiplier))
-            : undefined,
-        syntheticProvenance: ensureArray<
-          NonNullable<TrainingDataPlan["syntheticProvenance"]>[number]
-        >(job.dataPlan.syntheticProvenance),
+        ...job.plan,
+        dataRecipe: normalizeTrainingDataPlan(job.plan.dataRecipe),
       }
-    : job.dataPlan;
+    : job.plan;
   const normalized: TrainingJob = {
     ...job,
     backbone,
     productPreset,
     io,
     dataPlan,
+    plan,
+    productProfile: normalizeModelProductProfile(job.productProfile),
     trainingFormulaVersion: job.trainingFormulaVersion ?? 1,
     trainingNumerics,
     numerics: trainingNumerics,
@@ -988,6 +1039,7 @@ function normalizeModelComputeV2(model: Model): Model {
       completedPostTrainStages: [...completedPostTrainStages],
       postTrainStageEffectiveness,
     }),
+    productProfile: normalizeModelProductProfile(model.productProfile),
     lineageId: model.lineageId ?? model.id,
     parentModelId: model.parentModelId,
     revision: Math.max(1, model.revision ?? 1),
@@ -1265,6 +1317,9 @@ function restoreState(
                   ),
                 )
               : undefined,
+          teacherEffortIds: normalizeSyntheticTeacherEffortIds(
+            job.teacherEffortIds,
+          ),
         }),
       ),
     };

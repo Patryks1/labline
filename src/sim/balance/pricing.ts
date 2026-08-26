@@ -25,8 +25,10 @@ import {
   splitInOutCost,
 } from "./unitEconomics";
 import {
+  billableTextMTok,
   CANONICAL_TEXT_INPUT_SHARE,
   CANONICAL_TEXT_OUTPUT_SHARE,
+  nativeWorkFromEquivalentMTokAtEffort,
 } from "./workload";
 
 export {
@@ -1136,11 +1138,30 @@ export function apiRevenueForCommercialWork(
   priceIn: number,
   priceOut: number,
   native?: NativeApiListPrices,
+  generatedTokenMultiplier = 1,
 ): number {
   const mtok = Math.max(
     0,
     Number.isFinite(equivalentMTok) ? equivalentMTok : 0,
   );
+  if (
+    kind === "language" ||
+    kind === "coding" ||
+    kind === "reasoning" ||
+    kind === "omni"
+  ) {
+    const billed = billableTextMTok(
+      nativeWorkFromEquivalentMTokAtEffort(
+        kind,
+        mtok,
+        generatedTokenMultiplier,
+      ),
+    );
+    return (
+      billed.inputMTok * Math.max(0, priceIn) +
+      billed.outputMTok * Math.max(0, priceOut)
+    );
+  }
   return (
     mtok *
     commercialApiListPricePerEquivalentMTok(

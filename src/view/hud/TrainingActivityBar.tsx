@@ -126,6 +126,11 @@ function ActivityItem({
       data-stage={job.stage}
       data-status={job.statusLabel.toLowerCase().replaceAll(' ', '-')}
       data-issue={job.issueTone ?? 'none'}
+      data-mobile-priority={
+        job.job.pendingCampaignEvent || job.issueTone === 'danger' || job.issueTone === 'warning'
+          ? 'urgent'
+          : 'standard'
+      }
       title={
         job.issueLabel
           ? `${job.name} · ${job.issueLabel} · ${job.allocatedPf.toFixed(2)} PF/d`
@@ -153,7 +158,7 @@ function ActivityItem({
           </span>
           <StatusChip tone={chipTone(job.statusTone)}>{job.statusLabel}</StatusChip>
         </span>
-        <div className="training-activity-bar__meter mt-1">
+        <div className="training-activity-bar__meter mt-1" data-mobile-detail="progress">
           <MeterBar
             label={`${job.stageLabel} ${pct}%`}
             value={job.stageProgress}
@@ -256,6 +261,7 @@ export function TrainingActivityBar({
       <div
         className="training-activity-bar__surface hud-surface flex min-h-12 min-w-0 cursor-pointer flex-col gap-1.5 rounded-lg px-2.5 py-1.5"
         data-open-models="true"
+        data-mobile-summary="training"
         onClick={openModels}
       >
         {pendingDecision?.job.pendingCampaignEvent ? (
@@ -285,7 +291,10 @@ export function TrainingActivityBar({
         <div className="flex shrink-0 items-center gap-2 border-r border-line/60 pr-2.5">
           <Brain size="1rem" weight="duotone" className="text-train" aria-hidden />
           {activity.jobs.length > 0 ? (
-            <div className={`training-activity-bar__summary hidden min-w-0 sm:block ${suppressSummary ? 'training-activity-bar__summary--suppressed' : ''}`}>
+            <div
+              className={`training-activity-bar__summary hidden min-w-0 sm:block ${suppressSummary ? 'training-activity-bar__summary--suppressed' : ''}`}
+              data-mobile-detail="secondary"
+            >
               <p className="hud-eyebrow">Training activity</p>
               <p className="truncate text-[0.75rem] text-bone">{activity.summary}</p>
             </div>

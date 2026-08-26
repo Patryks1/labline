@@ -5,6 +5,7 @@ import {
   blendApiPrice,
   commercialModelKind,
   modelBlendedPublicApiPrice,
+  splitBlendedApiPrice,
   type CommercialModelKind,
 } from "../balance/pricing";
 import { defaultServePrecisionForModel, precisionComputeMult } from "../balance/tokenServe";
@@ -31,8 +32,13 @@ import {
   instantRecipe,
   migrateEffortRecipes,
   planPersonalityDissatisfaction,
-  serveTokenMultiplierForRecipe,
 } from "../balance/modelProduct";
+import { planEffortMix } from "../balance/effortEconomics";
+import {
+  billableTextMTok,
+  nativeWorkFromEquivalentMTok,
+  nativeWorkFromEquivalentMTokAtEffort,
+} from "../balance/workload";
 import {
   customerBandForPrice,
   expectedUtilizationRange,
@@ -1413,14 +1419,22 @@ export interface PlanModelEntitlement {
   kind: CommercialModelKind;
   /** Share of the plan's traffic routed to this model × effort head. */
   trafficShare: number;
-  /** Blended public API list price: input × expected input share + output × expected output share. */
+  /** Effective public API list price per billed MTok at this effort's in/out mix. */
   blendedApiPricePerMTok: number;
-  /** Fixed plan MTok allocated to this model×effort by routing and effort mix. */
+  /** API spend for one Instant-equivalent MTok before effort expands billing. */
+  effectiveApiSpendPerBaseMTok: number;
+  /** Billed plan MTok allocated by request share and effort token expansion. */
   includedMTokPerMonth: number;
   /** Expected tokens per interaction for this workload × thinking multiplier. */
   tokensPerInteraction: number;
   /** Serve-time token multiplier vs a 1× Instant budget. */
   tokenMult: number;
+  /** Total billed prompt + generated tokens versus Instant. */
+  billedTokenMult: number;
+  /** Physical serving work versus one Instant-equivalent request. */
+  computeTokenMult: number;
+  /** PF per billed token versus Instant. */
+  computeIntensityMult: number;
   /** Approximate daily interactions = included tokens ÷ interaction size ÷ 30. */
   interactionsPerDay: number;
   /** Band-based expected allowance utilization for the plan. */
@@ -1429,6 +1443,37 @@ export interface PlanModelEntitlement {
   apiEquivalentValuePerMonth: number;
   /** Raw serving cost of traffic routed to this model (£/mo, expected use). */
   rawServingCostPerMonth: number | null;
+}
+
+function planModelApiInOut(
+  state: SimState,
+  model: Model,
+): { priceIn: number; priceOut: number } {
+  if (
+    model.apiPriceInPerMTok == null &&
+    model.apiPriceOutPerMTok == null &&
+    model.apiPricePerMTok != null
+  ) {
+    return splitBlendedApiPrice(Math.max(0, model.apiPricePerMTok));
+  }
+  const pricing = state.player.pricing;
+  const fallback = splitBlendedApiPrice(pricing.apiPricePerMTok);
+  return {
+    priceIn: Math.max(
+      0,
+      model.apiPriceInPerMTok ??
+        model.suggestedApiPriceIn ??
+        pricing.apiPriceInPerMTok ??
+        fallback.priceIn,
+    ),
+    priceOut: Math.max(
+      0,
+      model.apiPriceOutPerMTok ??
+        model.suggestedApiPriceOut ??
+        pricing.apiPriceOutPerMTok ??
+        fallback.priceOut,
+    ),
+  };
 }
 
 /**
@@ -1553,22 +1598,61 @@ export function planModelEntitlements(
       state.player.pricing,
       lane.model,
     );
+    const { priceIn, priceOut } = planModelApiInOut(state, lane.model);
     const modelIncluded =
       planModelEntitlementMTok(plan, blended) * lane.share;
     const kind = commercialModelKind(lane.model);
     const baseTokens = avgTokensPerInteraction(kind);
     const rawCostPerMTok = opts?.rawCostPerMTok?.(lane.model);
-    const efficiency = lane.model.productProfile?.tokenEfficiency ?? 50;
     const efforts = planEnabledEffortRecipes(plan, lane.model);
     const defaultId = defaultEffortIdOf(lane.model.productProfile);
     const requestShares = effortRecipeRequestShares(efforts, defaultId);
+    const requestByEffortId = new Map(
+      efforts.map((recipe) => [
+        recipe.id,
+        planEffortMix({
+          model: lane.model,
+          kind,
+          recipes: [recipe],
+          defaultId: recipe.id,
+        }),
+      ]),
+    );
+    const billedMix = efforts.reduce(
+      (sum, recipe) =>
+        sum +
+        (requestShares[recipe.id] ?? 0) *
+          (requestByEffortId.get(recipe.id)?.billedTokenMultiplier ?? 1),
+      0,
+    );
 
     for (const recipe of efforts) {
       const requestShare = requestShares[recipe.id] ?? 0;
       if (requestShare <= 0) continue;
-      const tokenMult = serveTokenMultiplierForRecipe(recipe, efficiency);
-      const tokensPerInteraction = baseTokens * tokenMult;
-      const included = modelIncluded * requestShare;
+      const request = requestByEffortId.get(recipe.id)!;
+      const tokenMult = request.generatedTokenMultiplier;
+      const billedTokenMult = request.billedTokenMultiplier;
+      const computeTokenMult = request.computeTokenMultiplier;
+      const computeIntensityMult =
+        computeTokenMult / Math.max(1e-9, billedTokenMult);
+      const baseWork = billableTextMTok(
+        nativeWorkFromEquivalentMTok(kind, 1),
+      );
+      const effortWork = billableTextMTok(
+        nativeWorkFromEquivalentMTokAtEffort(kind, 1, tokenMult),
+      );
+      const effectiveApiSpendPerBaseMTok =
+        baseWork.totalMTok > 1e-9
+          ? effortWork.inputMTok * priceIn + effortWork.outputMTok * priceOut
+          : blended;
+      const effortBlendedApiPrice =
+        effortWork.totalMTok > 1e-9
+          ? effectiveApiSpendPerBaseMTok / effortWork.totalMTok
+          : blended;
+      const tokensPerInteraction = baseTokens * billedTokenMult;
+      const included =
+        modelIncluded *
+        ((requestShare * billedTokenMult) / Math.max(1e-9, billedMix));
       const trafficShare = lane.share * requestShare;
       rows.push({
         modelId: lane.model.id,
@@ -1580,19 +1664,26 @@ export function planModelEntitlements(
         ),
         kind,
         trafficShare,
-        blendedApiPricePerMTok: blended,
+        blendedApiPricePerMTok: effortBlendedApiPrice,
+        effectiveApiSpendPerBaseMTok,
         includedMTokPerMonth: included,
         tokensPerInteraction,
         tokenMult,
+        billedTokenMult,
+        computeTokenMult,
+        computeIntensityMult,
         interactionsPerDay:
           (included * 1_000_000) /
           tokensPerInteraction /
           ECONOMY.daysPerMonth,
         expectedUtilization,
-        apiEquivalentValuePerMonth: included * blended,
+        apiEquivalentValuePerMonth: included * effortBlendedApiPrice,
         rawServingCostPerMonth:
           rawCostPerMTok != null
-            ? included * expectedUtilization * Math.max(0, rawCostPerMTok)
+            ? included *
+              expectedUtilization *
+              Math.max(0, rawCostPerMTok) *
+              computeIntensityMult
             : null,
       });
     }
