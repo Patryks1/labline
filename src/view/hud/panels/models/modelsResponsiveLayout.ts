@@ -7,6 +7,10 @@ export const MODELS_COMPACT_DESKTOP_MAX_WIDTH = 1200;
 export const MODELS_COMPACT_COLUMNS_MIN_WIDTH = 1201;
 export const MODELS_COMPACT_COLUMNS_MAX_WIDTH = 1360;
 
+/** Compact HUD query shared with filter/CSS density: collapsed by default. */
+export const MODELS_COMPACT_DISCLOSURE_QUERY =
+  "(max-width: 900px), (orientation: landscape) and (max-height: 600px) and (max-width: 1180px)";
+
 export type ModelsWorkbenchLayout = "stacked" | "columns";
 
 export type ModelsMobileOrientation = "portrait" | "landscape";
@@ -60,3 +64,20 @@ export function modelsWorkspaceViewForSwipe(
   const next = index + (direction === "left" ? 1 : -1);
   return MODELS_WORKSPACE_VIEWS[next] ?? null;
 }
+
+/**
+ * Training-run accordions stay collapsed on compact viewports and start open
+ * on desktop, matching the HUD compact media query used by filters and CSS.
+ */
+export function modelsDesktopDefaultDisclosureOpen(
+  matchMedia?: (query: string) => Pick<MediaQueryList, "matches">,
+): boolean {
+  const media =
+    matchMedia ??
+    (typeof window !== "undefined"
+      ? window.matchMedia?.bind(window)
+      : undefined);
+  if (typeof media !== "function") return false;
+  return !media(MODELS_COMPACT_DISCLOSURE_QUERY).matches;
+}
+

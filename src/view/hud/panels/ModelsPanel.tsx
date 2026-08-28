@@ -180,6 +180,7 @@ import {
 } from "./models/CheckpointBranchDialog";
 import { resolveModelsFocusJobId } from "./models/modelsFocus";
 import { useShellSwipeGesture } from "../mobileShellContracts";
+import { ModelsDesktopDefaultDetails } from "./models/ModelsDesktopDefaultDetails";
 import { modelsWorkspaceViewForSwipe } from "./models/modelsResponsiveLayout";
 
 const TRAINING_FORMAT_OPTIONS: ReadonlyArray<{
@@ -2781,7 +2782,7 @@ export function ModelsPanel({
                             </div>
                           </div>
 
-                          <details className="group rounded-md border border-line/50 bg-void/25" data-model-stack-disclosure="true">
+                          <ModelsDesktopDefaultDetails className="group rounded-md border border-line/50 bg-void/25" data-model-stack-disclosure="true">
                             <summary className="flex min-h-11 cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-2.5 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
                               <h4 className="text-[0.8125rem] font-semibold text-bone">Model stack</h4>
                               <div className="flex flex-wrap gap-1 font-mono text-[0.625rem]">
@@ -2872,7 +2873,7 @@ export function ModelsPanel({
                               })}
                             </CardGrid>
                             </div>
-                          </details>
+                          </ModelsDesktopDefaultDetails>
                         </div>
                       </GameCard>
                     </div>
@@ -2903,7 +2904,7 @@ export function ModelsPanel({
                             />
                           </label>
 
-                          <details className="group rounded-md border border-line/50 bg-void/25" data-review-gyms-disclosure="true">
+                          <ModelsDesktopDefaultDetails className="group rounded-md border border-line/50 bg-void/25" data-review-gyms-disclosure="true">
                             <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
                               <span className="text-[0.8125rem] text-muted">Gyms on this run</span>
                               <span className="font-mono text-[0.625rem] text-muted">{attachedGymKinds.length} attached · <span className="group-open:hidden">Edit</span><span className="hidden group-open:inline">Hide</span></span>
@@ -2923,7 +2924,7 @@ export function ModelsPanel({
                               />
                             </div>
                             </div>
-                          </details>
+                          </ModelsDesktopDefaultDetails>
 
                           <div
                             className="rounded-md border border-line/60 bg-void/35 p-3"
@@ -3016,7 +3017,7 @@ export function ModelsPanel({
                                 mobileSummary={prospectiveRamFit.ready ? "Fits" : "Blocked"}
                               />
                             </div>
-                            <details className="group mt-2 rounded-md border border-line/40 bg-panel-2/35" data-readiness-disclosure="true">
+                            <ModelsDesktopDefaultDetails className="group mt-2 rounded-md border border-line/40 bg-panel-2/35" data-readiness-disclosure="true">
                               <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 font-mono text-[0.6875rem] text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
                                 <span>Technical readiness</span>
                                 <span>{blockersWithName.length === 0 ? "Ready" : `${blockersWithName.length} issue${blockersWithName.length === 1 ? "" : "s"}`} · <span className="group-open:hidden">Details</span><span className="hidden group-open:inline">Hide</span></span>
@@ -3092,7 +3093,7 @@ export function ModelsPanel({
                                 </div>
                               ))}
                             </div>
-                            </details>
+                            </ModelsDesktopDefaultDetails>
                           </div>
 
                           <BlockerList items={blockersWithName} />

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  MODELS_COMPACT_DISCLOSURE_QUERY,
+  modelsDesktopDefaultDisclosureOpen,
   modelsMobileOrientationForViewport,
   modelsWorkspaceViewForSwipe,
 } from "./modelsResponsiveLayout";
@@ -19,5 +21,18 @@ describe("Models mobile layout contract", () => {
     expect(modelsWorkspaceViewForSwipe("labs", "right")).toBe("checkpoints");
     expect(modelsWorkspaceViewForSwipe("runs", "right")).toBeNull();
     expect(modelsWorkspaceViewForSwipe("fleet", "left")).toBeNull();
+  });
+
+  it("opens training-run disclosures on desktop and keeps them collapsed on compact screens", () => {
+    expect(
+      modelsDesktopDefaultDisclosureOpen(() => ({ matches: false })),
+    ).toBe(true);
+    expect(
+      modelsDesktopDefaultDisclosureOpen((query) => {
+        expect(query).toBe(MODELS_COMPACT_DISCLOSURE_QUERY);
+        return { matches: true };
+      }),
+    ).toBe(false);
+    expect(modelsDesktopDefaultDisclosureOpen()).toBe(false);
   });
 });

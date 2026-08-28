@@ -4,6 +4,7 @@ import {
   normalizeFocus,
 } from "../../../../sim/balance/modelProduct";
 import { SliderField } from "../../ui/SliderField";
+import { ModelsDesktopDefaultDetails } from "./ModelsDesktopDefaultDetails";
 
 const AXES: readonly {
   id: FocusAxis;
@@ -34,7 +35,7 @@ export function FocusStudio({
 }) {
   const value = normalizeFocus(focus);
   return (
-    <details
+    <ModelsDesktopDefaultDetails
       className="group rounded-md border border-line/60 bg-void/30"
       data-focus-studio="true"
       data-mobile-default-collapsed="true"
@@ -80,6 +81,6 @@ export function FocusStudio({
         ))}
       </div>
       </div>
-    </details>
+    </ModelsDesktopDefaultDetails>
   );
 }
