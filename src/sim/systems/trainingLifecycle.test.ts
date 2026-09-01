@@ -290,6 +290,8 @@ describe("training lifecycle controls", () => {
         ...state,
         player: {
           ...state.player,
+          cash: 2_000_000_000,
+          researchUnlocked: [...state.player.researchUnlocked, "domain_agents"],
           trainingJobs: [baseComplete],
           trainingJob: baseComplete,
         },
@@ -360,6 +362,8 @@ describe("training lifecycle controls", () => {
       ...state,
       player: {
         ...state.player,
+        cash: 2_000_000_000,
+        researchUnlocked: [...state.player.researchUnlocked, "domain_agents"],
         trainingJobs: [
           {
             ...job,

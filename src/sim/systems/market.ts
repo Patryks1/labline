@@ -4147,8 +4147,11 @@ export function tickMarket(state: SimState): SimState {
     postedSurge > 1 + 1e-9
       ? Math.max(0, apiRevenue * (1 - 1 / postedSurge))
       : 0;
-  const serveOutage =
-    isInferenceOutage(capacityPf, unservedRatio) && playerDemandMTok > 0.05;
+  const serveOutage = isInferenceOutage({
+    capacityPf,
+    unservedRatio,
+    demandMTok: playerDemandMTok,
+  });
 
   const pauseFeed: FeedEventInput[] = [];
   if (serveOutage) {

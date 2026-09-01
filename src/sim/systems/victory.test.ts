@@ -3,7 +3,11 @@ import { ECONOMY } from '../balance/economy'
 import { createGame } from '../createGame'
 import type { SimState } from '../types'
 import { tickLoans } from './loans'
-import { cashDistressStage, tickVictory } from './victory'
+import {
+  cashDistressStage,
+  resumeInsolvency,
+  tickVictory,
+} from './victory'
 
 function withCash(state: SimState, cash: number): SimState {
   return {
@@ -47,24 +51,24 @@ describe('cash distress ladder', () => {
     expect(distressed.victory.outcome).toBe('playing')
   })
 
-  it('triggers game over at exactly the -$500M floor after settlement', () => {
+  it('keeps playing at the -$500M floor so credit, equity, and model sales stay usable', () => {
     const floor = ECONOMY.victory.bankruptCash
     expect(floor).toBe(-500_000_000)
 
     const atFloor = tickVictory(withCash(createGame(723), floor))
-    expect(atFloor.victory.outcome).toBe('lost')
-    expect(atFloor.paused).toBe(true)
+    expect(atFloor.victory.outcome).toBe('playing')
+    expect(
+      atFloor.alerts.some((a) => a.id.startsWith('cash-distress-bankrupt-')),
+    ).toBe(true)
 
     const belowFloor = tickVictory(withCash(createGame(724), floor - 1))
-    expect(belowFloor.victory.outcome).toBe('lost')
+    expect(belowFloor.victory.outcome).toBe('playing')
 
     const justAbove = tickVictory(withCash(createGame(725), floor + 1))
     expect(justAbove.victory.outcome).toBe('playing')
   })
 
-  it('triggers bankruptcy after daily financing settlement pushes cash to the floor', () => {
-    // Debt service settles before the victory check: a lab just above the
-    // floor crosses it once the day's loan payment lands.
+  it('does not end the run when daily financing settlement crosses the floor', () => {
     const base = withCash(createGame(726), -498_000_000)
     const state: SimState = {
       ...base,
@@ -89,8 +93,49 @@ describe('cash distress ladder', () => {
     const settled = tickLoans(state)
     expect(settled.player.cash).toBeLessThanOrEqual(-500_000_000)
     const next = tickVictory(settled)
+    expect(next.victory.outcome).toBe('playing')
+  })
+
+  it('ends the run only after the recovery window expires', () => {
+    const floor = ECONOMY.victory.bankruptCash
+    const insolvent = withCash(createGame(727), floor)
+    const reviewing: SimState = {
+      ...insolvent,
+      player: {
+        ...insolvent.player,
+        capital: {
+          ...insolvent.player.capital!,
+          restructuring: { active: true, daysLeft: 0, stage: 'bankruptcy' },
+        },
+      },
+    }
+    const next = tickVictory(reviewing)
     expect(next.victory.outcome).toBe('lost')
     expect(next.paused).toBe(true)
+    expect(next.victory.reason).toContain('bankruptcy')
+  })
+
+  it('reopens a recovery window so the board review is not a dead end', () => {
+    const base = withCash(createGame(728), ECONOMY.victory.bankruptCash)
+    const lost = tickVictory({
+      ...base,
+      player: {
+        ...base.player,
+        capital: {
+          ...base.player.capital!,
+          restructuring: { active: true, daysLeft: 0, stage: 'bankruptcy' },
+        },
+      },
+    })
+    expect(lost.victory.outcome).toBe('lost')
+    const resumed = resumeInsolvency(lost)
+    expect(resumed.victory.outcome).toBe('playing')
+    expect(resumed.player.capital?.restructuring).toEqual({
+      active: true,
+      daysLeft: 30,
+      stage: 'asset_sale',
+    })
+    expect(tickVictory(resumed).victory.outcome).toBe('playing')
   })
 })
 

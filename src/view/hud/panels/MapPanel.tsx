@@ -32,6 +32,8 @@ import { OverviewGovernance } from './OverviewGovernance'
 import { EmptyState, HudButton, PanelScaffold, StatusChip } from '../ui/HudPrimitives'
 import { BlockerList, GameCard, LiveDot, MeterBar, StatRow } from '../ui/kit'
 
+import { HudDesktopDefaultDetails } from '../ui/HudDesktopDefaultDetails'
+
 function dcSizeLabel(kind: string, size?: string): string {
   if (size === 'small' || kind === 'dc') return 'Small · 1 tile · 96 bays'
   if (size === 'medium' || kind === 'dc_m') return 'Medium · 4 tiles · 288 bays'
@@ -155,7 +157,7 @@ export function MapPanel() {
             </div>
 
             {isDcKind(tile.kind) || tile.capex > 0 || region || tile.note ? (
-              <details className="mt-3 rounded-md border border-line/60 bg-void/30">
+              <HudDesktopDefaultDetails className="mt-3 rounded-md border border-line/60 bg-void/30">
                 <summary className="flex min-h-11 cursor-pointer touch-manipulation items-center px-3 text-[0.75rem] font-semibold text-muted">
                   Site details
                 </summary>
@@ -186,7 +188,7 @@ export function MapPanel() {
                     <p className="pt-1 text-[0.75rem] leading-snug text-muted">{tile.note}</p>
                   ) : null}
                 </div>
-              </details>
+              </HudDesktopDefaultDetails>
             ) : null}
 
             {constructing ? (

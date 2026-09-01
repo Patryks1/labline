@@ -1950,13 +1950,20 @@ button:not(:disabled):active {
   position: absolute;
   right: var(--intel-width);
   bottom: var(--hud-ops);
-  left: var(--hud-rail);
+  left: calc(var(--hud-rail) + var(--workspace-width));
   z-index: 16;
+  box-sizing: border-box;
+  width: auto;
+  min-width: 0;
+  max-width: calc(100vw - var(--hud-rail) - var(--workspace-width) - var(--intel-width));
   padding: 0 0.5rem 0.35rem;
+  overflow: hidden;
 }
 
 .training-activity-bar__surface {
+  min-width: 0;
   min-height: 2.75rem;
+  overflow: hidden;
   cursor: pointer;
   border-color: color-mix(in srgb, var(--color-train) 24%, var(--color-line));
   background: color-mix(in srgb, var(--color-panel) 92%, transparent);
@@ -3905,7 +3912,6 @@ input[type='range'] {
   }
 
   .operations-allocation-grid,
-  .operations-zero-note,
   .operations-expanded-meta {
     display: none;
   }
@@ -3951,13 +3957,8 @@ input[type='range'] {
     height: 0.75rem;
   }
 
-  .operations-shell[data-expanded='true'] .operations-zero-note,
   .operations-shell[data-expanded='true'] .operations-expanded-meta {
     display: flex;
-  }
-
-  .operations-shell[data-expanded='true'] .operations-zero-note {
-    display: block;
   }
 
   .game-shell:has(.operations-shell[data-expanded='true']) .map-navigator-launcher,

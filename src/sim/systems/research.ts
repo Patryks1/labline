@@ -46,12 +46,127 @@ export function researchPfTargetForNode(
   return node.costPfDays * mult * depthMult;
 }
 
+/** Omit or 1 = one-shot. */
+export function researchMaxRanks(node: ResearchNodeDef): number {
+  return Math.max(1, node.maxRanks ?? 1);
+}
+
+/** Completed ranks. Missing ranks + unlocked id is treated as 1. */
+export function researchRank(state: SimState, id: string): number {
+  const recorded = state.player.researchRanks?.[id];
+  if (recorded != null && Number.isFinite(recorded)) return recorded;
+  return state.player.researchUnlocked.includes(id) ? 1 : 0;
+}
+
+export function researchFullyDone(state: SimState, id: string): boolean {
+  return researchRank(state, id) >= researchMaxRanks(getResearchNode(id));
+}
+
+function rankFromUnlocks(
+  unlocked: readonly string[],
+  ranks: Record<string, number> | undefined,
+  id: string,
+): number {
+  const recorded = ranks?.[id];
+  if (recorded != null && Number.isFinite(recorded)) return recorded;
+  return unlocked.includes(id) ? 1 : 0;
+}
+
+function nodeIsFullyDone(
+  unlocked: readonly string[],
+  ranks: Record<string, number> | undefined,
+  id: string,
+): boolean {
+  return rankFromUnlocks(unlocked, ranks, id) >= researchMaxRanks(getResearchNode(id));
+}
+
+function hasAssignedInFlightProgram(state: SimState): boolean {
+  return (state.player.researchPrograms ?? []).some((program) => {
+    if (program.phase === "complete") return false;
+    const pod = (state.player.researchPods ?? []).find(
+      (candidate) => candidate.id === program.podId,
+    );
+    return pod?.assignmentId === program.id;
+  });
+}
+
+/**
+ * Next catalog id to auto-queue, or null when auto-queue is off / busy / empty.
+ * Never returns a locked deep target — only currently available methods.
+ */
+export function nextAutoQueueResearchId(
+  state: SimState,
+  lastCompletedNodeId?: string,
+): string | null {
+  if (!state.player.autoQueueResearch) return null;
+  if (state.player.activeResearch) return null;
+  if (hasAssignedInFlightProgram(state)) return null;
+  if (state.player.researchQueue.length > 0) return null;
+  if ((state.player.researchProgramQueue ?? []).length > 0) return null;
+
+  const available = RESEARCH_NODES.filter((node) => {
+    if (researchFullyDone(state, node.id)) return false;
+    if (
+      !node.prereqs.every((prereq) =>
+        state.player.researchUnlocked.includes(prereq),
+      )
+    ) {
+      return false;
+    }
+    if (
+      node.exclusiveWith?.some((other) =>
+        state.player.researchUnlocked.includes(other),
+      )
+    ) {
+      return false;
+    }
+    return true;
+  });
+
+  let candidates = available.filter((node) => researchMaxRanks(node) === 1);
+  if (candidates.length === 0) {
+    candidates = available.filter(
+      (node) => researchRank(state, node.id) < researchMaxRanks(node),
+    );
+  }
+  if (candidates.length === 0) return null;
+
+  if (lastCompletedNodeId) {
+    try {
+      const trunk = getResearchNode(lastCompletedNodeId).trunk;
+      const sameTrunk = candidates.filter((node) => node.trunk === trunk);
+      if (sameTrunk.length > 0) candidates = sameTrunk;
+    } catch {
+      // Unknown last node — keep the full candidate set.
+    }
+  }
+
+  candidates.sort((a, b) => {
+    const pfDelta = researchPfTarget(state, a) - researchPfTarget(state, b);
+    if (pfDelta !== 0) return pfDelta;
+    return a.id.localeCompare(b.id);
+  });
+  return candidates[0]?.id ?? null;
+}
+
+/** Enqueue at most one available method onto the legacy research queue. */
+export function maybeAutoQueueResearch(
+  state: SimState,
+  lastCompletedNodeId?: string,
+): SimState {
+  const id = nextAutoQueueResearchId(state, lastCompletedNodeId);
+  if (!id) return state;
+  return enqueueResearch(state, id);
+}
+
 /** Effective PF-days target for a node (catalog × economy × config × depth). */
 export function researchPfTarget(
   state: SimState,
   node: ResearchNodeDef,
 ): number {
-  return researchPfTargetForNode(node, state.config?.researchCostMult ?? 1);
+  const base = researchPfTargetForNode(node, state.config?.researchCostMult ?? 1);
+  if (researchMaxRanks(node) <= 1) return base;
+  return base * (1 + 0.2 * researchRank(state, node.id));
 }
 
 /**
@@ -143,13 +258,17 @@ export function canLabResearchNode(
   unlocked: string[],
   researchers: number,
   nodeId: string,
+  ranks?: Record<string, number>,
 ): { ok: boolean; reason?: string } {
-  if (unlocked.includes(nodeId))
-    return { ok: false, reason: "Already unlocked" };
+  const node = getResearchNode(nodeId);
+  const done =
+    ranks != null
+      ? nodeIsFullyDone(unlocked, ranks, nodeId)
+      : unlocked.includes(nodeId);
+  if (done) return { ok: false, reason: "Already unlocked" };
   if (researchers < 1) {
     return { ok: false, reason: "Need at least 1 researcher" };
   }
-  const node = getResearchNode(nodeId);
   for (const p of node.prereqs) {
     if (!unlocked.includes(p)) {
       return { ok: false, reason: `Requires ${getResearchNode(p).name}` };
@@ -207,13 +326,17 @@ export function planResearchPath(
   unlocked: readonly string[],
   scheduled: readonly string[],
   targetId: string,
+  ranks?: Record<string, number>,
 ): ResearchPathPlan {
-  const satisfied = new Set([...unlocked, ...scheduled]);
+  const unlockedSet = new Set(unlocked);
+  const scheduledSet = new Set(scheduled);
   const visiting = new Set<string>();
   const additions: string[] = [];
 
-  const visit = (nodeId: string): string | undefined => {
-    if (satisfied.has(nodeId)) return undefined;
+  const visit = (nodeId: string, asPrereq: boolean): string | undefined => {
+    if (scheduledSet.has(nodeId)) return undefined;
+    if (asPrereq && unlockedSet.has(nodeId)) return undefined;
+    if (!asPrereq && nodeIsFullyDone(unlocked, ranks, nodeId)) return undefined;
     if (visiting.has(nodeId)) return `Research dependency cycle at ${nodeId}`;
 
     let node: ResearchNodeDef;
@@ -223,21 +346,23 @@ export function planResearchPath(
       return `Unknown research method: ${nodeId}`;
     }
 
-    const conflict = node.exclusiveWith?.find((id) => satisfied.has(id));
+    const conflict = node.exclusiveWith?.find(
+      (id) => unlockedSet.has(id) || scheduledSet.has(id),
+    );
     if (conflict) return `Conflicts with ${getResearchNode(conflict).name}`;
 
     visiting.add(nodeId);
     for (const prerequisite of node.prereqs) {
-      const reason = visit(prerequisite);
+      const reason = visit(prerequisite, true);
       if (reason) return reason;
     }
     visiting.delete(nodeId);
-    satisfied.add(nodeId);
+    scheduledSet.add(nodeId);
     additions.push(nodeId);
     return undefined;
   };
 
-  const reason = visit(targetId);
+  const reason = visit(targetId, false);
   return reason ? { nodeIds: [], reason } : { nodeIds: additions };
 }
 
@@ -248,9 +373,11 @@ export function nodeVisualStatus(
   state: SimState,
   nodeId: string,
 ): NodeVisualStatus {
-  if (state.player.researchUnlocked.includes(nodeId)) return "done";
   if (state.player.activeResearch?.nodeId === nodeId) return "active";
   if (state.player.researchQueue.includes(nodeId)) return "queued";
+  if ((state.player.researchProgramQueue ?? []).includes(nodeId)) return "queued";
+  if (researchFullyDone(state, nodeId)) return "done";
+  if (researchRank(state, nodeId) > 0) return "available";
   const gate = prereqGate(state, nodeId);
   if (!gate.ok) return gate.blocked ? "blocked" : "locked";
   return "available";
@@ -293,7 +420,7 @@ export function canEnqueue(
   state: SimState,
   nodeId: string,
 ): { ok: boolean; reason?: string } {
-  if (state.player.researchUnlocked.includes(nodeId)) {
+  if (researchFullyDone(state, nodeId)) {
     return { ok: false, reason: "Already unlocked" };
   }
   if (state.player.activeResearch?.nodeId === nodeId) {
@@ -328,7 +455,7 @@ export function canStartNow(
   state: SimState,
   nodeId: string,
 ): { ok: boolean; reason?: string } {
-  if (state.player.researchUnlocked.includes(nodeId)) {
+  if (researchFullyDone(state, nodeId)) {
     return { ok: false, reason: "Already unlocked" };
   }
   if (state.player.activeResearch) {
@@ -377,7 +504,7 @@ export function canStartNow(
 
 /** Start immediately if free, otherwise enqueue. */
 export function startResearch(state: SimState, nodeId: string): SimState {
-  if (state.player.researchUnlocked.includes(nodeId)) return state;
+  if (researchFullyDone(state, nodeId)) return state;
 
   // If idle and prereqs met → start now
   if (!state.player.activeResearch) {
@@ -417,6 +544,7 @@ export function enqueueResearch(state: SimState, nodeId: string): SimState {
     state.player.researchUnlocked,
     scheduled,
     nodeId,
+    state.player.researchRanks,
   );
   if (plan.reason) {
     return {
@@ -629,46 +757,56 @@ export function applyResearchEffectsToPlayer(
   return { ...state, player: { ...state.player, ...p } };
 }
 
-export function aggregateEffects(unlocked: string[]): ResearchEffects {
+function accumulateEffects(acc: ResearchEffects, e: ResearchEffects): void {
+  if (e.utilCap) acc.utilCap = (acc.utilCap ?? 0) + e.utilCap;
+  if (e.servingEfficiency)
+    acc.servingEfficiency = (acc.servingEfficiency ?? 0) + e.servingEfficiency;
+  if (e.trainEfficiency)
+    acc.trainEfficiency = (acc.trainEfficiency ?? 0) + e.trainEfficiency;
+  if (e.energyPue) acc.energyPue = (acc.energyPue ?? 0) + e.energyPue;
+  if (e.capabilityBonus)
+    acc.capabilityBonus = (acc.capabilityBonus ?? 0) + e.capabilityBonus;
+  if (e.moeInferMult)
+    acc.moeInferMult = (acc.moeInferMult ?? 1) * e.moeInferMult;
+  if (e.denseInferMult)
+    acc.denseInferMult = (acc.denseInferMult ?? 1) * e.denseInferMult;
+  if (e.safetyBonus) acc.safetyBonus = (acc.safetyBonus ?? 0) + e.safetyBonus;
+  if (e.rlhfQuality) acc.rlhfQuality = (acc.rlhfQuality ?? 0) + e.rlhfQuality;
+  if (e.chipDiscount) acc.chipDiscount = (acc.chipDiscount ?? 0) + e.chipDiscount;
+  if (e.fabSpeed) acc.fabSpeed = (acc.fabSpeed ?? 0) + e.fabSpeed;
+  if (e.talentAttract)
+    acc.talentAttract = (acc.talentAttract ?? 0) + e.talentAttract;
+  if (e.dataFlywheel) acc.dataFlywheel = (acc.dataFlywheel ?? 0) + e.dataFlywheel;
+  if (e.unlockFamily) acc.unlockFamily = e.unlockFamily;
+  if (e.trainingBreakthroughBias)
+    acc.trainingBreakthroughBias =
+      (acc.trainingBreakthroughBias ?? 0) + e.trainingBreakthroughBias;
+  if (e.trainingStumbleRisk)
+    acc.trainingStumbleRisk =
+      (acc.trainingStumbleRisk ?? 0) + e.trainingStumbleRisk;
+  if (e.trainingSafetyPenalty)
+    acc.trainingSafetyPenalty =
+      (acc.trainingSafetyPenalty ?? 0) + e.trainingSafetyPenalty;
+  if (e.overtrainCapBonus)
+    acc.overtrainCapBonus =
+      (acc.overtrainCapBonus ?? 0) + e.overtrainCapBonus;
+  if (e.unlockClosedLoopResearch) acc.unlockClosedLoopResearch = true;
+  if (e.gymQualityBonus)
+    acc.gymQualityBonus = (acc.gymQualityBonus ?? 0) + e.gymQualityBonus;
+  if (e.hostingOpexDiscount)
+    acc.hostingOpexDiscount =
+      (acc.hostingOpexDiscount ?? 0) + e.hostingOpexDiscount;
+}
+
+export function aggregateEffects(
+  unlocked: string[],
+  ranks?: Record<string, number>,
+): ResearchEffects {
   const acc: ResearchEffects = {};
   for (const id of unlocked) {
     const e = getResearchNode(id).effects;
-    if (e.utilCap) acc.utilCap = (acc.utilCap ?? 0) + e.utilCap;
-    if (e.servingEfficiency)
-      acc.servingEfficiency =
-        (acc.servingEfficiency ?? 0) + e.servingEfficiency;
-    if (e.trainEfficiency)
-      acc.trainEfficiency = (acc.trainEfficiency ?? 0) + e.trainEfficiency;
-    if (e.energyPue) acc.energyPue = (acc.energyPue ?? 0) + e.energyPue;
-    if (e.capabilityBonus)
-      acc.capabilityBonus = (acc.capabilityBonus ?? 0) + e.capabilityBonus;
-    if (e.moeInferMult)
-      acc.moeInferMult = (acc.moeInferMult ?? 1) * e.moeInferMult;
-    if (e.denseInferMult)
-      acc.denseInferMult = (acc.denseInferMult ?? 1) * e.denseInferMult;
-    if (e.safetyBonus) acc.safetyBonus = (acc.safetyBonus ?? 0) + e.safetyBonus;
-    if (e.rlhfQuality) acc.rlhfQuality = (acc.rlhfQuality ?? 0) + e.rlhfQuality;
-    if (e.chipDiscount)
-      acc.chipDiscount = (acc.chipDiscount ?? 0) + e.chipDiscount;
-    if (e.fabSpeed) acc.fabSpeed = (acc.fabSpeed ?? 0) + e.fabSpeed;
-    if (e.talentAttract)
-      acc.talentAttract = (acc.talentAttract ?? 0) + e.talentAttract;
-    if (e.dataFlywheel)
-      acc.dataFlywheel = (acc.dataFlywheel ?? 0) + e.dataFlywheel;
-    if (e.unlockFamily) acc.unlockFamily = e.unlockFamily;
-    if (e.trainingBreakthroughBias)
-      acc.trainingBreakthroughBias =
-        (acc.trainingBreakthroughBias ?? 0) + e.trainingBreakthroughBias;
-    if (e.trainingStumbleRisk)
-      acc.trainingStumbleRisk =
-        (acc.trainingStumbleRisk ?? 0) + e.trainingStumbleRisk;
-    if (e.trainingSafetyPenalty)
-      acc.trainingSafetyPenalty =
-        (acc.trainingSafetyPenalty ?? 0) + e.trainingSafetyPenalty;
-    if (e.overtrainCapBonus)
-      acc.overtrainCapBonus =
-        (acc.overtrainCapBonus ?? 0) + e.overtrainCapBonus;
-    if (e.unlockClosedLoopResearch) acc.unlockClosedLoopResearch = true;
+    const times = Math.max(0, Math.floor(ranks?.[id] ?? 1));
+    for (let i = 0; i < times; i++) accumulateEffects(acc, e);
   }
   return acc;
 }
@@ -690,9 +828,13 @@ export function tickResearch(state: SimState): SimState {
   }
   let s = state;
 
-  // If idle, pull from queue
+  // If idle, pull from queue, then auto-queue one available method.
   if (!s.player.activeResearch) {
     s = tryStartFromQueue(s);
+  }
+  if (!s.player.activeResearch && s.player.autoQueueResearch) {
+    s = maybeAutoQueueResearch(s);
+    if (!s.player.activeResearch) s = tryStartFromQueue(s);
   }
 
   const job = s.player.activeResearch;
@@ -799,10 +941,15 @@ export function tickResearch(state: SimState): SimState {
   return completeResearchNode(s, node);
 }
 
-function completeResearchNode(
+export function completeResearchNode(
   state: SimState,
   node: ResearchNodeDef,
 ): SimState {
+  const maxRanks = researchMaxRanks(node);
+  const prevRank = researchRank(state, node.id);
+  const alreadyDone = prevRank >= maxRanks;
+  const nextRank = alreadyDone ? prevRank : prevRank + 1;
+  const firstRank = prevRank === 0;
   const newlyUnlocked = !state.player.researchUnlocked.includes(node.id);
   let s: SimState = {
     ...state,
@@ -812,32 +959,42 @@ function completeResearchNode(
       researchUnlocked: newlyUnlocked
         ? [...state.player.researchUnlocked, node.id]
         : state.player.researchUnlocked,
+      researchRanks: alreadyDone
+        ? state.player.researchRanks
+        : { ...state.player.researchRanks, [node.id]: nextRank },
     },
-    news: [`Day ${state.day}: Unlocked ${node.name}`, ...state.news].slice(
-      0,
-      20,
-    ),
+    news: [
+      firstRank
+        ? `Day ${state.day}: Unlocked ${node.name}`
+        : `Day ${state.day}: Rank ${nextRank}/${maxRanks} complete: ${node.name}`,
+      ...state.news,
+    ].slice(0, 20),
     alerts: [
       {
-        id: `res-done-${state.day}-${node.id}`,
+        id: `res-done-${state.day}-${node.id}-${nextRank}`,
         day: state.day,
         severity: "info" as const,
-        message: `Research complete: ${node.name}`,
+        message: firstRank
+          ? `Research complete: ${node.name}`
+          : `Research complete: ${node.name} (rank ${nextRank}/${maxRanks})`,
       },
       ...state.alerts,
     ].slice(0, 40),
   };
-  if (newlyUnlocked) s = applyResearchEffectsToPlayer(s, node.effects);
+  if (!alreadyDone) s = applyResearchEffectsToPlayer(s, node.effects);
   s = tryStartFromQueue(s);
+  s = maybeAutoQueueResearch(s, node.id);
   return appendFeedEvents(s, [
     {
-      id: `feed-research-complete-${node.id}-${state.day}`,
+      id: `feed-research-complete-${node.id}-${state.day}-${nextRank}`,
       day: state.day,
       category: "models",
-      title: `Research unlocked: ${node.name}`,
-      body: newlyUnlocked
+      title: firstRank
+        ? `Research unlocked: ${node.name}`
+        : `Rank ${nextRank}/${maxRanks} complete: ${node.name}`,
+      body: firstRank
         ? "The method is now available to training, serving, or data workflows."
-        : "The research cycle completed; existing effects remain active.",
+        : `Rank ${nextRank}/${maxRanks} complete`,
       source: state.player.name,
       tone: "research",
       entityId: node.id,
@@ -858,7 +1015,7 @@ export function completeActiveResearchNow(state: SimState): SimState {
 
 export function availableResearch(state: SimState) {
   return RESEARCH_NODES.filter((n) => {
-    if (state.player.researchUnlocked.includes(n.id)) return false;
+    if (researchFullyDone(state, n.id)) return false;
     return prereqGate(state, n.id).ok;
   });
 }

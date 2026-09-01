@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ModelsTrainingModal } from "./ModelsTrainingModal";
+import { MODELS_CONTINUE_STEPS } from "./ModelsWorkflowStepper";
 
 describe("ModelsTrainingModal", () => {
   it("renders a labelled accessible dialog with the workflow in its footer", () => {
@@ -27,6 +28,8 @@ describe("ModelsTrainingModal", () => {
     expect(markup).toContain("Workflow body");
     expect(markup).toContain(">Done</button>");
     expect(markup).toContain(">Cancel</button>");
+    expect(markup).toContain("hud-button--danger");
+    expect(markup).toContain("hud-button--primary");
     expect(markup).not.toContain("×");
   });
 
@@ -41,5 +44,29 @@ describe("ModelsTrainingModal", () => {
     );
 
     expect(markup).toBe("");
+  });
+
+  it("renders continue training copy without a product step in the footer", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ModelsTrainingModal, {
+        open: true,
+        activeStep: "data",
+        onStepChange: () => undefined,
+        onCancel: () => undefined,
+        title: "Continue training",
+        description:
+          "Add extra data and compute priority. Mix and topology stay inherited.",
+        mobileDescription: "Data extras → launch",
+        steps: MODELS_CONTINUE_STEPS,
+      }),
+    );
+
+    expect(markup).toContain("Continue training");
+    expect(markup).toContain("Data extras → launch");
+    expect(markup).toContain('data-step="data"');
+    expect(markup).toContain('data-step="compute"');
+    expect(markup).toContain('data-step="review"');
+    expect(markup).not.toContain('data-step="product"');
+    expect(markup).not.toContain('data-step="architecture"');
   });
 });

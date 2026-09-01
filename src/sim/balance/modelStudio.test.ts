@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   GYM_PACKAGES,
   POST_TRAIN_GYM_KINDS,
+  autoAssignedGymStaffing,
   defaultPostTrainGyms,
   gymQualityForStage,
   gymQualityFromInvestment,
@@ -178,6 +179,17 @@ describe('model studio gyms and tools', () => {
     expect(state.player.cash).toBeLessThan(
       before - packageTotalCash(GYM_PACKAGES[0]!),
     )
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        researchUnlocked: [
+          ...state.player.researchUnlocked,
+          'align_sft',
+          'align_rlhf',
+        ],
+      },
+    }
     state = teachToolSkill(state, 'json', 'drill')
     expect(
       state.player.toolSkills?.find((skill) => skill.id === 'json')?.proficiency,
@@ -243,6 +255,54 @@ describe('model studio gyms and tools', () => {
       ),
     ).toBeCloseTo(0.75, 12)
   })
+
+  it('auto-assigns HQ researchers, engineers, and data staff across unlocked gyms', () => {
+    const gyms = autoAssignedGymStaffing({
+      gyms: defaultPostTrainGyms(),
+      unlockedKinds: new Set(['code', 'math']),
+      availableResearchers: 7,
+      availableEngineers: 3,
+      availableDataStaff: 2,
+      researchShareBudget: 0.4,
+    })
+    const code = gyms.find((gym) => gym.kind === 'code')
+    const math = gyms.find((gym) => gym.kind === 'math')
+    const locked = gyms.find((gym) => gym.kind === 'chat')
+    expect(code?.assignedResearchers).toBeGreaterThanOrEqual(2)
+    expect(math?.assignedResearchers).toBeGreaterThanOrEqual(2)
+    expect((code?.assignedResearchers ?? 0) + (math?.assignedResearchers ?? 0)).toBe(7)
+    expect((code?.assignedEngineers ?? 0) + (math?.assignedEngineers ?? 0)).toBe(3)
+    expect((code?.assignedDataStaff ?? 0) + (math?.assignedDataStaff ?? 0)).toBe(2)
+    expect((code?.researchShare ?? 0) + (math?.researchShare ?? 0)).toBeCloseTo(0.4, 3)
+    expect(locked?.assignedResearchers).toBe(0)
+    expect(locked?.researchShare).toBe(0)
+  })
+
+  it('auto-staffs a gym when funding starts without a manual assignment', () => {
+    let state = createGame(147)
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        cash: 80_000_000,
+        staff: {
+          researcher: 6,
+          engineer: 2,
+          data_processor: 2,
+          ops: 0,
+        },
+        allocation: { training: 0.1, inference: 0.1, research: 0.8 },
+        researchUnlocked: [...state.player.researchUnlocked, 'domain_coding'],
+      },
+    }
+    state = investPostTrainGym(state, 'code', 'foundry')
+    const gym = state.player.postTrainGyms?.find((entry) => entry.kind === 'code')
+    expect(gym?.activePackageId).toBe('foundry')
+    expect(gym?.assignedResearchers).toBeGreaterThanOrEqual(2)
+    expect(gym?.assignedEngineers).toBeGreaterThan(0)
+    expect(gym?.assignedDataStaff).toBeGreaterThan(0)
+    expect(gym?.researchShare).toBeGreaterThanOrEqual(0.05)
+  })
 })
 
 describe('post-train coupling', () => {
@@ -302,6 +362,39 @@ describe('post-train coupling', () => {
     )
     expect(meanToolProficiency(taughtTools)).toBeGreaterThan(meanToolProficiency(emptyTools))
     expect(strong).toBeGreaterThan(weak)
+  })
+
+  it('tilts gym domain lift with focus and leaks into other domains after long attachment', () => {
+    const funded = defaultPostTrainGyms().map((gym) =>
+      gym.kind === 'math'
+        ? { ...gym, quality: 0.8, focusBias: 1, tier: 2 }
+        : gym,
+    )
+    const early = trainingGymDomainExtras(funded, ['math'])
+    const late = trainingGymDomainExtras(funded, ['math'], { attachDays: 24 })
+    expect(early.math ?? 0).toBeGreaterThan(early.science ?? 0)
+    expect(late.coding ?? 0).toBeGreaterThan(0)
+    expect(late.mmlu ?? 0).toBeGreaterThan(early.mmlu ?? 0)
+    expect(late.math ?? 0).toBeLessThan(early.math ?? 0)
+  })
+
+  it('blocks tool curricula until the matching research nodes exist', () => {
+    let state = createGame(47)
+    state = { ...state, player: { ...state.player, cash: 80_000_000 } }
+    const locked = teachToolSkill(state, 'json', 'primer')
+    expect(locked.player.cash).toBe(state.player.cash)
+    expect(locked.alerts[0]?.message).toMatch(/Research/i)
+    state = {
+      ...state,
+      player: {
+        ...state.player,
+        researchUnlocked: [...state.player.researchUnlocked, 'align_sft'],
+      },
+    }
+    const primer = teachToolSkill(state, 'json', 'primer')
+    expect(primer.player.cash).toBeLessThan(state.player.cash)
+    const drill = teachToolSkill(primer, 'json', 'drill')
+    expect(drill.player.cash).toBe(primer.player.cash)
   })
 
   it('charges cash and stretches PF when selecting a post-train stage', () => {

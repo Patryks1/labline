@@ -9,7 +9,11 @@ import {
   clampStaff,
   talentFromStaff,
   STAFF_HIRE_COST,
+  STAFF_POACH_INTERVAL_DAYS,
+  STAFF_POACH_MIN_RESEARCHERS,
   STAFF_POACH_MULT,
+  STAFF_POACH_NOTICE_DAYS,
+  staffPoachRetainCost,
   STAFF_ROLES,
   STAFF_WAGE_PER_DAY,
   STAFF_LABELS,
@@ -19,7 +23,15 @@ import {
   cityTalentInitial,
 } from '../balance/staff'
 import { getResearchNode } from '../balance/research'
-import type { BuildableKind, HqOfficeLayoutAnalysis, MapCity, SimState, StaffHeadcount, StaffRole } from '../types'
+import type {
+  BuildableKind,
+  HqOfficeLayoutAnalysis,
+  MapCity,
+  SimState,
+  StaffHeadcount,
+  StaffPoachThreat,
+  StaffRole,
+} from '../types'
 import { chargeExpense } from './financeLedger'
 import { isHqAnchor, isHqKind } from './map'
 import {
@@ -33,7 +45,17 @@ import {
   officeProductivityMultiplier,
 } from './hqOffice'
 
-export { STAFF_ROLES, STAFF_LABELS, emptyStaff, staffTotal, talentFromStaff, BASE_REMOTE_TEAM_SEATS }
+export {
+  STAFF_ROLES,
+  STAFF_LABELS,
+  STAFF_POACH_INTERVAL_DAYS,
+  STAFF_POACH_NOTICE_DAYS,
+  staffPoachRetainCost,
+  emptyStaff,
+  staffTotal,
+  talentFromStaff,
+  BASE_REMOTE_TEAM_SEATS,
+}
 
 const emptyOfficeEffects = (): HqOfficeLayoutAnalysis => ({
   revision: 0,
@@ -427,6 +449,146 @@ export function staffWagePerDay(state: SimState): number {
   )
 }
 
+export function pendingStaffPoaches(state: SimState): StaffPoachThreat[] {
+  return state.player.pendingStaffPoaches ?? []
+}
+
+function withPendingPoaches(
+  state: SimState,
+  pendingStaffPoaches: StaffPoachThreat[],
+): SimState {
+  return {
+    ...state,
+    player: {
+      ...state.player,
+      pendingStaffPoaches,
+    },
+  }
+}
+
+function completeStaffPoach(
+  state: SimState,
+  threat: StaffPoachThreat,
+): SimState {
+  const staff = playerStaff(state)
+  if ((staff[threat.role] ?? 0) < threat.count) {
+    return alert(
+      withPendingPoaches(
+        state,
+        pendingStaffPoaches(state).filter((item) => item.id !== threat.id),
+      ),
+      'info',
+      `${threat.rivalName}'s poach expired — that seat was already empty.`,
+    )
+  }
+  const rivalIndex = state.rivals.findIndex((rival) => rival.id === threat.rivalId)
+  const rival = rivalIndex >= 0 ? state.rivals[rivalIndex] : null
+  const raidCost = STAFF_HIRE_COST[threat.role] * STAFF_POACH_MULT * 0.9
+  const nextStaff = addStaff(staff, threat.role, -threat.count)
+  const rivals = state.rivals.slice()
+  if (rival && rival.cash >= raidCost) {
+    rivals[rivalIndex] = {
+      ...rival,
+      cash: rival.cash - raidCost,
+      staff: addStaff(clampStaff(rival.staff ?? emptyStaff()), threat.role, threat.count),
+    }
+  }
+  return alert(
+    {
+      ...state,
+      player: {
+        ...state.player,
+        staff: nextStaff,
+        talent: talentFromStaff(nextStaff),
+        brandTrust: Math.max(15, state.player.brandTrust - 1.2 * threat.count),
+        pendingStaffPoaches: pendingStaffPoaches(state).filter(
+          (item) => item.id !== threat.id,
+        ),
+      },
+      rivals,
+    },
+    'warn',
+    `${threat.rivalName} poached ${threat.count} ${STAFF_LABELS[threat.role].toLowerCase()} after the raise window closed.`,
+  )
+}
+
+function resolveExpiredStaffPoaches(state: SimState): SimState {
+  let next = state
+  for (const threat of pendingStaffPoaches(state)) {
+    if (next.day < threat.resolveDay) continue
+    next = completeStaffPoach(next, threat)
+  }
+  return next
+}
+
+function poachIntervalDays(state: SimState): number {
+  const ops = playerStaff(state).ops ?? 0
+  return (
+    STAFF_POACH_INTERVAL_DAYS +
+    Math.floor(ops * 4) +
+    Math.floor(Math.max(0, state.player.brandTrust) / 25)
+  )
+}
+
+function maybeOpenStaffPoach(state: SimState): SimState {
+  if (pendingStaffPoaches(state).length > 0) return state
+  if (state.day <= 0) return state
+  const researchers = playerStaff(state).researcher ?? 0
+  if (researchers < STAFF_POACH_MIN_RESEARCHERS) return state
+  const interval = poachIntervalDays(state)
+  if (state.day % interval !== 0) return state
+  const aggressor = state.rivals.find((rival) => rival.cash > 40_000_000)
+  if (!aggressor) return state
+  const raidCost = STAFF_HIRE_COST.researcher * STAFF_POACH_MULT * 0.9
+  if (aggressor.cash < raidCost) return state
+  const threat: StaffPoachThreat = {
+    id: `poach-${aggressor.id}-${state.day}`,
+    rivalId: aggressor.id,
+    rivalName: aggressor.name,
+    role: 'researcher',
+    count: 1,
+    startDay: state.day,
+    resolveDay: state.day + STAFF_POACH_NOTICE_DAYS,
+    retainCost: staffPoachRetainCost('researcher'),
+  }
+  return alert(
+    withPendingPoaches(state, [...pendingStaffPoaches(state), threat]),
+    'warn',
+    `${aggressor.name} is poaching a researcher. Match ${formatStaffCash(threat.retainCost)} by day ${threat.resolveDay} to keep them.`,
+  )
+}
+
+function formatStaffCash(amount: number): string {
+  return `$${(amount / 1e6).toFixed(2)}M`
+}
+
+/** Pay the raise package to keep the employee. */
+export function retainStaffPoach(state: SimState, threatId: string): SimState {
+  const threat = pendingStaffPoaches(state).find((item) => item.id === threatId)
+  if (!threat) return alert(state, 'warn', 'That poach offer has already closed.')
+  if (state.day > threat.resolveDay) return completeStaffPoach(state, threat)
+  if (state.player.cash < threat.retainCost) {
+    return alert(
+      state,
+      'warn',
+      `Matching the offer needs ${formatStaffCash(threat.retainCost)}.`,
+    )
+  }
+  const charged = chargeExpense(
+    withPendingPoaches(
+      state,
+      pendingStaffPoaches(state).filter((item) => item.id !== threat.id),
+    ),
+    threat.retainCost,
+    'hiring',
+  )
+  return alert(
+    charged,
+    'info',
+    `You matched ${threat.rivalName}'s offer. The ${STAFF_LABELS[threat.role].toLowerCase().replace(/s$/, '')} stays.`,
+  )
+}
+
 /** Regen free city pools + rival hiring/poach AI + sync talent score. */
 export function tickStaff(state: SimState): SimState {
   let s = syncTalentScore(state)
@@ -481,43 +643,8 @@ export function tickStaff(state: SimState): SimState {
     }
   }
 
-  // Occasional rival poach of player researchers
-  if (s.day % 11 === 0 && (playerStaff(s).researcher ?? 0) > 2) {
-    const aggressor = s.rivals.find((r) => r.cash > 40_000_000)
-    if (aggressor) {
-      const cost = STAFF_HIRE_COST.researcher * STAFF_POACH_MULT * 0.9
-      if (aggressor.cash > cost) {
-        const staff = addStaff(playerStaff(s), 'researcher', -1)
-        s = {
-          ...s,
-          player: {
-            ...s.player,
-            staff,
-            talent: talentFromStaff(staff),
-            brandTrust: Math.max(15, s.player.brandTrust - 1.2),
-          },
-          rivals: s.rivals.map((r) =>
-            r.id === aggressor.id
-              ? {
-                  ...r,
-                  cash: r.cash - cost,
-                  staff: addStaff(clampStaff(r.staff ?? emptyStaff()), 'researcher', 1),
-                }
-              : r,
-          ),
-          alerts: [
-            {
-              id: `poached-${s.day}`,
-              day: s.day,
-              severity: 'warn' as const,
-              message: `${aggressor.name} poached one of your researchers.`,
-            },
-            ...s.alerts,
-          ].slice(0, 40),
-        }
-      }
-    }
-  }
+  s = resolveExpiredStaffPoaches(s)
+  s = maybeOpenStaffPoach(s)
 
   return s
 }

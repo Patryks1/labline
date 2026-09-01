@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { HudButton } from "../../ui/HudPrimitives";
 
 export type ModelsWorkflowStep =
@@ -20,6 +21,15 @@ const STEPS: ReadonlyArray<{
 
 export const MODELS_WORKFLOW_STEPS = STEPS;
 
+export const MODELS_CONTINUE_STEPS: ReadonlyArray<{
+  id: ModelsWorkflowStep;
+  label: string;
+}> = [
+  { id: "data", label: "Data extras" },
+  { id: "compute", label: "Compute" },
+  { id: "review", label: "Review" },
+];
+
 /**
  * Single-level workflow navigation. Form controls remain in their owner card;
  * clicking a step only changes which existing card is visible.
@@ -28,14 +38,20 @@ export function ModelsWorkflowStepper({
   activeStep,
   completedThrough,
   onStepChange,
+  onCancel,
+  primaryAction,
+  steps = STEPS,
 }: {
   activeStep: ModelsWorkflowStep;
   completedThrough?: ModelsWorkflowStep;
   onStepChange?: (step: ModelsWorkflowStep) => void;
+  onCancel?: () => void;
+  primaryAction?: ReactNode;
+  steps?: ReadonlyArray<{ id: ModelsWorkflowStep; label: string }>;
 }) {
-  const activeIndex = STEPS.findIndex((step) => step.id === activeStep);
+  const activeIndex = Math.max(0, steps.findIndex((step) => step.id === activeStep));
   const completedIndex = completedThrough
-    ? STEPS.findIndex((step) => step.id === completedThrough)
+    ? steps.findIndex((step) => step.id === completedThrough)
     : activeIndex - 1;
 
   return (
@@ -45,8 +61,8 @@ export function ModelsWorkflowStepper({
       data-mobile-layout="compact-steps"
       className="rounded-lg border border-line/60 bg-void/25 px-1.5 py-2 sm:px-2.5"
     >
-      <ol className="grid grid-cols-5 gap-1">
-        {STEPS.map((step, index) => {
+      <ol className={`grid gap-1 ${steps.length <= 2 ? "grid-cols-2" : steps.length === 3 ? "grid-cols-3" : "grid-cols-5"}`}>
+        {steps.map((step, index) => {
           const complete = index <= completedIndex;
           const active = index === activeIndex;
           return (
@@ -93,28 +109,43 @@ export function ModelsWorkflowStepper({
         })}
       </ol>
       {onStepChange ? (
-        <div className="mt-2 flex items-center justify-between gap-2 border-t border-line/45 pt-2 [@media(max-height:600px)]:hidden" data-short-landscape="hide-secondary-navigation">
+        <div
+          className="mt-2 flex flex-nowrap items-center gap-2 border-t border-line/45 pt-2"
+        >
+          {onCancel ? (
+            <HudButton
+              type="button"
+              variant="danger"
+              className="!min-h-11 !shrink-0 !rounded-md !px-3 !text-[0.6875rem] !font-semibold"
+              onClick={onCancel}
+            >
+              Cancel
+            </HudButton>
+          ) : null}
           <HudButton
             type="button"
             variant="ghost"
-            className="!min-h-11 !rounded-md !border-0 !bg-transparent !px-2.5 !text-[0.6875rem] !font-semibold !text-muted transition hover:!bg-panel-2 hover:!text-bone focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/45 disabled:cursor-not-allowed disabled:opacity-40"
+            className="!min-h-11 !shrink-0 !rounded-md !border !border-line/70 !bg-void/40 !px-3 !text-[0.6875rem] !font-semibold !text-bone hover:!bg-panel-2"
             disabled={activeIndex <= 0}
-            onClick={() => onStepChange(STEPS[activeIndex - 1]!.id)}
+            onClick={() => onStepChange(steps[activeIndex - 1]!.id)}
           >
-            ← Back
+            Back
           </HudButton>
-          <span className="font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">
-            Step {activeIndex + 1} of {STEPS.length}
+          <span className="min-w-0 flex-1 text-center font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">
+            {activeIndex + 1} / {steps.length}
           </span>
-          <HudButton
-            type="button"
-            variant="ghost"
-            className="!min-h-11 !rounded-md !border-0 !bg-transparent !px-2.5 !text-[0.6875rem] !font-semibold !text-muted transition hover:!bg-panel-2 hover:!text-bone focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/45 disabled:cursor-not-allowed disabled:opacity-40"
-            disabled={activeIndex >= STEPS.length - 1}
-            onClick={() => onStepChange(STEPS[activeIndex + 1]!.id)}
-          >
-            Continue →
-          </HudButton>
+          {activeIndex < steps.length - 1 ? (
+            <HudButton
+              type="button"
+              variant="primary"
+              className="!min-h-11 !shrink-0 !rounded-md !px-3 !text-[0.6875rem] !font-semibold"
+              onClick={() => onStepChange(steps[activeIndex + 1]!.id)}
+            >
+              Continue
+            </HudButton>
+          ) : primaryAction ? (
+            <div className="flex shrink-0 items-center gap-2">{primaryAction}</div>
+          ) : null}
         </div>
       ) : null}
     </nav>

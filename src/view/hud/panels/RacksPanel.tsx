@@ -44,6 +44,8 @@ import {
 } from '../../../sim/systems/rackLayouts'
 import { facilityAcquisitionPresentation } from './hardware/facilityMarketPresentation'
 
+import { HudDesktopDefaultDetails } from '../ui/HudDesktopDefaultDetails'
+
 const KIND_ORDER: ModuleKind[] = ['gpu', 'ram', 'cpu', 'cooling', 'psu', 'nic']
 
 /** Gamified hall tier from live compute. */
@@ -337,7 +339,7 @@ export function RacksPanel() {
                               <span><b className="block text-bone">{num(usage.flopsLive, 1)}</b> PF</span>
                               <span><b className="block text-bone">{mw(usage.mwLive)}</b> draw</span>
                             </div>
-                            <details className="group mt-2 rounded-md border border-line/60 bg-void/30">
+                            <HudDesktopDefaultDetails className="group mt-2 rounded-md border border-line/60 bg-void/30">
                               <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-muted marker:hidden">
                                 <span>Placement details</span>
                                 <span className="shrink-0 font-mono tabular-nums text-bone">
@@ -353,7 +355,7 @@ export function RacksPanel() {
                                   live={usage.staged > 0}
                                 />
                               </div>
-                            </details>
+                            </HudDesktopDefaultDetails>
                             {commissioning > 0 ? (
                               <p className="mt-1.5 text-[0.75rem] text-amber">
                                 Spinning up {commissioning} rack{commissioning === 1 ? '' : 's'} · {RACK_COMMISSION_PER_DAY}/day · ~{commissioningDays}d until fully on

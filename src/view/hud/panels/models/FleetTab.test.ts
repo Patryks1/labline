@@ -203,6 +203,7 @@ describe("FleetTab checkpoint evidence", () => {
     );
 
     expect(markup).toContain("ACTIVE");
+    expect(markup).not.toContain("Sell IP");
     expect(markup).toContain("Suite");
     expect(markup).toContain("Frontier");
     expect(markup).toContain("API rev");
@@ -353,6 +354,28 @@ describe("FleetTab checkpoint evidence", () => {
     expect(markup).toContain("Profile");
     expect(markup).toContain("Axis readout");
   });
+
+  it("offers a priced IP sale on live and private checkpoints", () => {
+    const markup = renderToStaticMarkup(
+      createElement(FleetTab, {
+        internal: [],
+        released: [releasedModel()],
+        pricingId: "spark",
+        frontierCapability: 60,
+        onSelect: vi.fn(),
+        onRelease: vi.fn(),
+        onDelete: vi.fn(),
+        onArchive: vi.fn(),
+        onRestore: vi.fn(),
+        onSellIp: vi.fn(),
+        ipSaleQuoteFor: () => 12_000_000,
+        onTrainFurther: vi.fn(),
+        onDistill: vi.fn(),
+      }),
+    )
+    expect(markup).toContain("Sell IP")
+    expect(markup).toContain("$12.00M")
+  })
 
   it("disables archiving the source of an active safety campaign", () => {
     const markup = renderToStaticMarkup(

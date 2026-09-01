@@ -80,13 +80,15 @@ export function mobileTrainingActivityRect({
 export function desktopTrainingActivityRect({
   viewportWidth,
   railWidth,
+  workspaceWidth = 0,
   intelWidth,
 }: {
   viewportWidth: number
   railWidth: number
+  workspaceWidth?: number
   intelWidth: number
 }) {
-  const left = Math.max(0, railWidth)
+  const left = Math.max(0, railWidth + Math.max(0, workspaceWidth))
   const right = Math.max(left, viewportWidth - Math.max(0, intelWidth))
   return {
     left,
@@ -250,7 +252,7 @@ export function TrainingActivityBar({
 
   return (
     <aside
-      className="training-activity-bar pointer-events-none absolute inset-x-0 bottom-[var(--hud-ops)] px-2"
+      className="training-activity-bar pointer-events-none absolute bottom-[var(--hud-ops)] px-2"
       data-job-count={activity.jobs.length}
       data-active-count={activity.activeCount}
       data-issue-count={activity.issueCount}

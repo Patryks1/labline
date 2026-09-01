@@ -40,6 +40,22 @@ export const STAFF_HIRE_COST: Record<StaffRole, number> = {
 /** Premium mult when poaching from a rival (vs free-pool hire). */
 export const STAFF_POACH_MULT = 2.4
 
+/** Calendar days between rival raids on the player's HQ (was an instant 11-day steal). */
+export const STAFF_POACH_INTERVAL_DAYS = 42
+
+/** Days the player has to match pay after a raid is announced. */
+export const STAFF_POACH_NOTICE_DAYS = 12
+
+/** Extra salary days paid as a one-shot raise to keep the employee. */
+export const STAFF_POACH_RETAIN_DAYS = 90
+
+export function staffPoachRetainCost(role: StaffRole): number {
+  return Math.floor(STAFF_WAGE_PER_DAY[role] * STAFF_POACH_RETAIN_DAYS)
+}
+
+/** Don't raid tiny research teams down to nothing. */
+export const STAFF_POACH_MIN_RESEARCHERS = 3
+
 /** HQ desk capacity by kind. */
 export const HQ_STAFF_CAP: Record<string, number> = {
   hq: 12,

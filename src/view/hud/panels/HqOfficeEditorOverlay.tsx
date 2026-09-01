@@ -36,11 +36,13 @@ import {
   cityForHq,
   hireStaff,
   hireStaffCost,
+  pendingStaffPoaches,
   playerHqStaffCap,
   playerStaff,
   playerStaffOpenSeats,
   poachRivalStaff,
   poachStaffCost,
+  retainStaffPoach,
   staffWagePerDay,
 } from "../../../sim/systems/staff";
 import {
@@ -480,6 +482,32 @@ function OfficeTeamPanel({ facilityId }: { facilityId: string }) {
               ))}
             </div>
           </section>
+
+          {pendingStaffPoaches(state).map((threat) => {
+            const daysLeft = Math.max(0, threat.resolveDay - state.day);
+            const canPay = state.player.cash >= threat.retainCost;
+            return (
+              <section key={threat.id} className="rounded-lg border border-amber/40 bg-amber/10 p-3">
+                <p className="hud-eyebrow text-amber">Poach offer</p>
+                <h3 className="mt-1 text-[0.875rem] font-semibold text-bone">
+                  {threat.rivalName} is raiding {STAFF_LABELS[threat.role].toLowerCase()}
+                </h3>
+                <p className="mt-1 text-[0.75rem] leading-5 text-muted">
+                  Match {money(threat.retainCost)} by day {threat.resolveDay} ({daysLeft}d left) or they walk.
+                </p>
+                <HudButton
+                  type="button"
+                  variant="primary"
+                  className="mt-2"
+                  disabled={!canPay}
+                  title={canPay ? undefined : "Need cash to match the offer."}
+                  onClick={() => setState(retainStaffPoach(state, threat.id))}
+                >
+                  Match offer · {money(threat.retainCost)}
+                </HudButton>
+              </section>
+            );
+          })}
 
           <section className="rounded-lg border border-line bg-panel-2/60 p-3">
             <div className="flex items-start gap-2">

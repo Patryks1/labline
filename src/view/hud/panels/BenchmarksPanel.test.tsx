@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
@@ -46,14 +48,14 @@ function releasedThinkingModel(): Model {
 }
 
 describe('BenchmarksPanel official leaderboard and review', () => {
-  it('keeps official Instant rows while exposing sortable and accessible detail', () => {
+  it('lists Instant and trained thinking levels as official ranked rows', () => {
     const state = createGame(64_221)
     const model = releasedThinkingModel()
     const next = { ...state, player: { ...state.player, models: [model] } }
     useGameStore.setState({ state: next })
     const markup = renderToStaticMarkup(createElement(BenchmarksPanel))
 
-    expect(markup).toContain('Official public Instant scores')
+    expect(markup).toContain('one row per trained thinking level')
     expect(markup).toContain('Ranks, model economics and reviews.')
     expect(markup).toContain('aria-sort="descending"')
     expect(markup).toContain('Sort by Coding')
@@ -77,8 +79,7 @@ describe('BenchmarksPanel official leaderboard and review', () => {
       prices: { priceIn: 3, priceOut: 15 }, servingEfficiency: 1,
       publishedReviews: [],
     }))
-    expect(review).toContain('Instant rank preserved')
-    expect(review).toContain('Unofficial projection')
+    expect(review).toContain('Instant')
     expect(review).toContain('Deep · 32.0× budget')
     expect(review).toContain('Effective $/MTok')
     expect(review).toContain('Per-task benchmark ledger')
@@ -98,6 +99,7 @@ describe('BenchmarksPanel official leaderboard and review', () => {
       servingEfficiency: 1,
       onSelect: () => {},
     }))
+    expect(mobileCard).toContain('Instant')
     expect(mobileCard).toContain('All 11 scores &amp; task cost')
     expect(mobileCard).toContain('aria-controls="benchmark-model-review"')
     expect(mobileCard).toContain('aria-expanded="false"')
@@ -112,6 +114,41 @@ describe('BenchmarksPanel official leaderboard and review', () => {
     expect(cost).toContain('data-benchmark-cost-trigger')
     expect(cost).toContain('aria-haspopup="dialog"')
     expect(cost).toContain('aria-expanded="false"')
+
+    const deepCard = renderToStaticMarkup(createElement(MobileBenchmarkCard, {
+      row: {
+        ...row,
+        recipeId: 'deep',
+        recipeName: 'Deep',
+        displayName: 'Review Model-Deep',
+        tokenMult: 8,
+      },
+      rank: 1,
+      selected: false,
+      metrics: SUITE_METRICS.language,
+      sortId: 'cap',
+      prices: { priceIn: 3, priceOut: 15 },
+      servingEfficiency: 1,
+      onSelect: () => {},
+    }))
+    expect(deepCard).toContain('Review Model-Deep')
+    expect(deepCard).toContain('Deep')
+    expect(deepCard).not.toContain('>Instant<')
+  })
+
+  it('keeps trained thinking rows on the official public board', async () => {
+    const source = await readFile(
+      fileURLToPath(new URL('./BenchmarksPanel.tsx', import.meta.url)),
+      'utf8',
+    )
+    expect(source).toContain('expandLeaderboardEffortRows(boardModels')
+    expect(source).not.toContain(
+      '.filter((row) => row.recipeId === INSTANT_EFFORT_ID)',
+    )
+    expect(source).toContain('one row per trained thinking level')
+    expect(source).toContain('setReviewRecipeId(row.recipeId)')
+    expect(source).toContain('setReviewRecipeId(r.recipeId)')
+    expect(source).toContain('{row.recipeName}')
   })
 
   it('renders a concise, sortable internal card view before the wide table', () => {

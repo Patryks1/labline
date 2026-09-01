@@ -1220,7 +1220,7 @@ export function DataHallEditorOverlay() {
     const placeholderSku = orderSku?.id ?? delivered[0]?.skuId ?? "rack_h100";
     const plannedRackBays = Math.max(1, Math.floor(orderSku?.rackUnits ?? 1));
     const discount =
-      aggregateEffects(state.player.researchUnlocked).chipDiscount ?? 0;
+      aggregateEffects(state.player.researchUnlocked, state.player.researchRanks).chipDiscount ?? 0;
     const unitPrice = orderSku
       ? quoteRackOrder(orderSku, 1, { discount }).unitPrice
       : 0;

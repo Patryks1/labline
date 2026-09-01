@@ -1,7 +1,21 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import type { Model } from '../../sim/types'
 import type { CheckpointEvaluationReport } from '../../sim/balance/checkpointEvaluation'
+import {
+  buildModelProductProfile,
+  instantRecipe,
+} from '../../sim/balance/modelProduct'
+import {
+  releaseEffortRecipes,
+} from './ReleaseCelebration'
 import { measuredReleaseEvidence, releasedModelForEvent } from './releaseReview'
+
+const releaseSource = readFileSync(
+  fileURLToPath(new URL('./ReleaseCelebration.tsx', import.meta.url)),
+  'utf8',
+)
 
 function model(id: string, name: string, capability: number): Model {
   return {
@@ -123,5 +137,91 @@ describe('release review evidence', () => {
     expect(evidence?.suite.score).toBe(63.2)
     expect(evidence?.metrics[0]?.rival?.delta).toBe(-4)
     expect(evidence?.rankLabel).toBe('#2')
+  })
+})
+
+describe('release celebration listing dialog', () => {
+  function releasedWithThinking(): Model {
+    return {
+      ...model('spark-1', 'Spark', 62),
+      commerciallyOffered: false,
+      tokPerSecMult: 1,
+      suggestedApiPriceIn: 0.8,
+      suggestedApiPriceOut: 3.2,
+      productProfile: buildModelProductProfile({
+        completedPostTrainStages: ['process'],
+        chatShare: 0.2,
+        chatQuality: 60,
+        reasoningEnabled: true,
+        researchUnlocked: ['align_process'],
+        existing: {
+          lifecycle: 'reasoning',
+          focus: {
+            coding: 0,
+            science: 0,
+            research: 0,
+            personality: 0,
+            chat: 0,
+          },
+          personality: 40,
+          tokenEfficiency: 50,
+          defaultEffortId: 'high',
+          effortRecipes: [
+            { ...instantRecipe(), served: true },
+            {
+              id: 'high',
+              name: 'Think',
+              kind: 'trained',
+              thinkingTokenMult: 4,
+              trainPfDays: 8,
+              trainCash: 1,
+              trained: true,
+              quality: 0.8,
+              served: true,
+              capabilityBias: 0.6,
+              trainComputeShare: 0.1,
+            },
+          ],
+        },
+      }),
+    } as Model
+  }
+
+  it('lists Instant for an Instant-only release', () => {
+    const released = {
+      ...model('spark-0', 'Spark', 50),
+      productProfile: buildModelProductProfile({
+        chatShare: 0.2,
+        chatQuality: 50,
+        reasoningEnabled: false,
+      }),
+    } as Model
+    const heads = releaseEffortRecipes(released)
+    expect(heads.map((recipe) => recipe.name)).toEqual(['Instant'])
+    expect(heads[0]?.kind).toBe('instant')
+  })
+
+  it('lists Instant and trained thinking heads for a process-trained release', () => {
+    const released = releasedWithThinking()
+    const heads = releaseEffortRecipes(released)
+    expect(heads.map((recipe) => recipe.name)).toEqual(['Instant', 'Think'])
+    expect(heads[1]?.thinkingTokenMult).toBe(4)
+  })
+
+  it('keeps listing chrome to API, plans, peers, and thinking', () => {
+    expect(releaseSource).toContain('List it')
+    expect(releaseSource).toContain('API listing')
+    expect(releaseSource).toContain('data-testid="release-comparable-peers"')
+    expect(releaseSource).toContain('data-testid="release-thinking-heads"')
+    expect(releaseSource).toContain('Similar capability')
+    expect(releaseSource).toContain('Thinking levels')
+    expect(releaseSource).toContain('sm:h-[92dvh]')
+    expect(releaseSource).not.toContain('sm:max-h-36')
+    expect(releaseSource).not.toContain('Measured evidence')
+    expect(releaseSource).not.toContain('Sell this model')
+    expect(releaseSource).not.toContain('Public on evals')
+    expect(releaseSource).not.toContain('Hosting floor from energy')
+    expect(releaseSource).not.toContain('Release without selling')
+    expect(releaseSource).not.toContain("Don't list")
   })
 })

@@ -172,6 +172,10 @@ describe('continued-training model versions', () => {
       ...initial.state,
       player: {
         ...initial.state.player,
+        researchUnlocked: [
+          ...initial.state.player.researchUnlocked,
+          'domain_agents',
+        ],
         models: initial.state.player.models.map((model) =>
           model.id === source.id ? source : model,
         ),

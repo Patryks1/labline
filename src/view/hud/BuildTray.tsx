@@ -37,6 +37,8 @@ import {
   StatusChip,
 } from './ui/HudPrimitives'
 
+import { HudDesktopDefaultDetails } from './ui/HudDesktopDefaultDetails'
+
 type BuildCategoryId = 'all' | 'compute' | 'power' | 'people' | 'research' | 'silicon'
 
 const BUILD_CATEGORIES: {
@@ -348,7 +350,7 @@ export function BuildPanel() {
             </div>
           </div>
 
-          <details className="mt-3 rounded-md border border-line/60 bg-void/30">
+          <HudDesktopDefaultDetails className="mt-3 rounded-md border border-line/60 bg-void/30">
             <summary className="flex min-h-11 cursor-pointer touch-manipulation items-center px-3 text-[0.75rem] font-semibold text-muted">
               Cost breakdown
             </summary>
@@ -359,7 +361,7 @@ export function BuildPanel() {
                 value={landEstimate > 0 ? money(landEstimate) : tile?.kind === 'empty' ? money(0) : '—'}
               />
             </div>
-          </details>
+          </HudDesktopDefaultDetails>
 
           <div className="mt-3 space-y-2 border-t border-line/50 pt-3">
             <div className="font-mono text-[0.6875rem] tabular-nums text-muted">

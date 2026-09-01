@@ -1,19 +1,29 @@
 import { useMemo, useState } from 'react'
 import { ChartLineUp, RocketLaunch } from '@phosphor-icons/react'
-import type { CheckpointEvaluationRequest } from '../../sim/balance/checkpointEvaluation'
 import type { BenchmarkSuiteId, Model, SimState, SubPlan } from '../../sim/types'
-import { apiHostingCostFloor, clampApiListToHostingFloor } from '../../sim/balance/pricing'
+import {
+  apiComparablePeerRows,
+  apiHostingCostFloor,
+  blendApiPrice,
+  clampApiListToHostingFloor,
+  commercialModelKind,
+} from '../../sim/balance/pricing'
 import { formatParams } from '../../sim/balance/training'
+import { migrateEffortRecipes } from '../../sim/balance/modelProduct'
 import { computeSnapshot } from '../../sim/systems/compute'
+import { isLivePublicModel } from '../../sim/modelRelease'
 import { useGameStore } from '../../store/gameStore'
 import { type ReleaseEvent, useUiStore } from '../../store/uiStore'
 import { money, num } from './format'
-import { formatApiListPrice } from './panels/apiPriceUi'
+import { formatApiListPrice, effectiveApiPeerPricing } from './panels/apiPriceUi'
+import {
+  formatFrontierThinking,
+  frontierThinkingFor,
+} from './panels/BenchmarkCompareTab'
 import { ConsoleDialog } from './ui/ConsoleDialog'
 import { HudButton, HudInput, MetricTile, StatusChip } from './ui/HudPrimitives'
 import { TrainingLossChart } from './panels/models/TrainingLossChart'
 import { BENCHMARK_SUITE_UI } from './panels/models/benchmarkRunUi'
-import { ReleaseEvaluationOrder } from './panels/models/ReleaseEvaluationOrder'
 import { measuredReleaseEvidence, releasedModelForEvent } from './releaseReview'
 
 function preferredReleaseSuites(event: ReleaseEvent): BenchmarkSuiteId[] {
@@ -30,15 +40,18 @@ function preferredReleaseSuites(event: ReleaseEvent): BenchmarkSuiteId[] {
   return [...new Set([...preferred, ...(event.benchmarkSuiteIds ?? [])])]
 }
 
+export function releaseEffortRecipes(model: Model) {
+  return migrateEffortRecipes(model.productProfile)
+}
+
+export const trainedThinkingRecipes = releaseEffortRecipes
+
 /** Persistent post-release review; it remains until the player dismisses it. */
 export function ReleaseCelebration() {
   const event = useUiStore((state) => state.releaseEvent)
   const clear = useUiStore((state) => state.clearRelease)
   const state = useGameStore((store) => store.state)
   const listReleasedModel = useGameStore((store) => store.listReleasedModel)
-  const scheduleReleasedModelEvaluation = useGameStore(
-    (store) => store.scheduleReleasedModelEvaluation,
-  )
 
   const review = useMemo(() => {
     if (!event) return null
@@ -66,10 +79,6 @@ export function ReleaseCelebration() {
         listReleasedModel({ modelId: review.model.id, ...payload })
         clear()
       }}
-      onRunEvaluation={(request) => {
-        if (!review.model) return
-        scheduleReleasedModelEvaluation(review.model.id, request)
-      }}
     />
   )
 }
@@ -81,7 +90,6 @@ function ReleaseCelebrationDialog({
   simState,
   onClear,
   onList,
-  onRunEvaluation,
 }: {
   event: ReleaseEvent
   review: {
@@ -98,7 +106,6 @@ function ReleaseCelebrationDialog({
     apiOut?: number | null
     planIds?: readonly string[]
   }) => void
-  onRunEvaluation: (request: CheckpointEvaluationRequest) => void
 }) {
   const latestSnapshot = event.benchmarkSnapshots?.at(-1)
   const hosting = useMemo(() => {
@@ -112,21 +119,50 @@ function ReleaseCelebrationDialog({
   const seeded = hosting
     ? clampApiListToHostingFloor(suggestedIn, suggestedOut, hosting)
     : { priceIn: suggestedIn, priceOut: suggestedOut }
-  const [sell, setSell] = useState(true)
   const [apiOn, setApiOn] = useState(true)
   const [apiIn, setApiIn] = useState(seeded.priceIn)
   const [apiOut, setApiOut] = useState(seeded.priceOut)
   const [planIds, setPlanIds] = useState<string[]>([])
-  const [showEvalOrder, setShowEvalOrder] = useState(!review.evidence)
   const hasLoss = (event.lossHistory?.length ?? 0) > 0
-  const pendingEvaluations = useMemo(() => {
+  const thinkingHeads = review.model ? releaseEffortRecipes(review.model) : []
+  const comparablePeers = useMemo(() => {
     if (!review.model) return []
-    return (simState.player.privateEvaluationJobs ?? []).filter(
-      (job) =>
-        job.kind === 'released_model_evaluation' &&
-        job.subjectId === review.model?.id,
+    const ownKind = commercialModelKind(review.model)
+    const blend = blendApiPrice(apiIn, apiOut)
+    const peers = simState.rivals.flatMap((rival) =>
+      rival.models
+        .filter(isLivePublicModel)
+        .map((model) => {
+          const effective = effectiveApiPeerPricing(rival.pricing, model)
+          return {
+            name: model.name,
+            price: effective.price,
+            capability: model.capability,
+            featureScore: model.modalities.length * 18,
+            tokPerSec:
+              model.serviceProfile?.interactiveTokPerSec ??
+              52 * model.tokPerSecMult,
+            kind: commercialModelKind(model),
+            thinking: frontierThinkingFor(model),
+          }
+        })
+        .filter((peer) => peer.kind === ownKind),
     )
-  }, [review.model, simState.player.privateEvaluationJobs])
+    return apiComparablePeerRows(
+      blend,
+      {
+        capability: review.model.capability,
+        featureScore: review.model.modalities.length * 18,
+        tokPerSec:
+          review.model.serviceProfile?.interactiveTokPerSec ??
+          52 * review.model.tokPerSecMult,
+      },
+      peers,
+    ).map((row) => ({
+      ...row,
+      thinking: peers.find((peer) => peer.name === row.name)?.thinking,
+    }))
+  }, [apiIn, apiOut, review.model, simState.rivals])
 
   const confirmSell = () => {
     const listed = hosting
@@ -139,7 +175,6 @@ function ReleaseCelebrationDialog({
       planIds,
     })
   }
-  const confirmHold = () => onList({ sell: false })
 
   return (
     <ConsoleDialog
@@ -147,6 +182,7 @@ function ReleaseCelebrationDialog({
       titleId={`release-review-${event.id}`}
       eyebrow="Release review · list it"
       title={event.name}
+      shellClassName="sm:h-[92dvh]"
       description={(
         <>
           <span className="sm:hidden">
@@ -162,30 +198,18 @@ function ReleaseCelebrationDialog({
       maxWidthClass="max-w-6xl"
       footer={
         review.model ? (
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <p className="hud-mobile-detail text-[0.75rem] text-muted max-sm:hidden [@media(max-height:540px)]:hidden">
-              Public on evals. Demand starts only after you list it.
-            </p>
-            <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
-              <HudButton type="button" variant="ghost" onClick={confirmHold}>
-                <span className="sm:hidden">Don't list</span>
-                <span className="hidden sm:inline">Release without selling</span>
-              </HudButton>
-              <HudButton
-                type="button"
-                variant="primary"
-                className="sm:min-w-40"
-                onClick={sell ? confirmSell : confirmHold}
-              >
-                {sell ? 'List it' : <><span className="sm:hidden">Don't list</span><span className="hidden sm:inline">Release without selling</span></>}
-              </HudButton>
-            </div>
+          <div className="flex justify-end">
+            <HudButton
+              type="button"
+              variant="primary"
+              className="sm:min-w-40"
+              onClick={confirmSell}
+            >
+              List it
+            </HudButton>
           </div>
         ) : (
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-[0.75rem] text-muted">
-              Release is public on evals. Listing controls need the finished model row.
-            </p>
+          <div className="flex justify-end">
             <HudButton type="button" variant="primary" onClick={onClear} className="sm:min-w-40">
               Continue operations
             </HudButton>
@@ -193,7 +217,8 @@ function ReleaseCelebrationDialog({
         )
       }
     >
-      <div className="mb-3 grid grid-cols-2 gap-2 sm:mb-4 sm:grid-cols-4">
+      <div className="flex min-h-0 flex-1 flex-col">
+      <div className="mb-3 grid shrink-0 grid-cols-2 gap-2 sm:mb-4 sm:grid-cols-4">
         <MetricTile
           label="Release status"
           value={
@@ -219,199 +244,52 @@ function ReleaseCelebrationDialog({
         />
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(20rem,0.82fr)_minmax(32rem,1.18fr)]">
-        <section className="hud-mobile-detail rounded-lg border border-line/70 bg-panel-2/55 p-3.5 max-sm:hidden [@media(max-height:540px)]:hidden" aria-labelledby={`release-curve-${event.id}`}>
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="hud-eyebrow">Training trace</p>
-              <h3 id={`release-curve-${event.id}`} className="mt-1 text-sm font-semibold text-bone">
-                Loss and private evaluation checkpoints
-              </h3>
-            </div>
-            {latestSnapshot?.totalCost != null ? (
-              <StatusChip tone="research">{money(latestSnapshot.totalCost)} eval</StatusChip>
-            ) : null}
+      <section className="hud-mobile-detail shrink-0 rounded-lg border border-line/70 bg-panel-2/55 p-3.5 max-sm:hidden [@media(max-height:540px)]:hidden" aria-labelledby={`release-curve-${event.id}`}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="hud-eyebrow">Training trace</p>
+            <h3 id={`release-curve-${event.id}`} className="mt-1 text-sm font-semibold text-bone">
+              Loss and private evaluation checkpoints
+            </h3>
           </div>
-          {hasLoss ? (
-            <TrainingLossChart
-              history={event.lossHistory ?? []}
-              failed={false}
-              energyMWh={event.energyMWh}
-              mwDays={event.energyMwDays}
-              benchmarks={event.benchmarkSnapshots}
-            />
-          ) : (
-            <div className="mt-3 rounded-lg border border-line/50 bg-void/30 px-3 py-8 text-center">
-              <ChartLineUp className="mx-auto text-muted" size="1.5rem" />
-              <p className="mt-2 text-[0.75rem] text-muted">
-                This checkpoint predates retained training telemetry. Public evaluation evidence remains pending.
-              </p>
-            </div>
-          )}
-        </section>
-
-        <section className="min-w-0 rounded-lg border border-line/70 bg-panel-2/55 p-3.5" aria-labelledby={`release-bench-${event.id}`}>
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="hud-eyebrow">Measured evidence</p>
-              <h3 id={`release-bench-${event.id}`} className="mt-1 text-sm font-semibold text-bone">
-                {review.evidence
-                  ? `${BENCHMARK_SUITE_UI[review.suiteId].label} · same-metric public peers`
-                  : 'Public evaluation pending'}
-              </h3>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {review.evidence ? (
-                <StatusChip tone="research">
-                  {(review.evidence.report.quote.accuracy * 100).toFixed(0)}% accuracy
-                </StatusChip>
-              ) : null}
-              {review.model && review.evidence ? (
-                <HudButton
-                  type="button"
-                  variant="ghost"
-                  className="!px-2.5 !py-1 text-[0.75rem]"
-                  onClick={() => setShowEvalOrder((open) => !open)}
-                >
-                  {showEvalOrder ? 'Hide benchmark order' : 'Run benchmarks'}
-                </HudButton>
-              ) : null}
-            </div>
+          {latestSnapshot?.totalCost != null ? (
+            <StatusChip tone="research">{money(latestSnapshot.totalCost)} eval</StatusChip>
+          ) : null}
+        </div>
+        {hasLoss ? (
+          <TrainingLossChart
+            history={event.lossHistory ?? []}
+            failed={false}
+            energyMWh={event.energyMWh}
+            mwDays={event.energyMwDays}
+            benchmarks={event.benchmarkSnapshots}
+          />
+        ) : (
+          <div className="mt-3 rounded-lg border border-line/50 bg-void/30 px-3 py-8 text-center">
+            <ChartLineUp className="mx-auto text-muted" size="1.5rem" />
+            <p className="mt-2 text-[0.75rem] text-muted">
+              This checkpoint predates retained training telemetry. Public evaluation evidence remains pending.
+            </p>
           </div>
-          {review.evidence ? (
-            <>
-              <div className="hud-mobile-detail panel-scroll mt-3 hidden overflow-x-auto overscroll-x-contain rounded-md border border-line/60 sm:block">
-                <table className="w-full min-w-[38rem] border-collapse text-left text-[0.75rem]">
-                  <thead>
-                    <tr className="border-b border-line/70 bg-void/55 font-mono text-[0.625rem] uppercase tracking-[0.11em] text-muted">
-                      <th className="px-2.5 py-2">Metric</th>
-                      <th className="px-2 py-2 text-right">Estimate</th>
-                      <th className="px-2 py-2 text-right">Interval</th>
-                      <th className="px-2 py-2 text-right">Closest public peer</th>
-                      <th className="px-2 py-2 text-right">Delta</th>
-                      <th className="px-2 py-2 text-right">Rank</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {review.evidence.metrics.map((metric) => (
-                      <tr key={metric.metricId} className="border-b border-line/45 bg-panel/20 last:border-0">
-                        <td className="px-2.5 py-2 font-medium text-bone">{metric.label}</td>
-                        <td className="px-2 py-2 text-right font-mono tabular-nums text-mint">{metric.score.toFixed(1)}</td>
-                        <td className="px-2 py-2 text-right font-mono tabular-nums text-muted">{metric.low.toFixed(1)}–{metric.high.toFixed(1)}</td>
-                        <td className="px-2 py-2 text-right text-muted">
-                          {metric.rival ? `${metric.rival.modelName}${metric.rival.labName ? ` · ${metric.rival.labName}` : ''}` : '—'}
-                        </td>
-                        <td className={`px-2 py-2 text-right font-mono tabular-nums ${metric.rival && metric.rival.delta >= 0 ? 'text-mint' : 'text-warning'}`}>
-                          {metric.rival ? `${metric.rival.delta >= 0 ? '+' : ''}${metric.rival.delta.toFixed(1)}` : '—'}
-                        </td>
-                        <td className="px-2 py-2 text-right font-mono tabular-nums text-bone">
-                          {metric.rival ? `#${metric.rival.rank}/${metric.rival.fieldSize}` : '—'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <div data-testid="release-evidence-mobile" className="hud-mobile-summary mt-3 space-y-2 sm:hidden">
-                {review.evidence.metrics.map((metric) => (
-                  <article key={metric.metricId} className="rounded-md border border-line/60 bg-void/35 px-3 py-2.5">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <h4 className="truncate text-[0.8125rem] font-medium text-bone">{metric.label}</h4>
-                        <p className="mt-1 font-mono text-[0.625rem] text-muted">
-                          {metric.rival ? `Rank #${metric.rival.rank}/${metric.rival.fieldSize}` : 'No public peer'}
-                        </p>
-                      </div>
-                      <div className="shrink-0 text-right">
-                        <strong className="block font-mono text-sm tabular-nums text-mint">{metric.score.toFixed(1)}</strong>
-                        <span className={`font-mono text-[0.6875rem] tabular-nums ${metric.rival && metric.rival.delta >= 0 ? 'text-mint' : 'text-warning'}`}>
-                          {metric.rival ? `${metric.rival.delta >= 0 ? '+' : ''}${metric.rival.delta.toFixed(1)} vs peer` : 'Measured'}
-                        </span>
-                      </div>
-                    </div>
-                  </article>
-                ))}
-              </div>
-              <p className="mt-2 font-mono text-[0.625rem] tabular-nums text-muted sm:mt-3">
-                <span className="sm:hidden">Day {review.evidence.report.completedDay} · {(review.evidence.report.confidence * 100).toFixed(0)}% confidence</span>
-                <span className="hidden sm:inline">
-                Report day {review.evidence.report.completedDay} · {review.evidence.report.request.mode.replaceAll('_', ' ')} · {money(review.evidence.report.quote.totalCost)} · {(review.evidence.report.confidence * 100).toFixed(0)}% confidence
-                </span>
-              </p>
-              {showEvalOrder && review.model ? (
-                <ReleaseEvaluationOrder
-                  model={review.model}
-                  cash={simState.player.cash}
-                  preferredSuiteIds={preferredReleaseSuites(event)}
-                  onSubmit={onRunEvaluation}
-                />
-              ) : null}
-            </>
-          ) : (
-            <div className="mt-3 rounded-lg border border-research/25 bg-research/5 px-3 py-4 sm:px-4 sm:py-5">
-              <ChartLineUp className="mx-auto text-research" size="1.5rem" />
-              <strong className="mt-2 block text-center text-sm text-bone">
-                {pendingEvaluations.length > 0
-                  ? 'Evaluation in flight'
-                  : 'Public evaluation pending'}
-              </strong>
-              <p className="hud-mobile-detail mx-auto mt-1 max-w-lg text-center text-[0.75rem] leading-relaxed text-muted max-sm:hidden">
-                {pendingEvaluations.length > 0
-                  ? `Results land on day ${Math.max(...pendingEvaluations.map((job) => job.readyDay))}. Latent scores stay hidden until the panel reports.`
-                  : 'No measured report is retained for this exact model version yet. Commission a study here, or list it and measure later.'}
-              </p>
-              {review.model && showEvalOrder ? (
-                <ReleaseEvaluationOrder
-                  model={review.model}
-                  cash={simState.player.cash}
-                  preferredSuiteIds={preferredReleaseSuites(event)}
-                  onSubmit={onRunEvaluation}
-                />
-              ) : review.model ? (
-                <div className="mt-3 flex justify-center">
-                  <HudButton
-                    type="button"
-                    variant="secondary"
-                    onClick={() => setShowEvalOrder(true)}
-                  >
-                    Run benchmarks
-                  </HudButton>
-                </div>
-              ) : null}
-            </div>
-          )}
-        </section>
-      </div>
+        )}
+      </section>
 
       {review.model ? (
         <section
-          className="mt-3 rounded-lg border border-line/70 bg-panel-2/55 p-3 sm:mt-4 sm:p-3.5"
+          className="mt-3 flex min-h-0 flex-1 flex-col rounded-lg border border-line/70 bg-panel-2/55 p-3 sm:mt-4 sm:p-3.5"
           aria-labelledby={`release-gtm-${event.id}`}
         >
           <p className="hud-eyebrow">Go to market</p>
           <h3 id={`release-gtm-${event.id}`} className="mt-1 text-sm font-semibold text-bone">
-            Sell, price the API, and tick plans
+            Price the API and tick plans
           </h3>
-          <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(12rem,0.7fr)_minmax(16rem,1fr)_minmax(16rem,1fr)]">
-            <label className="flex min-h-11 cursor-pointer items-start gap-2 rounded-md border border-line/60 bg-void/35 px-3 py-2.5 text-[0.75rem] text-muted">
-              <input
-                type="checkbox"
-                className="mt-0.5 size-5 shrink-0 accent-mint"
-                checked={sell}
-                onChange={(event) => setSell(event.target.checked)}
-              />
-              <span>
-                <strong className="block text-bone">Sell this model</strong>
-                <span className="max-sm:hidden">Off keeps it on the board without demand.</span>
-              </span>
-            </label>
-            <div className="rounded-md border border-line/60 bg-void/35 px-3 py-2.5">
+          <div className="mt-3 grid min-h-0 flex-1 gap-3 lg:grid-cols-2">
+            <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-line/60 bg-void/35 px-3 py-2.5">
               <label className="flex cursor-pointer items-center gap-2 text-[0.75rem] text-muted">
                 <input
                   type="checkbox"
                   className="size-5 shrink-0 accent-mint"
                   checked={apiOn}
-                  disabled={!sell}
                   onChange={(event) => setApiOn(event.target.checked)}
                 />
                 <span className="font-medium text-bone">API listing</span>
@@ -424,7 +302,7 @@ function ReleaseCelebrationDialog({
                     type="number"
                     min={hosting?.costIn ?? 0}
                     step={0.01}
-                    disabled={!sell || !apiOn}
+                    disabled={!apiOn}
                     value={apiIn}
                     invalid={Boolean(hosting && apiIn < hosting.costIn)}
                     onChange={(event) => setApiIn(Number(event.target.value))}
@@ -448,7 +326,7 @@ function ReleaseCelebrationDialog({
                     type="number"
                     min={hosting?.costOut ?? 0}
                     step={0.01}
-                    disabled={!sell || !apiOn}
+                    disabled={!apiOn}
                     value={apiOut}
                     invalid={Boolean(hosting && apiOut < hosting.costOut)}
                     onChange={(event) => setApiOut(Number(event.target.value))}
@@ -466,17 +344,65 @@ function ReleaseCelebrationDialog({
                   ) : null}
                 </label>
               </div>
-              {hosting ? (
-                <p className="hud-mobile-detail mt-2 text-[0.625rem] leading-relaxed text-muted max-sm:hidden [@media(max-height:540px)]:hidden">
-                  {hosting.source === 'cloud_reference'
-                    ? 'No serving replica on campus — floor is a cloud-rental quote for this size.'
-                    : `Hosting floor from energy, racks, halls, and leases at this model's size (${review.model ? formatParams(review.model.paramsB) : 'model'} · ${num(hosting.capacityMTok)} MTok/day). Output costs more than input because decode is memory-bound.`}
-                </p>
+              <div className="mt-2 min-h-0 flex-1 space-y-2 overflow-y-auto">
+                <div data-testid="release-thinking-heads">
+                  <p className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+                    Thinking levels
+                  </p>
+                  <ul className="mt-1 space-y-0.5 font-mono text-[0.6875rem] tabular-nums text-bone">
+                    {thinkingHeads.map((recipe) => (
+                      <li key={recipe.id}>
+                        {recipe.kind === 'instant'
+                          ? 'Instant · free serve'
+                          : `${recipe.name} · ${recipe.thinkingTokenMult.toFixed(1)}× generated${recipe.trained ? '' : ' · untrained'}${recipe.served ? '' : ' · not serving'}`}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              {comparablePeers.length > 0 ? (
+                <div data-testid="release-comparable-peers">
+                  <p className="text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
+                    Similar capability
+                  </p>
+                  <ul className="mt-1 space-y-0.5">
+                    {comparablePeers.map((peer) => (
+                      <li
+                        key={`${peer.name}-${peer.capability}`}
+                        className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-2 font-mono text-[0.6875rem] tabular-nums min-[420px]:grid-cols-[minmax(0,1fr)_auto_auto_auto]"
+                      >
+                        <span className="min-w-0 truncate text-bone">
+                          {peer.name}
+                          {peer.thinking?.thinkingTokenMult != null
+                            ? ` · ${formatFrontierThinking(peer.thinking)}`
+                            : ''}
+                        </span>
+                        <span className="shrink-0 text-bone">
+                          ${formatApiListPrice(peer.price)}/M
+                        </span>
+                        <span className="text-muted min-[420px]:shrink-0">
+                          cap {num(peer.capability, 0)}
+                        </span>
+                        <span
+                          className={`text-right uppercase tracking-[0.08em] min-[420px]:shrink-0 ${
+                            peer.position === 'cheaper'
+                              ? 'text-mint'
+                              : peer.position === 'premium'
+                                ? 'text-amber'
+                                : 'text-muted'
+                          }`}
+                        >
+                          {peer.position}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               ) : null}
+              </div>
             </div>
-            <div className="rounded-md border border-line/60 bg-void/35 px-3 py-2.5">
+            <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-line/60 bg-void/35 px-3 py-2.5">
               <p className="text-[0.75rem] font-medium text-bone">Plans</p>
-              <div className="mt-2 flex flex-col gap-1.5 sm:max-h-36 sm:overflow-y-auto [@media(max-height:540px)]:!max-h-none [@media(max-height:540px)]:!overflow-visible">
+              <div className="mt-2 flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto">
                 {plans.length === 0 ? (
                   <p className="text-[0.6875rem] text-muted">No plans yet.</p>
                 ) : (
@@ -491,7 +417,6 @@ function ReleaseCelebrationDialog({
                           type="checkbox"
                           className="size-5 shrink-0 accent-mint"
                           checked={checked}
-                          disabled={!sell}
                           onChange={() =>
                             setPlanIds((current) =>
                               checked
@@ -513,6 +438,7 @@ function ReleaseCelebrationDialog({
           </div>
         </section>
       ) : null}
+      </div>
     </ConsoleDialog>
   )
 }

@@ -37,6 +37,7 @@ function baseReady(seed: number): SimState {
         ...state.player.researchUnlocked,
         'align_rlhf',
         'align_process',
+        'domain_agents',
       ],
     },
   }

@@ -1,10 +1,11 @@
 /** Live API/subscription serving. Archived weights stay trainable but off-market. */
 export function isLivePublicModel(model: {
   archived?: boolean;
+  soldIp?: boolean;
   release?: string;
   shipped?: boolean;
 }): boolean {
-  if (model.archived) return false;
+  if (model.archived || model.soldIp) return false;
   return model.release === "released" || model.shipped === true;
 }
 

@@ -534,6 +534,38 @@ describe('capital stack', () => {
     })
   })
 
+  it('opens a 30-day asset-sale window at the insolvency floor instead of ending the run', () => {
+    const base = createGame(39)
+    const insolvent = {
+      ...base,
+      player: {
+        ...base.player,
+        cash: -500_000_000,
+        finance: { ...base.player.finance, cash: -500_000_000, runwayDays: 0 },
+      },
+    }
+    const next = tickCapital(insolvent)
+    expect(next.player.capital?.restructuring).toEqual({
+      active: true,
+      daysLeft: 30,
+      stage: 'asset_sale',
+    })
+    expect(next.victory.outcome).toBe('playing')
+
+    const lastDay = tickCapital({
+      ...next,
+      player: {
+        ...next.player,
+        cash: -500_000_000,
+        capital: {
+          ...next.player.capital!,
+          restructuring: { active: true, daysLeft: 1, stage: 'asset_sale' },
+        },
+      },
+    })
+    expect(lastDay.player.capital?.restructuring.stage).toBe('bankruptcy')
+  })
+
   it('does not start the player recovery ladder from runway alone', () => {
     const base = createGame(38)
     const next = tickCapital({

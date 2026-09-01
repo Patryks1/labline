@@ -54,6 +54,10 @@ import { BlockerList, GameCard, SegmentedTabs, StatRow } from "../ui/kit";
 import { ResponsiveDonut } from "../ui/dataViz/ResponsiveDonut";
 import { LineChart, type LineChartSeries } from "../ui/LineChart";
 
+import { HudDesktopDefaultDetails } from "../ui/HudDesktopDefaultDetails";
+import { ComputeUsageSection } from "./ComputeUsageSection";
+import { buildFinanceDashboardModel } from "../data/financeDashboardModel";
+
 type ProviderEvent = {
   title: string;
   body: string;
@@ -150,7 +154,7 @@ function providerEvent(day: number, providerId: string): ProviderEvent {
   ]!;
 }
 
-type MarketTab = "negotiate" | "offers" | "leases";
+type MarketTab = "usage" | "negotiate" | "offers" | "leases";
 type ChatLine = {
   side: "provider" | "player";
   text: string;
@@ -164,8 +168,13 @@ export function ComputeMarketPanel() {
   const state = useGameStore((s) => s.state);
   const setState = (next: typeof state) =>
     useGameStore.setState({ state: next });
+  const setPanel = useGameStore((s) => s.setPanel);
   const requestConfirm = useUiStore((s) => s.requestConfirm);
   const [tab, setTab] = useState<MarketTab>("negotiate");
+  const financeModel = useMemo(
+    () => buildFinanceDashboardModel(state),
+    [state],
+  );
 
   const offers = openOffers(state).filter((offer) => offer.from === "rival");
   const active = activeLeases(state);
@@ -421,7 +430,7 @@ export function ComputeMarketPanel() {
                 value={pricePerPfDay > 0 ? money(pricePerMwDayFromPf(pricePerPfDay)) : "—"}
                 tone="warning"
               />
-              <details className="group rounded-md border border-line/60 bg-void/30">
+              <HudDesktopDefaultDetails className="group rounded-md border border-line/60 bg-void/30">
                 <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-muted marker:hidden">
                   <span>Capacity details</span>
                   <span className="shrink-0 font-mono tabular-nums text-bone">{pct(util, 0)} local util</span>
@@ -434,7 +443,7 @@ export function ComputeMarketPanel() {
                   />
                   <StatRow label="Local util" value={pct(util, 0)} />
                 </div>
-              </details>
+              </HudDesktopDefaultDetails>
             </div>
           </div>
         </GameCard>
@@ -448,6 +457,7 @@ export function ComputeMarketPanel() {
             setTab(id as MarketTab);
           }}
           items={[
+            { id: "usage", label: "Compute" },
             { id: "negotiate", label: "Provider desk" },
             { id: "offers", label: `Offers (${offers.length})` },
             {
@@ -458,6 +468,13 @@ export function ComputeMarketPanel() {
         />
 
         <div key={tab} className="panel-swap">
+          {tab === "usage" ? (
+            <ComputeUsageSection
+              stats={financeModel.stats}
+              financeModel={financeModel}
+              setPanel={setPanel}
+            />
+          ) : null}
           {tab === "negotiate" ? (
             <section className="overflow-hidden rounded-lg border border-mint/25 bg-panel-2/90">
               <NegotiationHeader
@@ -961,7 +978,7 @@ export function ComputeQuoteCard({
         </div>
       </div>
 
-      <details className="group rounded-md border border-line/60 bg-panel-2/45">
+      <HudDesktopDefaultDetails className="group rounded-md border border-line/60 bg-panel-2/45">
         <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.6875rem] text-muted marker:hidden">
           <span>Cost &amp; interruption projection</span>
           <span className="shrink-0 font-mono tabular-nums text-bone">
@@ -1008,7 +1025,7 @@ export function ComputeQuoteCard({
             />
           </div>
         </div>
-      </details>
+      </HudDesktopDefaultDetails>
 
       <div className="grid grid-cols-2 gap-1.5 font-mono text-[0.6875rem] sm:grid-cols-4">
         <QuoteMetric label="Daily" value={money(dailyCost)} />

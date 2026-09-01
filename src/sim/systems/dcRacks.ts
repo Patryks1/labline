@@ -259,7 +259,7 @@ export function orderRacksIntoDc(
     return alert(state, 'danger', `Export controls block ${sku.name} orders.`)
   }
 
-  const effects = aggregateEffects(state.player.researchUnlocked)
+  const effects = aggregateEffects(state.player.researchUnlocked, state.player.researchRanks)
   const discount = effects.chipDiscount ?? 0
   const quote = quoteRackOrder(sku, count, {
     discount,

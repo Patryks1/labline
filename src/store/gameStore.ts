@@ -32,6 +32,7 @@ import {
   deleteModel,
   archiveModel,
   restoreArchivedModel,
+  sellModelIp,
   setModelApiPrice,
   setDefaultEffort,
   setServedEffort,
@@ -373,7 +374,11 @@ interface GameStore {
   investPostTrainGym: (kind: PostTrainGymKind, packageId: string) => void;
   setPostTrainGymAllocation: (
     kind: PostTrainGymKind,
-    allocation: { assignedResearchers?: number; researchShare?: number },
+    allocation: {
+      assignedResearchers?: number;
+      researchShare?: number;
+      focusBias?: number;
+    },
   ) => void;
   setTrainingLabs: (jobId: string, kinds: PostTrainGymKind[]) => void;
   teachToolSkill: (skillId: ToolSkillId, packageId: string) => void;
@@ -428,6 +433,7 @@ interface GameStore {
   releaseModel: (id: string, opts?: { list?: boolean }) => void;
   archiveModel: (id: string) => void;
   restoreArchivedModel: (id: string) => void;
+  sellModelIp: (id: string) => void;
   deleteModel: (id: string) => void;
   setModelApiPrice: (id: string, price: number | null) => void;
   setDefaultEffort: (id: string, effort: string) => void;
@@ -1310,6 +1316,7 @@ export const useGameStore = create<GameStore>((rawSet, get) => {
   archiveModel: (id) => set((st) => ({ state: archiveModel(st.state, id) })),
   restoreArchivedModel: (id) =>
     set((st) => ({ state: restoreArchivedModel(st.state, id) })),
+  sellModelIp: (id) => set((st) => ({ state: sellModelIp(st.state, id) })),
   deleteModel: (id) => set((st) => ({ state: deleteModel(st.state, id) })),
   setModelApiPrice: (id, price) =>
     set((st) => ({ state: setModelApiPrice(st.state, id, price) })),

@@ -37,6 +37,23 @@ describe('ConsoleDialog responsive frame', () => {
     expect(markup).toContain('hud-mobile-summary')
   })
 
+  it('merges shellClassName onto the dialog shell', () => {
+    const markup = renderToStaticMarkup(createElement(
+      ConsoleDialog,
+      {
+        open: true,
+        titleId: 'shell-dialog-title',
+        title: 'Decision',
+        onClose: () => undefined,
+        shellClassName: 'sm:h-[92dvh]',
+      },
+      createElement('p', null, 'Details'),
+    ))
+
+    expect(markup).toContain('hud-dialog-shell')
+    expect(markup).toContain('sm:h-auto sm:max-h-[92dvh] sm:rounded-xl sm:border sm:h-[92dvh]')
+  })
+
   it('supports terminal outcomes that require an explicit footer action', () => {
     const markup = renderToStaticMarkup(createElement(
       ConsoleDialog,

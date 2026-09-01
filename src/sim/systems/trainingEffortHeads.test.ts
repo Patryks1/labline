@@ -13,7 +13,6 @@ import {
   setEffortHeadComputeShare,
   startEffortTraining,
   startTraining,
-  tickTraining,
 } from "./training";
 
 function richState(seed: number): SimState {
@@ -74,24 +73,30 @@ describe("per-head effort training", () => {
     expect(fast.loss!).toBeLessThan(slow.loss!);
   });
 
-  it("continues training Instant and Deep instead of only naming a new head", () => {
+  it("refuses Instant extra PF and continues a named thinking head", () => {
     let state = startTraining(richState(4402), {
       name: "Continue Heads",
       family: "dense",
       paramsB: 1,
     });
     const job = state.player.trainingJob!;
+    const instantBefore = migrateEffortRecipes(
+      state.player.trainingJob?.productProfile,
+    ).find((recipe) => recipe.id === INSTANT_EFFORT_ID);
     state = startEffortTraining(state, {
       id: job.id,
       recipeId: INSTANT_EFFORT_ID,
       name: "Instant",
       trainPfDays: 6,
     });
+    expect(state.alerts[0]?.message).toMatch(/not extra Instant compute/i);
     const instant = migrateEffortRecipes(
       state.player.trainingJob?.productProfile,
     ).find((recipe) => recipe.id === INSTANT_EFFORT_ID);
-    expect(instant?.targetPfDays).toBeGreaterThan(0);
-    expect(instant?.trainComputeShare).toBeGreaterThan(0);
+    expect(instant?.targetPfDays ?? 0).toBe(instantBefore?.targetPfDays ?? 0);
+    expect(instant?.trainComputeShare ?? 0).toBe(
+      instantBefore?.trainComputeShare ?? 0,
+    );
     expect(
       migrateEffortRecipes(state.player.trainingJob?.productProfile).filter(
         (recipe) => recipe.kind === "trained",
@@ -147,6 +152,7 @@ describe("per-head effort training", () => {
       name: "Instant",
       capabilityBias: 1,
     });
+    expect(state.alerts[0]?.message).toMatch(/not extra Instant compute/i);
     const instant = migrateEffortRecipes(
       state.player.trainingJob?.productProfile,
     ).find((recipe) => recipe.id === INSTANT_EFFORT_ID)!;
@@ -154,7 +160,7 @@ describe("per-head effort training", () => {
     expect(serveTokenMultiplierForRecipe(instant, 50)).toBeCloseTo(before);
   });
 
-  it("preserves Think/Deep when continuing Instant on a multi-head model", () => {
+  it("preserves Think/Deep on continue-train and refuses Instant extra PF", () => {
     let state = startTraining(richState(4404), {
       name: "Multi Head Source",
       family: "dense",
@@ -240,70 +246,28 @@ describe("per-head effort training", () => {
       onJob.find((recipe) => recipe.name === "Think")?.served,
     ).toBe(thinkBefore.served);
 
-    const instantOnJob = onJob.find(
-      (recipe) => recipe.id === INSTANT_EFFORT_ID,
-    )!;
     state = startEffortTraining(state, {
       id: continuedJob.id,
       recipeId: INSTANT_EFFORT_ID,
       name: "Instant",
       thinkingTokenMult: 1,
       trainPfDays: 8,
-      trainComputeShare: Math.max(
-        instantOnJob.trainComputeShare ?? 0,
-        0.15,
-      ),
     });
-    let nextJob = state.player.trainingJob!;
-    const afterFund = migrateEffortRecipes(nextJob.productProfile);
-    expect(afterFund.some((recipe) => recipe.name === "Think")).toBe(true);
-    expect(afterFund.some((recipe) => recipe.name === "Deep")).toBe(true);
-    expect(afterFund.filter((recipe) => recipe.kind === "trained")).toHaveLength(
+    expect(state.alerts[0]?.message).toMatch(/not extra Instant compute/i);
+    const afterRefuse = migrateEffortRecipes(
+      state.player.trainingJob?.productProfile,
+    );
+    expect(afterRefuse.some((recipe) => recipe.name === "Think")).toBe(true);
+    expect(afterRefuse.some((recipe) => recipe.name === "Deep")).toBe(true);
+    expect(afterRefuse.filter((recipe) => recipe.kind === "trained")).toHaveLength(
       2,
     );
-    const instantFunded = afterFund.find(
-      (recipe) => recipe.id === INSTANT_EFFORT_ID,
-    )!;
-    expect(instantFunded.targetPfDays ?? 0).toBeGreaterThan(
-      instantBefore.targetPfDays ?? 0,
-    );
-
-    for (let day = 0; day < 20; day += 1) {
-      nextJob = applyEffortHeadTick(state, nextJob, 10, day).job;
-    }
-    const afterTicks = migrateEffortRecipes(nextJob.productProfile);
-    const instantAfter = afterTicks.find(
-      (recipe) => recipe.id === INSTANT_EFFORT_ID,
-    )!;
-    expect(instantAfter.progressPfDays ?? 0).toBeGreaterThan(
-      instantFunded.progressPfDays ?? 0,
-    );
-    expect(instantAfter.trainPfDays).toBeGreaterThan(instantFunded.trainPfDays);
-    expect(afterTicks.some((recipe) => recipe.name === "Think")).toBe(true);
-    expect(afterTicks.some((recipe) => recipe.name === "Deep")).toBe(true);
     expect(
-      afterTicks.find((recipe) => recipe.name === "Deep")?.thinkingTokenMult,
-    ).toBe(deepBefore.thinkingTokenMult);
+      afterRefuse.find((recipe) => recipe.id === INSTANT_EFFORT_ID)
+        ?.targetPfDays ?? 0,
+    ).toBe(instantBefore.targetPfDays ?? 0);
 
-    state = {
-      ...state,
-      player: {
-        ...state.player,
-        trainingJob: {
-          ...nextJob,
-          progressPfDays: nextJob.targetPfDays,
-          daysElapsed: Math.max(nextJob.minCalendarDays ?? 0, 30),
-        },
-        trainingJobs: [
-          {
-            ...nextJob,
-            progressPfDays: nextJob.targetPfDays,
-            daysElapsed: Math.max(nextJob.minCalendarDays ?? 0, 30),
-          },
-        ],
-      },
-    };
-    state = releaseFromJob(state, undefined, { list: false });
+    state = releaseFromJob(finishJob(state), undefined, { list: false });
     const released = state.player.models.at(-1)!;
     const releasedRecipes = migrateEffortRecipes(released.productProfile);
     expect(releasedRecipes.some((recipe) => recipe.name === "Think")).toBe(
@@ -313,10 +277,10 @@ describe("per-head effort training", () => {
     expect(
       releasedRecipes.find((recipe) => recipe.id === INSTANT_EFFORT_ID)
         ?.trainPfDays ?? 0,
-    ).toBeGreaterThan(instantBefore.trainPfDays);
+    ).toBe(instantBefore.trainPfDays);
   });
 
-  it("queues released-head work on shared Training PF and keeps siblings", () => {
+  it("refuses fleet Instant continue and standalone thinking heads", () => {
     let state = startTraining(richState(4405), {
       name: "Released Heads",
       family: "dense",
@@ -348,6 +312,7 @@ describe("per-head effort training", () => {
     const instantBefore = before.find(
       (recipe) => recipe.id === INSTANT_EFFORT_ID,
     )!;
+    const jobsBefore = state.player.trainingJobs?.length ?? 0;
 
     state = startEffortTraining(state, {
       id: model.id,
@@ -356,6 +321,19 @@ describe("per-head effort training", () => {
       trainPfDays: 6,
       trainComputeShare: 0.2,
     });
+    expect(state.alerts[0]?.message).toMatch(
+      /not extra Instant compute|training run/i,
+    );
+    expect(state.player.trainingJob?.effortOnlySourceModelId).not.toBe(model.id);
+    expect(state.player.trainingJobs?.length ?? 0).toBe(jobsBefore);
+
+    state = startEffortTraining(state, {
+      id: model.id,
+      name: "Deep",
+      thinkingTokenMult: 6,
+      trainPfDays: 8,
+    });
+    expect(state.alerts[0]?.message).toMatch(/training run/i);
     const after = migrateEffortRecipes(
       state.player.models.find((candidate) => candidate.id === model.id)
         ?.productProfile,
@@ -368,6 +346,7 @@ describe("per-head effort training", () => {
     expect(after.find((recipe) => recipe.name === "Think")?.served).toBe(
       think.served,
     );
+    expect(after.filter((recipe) => recipe.kind === "trained")).toHaveLength(1);
     const instantAfter = after.find(
       (recipe) => recipe.id === INSTANT_EFFORT_ID,
     )!;
@@ -375,27 +354,8 @@ describe("per-head effort training", () => {
     expect(instantAfter.progressPfDays ?? 0).toBe(
       instantBefore.progressPfDays ?? 0,
     );
-    expect(instantAfter.targetPfDays ?? 0).toBeGreaterThan(
-      instantBefore.targetPfDays ?? 0,
-    );
-    expect(state.player.trainingJob?.effortOnlySourceModelId).toBe(model.id);
-    for (let day = 0; day < 60 && state.player.trainingJob; day += 1) {
-      state = tickTraining(state);
-    }
-    const completed = migrateEffortRecipes(
-      state.player.models.find((candidate) => candidate.id === model.id)
-        ?.productProfile,
-    );
-    const completedInstant = completed.find(
-      (recipe) => recipe.id === INSTANT_EFFORT_ID,
-    )!;
-    expect(completedInstant.trainPfDays).toBeGreaterThan(
-      instantBefore.trainPfDays,
-    );
-    expect(completedInstant.progressPfDays ?? 0).toBeGreaterThan(
-      instantBefore.progressPfDays ?? 0,
-    );
-    expect(completed.some((recipe) => recipe.name === "Think")).toBe(true);
+    expect(instantAfter.targetPfDays ?? 0).toBe(instantBefore.targetPfDays ?? 0);
+    expect(state.player.trainingJobs?.length ?? 0).toBe(jobsBefore);
   });
 });
 

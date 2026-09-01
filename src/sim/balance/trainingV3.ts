@@ -100,9 +100,9 @@ export function trainingDataModalityRequirements(
   family: ModelFamily,
   productPreset: ModelProductPreset,
 ): Partial<Record<DataDomain, number>> {
-  if (productPreset === 'omni' || family === 'omni') {
-    return { image: 0.08, audio: 0.08, video: 0.08 }
-  }
+  // Omni is a joint text+media product. It does not inherit the native
+  // image/video/audio floors that dedicated media models need to be valid.
+  if (productPreset === 'omni' || family === 'omni') return {}
   if (productPreset === 'video_generation' || family === 'video') {
     return { video: 0.2 }
   }

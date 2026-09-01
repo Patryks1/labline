@@ -506,6 +506,19 @@ function ensureRecord(value: unknown): Record<string, number> {
     : {};
 }
 
+function hydrateResearchRanks(
+  value: unknown,
+): Record<string, number> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const ranks: Record<string, number> = {};
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof raw === "number" && Number.isFinite(raw)) ranks[id] = raw;
+  }
+  return Object.keys(ranks).length > 0 ? ranks : undefined;
+}
+
 /** Additive migration for model-backed investor pitches introduced after v14. */
 function normalizeCapitalStack(
   capital: CapitalStack | undefined,
@@ -1068,6 +1081,7 @@ function normalizeModelComputeV2(model: Model): Model {
     deploymentArtifacts: ensureArray(model.deploymentArtifacts),
     syntheticProvenance: ensureArray(model.syntheticProvenance),
     archived: model.archived === true ? true : undefined,
+    soldIp: model.soldIp === true ? true : undefined,
   };
 }
 
@@ -1610,6 +1624,10 @@ function restoreState(
     restored.player.researchUnlocked,
   );
   restored.player.researchQueue = ensureArray(restored.player.researchQueue);
+  restored.player.autoQueueResearch = restored.player.autoQueueResearch === true;
+  restored.player.researchRanks = hydrateResearchRanks(
+    restored.player.researchRanks,
+  );
   restored.player.chips = ensureArray(restored.player.chips);
   // Keep the Power panel trend inside its 30-day window and drop corrupt samples.
   restored.player.powerEfficiencyHistory = ensureArray<PowerEfficiencySample>(

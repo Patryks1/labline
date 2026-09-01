@@ -9,13 +9,18 @@ import {
   loanOffers,
 } from "../../../sim/systems/loans";
 import {
+  pendingStaffPoaches,
   playerHqStaffCap,
   playerStaff,
   playerStaffOpenSeats,
+  retainStaffPoach,
 } from "../../../sim/systems/staff";
+import { STAFF_LABELS } from "../../../sim/balance/staff";
 import { isHqAnchor, isHqKind } from "../../../sim/systems/map";
 import type {
   BuildableKind,
+  CashDistressStage,
+  EquityOffer,
   FinanceDaySnapshot,
   SimState,
 } from "../../../sim/types";
@@ -44,7 +49,12 @@ import {
   MARKETING_MAX_REVENUE_MULTIPLE,
 } from "../../../sim/systems/org";
 import { computeMarketingOutcome } from "../../../sim/systems/marketing";
-import { cashDistressStage } from "../../../sim/systems/victory";
+import {
+  cashDistressStage,
+  insolvencyGraceDays,
+  sellableModelQuotes,
+} from "../../../sim/systems/victory";
+import { sellModelIp } from "../../../sim/systems/training";
 import { useGameStore } from "../../../store/gameStore";
 import { money, num, pct } from "../format";
 import { SliderField } from "../ui/SliderField";
@@ -61,6 +71,8 @@ import { facilityAnchorTiles } from "../../../sim/systems/worldAccess";
 import { buildFinanceDashboardModel } from "../data/financeDashboardModel";
 import { Sparkline } from "../ui/dataViz/Sparkline";
 import { hqOfficeEffects } from "../../../sim/systems/hqOffice";
+
+import { HudDesktopDefaultDetails } from "../ui/HudDesktopDefaultDetails";
 
 type CapitalView = "ownership" | "credit";
 
@@ -166,7 +178,7 @@ export function InvestorPitchAmountCard({
           accent={preview.dataDrag > 0.35 ? "text-amber" : "text-bone"}
         />
       </div>
-      <details className="group rounded border border-line/50 bg-void/25">
+      <HudDesktopDefaultDetails className="group rounded border border-line/50 bg-void/25">
         <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2 py-1.5 text-[0.625rem] marker:hidden lg:min-h-0">
           <span className="font-medium text-bone">Valuation details</span>
           <span className="font-mono text-muted">
@@ -179,7 +191,7 @@ export function InvestorPitchAmountCard({
           {preview.frontierCapability.toFixed(0)} · confidence floor{" "}
           {(preview.confidenceRequired * 100).toFixed(0)}%
         </p>
-      </details>
+      </HudDesktopDefaultDetails>
       {preview.reason ? (
         <p
           className="rounded border border-amber/25 bg-amber/5 px-2 py-1 text-[0.625rem] text-amber"
@@ -203,6 +215,152 @@ export function InvestorPitchAmountCard({
       >
         Pitch {preview.modelName} for {money(preview.cashRaised)}
       </HudButton>
+    </div>
+  );
+}
+
+function DistressRecoveryCard({
+  state,
+  distress,
+  onOpenCredit,
+  onOpenOwnership,
+  onTakeBailout,
+  onAcceptEquity,
+  onSellModel,
+}: {
+  state: SimState;
+  distress: Exclude<CashDistressStage, "stable">;
+  onOpenCredit: () => void;
+  onOpenOwnership: () => void;
+  onTakeBailout: () => void;
+  onAcceptEquity: (offer: EquityOffer) => void;
+  onSellModel: (id: string) => void;
+}) {
+  const restructuring = state.player.capital?.restructuring;
+  const windowLeft =
+    restructuring?.active && restructuring.stage !== "none"
+      ? restructuring.daysLeft
+      : insolvencyGraceDays();
+  const stageLabel =
+    restructuring?.active && restructuring.stage !== "none"
+      ? restructuring.stage.replace("_", " ")
+      : distress === "bankrupt"
+        ? "asset sale"
+        : "recovery";
+  const bailoutOk = isBailoutEligible(state);
+  const equityOffers = requestEquityOffers(state).slice(0, 2);
+  const modelSales = sellableModelQuotes(state).slice(0, 3);
+  const headline =
+    distress === "distressed"
+      ? "Cash distress."
+      : distress === "severe"
+        ? "Severe distress."
+        : distress === "final"
+          ? "Final warning."
+          : "Insolvency window.";
+  const body =
+    distress === "bankrupt"
+      ? `Cash at the insolvency floor. Take credit, sell equity, or sell models — bankruptcy review in ${windowLeft}d if cash stays negative.`
+      : distress === "final"
+        ? `Cash below -$250M. At -$500M the board opens a ${insolvencyGraceDays()}-day window to raise or sell before bankruptcy review.`
+        : "Cash is below zero. Credit, equity, and model sales stay available until the recovery window expires.";
+
+  return (
+    <div
+      data-testid="distress-recovery"
+      className={`mt-3 space-y-2 rounded-lg border px-3 py-2 text-[0.75rem] leading-snug ${
+        distress === "distressed"
+          ? "border-amber/35 bg-amber/10 text-amber"
+          : "border-danger/40 bg-danger/10 text-danger"
+      }`}
+    >
+      <p>
+        <span className="font-medium">{headline}</span> {body}
+      </p>
+      {restructuring?.active ? (
+        <p className="font-mono text-[0.6875rem] text-bone">
+          {stageLabel} · {windowLeft}d to stabilize
+        </p>
+      ) : null}
+      <div className="flex flex-wrap gap-1.5">
+        {bailoutOk ? (
+          <HudButton
+            type="button"
+            variant="danger"
+            className="min-h-11 rounded-lg px-2 py-1 text-[0.6875rem] lg:min-h-0"
+            onClick={onTakeBailout}
+          >
+            Take emergency credit
+          </HudButton>
+        ) : (
+          <HudButton
+            type="button"
+            variant="secondary"
+            className="min-h-11 rounded-lg px-2 py-1 text-[0.6875rem] lg:min-h-0"
+            onClick={onOpenCredit}
+          >
+            Open credit
+          </HudButton>
+        )}
+        <HudButton
+          type="button"
+          variant="secondary"
+          className="min-h-11 rounded-lg px-2 py-1 text-[0.6875rem] lg:min-h-0"
+          onClick={onOpenOwnership}
+        >
+          Sell equity
+        </HudButton>
+      </div>
+      {equityOffers.length > 0 ? (
+        <div className="space-y-1">
+          {equityOffers.map((offer) => {
+            const blocked =
+              (state.player.capital?.investorConfidence ?? 0) <
+              offer.confidenceRequired;
+            return (
+              <HudButton
+                key={offer.id}
+                type="button"
+                variant="ghost"
+                disabled={blocked}
+                title={
+                  blocked
+                    ? "Investor confidence is too low for this term sheet."
+                    : undefined
+                }
+                className="flex min-h-11 w-full items-center justify-between gap-2 rounded-lg border border-line/70 px-2 py-1 text-left text-[0.6875rem] text-bone lg:min-h-0"
+                onClick={() => onAcceptEquity(offer)}
+              >
+                <span className="truncate">{offer.investorName}</span>
+                <span className="shrink-0 font-mono text-mint">
+                  Raise {money(offer.cashRaised)}
+                </span>
+              </HudButton>
+            );
+          })}
+        </div>
+      ) : null}
+      {modelSales.length > 0 ? (
+        <div className="space-y-1">
+          {modelSales.map(({ model, cash }) => (
+            <HudButton
+              key={model.id}
+              type="button"
+              variant="ghost"
+              className="flex min-h-11 w-full items-center justify-between gap-2 rounded-lg border border-line/70 px-2 py-1 text-left text-[0.6875rem] text-bone lg:min-h-0"
+              onClick={() => onSellModel(model.id)}
+            >
+              <span className="truncate">Sell {model.name}</span>
+              <span className="shrink-0 font-mono text-mint">{money(cash)}</span>
+            </HudButton>
+          ))}
+        </div>
+      ) : (
+        <p className="text-[0.6875rem] text-muted">
+          No model IP to sell yet. Released or trained checkpoints can be sold
+          from Capital or the fleet.
+        </p>
+      )}
     </div>
   );
 }
@@ -466,7 +624,7 @@ export function OrgPanel({
             />
           </GameCard>
 
-          <details className="group overflow-hidden rounded-lg border border-line/70 bg-panel-2/55">
+          <HudDesktopDefaultDetails className="group overflow-hidden rounded-lg border border-line/70 bg-panel-2/55">
             <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 marker:hidden lg:min-h-0">
               <span className="text-[0.8125rem] font-semibold text-bone">
                 Campaign diagnostics
@@ -567,7 +725,7 @@ export function OrgPanel({
             />
           </GameCard>
             </div>
-          </details>
+          </HudDesktopDefaultDetails>
         </div>
       </PanelScaffold>
     );
@@ -604,47 +762,50 @@ export function OrgPanel({
         </div>
       </div> : null}
 
-      {!capitalWorkspace && distress !== "stable" && (
-        <div
-          className={`mt-3 rounded-lg border px-3 py-2 text-[0.75rem] leading-snug ${
-            distress === "distressed"
-              ? "border-amber/35 bg-amber/10 text-amber"
-              : "border-danger/40 bg-danger/10 text-danger"
-          }`}
-        >
-          {distress === "distressed" && (
-            <>
-              <span className="font-medium">Cash distress.</span> Cash is below
-              zero — credit gets expensive and vendor terms may worsen. Raise
-              cash, cut burn, or take emergency funding in Capital.
-            </>
-          )}
-          {distress === "severe" && (
-            <>
-              <span className="font-medium">Severe distress.</span> Cash below
-              -$100M. Lenders charge distress rates; an emergency facility may
-              be available in Capital.
-            </>
-          )}
-          {distress === "final" && (
-            <>
-              <span className="font-medium">Final warning.</span> Cash below
-              -$250M. At -$500M the board forces a fire sale and the run ends.
-            </>
-          )}
-          {distress === "bankrupt" && (
-            <>
-              <span className="font-medium">Bankruptcy.</span> Cash at or below
-              -$500M — the company is being wound down.
-            </>
-          )}
-        </div>
+      {distress !== "stable" && (
+        <DistressRecoveryCard
+          state={state}
+          distress={distress}
+          onOpenCredit={() => setCapitalView("credit")}
+          onOpenOwnership={() => setCapitalView("ownership")}
+          onTakeBailout={() => takeLoan("bailout")}
+          onAcceptEquity={(offer) => setState(acceptEquityOffer(state, offer))}
+          onSellModel={(id) => setState(sellModelIp(state, id))}
+        />
       )}
 
       <div key={companyTab} className={`panel-swap space-y-3${embedded ? '' : ' mt-3'}`}>
         {companyTab === "staff" ? (
           <>
             <HqOfficeSummary state={state} hqs={hqs} />
+            {pendingStaffPoaches(state).map((threat) => {
+              const daysLeft = Math.max(0, threat.resolveDay - state.day);
+              const canPay = state.player.cash >= threat.retainCost;
+              return (
+                <GameCard
+                  key={threat.id}
+                  eyebrow="Poach offer"
+                  title={`${threat.rivalName} is raiding ${STAFF_LABELS[threat.role].toLowerCase()}`}
+                  mobileSummary={`${money(threat.retainCost)} · ${daysLeft}d left`}
+                  tone="danger"
+                >
+                  <p className="text-[0.8125rem] leading-5 text-muted">
+                    Match pay with a {money(threat.retainCost)} raise package
+                    {" "}by day {threat.resolveDay} or they leave.
+                  </p>
+                  <HudButton
+                    type="button"
+                    variant="primary"
+                    className="mt-3"
+                    disabled={!canPay}
+                    title={canPay ? undefined : "Need cash to match the offer."}
+                    onClick={() => setState(retainStaffPoach(state, threat.id))}
+                  >
+                    Match offer · {money(threat.retainCost)}
+                  </HudButton>
+                </GameCard>
+              );
+            })}
             <GameCard
               eyebrow="Office-owned"
               title="Team management lives on the floor"
@@ -714,11 +875,11 @@ export function OrgPanel({
                     Recovery ladder:{" "}
                     {state.player.capital.restructuring.stage.replace("_", " ")}{" "}
                     · {state.player.capital.restructuring.daysLeft}d to
-                    stabilize cash, refinance, raise equity, or sell assets.
+                    take credit, sell equity, or sell models.
                   </div>
                 )}
 
-                <details
+                <HudDesktopDefaultDetails
                   className="group overflow-hidden rounded-lg border border-line/60 bg-void/25"
                   data-testid="capital-buyback-details"
                 >
@@ -801,7 +962,7 @@ export function OrgPanel({
                     </div>
                   )}
                   </div>
-                </details>
+                </HudDesktopDefaultDetails>
 
                 <div className="space-y-2 rounded-lg border border-mint/25 bg-mint/5 p-2">
                   <div className="flex items-start justify-between gap-2">
@@ -908,7 +1069,7 @@ export function OrgPanel({
                   ))}
                 </div>
 
-                <details
+                <HudDesktopDefaultDetails
                   className="group overflow-hidden rounded-lg border border-amber/20 bg-amber/5"
                   data-testid="specialist-bank-details"
                 >
@@ -955,7 +1116,7 @@ export function OrgPanel({
                     </div>
                   ))}
                   </div>
-                </details>
+                </HudDesktopDefaultDetails>
               </section>
             ) : (
               <>

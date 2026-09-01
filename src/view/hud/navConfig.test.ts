@@ -36,6 +36,9 @@ describe('panel function-key shortcuts', () => {
     expect(new Set(ids).size).toBe(ids.length)
     expect(shellGroupForPanel('models').label).toBe('Products')
     expect(shellGroupForPanel('rivals').label).toBe('Operate')
+    expect(
+      SHELL_NAV_GROUPS[0]!.items.find((item) => item.id === 'rivals')?.label,
+    ).toBe('Companies')
   })
 
   it('maps the legacy chips route to the visible Build > Hardware destination', () => {

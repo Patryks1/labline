@@ -2593,7 +2593,7 @@ export function quoteHallRackPurchases(
   _legacyHall?: Pick<MapTile, "rackCapacity">,
 ): HallRackPurchaseQuote {
   const discount =
-    aggregateEffects(state.player.researchUnlocked).chipDiscount ?? 0;
+    aggregateEffects(state.player.researchUnlocked, state.player.researchRanks).chipDiscount ?? 0;
   let cost = 0;
   let drafts = 0;
   for (const object of candidate.objects) {
@@ -2696,7 +2696,7 @@ export function applyHallPlan(
     };
   }
   const discount =
-    aggregateEffects(state.player.researchUnlocked).chipDiscount ?? 0;
+    aggregateEffects(state.player.researchUnlocked, state.player.researchRanks).chipDiscount ?? 0;
   let purchaseCost = 0;
   if (ownerId === state.playerLabId) {
     const fleet = next.player.rackFleet.map((install) => ({

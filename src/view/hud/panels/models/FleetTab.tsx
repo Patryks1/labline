@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import type {
   Model,
   ModelFinanceRow,
@@ -24,6 +24,8 @@ import {
   type CheckpointUiRecord,
 } from "./checkpointUi";
 import { buildPublicBenchmarkData } from "../../data/benchmarkViewModel";
+import { HudDesktopDefaultDetails } from "../../ui/HudDesktopDefaultDetails";
+import { hudDesktopDefaultDisclosureOpen } from "../../ui/hudDesktopDisclosure";
 
 const PREFERRED_SUITE_IDS = [
   "omni_overview",
@@ -48,7 +50,8 @@ export function compareFleetFinishDay(
   return b.releaseDay - a.releaseDay || a.id.localeCompare(b.id);
 }
 
-function fleetStatus(model: Model): "archived" | "released" | "internal" {
+function fleetStatus(model: Model): "sold" | "archived" | "released" | "internal" {
+  if (model.soldIp) return "sold";
   if (isArchivedModel(model)) return "archived";
   if (isLivePublicModel(model)) return "released";
   return "internal";
@@ -81,25 +84,7 @@ function FleetEvidenceDisclosure({
   summary: string;
   children: ReactNode;
 }) {
-  const [open, setOpen] = useState(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-      return false;
-    }
-    return !window.matchMedia("(max-width: 1279px), (max-height: 600px)").matches;
-  });
-
-  useEffect(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-      return;
-    }
-    const query = window.matchMedia(
-      "(max-width: 1279px), (max-height: 600px)",
-    );
-    const sync = () => setOpen(!query.matches);
-    sync();
-    query.addEventListener?.("change", sync);
-    return () => query.removeEventListener?.("change", sync);
-  }, []);
+  const [open, setOpen] = useState(hudDesktopDefaultDisclosureOpen);
 
   return (
     <details
@@ -135,6 +120,8 @@ export function FleetTab({
   onRelease,
   onArchive,
   onRestore,
+  onSellIp,
+  ipSaleQuoteFor,
   onDelete,
   frontierCapability,
   onTrainFurther,
@@ -155,6 +142,8 @@ export function FleetTab({
   onRelease: (id: string) => void;
   onArchive?: (id: string) => void;
   onRestore?: (id: string) => void;
+  onSellIp?: (id: string) => void;
+  ipSaleQuoteFor?: (model: Model) => number;
   onDelete: (id: string) => void;
   frontierCapability: number;
   /** Canonical $/MTok unit cost for suggested list prices. */
@@ -234,11 +223,13 @@ export function FleetTab({
               const measuredLow = evidence?.evaluationScore.low;
               const measuredHigh = evidence?.evaluationScore.high;
               const statusLabel =
-                status === "archived"
-                  ? "archived"
-                  : status === "released"
-                    ? "released"
-                    : "internal";
+                status === "sold"
+                  ? "sold"
+                  : status === "archived"
+                    ? "archived"
+                    : status === "released"
+                      ? "released"
+                      : "internal";
               const selectedRing =
                 status === "released"
                   ? "ring-1 ring-gold/40"
@@ -288,7 +279,9 @@ export function FleetTab({
                       >
                         {model.name}
                       </HudButton>
-                      {status === "archived" ? (
+                      {status === "sold" ? (
+                        <span className="hud-mobile-detail hidden sm:inline-flex"><StatusChip tone="danger">SOLD</StatusChip></span>
+                      ) : status === "archived" ? (
                         <span className="hud-mobile-detail hidden sm:inline-flex"><StatusChip tone="neutral">ARCHIVED</StatusChip></span>
                       ) : null}
                       {status === "released" && finance?.isActive ? (
@@ -357,7 +350,7 @@ export function FleetTab({
                       />
                     </div>
                     {model.economics ? (
-                      <details className="group mt-2 rounded-md border border-line/50 bg-void/25">
+                      <HudDesktopDefaultDetails className="group mt-2 rounded-md border border-line/50 bg-void/25">
                         <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2 py-1.5 text-[0.6875rem] text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
                           <span>Lifetime economics</span>
                           <span className="font-mono tabular-nums text-bone">
@@ -398,7 +391,7 @@ export function FleetTab({
                           )}
                         />
                         </div>
-                      </details>
+                      </HudDesktopDefaultDetails>
                     ) : null}
                     <div className="mt-2">
                       <MeterBar
@@ -482,7 +475,7 @@ export function FleetTab({
                     />
                   </div>
                   {status === "released" && finance ? (
-                    <details className="group mt-3 border-t border-line/50 pt-2" data-serving-economics="collapsed">
+                    <HudDesktopDefaultDetails className="group mt-3 border-t border-line/50 pt-2" data-serving-economics="collapsed">
                       <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 rounded-md px-2 py-1.5 text-[0.6875rem] text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
                         <span>Serving today</span>
                         <span className="font-mono tabular-nums text-bone">
@@ -497,9 +490,14 @@ export function FleetTab({
                         </p>
                       ) : null}
                       </div>
-                    </details>
+                    </HudDesktopDefaultDetails>
                   ) : null}
-                  {status === "archived" ? (
+                  {status === "sold" ? (
+                    <p className="mt-3 text-[0.6875rem] leading-5 text-muted">
+                      Sold. The buyer owns this IP — it cannot return to the
+                      public fleet.
+                    </p>
+                  ) : status === "archived" ? (
                     <p className="mt-3 text-[0.6875rem] leading-5 text-muted">
                       Not serving customers. Train a new version, distill, or
                       restore to the public fleet.
@@ -509,24 +507,28 @@ export function FleetTab({
                     className="mt-3 grid grid-cols-2 gap-1.5 border-t border-line/50 pt-3 [&_.hud-button]:!min-h-11 [&_.hud-button]:!w-full sm:flex sm:flex-wrap sm:[&_.hud-button]:!w-auto"
                     data-fleet-actions={status}
                   >
-                    <HudButton
-                      type="button"
-                      variant="secondary"
-                      className="!px-2 !py-1 text-[0.6875rem]"
-                      onClick={() => onTrainFurther(model)}
-                    >
-                      {status === "internal"
-                        ? "Train further"
-                        : "Train new version"}
-                    </HudButton>
-                    <HudButton
-                      type="button"
-                      variant="ghost"
-                      className="!px-2 !py-1 text-[0.6875rem]"
-                      onClick={() => onDistill(model)}
-                    >
-                      Distill
-                    </HudButton>
+                    {status !== "sold" ? (
+                      <HudButton
+                        type="button"
+                        variant="secondary"
+                        className="!px-2 !py-1 text-[0.6875rem]"
+                        onClick={() => onTrainFurther(model)}
+                      >
+                        {status === "internal"
+                          ? "Train further"
+                          : "Train new version"}
+                      </HudButton>
+                    ) : null}
+                    {status !== "sold" ? (
+                      <HudButton
+                        type="button"
+                        variant="ghost"
+                        className="!px-2 !py-1 text-[0.6875rem]"
+                        onClick={() => onDistill(model)}
+                      >
+                        Distill
+                      </HudButton>
+                    ) : null}
                     {status === "internal" ? (
                       <HudButton
                         type="button"
@@ -561,6 +563,24 @@ export function FleetTab({
                         onClick={() => onRestore(model.id)}
                       >
                         Restore
+                      </HudButton>
+                    ) : null}
+                    {status !== "sold" && onSellIp ? (
+                      <HudButton
+                        type="button"
+                        variant="ghost"
+                        disabled={archiveBlocked}
+                        title={
+                          archiveBlocked
+                            ? "Finish or cancel this model's active safety campaign before selling it."
+                            : undefined
+                        }
+                        className="!px-2 !py-1 text-[0.6875rem]"
+                        onClick={() => onSellIp(model.id)}
+                      >
+                        {ipSaleQuoteFor
+                          ? `Sell IP · ${money(ipSaleQuoteFor(model))}`
+                          : "Sell IP"}
                       </HudButton>
                     ) : null}
                     <HudButton
@@ -660,7 +680,7 @@ export function FleetTab({
             </section>
 
             {archivedModels.length > 0 ? (
-              <details
+              <HudDesktopDefaultDetails
                 className="group rounded-lg border border-line/65 bg-void/20"
                 data-fleet-archive-disclosure="true"
               >
@@ -684,7 +704,7 @@ export function FleetTab({
                 <div className="border-t border-line/50 p-3">
                   {renderFleet(archivedModels)}
                 </div>
-              </details>
+              </HudDesktopDefaultDetails>
             ) : null}
           </>
         )}

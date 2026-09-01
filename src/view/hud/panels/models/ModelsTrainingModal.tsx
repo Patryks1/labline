@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import { HudButton } from "../../ui/HudPrimitives";
 import { ConsoleDialog } from "../../ui/ConsoleDialog";
 import {
   ModelsWorkflowStepper,
@@ -22,6 +21,10 @@ export function ModelsTrainingModal({
   onCancel,
   footerAction,
   children,
+  steps,
+  title = "New training run",
+  description = "Set the goal, data and compute, then review the launch.",
+  mobileDescription = "Goal → data → compute → launch.",
 }: {
   open: boolean;
   activeStep: ModelsWorkflowStep;
@@ -30,39 +33,31 @@ export function ModelsTrainingModal({
   onCancel: () => void;
   footerAction?: ReactNode;
   children?: ReactNode;
+  steps?: ReadonlyArray<{ id: ModelsWorkflowStep; label: string }>;
+  title?: string;
+  description?: string;
+  mobileDescription?: string;
 }) {
   return (
     <ConsoleDialog
       open={open}
       titleId="models-training-workflow"
       eyebrow="Model training"
-      title="New training run"
-      description="Set the goal, data and compute, then review the launch."
-      mobileDescription="Goal → data → compute → launch."
+      title={title}
+      description={description}
+      mobileDescription={mobileDescription}
       onClose={onCancel}
       closeLabel="Close training workflow"
       maxWidthClass="max-w-5xl"
       footer={
-        <div className="space-y-3 [@media(max-height:600px)]:space-y-1">
-          <ModelsWorkflowStepper
-            activeStep={activeStep}
-            completedThrough={completedThrough}
-            onStepChange={onStepChange}
-          />
-          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <HudButton
-              type="button"
-              variant="ghost"
-              onClick={onCancel}
-              className="w-full sm:w-auto"
-            >
-              Cancel
-            </HudButton>
-            {footerAction ? (
-              <div className="flex w-full gap-2 sm:w-auto">{footerAction}</div>
-            ) : null}
-          </div>
-        </div>
+        <ModelsWorkflowStepper
+          activeStep={activeStep}
+          completedThrough={completedThrough}
+          onStepChange={onStepChange}
+          onCancel={onCancel}
+          primaryAction={footerAction}
+          steps={steps}
+        />
       }
     >
       {children}

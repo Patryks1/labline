@@ -49,7 +49,10 @@ import {
   minResearchersForNode,
   researchCashEstimate,
   researchDaysTarget,
+  researchFullyDone,
+  researchMaxRanks,
   researchPfTarget,
+  researchRank,
   startResearch,
   planResearchPath,
   type NodeVisualStatus,
@@ -107,6 +110,7 @@ import {
   researchRelationshipTargets,
   shouldClearResearchSelection,
 } from "./researchPanelA11y";
+import { HudDesktopDefaultDetails } from "../ui/HudDesktopDefaultDetails";
 
 const FULL_RESEARCH_LAYOUT = layoutResearchTree();
 
@@ -213,6 +217,7 @@ export function ResearchPanel() {
       state.player.researchUnlocked,
       scheduled,
       selected.id,
+      state.player.researchRanks,
     ).nodeIds;
   })();
   const selectedLineage = useMemo(
@@ -441,6 +446,7 @@ export function ResearchPanel() {
                     )}
                     Pods
                   </p>
+                  <AutoQueueToggle state={state} apply={apply} />
                 </div>
                 <ResearchPodRoster
                   state={state}
@@ -473,6 +479,7 @@ export function ResearchPanel() {
                 eyebrow="Queue"
                 title={active ? "In flight" : "Waiting"}
                 tone="research"
+                actions={<AutoQueueToggle state={state} apply={apply} />}
               >
                 {queue.length === 0 && !active ? (
                   <p className="text-[0.8125rem] text-muted">Queue is empty.</p>
@@ -788,6 +795,13 @@ export function ResearchPanel() {
                             <span>
                               {st === "done" ? (
                                 <span className="text-mint">DONE</span>
+                              ) : researchRank(state, n.id) > 0 &&
+                                researchMaxRanks(def) > 1 ? (
+                                <>
+                                  R{researchRank(state, n.id)}/{researchMaxRanks(def)}
+                                  {st === "queued" ? " · Q" : ""}
+                                  {st === "active" ? " · …" : ""}
+                                </>
                               ) : (
                                 <>
                                   {def.costPfDays} PF
@@ -1244,7 +1258,14 @@ function ResearchMethodDetail({
           ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          <StatusChip tone={statusTone(status)}>{status}</StatusChip>
+          <StatusChip tone={statusTone(status)}>
+            {researchFullyDone(state, selected.id)
+              ? "done"
+              : researchRank(state, selected.id) > 0 &&
+                  researchMaxRanks(selected) > 1
+                ? `R${researchRank(state, selected.id)}/${researchMaxRanks(selected)}`
+                : status}
+          </StatusChip>
           {onDismiss ? (
             <HudButton
               type="button"
@@ -1385,7 +1406,7 @@ function ResearchMethodDetail({
           />
         </div>
 
-        <details
+        <HudDesktopDefaultDetails
           className="group rounded-md border border-line/70 bg-void/35"
           data-research-secondary-detail="collapsed"
         >
@@ -1411,9 +1432,12 @@ function ResearchMethodDetail({
                 Needs {selected.prereqs.map((prereq) => getResearchNode(prereq).name).join(", ")}
               </p>
             ) : null}
-            <EffectsLine effects={selected.effects} />
+            <EffectsLine
+              effects={selected.effects}
+              perRank={researchMaxRanks(selected) > 1}
+            />
           </div>
-        </details>
+        </HudDesktopDefaultDetails>
         {selected.riskLevel ? (
           <div className="rounded-md border border-danger/40 bg-danger/10 px-2.5 py-2">
             <div className="font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.12em] text-danger">
@@ -1831,20 +1855,54 @@ function nodeClass(
   return base + "border-line/40 bg-void/40 opacity-50";
 }
 
-function EffectsLine({ effects }: { effects: ResearchEffects }) {
+function AutoQueueToggle({
+  state,
+  apply,
+}: {
+  state: SimState;
+  apply: (next: SimState) => void;
+}) {
+  const on = !!state.player.autoQueueResearch;
+  return (
+    <HudButton
+      type="button"
+      variant="ghost"
+      className={`!min-h-8 !px-2 !text-[0.75rem] ${on ? "!border-research/50 !bg-research/15 !text-research" : ""}`}
+      aria-pressed={on}
+      title="When a method finishes, start the cheapest available method (same trunk first)."
+      onClick={() =>
+        apply({
+          ...state,
+          player: { ...state.player, autoQueueResearch: !on },
+        })
+      }
+    >
+      Auto-queue
+    </HudButton>
+  );
+}
+
+function EffectsLine({
+  effects,
+  perRank = false,
+}: {
+  effects: ResearchEffects;
+  perRank?: boolean;
+}) {
+  const rank = perRank ? " per rank" : "";
   const bits: string[] = [];
   if (effects.utilCap)
-    bits.push(`usable compute +${(effects.utilCap * 100).toFixed(0)}%`);
+    bits.push(`usable compute +${(effects.utilCap * 100).toFixed(0)}%${rank}`);
   if (effects.servingEfficiency) {
-    bits.push(`token speed +${(effects.servingEfficiency * 100).toFixed(0)}%`);
+    bits.push(`token speed +${(effects.servingEfficiency * 100).toFixed(0)}%${rank}`);
     bits.push(
-      `inference compute/token −${(100 - 100 / (1 + effects.servingEfficiency)).toFixed(0)}%`,
+      `inference compute/token −${(100 - 100 / (1 + effects.servingEfficiency)).toFixed(0)}%${rank}`,
     );
   }
   if (effects.trainEfficiency) {
-    bits.push(`training speed +${(effects.trainEfficiency * 100).toFixed(0)}%`);
+    bits.push(`training speed +${(effects.trainEfficiency * 100).toFixed(0)}%${rank}`);
     bits.push(
-      `training compute/token −${(100 - 100 / (1 + effects.trainEfficiency)).toFixed(0)}%`,
+      `training compute/token −${(100 - 100 / (1 + effects.trainEfficiency)).toFixed(0)}%${rank}`,
     );
   }
   if (effects.energyPue)
@@ -1864,7 +1922,15 @@ function EffectsLine({ effects }: { effects: ResearchEffects }) {
   if (effects.chipDiscount)
     bits.push(`hardware cost −${(effects.chipDiscount * 100).toFixed(0)}%`);
   if (effects.dataFlywheel)
-    bits.push(`data processing +${(effects.dataFlywheel * 100).toFixed(0)}%`);
+    bits.push(`data processing +${(effects.dataFlywheel * 100).toFixed(0)}%${rank}`);
+  if (effects.gymQualityBonus)
+    bits.push(
+      `gym quality +${(effects.gymQualityBonus * 100).toFixed(1)} pts per rank`,
+    );
+  if (effects.hostingOpexDiscount)
+    bits.push(
+      `hosting opex −${(effects.hostingOpexDiscount * 100).toFixed(0)}% per rank`,
+    );
   if (effects.benchmarkBoost) bits.push("evaluation lift");
   if (effects.unlockCorpusSpecialists) bits.push("specialist data processing");
   if (effects.unlockFamily) bits.push(`unlock ${effects.unlockFamily}`);

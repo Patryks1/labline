@@ -5,6 +5,7 @@ import { useGameStore } from '../../../store/gameStore'
 import { money, num, pct } from '../format'
 import { HudButton, StatusChip } from '../ui/HudPrimitives'
 import { StatRow } from '../ui/kit'
+import { hudDesktopDefaultDisclosureOpen } from '../ui/hudDesktopDisclosure'
 
 const POLICY_DEFS = [
   [
@@ -41,7 +42,7 @@ type PolicyKey = (typeof POLICY_DEFS)[number][0]
  * sites, fleet capacity, construction, and deployment operations.
  */
 export function OverviewGovernance({ state }: { state: SimState }) {
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(hudDesktopDefaultDisclosureOpen)
   const applyState = (next: SimState) => useGameStore.setState({ state: next })
   const advanced = state.config.campaignRules.externalityMode === 'advanced'
   const account = state.externalities?.accounts[state.playerLabId]

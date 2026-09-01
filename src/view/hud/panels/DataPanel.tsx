@@ -77,6 +77,8 @@ import {
   syntheticTeacherSelectOptions,
   syntheticTeacherSelectValue,
 } from "../ui/trainingSyntheticTeacherOptions";
+import { HudDesktopDefaultDetails } from "../ui/HudDesktopDefaultDetails";
+import { hudDesktopDefaultDisclosureOpen } from "../ui/hudDesktopDisclosure";
 
 type CorpusSourceKey = "web" | "bought" | "user" | "synth";
 type DataTab = "stocks" | "sources" | "market" | "synth";
@@ -236,7 +238,7 @@ export function SynthTeacherRoutingTable({
   onPick: (domain: DataDomain, modelId: string, effortId: string) => void;
 }) {
   return (
-    <details
+    <HudDesktopDefaultDetails
       className="group mt-3 overflow-hidden rounded-md border border-line/70 bg-void/45"
       aria-label="Synthetic corpus teacher routing"
     >
@@ -387,7 +389,7 @@ export function SynthTeacherRoutingTable({
           );
         })}
       </div>
-    </details>
+    </HudDesktopDefaultDetails>
   );
 }
 
@@ -492,7 +494,7 @@ export function DataPanel({
   );
   const [filterPrice, setFilterPrice] = useState<MarketPriceFilter>("all");
   const [sortBy, setSortBy] = useState<MarketSort>("priceAsc");
-  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(hudDesktopDefaultDisclosureOpen);
   const supplierOffers = useMemo(() => listDataSupplierOffers(state), [state]);
   const supplierContracts = state.player.dataSupplierContracts ?? [];
 
@@ -1046,7 +1048,7 @@ export function DataPanel({
                   value={`${data.processQueue.length}/6`}
                 />
               </div>
-              <details className="group mt-2 rounded-md border border-line/60 bg-void/25">
+              <HudDesktopDefaultDetails className="group mt-2 rounded-md border border-line/60 bg-void/25">
                 <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-bone">
                   <span>Collection breakdown</span>
                   <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
@@ -1071,7 +1073,7 @@ export function DataPanel({
                     instead of making them train-ready.
                   </p>
                 </div>
-              </details>
+              </HudDesktopDefaultDetails>
               <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                 <label className="flex items-center gap-2 text-[0.8125rem] text-bone">
                   <HudInput
@@ -1338,7 +1340,7 @@ export function DataPanel({
                 />
               </div>
 
-              <details className="group mt-3 rounded-md border border-line/60 bg-void/25">
+              <HudDesktopDefaultDetails className="group mt-3 rounded-md border border-line/60 bg-void/25">
                 <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.6875rem]">
                   <span className="uppercase tracking-[0.12em] text-muted">
                     Top domains
@@ -1359,7 +1361,7 @@ export function DataPanel({
                     />
                   ))}
                 </div>
-              </details>
+              </HudDesktopDefaultDetails>
             </GameCard>
 
             <GameCard
@@ -1432,7 +1434,7 @@ export function DataPanel({
                               value={`Q${Math.round(asset.quality)}`}
                             />
                           </div>
-                          <details className="group mt-2 rounded-md border border-line/60 bg-void/25">
+                          <HudDesktopDefaultDetails className="group mt-2 rounded-md border border-line/60 bg-void/25">
                             <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2 py-1.5 text-[0.6875rem] text-muted">
                               <span>Asset details</span>
                               <span className="font-mono tabular-nums">
@@ -1460,7 +1462,7 @@ export function DataPanel({
                                   : ""}
                               </p>
                             </div>
-                          </details>
+                          </HudDesktopDefaultDetails>
                         </div>
                       );
                     })}
@@ -1772,7 +1774,7 @@ export function DataPanel({
               </div>
             </GameCard>
 
-            <details className="group rounded-lg border border-line/70 bg-panel/45">
+            <HudDesktopDefaultDetails className="group rounded-lg border border-line/70 bg-panel/45">
               <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5 text-[0.8125rem] font-semibold text-bone">
                 <span>Supplier contracts</span>
                 <span className="font-mono text-[0.6875rem] font-normal tabular-nums text-muted">
@@ -2269,7 +2271,7 @@ export function DataPanel({
                   </div>
                 </GameCard>
               </div>
-            </details>
+            </HudDesktopDefaultDetails>
           </>
         )}
 
@@ -2317,7 +2319,7 @@ export function DataPanel({
               />
             </div>
 
-            <details className="group mt-2 rounded-md border border-line/60 bg-void/25">
+            <HudDesktopDefaultDetails className="group mt-2 rounded-md border border-line/60 bg-void/25">
               <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-bone">
                 <span>Generation detail</span>
                 <span className="font-mono text-[0.6875rem] tabular-nums text-muted">
@@ -2332,7 +2334,7 @@ export function DataPanel({
                 />
                 <StatRow label="Power" value={mw(synthEstimate.powerMw)} />
               </div>
-            </details>
+            </HudDesktopDefaultDetails>
 
             <SynthTeacherRoutingTable
               state={state}
@@ -2685,7 +2687,7 @@ function DomainStockCard({
         />
       </div>
 
-      <details className="group mt-2 rounded-md border border-line/60 bg-void/25">
+      <HudDesktopDefaultDetails className="group mt-2 rounded-md border border-line/60 bg-void/25">
         <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2 py-1.5 text-[0.6875rem] text-muted">
           <span>Stock details</span>
           <span className="font-mono tabular-nums">
@@ -2719,7 +2721,7 @@ function DomainStockCard({
             </div>
           ) : null}
         </div>
-      </details>
+      </HudDesktopDefaultDetails>
     </div>
   );
 }

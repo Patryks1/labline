@@ -57,6 +57,8 @@ describe('ComputeMarketPanel', () => {
     useGameStore.setState({ state: createGame(6_407) })
     const markup = renderToStaticMarkup(createElement(ComputeMarketPanel))
     expect(markup).toContain('Compute market')
+    expect(markup).toContain('>Compute</span>')
+    expect(markup).toContain('>Provider desk</span>')
     expect(markup).toContain('min-[400px]:grid-cols-[auto_minmax(0,1fr)]')
     expect(markup).toContain('data-testid="compute-quote-card"')
     expect(markup).toContain('data-testid="compute-quote-cost-projection"')

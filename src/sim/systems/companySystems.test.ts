@@ -198,9 +198,9 @@ describe('company systems', () => {
     expect(next.victory.reason).toContain('no longer yours')
   })
 
-  it('ends the run when cash falls below the shared bankrupt floor', () => {
+  it('does not end the run at the insolvency floor until bankruptcy review', () => {
     const state = createGame(9104)
-    const bankrupt = {
+    const insolvent = {
       ...state,
       player: {
         ...state.player,
@@ -211,10 +211,9 @@ describe('company systems', () => {
         },
       },
     }
-    const next = tickVictory(bankrupt)
+    const next = tickVictory(insolvent)
     expect(ECONOMY.victory.bankruptCash).toBe(-500_000_000)
-    expect(next.victory.outcome).toBe('lost')
-    expect(next.paused).toBe(true)
+    expect(next.victory.outcome).toBe('playing')
   })
 
   it('scales venture banking capacity and rates with company value', () => {

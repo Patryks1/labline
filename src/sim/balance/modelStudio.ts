@@ -65,6 +65,38 @@ export const POST_TRAIN_GYM_META: Record<
   },
 }
 
+/** Curriculum poles. 0 = conservative, 1 = exploratory. */
+export const GYM_FOCUS_AXES: Record<
+  PostTrainGymKind,
+  { low: string; high: string; hint: string }
+> = {
+  code: {
+    low: 'Maintenance',
+    high: 'Greenfield',
+    hint: 'Known APIs and repair vs new repos and invention.',
+  },
+  cyber: {
+    low: 'Defense',
+    high: 'Offense',
+    hint: 'Hardening and audit vs exploit-finding and red team.',
+  },
+  math: {
+    low: 'Known results',
+    high: 'New maths',
+    hint: 'Textbook proofs vs unsolved and invented techniques.',
+  },
+  research: {
+    low: 'Survey',
+    high: 'Frontier papers',
+    hint: 'Literature coverage vs latest lab notebooks.',
+  },
+  chat: {
+    low: 'Pragmatic',
+    high: 'Warmth',
+    hint: 'Direct and terse vs friendly and socially fluent.',
+  },
+}
+
 export function gymUnlocked(
   kind: PostTrainGymKind,
   researchUnlocked: readonly string[] | undefined,
@@ -78,37 +110,61 @@ export function unlockedGymKinds(
   return POST_TRAIN_GYM_KINDS.filter((kind) => gymUnlocked(kind, researchUnlocked))
 }
 
+function addExtra(
+  extras: Partial<import('../types').BenchmarkScores>,
+  key: keyof import('../types').BenchmarkScores,
+  amount: number,
+) {
+  extras[key] = (extras[key] ?? 0) + amount
+}
+
 /** Domain lift from labs attached to a training run. Unfunded labs add nothing. */
 export function trainingGymDomainExtras(
   gyms: readonly PostTrainGym[] | undefined,
   attached: readonly PostTrainGymKind[] | undefined,
+  options?: { attachDays?: number },
 ): Partial<import('../types').BenchmarkScores> {
   const attachedSet = new Set(attached ?? [])
   if (attachedSet.size === 0) return {}
   const extras: Partial<import('../types').BenchmarkScores> = {}
+  const attachDays = Math.max(0, options?.attachDays ?? 0)
+  const overfit = Math.max(0, (attachDays - 10) / 18)
   for (const gym of normalizePostTrainGyms(gyms)) {
     if (!attachedSet.has(gym.kind) || gym.quality <= 1e-6) continue
     const q = gym.quality
+    const tilt = clamp01(gym.focusBias ?? 0.5) - 0.5
+    const specialtyScale = 1 - Math.min(0.42, overfit * 0.42)
     if (gym.kind === 'code') {
-      extras.coding = (extras.coding ?? 0) + Math.min(5.5, q * 5.8)
-      extras.agents = (extras.agents ?? 0) + Math.min(3, q * 3.2)
+      addExtra(extras, 'coding', Math.min(5.5, q * 5.8) * specialtyScale)
+      addExtra(extras, 'agents', Math.min(3, q * (3.2 + tilt * 1.4)) * specialtyScale)
     } else if (gym.kind === 'cyber') {
-      // Cyber is deliberately narrow: it can create an excellent security or
-      // agent endpoint, but it does not raise headline general capability.
-      extras.coding = (extras.coding ?? 0) + Math.min(4.5, q * 4.8)
-      extras.agents = (extras.agents ?? 0) + Math.min(6, q * 6.4)
-      extras.safety = (extras.safety ?? 0) + Math.min(4, q * 4.2)
-      extras.law = (extras.law ?? 0) + Math.min(2.5, q * 2.8)
+      addExtra(extras, 'coding', Math.min(4.5, q * 4.8) * specialtyScale)
+      addExtra(extras, 'agents', Math.min(6, q * (6.4 + tilt * 1.2)) * specialtyScale)
+      addExtra(extras, 'safety', Math.min(4, q * (4.2 - tilt * 1.4)) * specialtyScale)
+      addExtra(extras, 'law', Math.min(2.5, q * 2.8) * specialtyScale)
     } else if (gym.kind === 'math') {
-      extras.math = (extras.math ?? 0) + Math.min(5.5, q * 5.8)
-      extras.science = (extras.science ?? 0) + Math.min(2.4, q * 2.6)
+      addExtra(extras, 'math', Math.min(5.5, q * 5.8) * specialtyScale)
+      addExtra(extras, 'science', Math.min(2.4, q * (2.6 + tilt * 1.6)) * specialtyScale)
     } else if (gym.kind === 'chat') {
-      extras.personality = (extras.personality ?? 0) + Math.min(8, q * 8.5)
-      extras.multilingual = (extras.multilingual ?? 0) + Math.min(2.5, q * 2.8)
+      addExtra(extras, 'personality', Math.min(8, q * (8.5 + tilt * 2.2)) * specialtyScale)
+      addExtra(extras, 'multilingual', Math.min(2.5, q * 2.8) * specialtyScale)
+      addExtra(extras, 'coding', Math.min(1.6, q * Math.max(0, -tilt) * 3.2) * specialtyScale)
     } else {
-      extras.science = (extras.science ?? 0) + Math.min(5.5, q * 5.8)
-      extras.mmlu = (extras.mmlu ?? 0) + Math.min(2.8, q * 3)
-      extras.law = (extras.law ?? 0) + Math.min(2.2, q * 2.4)
+      addExtra(extras, 'science', Math.min(5.5, q * 5.8) * specialtyScale)
+      addExtra(extras, 'mmlu', Math.min(2.8, q * 3) * specialtyScale)
+      addExtra(extras, 'law', Math.min(2.2, q * 2.4) * specialtyScale)
+    }
+    if (overfit > 0 && gym.kind !== 'cyber') {
+      const leak = q * overfit * 1.6
+      addExtra(extras, 'multilingual', leak * 0.22)
+      if (gym.kind !== 'math') addExtra(extras, 'math', leak * 0.28)
+      if (gym.kind !== 'code') addExtra(extras, 'coding', leak * 0.22)
+      if (gym.kind !== 'research') addExtra(extras, 'science', leak * 0.22)
+      if (gym.kind !== 'research') addExtra(extras, 'mmlu', leak * 0.2)
+    } else if (overfit > 0) {
+      const leak = q * overfit * 0.9
+      addExtra(extras, 'agents', leak * 0.35)
+      addExtra(extras, 'safety', leak * 0.2)
     }
   }
   return extras
@@ -117,8 +173,9 @@ export function trainingGymDomainExtras(
 export function trainingGymLatentLift(
   gyms: readonly PostTrainGym[] | undefined,
   attached: readonly PostTrainGymKind[] | undefined,
+  options?: { attachDays?: number },
 ): number {
-  const extras = trainingGymDomainExtras(gyms, attached)
+  const extras = trainingGymDomainExtras(gyms, attached, options)
   const values = Object.values(extras)
   if (values.length === 0) return 0
   return values.reduce((sum, value) => sum + (value ?? 0), 0) / values.length
@@ -197,6 +254,36 @@ export const TOOL_SKILL_META: Record<ToolSkillId, { name: string; blurb: string 
   web: { name: 'Web fetch', blurb: 'Retrieve pages, APIs, and citations without hallucinating URLs.' },
 }
 
+export const TOOL_SKILL_UNLOCK: Record<ToolSkillId, string> = {
+  json: 'align_sft',
+  grep: 'domain_coding',
+  python: 'domain_coding',
+  shell: 'domain_agents',
+  web: 'data_web',
+}
+
+export const TOOL_PACKAGE_UNLOCK: Record<string, string | undefined> = {
+  primer: undefined,
+  drill: 'align_rlhf',
+  mastery: 'align_process',
+}
+
+export function toolSkillUnlocked(
+  skillId: ToolSkillId,
+  researchUnlocked: readonly string[] | undefined,
+): boolean {
+  return (researchUnlocked ?? []).includes(TOOL_SKILL_UNLOCK[skillId])
+}
+
+export function toolPackageUnlocked(
+  packageId: string,
+  researchUnlocked: readonly string[] | undefined,
+): boolean {
+  const node = TOOL_PACKAGE_UNLOCK[packageId]
+  if (!node) return true
+  return (researchUnlocked ?? []).includes(node)
+}
+
 export const TOOL_PACKAGES: readonly StudioSpendPackage[] = [
   {
     id: 'primer',
@@ -210,14 +297,14 @@ export const TOOL_PACKAGES: readonly StudioSpendPackage[] = [
     label: 'Drill set',
     cash: 16_000_000,
     computeCash: 12_000_000,
-    hint: 'Thousands of graded trajectories. Failure modes shrink.',
+    hint: 'Graded trajectories plus a live eval harness. Needs RLHF Pipeline.',
   },
   {
     id: 'mastery',
     label: 'Mastery',
     cash: 55_000_000,
     computeCash: 40_000_000,
-    hint: 'Long-horizon tool campaigns. Expensive, sticky skill.',
+    hint: 'Long-horizon campaigns. Needs Process Reward Models.',
   },
 ]
 
@@ -245,7 +332,10 @@ export function defaultPostTrainGyms(): PostTrainGym[] {
     targetPfDays: 0,
     researchShare: 0,
     assignedResearchers: 0,
+    assignedEngineers: 0,
+    assignedDataStaff: 0,
     operatingCostPerDay: 0,
+    focusBias: 0.5,
   }))
 }
 
@@ -300,6 +390,9 @@ export function normalizePostTrainGyms(gyms: readonly PostTrainGym[] | undefined
       targetPfDays,
       researchShare: Math.max(0, Math.min(0.75, existing.researchShare ?? 0)),
       assignedResearchers: Math.max(0, Math.round(existing.assignedResearchers ?? 0)),
+      assignedEngineers: Math.max(0, Math.round(existing.assignedEngineers ?? 0)),
+      assignedDataStaff: Math.max(0, Math.round(existing.assignedDataStaff ?? 0)),
+      focusBias: clamp01(existing.focusBias ?? 0.5),
       operatingCostPerDay: Math.max(
         0,
         existing.operatingCostPerDay ??
@@ -342,6 +435,98 @@ export function assignedGymResearchers(
   )
 }
 
+function gymResearcherNeed(gym: PostTrainGym): number {
+  const active = GYM_PACKAGES.find((pack) => pack.id === gym.activePackageId)
+  if (active) return active.minResearchers
+  const next = GYM_PACKAGES.find((pack) => pack.tier === (gym.tier ?? 0) + 1)
+  if (next) return next.minResearchers
+  const completed = GYM_PACKAGES.find((pack) => pack.tier === (gym.tier ?? 0))
+  return Math.max(1, completed?.minResearchers ?? 1)
+}
+
+function splitCount(total: number, slots: number): number[] {
+  if (slots <= 0) return []
+  const base = Math.floor(Math.max(0, total) / slots)
+  let extra = Math.max(0, total) - base * slots
+  return Array.from({ length: slots }, () => {
+    const value = base + (extra > 0 ? 1 : 0)
+    if (extra > 0) extra -= 1
+    return value
+  })
+}
+
+/** Spread leftover HQ crew and research PF across unlocked gyms. */
+export function autoAssignedGymStaffing(input: {
+  gyms: readonly PostTrainGym[] | undefined
+  unlockedKinds: ReadonlySet<PostTrainGymKind>
+  availableResearchers: number
+  availableEngineers: number
+  availableDataStaff: number
+  researchShareBudget: number
+}): PostTrainGym[] {
+  const gyms = normalizePostTrainGyms(input.gyms)
+  const targets = gyms.filter((gym) => input.unlockedKinds.has(gym.kind))
+  const clear = (gym: PostTrainGym): PostTrainGym => ({
+    ...gym,
+    assignedResearchers: 0,
+    assignedEngineers: 0,
+    assignedDataStaff: 0,
+    researchShare: 0,
+  })
+  if (targets.length === 0) return gyms.map(clear)
+
+  const researchers: Partial<Record<PostTrainGymKind, number>> = {}
+  let remainingResearchers = Math.max(0, Math.floor(input.availableResearchers))
+  const fillNeed = (gym: PostTrainGym) => {
+    const have = researchers[gym.kind] ?? 0
+    const give = Math.min(Math.max(0, gymResearcherNeed(gym) - have), remainingResearchers)
+    researchers[gym.kind] = have + give
+    remainingResearchers -= give
+  }
+  for (const gym of targets.filter((candidate) => candidate.activePackageId)) fillNeed(gym)
+  for (const gym of targets.filter((candidate) => !candidate.activePackageId)) fillNeed(gym)
+  let cursor = 0
+  while (remainingResearchers > 0 && targets.length > 0) {
+    const gym = targets[cursor % targets.length]!
+    researchers[gym.kind] = (researchers[gym.kind] ?? 0) + 1
+    remainingResearchers -= 1
+    cursor += 1
+  }
+
+  const engineers = splitCount(Math.max(0, Math.floor(input.availableEngineers)), targets.length)
+  const dataStaff = splitCount(Math.max(0, Math.floor(input.availableDataStaff)), targets.length)
+  const budget = Math.max(0, Math.min(0.75, input.researchShareBudget))
+  const shares: Partial<Record<PostTrainGymKind, number>> = {}
+  if (budget >= 0.05 * targets.length) {
+    const each = Math.floor((budget / targets.length) * 1000) / 1000
+    let leftover = budget - each * targets.length
+    for (const gym of targets) {
+      const extra = leftover >= 0.001 ? 0.001 : leftover
+      leftover -= extra
+      shares[gym.kind] = each + extra
+    }
+  } else {
+    let remainingShare = budget
+    for (const gym of targets) {
+      const give = remainingShare >= 0.05 ? 0.05 : remainingShare
+      shares[gym.kind] = give
+      remainingShare -= give
+    }
+  }
+
+  return gyms.map((gym) => {
+    if (!input.unlockedKinds.has(gym.kind)) return clear(gym)
+    const index = targets.findIndex((candidate) => candidate.kind === gym.kind)
+    return {
+      ...gym,
+      assignedResearchers: researchers[gym.kind] ?? 0,
+      assignedEngineers: engineers[index] ?? 0,
+      assignedDataStaff: dataStaff[index] ?? 0,
+      researchShare: shares[gym.kind] ?? 0,
+    }
+  })
+}
+
 export function normalizeToolSkills(skills: readonly ToolSkill[] | undefined): ToolSkill[] {
   const byId = new Map((skills ?? []).map((skill) => [skill.id, skill]))
   return defaultToolSkills().map((seed) => {
@@ -362,12 +547,13 @@ const STAGE_GYM_WEIGHT: Record<Exclude<PostTrainStage, 'none'>, Partial<Record<P
   sft: { chat: 0.45, code: 0.25, math: 0.1, research: 0.2 },
   rlhf: { chat: 0.5, research: 0.25, math: 0.15, code: 0.1 },
   process: { math: 0.55, research: 0.35, code: 0.1 },
-  tools: { code: 0.7, math: 0.15, research: 0.15 },
+  tools: { code: 0.45, cyber: 0.3, math: 0.15, research: 0.1 },
 }
 
 export function gymQualityForStage(
   stage: Exclude<PostTrainStage, 'none'>,
   gyms: readonly PostTrainGym[] | undefined,
+  bonus = 0,
 ): number {
   const weights = STAGE_GYM_WEIGHT[stage]
   const normalized = normalizePostTrainGyms(gyms)
@@ -380,7 +566,7 @@ export function gymQualityForStage(
     total += weight
     weighted += (gym?.quality ?? 0) * weight
   }
-  return clamp01(weighted / Math.max(1e-9, total))
+  return clamp01(weighted / Math.max(1e-9, total) + bonus)
 }
 
 export function meanToolProficiency(skills: readonly ToolSkill[] | undefined): number {

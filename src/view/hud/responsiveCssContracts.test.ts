@@ -17,6 +17,18 @@ describe('responsive CSS contracts', () => {
     expect(css).toContain('grid-template-rows: repeat(5, minmax(2.75rem, 1fr))')
   })
 
+  it('keeps the desktop training strip between workspace and intel rails', () => {
+    const start = css.indexOf('.training-activity-bar {')
+    const end = start < 0 ? -1 : css.indexOf('}', start)
+    const block = start < 0 || end < 0 ? '' : css.slice(start, end + 1)
+
+    expect(block).toContain('left: calc(var(--hud-rail) + var(--workspace-width))')
+    expect(block).toContain('right: var(--intel-width)')
+    expect(block).toContain(
+      'max-width: calc(100vw - var(--hud-rail) - var(--workspace-width) - var(--intel-width))',
+    )
+  })
+
   it('reserves distinct mobile layers for operations, training, and map tools', () => {
     expect(css).toContain(
       '--hud-bottom-telemetry-bottom: calc(var(--mobile-nav-height) + var(--hud-ops) + var(--hud-training-height) + 0.45rem)',

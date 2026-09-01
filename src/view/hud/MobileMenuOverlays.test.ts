@@ -45,7 +45,7 @@ describe('mobile menu and overlay contracts', () => {
     expect(shell).toContain('overflow-x-hidden overflow-y-auto overscroll-contain touch-pan-y')
   })
 
-  it('uses compact, non-crushing settings and release evidence on phones', async () => {
+  it('uses compact, non-crushing settings and a compact release GTM on phones', async () => {
     const [settings, release] = await Promise.all([
       source('./menu/SettingsPanel.tsx'),
       source('./ReleaseCelebration.tsx'),
@@ -53,10 +53,12 @@ describe('mobile menu and overlay contracts', () => {
 
     expect(settings).toContain('grid-cols-2 gap-1.5 min-[420px]:grid-cols-4')
     expect(settings).toContain('overflow-x-auto overscroll-x-contain')
-    expect(release).toContain('data-testid="release-evidence-mobile"')
-    expect(release).toContain('hud-mobile-detail panel-scroll')
-    expect(release).toContain('hud-mobile-summary mt-3 space-y-2')
-    expect(release).toContain('sm:max-h-36 sm:overflow-y-auto')
+    expect(release).not.toContain('data-testid="release-evidence-mobile"')
+    expect(release).not.toContain('Measured evidence')
+    expect(release).toContain('data-testid="release-comparable-peers"')
+    expect(release).toContain('data-testid="release-thinking-heads"')
+    expect(release).not.toContain('sm:max-h-36')
+    expect(release).toContain('sm:h-[92dvh]')
   })
 
   it('separates the mobile HQ floor from its controls and never places during orbit drag', async () => {

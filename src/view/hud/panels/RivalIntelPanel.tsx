@@ -16,6 +16,8 @@ import { EmptyState, HudButton, PanelScaffold, StatusChip } from "../ui/HudPrimi
 import { buildFinanceDashboardModel } from "../data/financeDashboardModel";
 import { normalizeTrainingJobs } from "../trainingJobViewModel";
 
+import { HudDesktopDefaultDetails } from "../ui/HudDesktopDefaultDetails";
+
 function RangeBar({
   label,
   values,
@@ -249,7 +251,7 @@ export function RivalIntelPanel() {
                   tone={financeModel.current.net < 0 ? "danger" : "positive"}
                 />
               </div>
-              <details className="group mt-2 border-t border-line/50 pt-1">
+              <HudDesktopDefaultDetails className="group mt-2 border-t border-line/50 pt-1">
                 <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 py-2 text-[0.75rem] marker:hidden lg:min-h-0">
                   <span className="font-medium text-bone">Long-term position</span>
                   <span className="font-mono text-muted">{money(financeModel.current.valuation)} value · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span></span>
@@ -275,7 +277,7 @@ export function RivalIntelPanel() {
                     value={money(financeModel.current.debtOutstanding)}
                   />
                 </div>
-              </details>
+              </HudDesktopDefaultDetails>
             </GameCard>
 
             <GameCard

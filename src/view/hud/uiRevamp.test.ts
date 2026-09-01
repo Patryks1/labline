@@ -171,6 +171,20 @@ describe('mission-control objectives', () => {
     state.player.finance.runwayDays = 12
     expect(buildObjectives(state, false)[0]?.id).toBe('runway-risk')
   })
+
+  it('points distressed cash at Capital recovery instead of instant bankruptcy', () => {
+    const state = createGame({ seed: 6, difficulty: 'easy' })
+    state.player.cash = -500_000_000
+    state.player.finance.cash = -500_000_000
+    state.player.capital = {
+      ...state.player.capital!,
+      restructuring: { active: true, daysLeft: 30, stage: 'asset_sale' },
+    }
+    const next = buildObjectives(state, false)[0]
+    expect(next?.id).toBe('cash-recovery')
+    expect(next?.description).toMatch(/sell models/i)
+    expect(next?.progress).toMatch(/30d/)
+  })
 })
 
 describe('onboarding visibility', () => {

@@ -34,6 +34,8 @@ export function podStaffReservation(
 export interface StaffReservationOptions {
   exceptPodId?: string;
   exceptGymKind?: PostTrainGymKind;
+  /** Ignore every gym reservation (used when reallocating gym crews). */
+  exceptAllGyms?: boolean;
   /** Data prune jobs are excluded while their own scheduler assigns slots. */
   includeDataJobs?: boolean;
 }
@@ -51,9 +53,13 @@ export function reservedHqStaff(
     state.player.researchPods ?? [],
     options.exceptPodId,
   );
-  for (const gym of state.player.postTrainGyms ?? []) {
-    if (gym.kind === options.exceptGymKind) continue;
-    reserved.researchers += Math.max(0, gym.assignedResearchers ?? 0);
+  if (!options.exceptAllGyms) {
+    for (const gym of state.player.postTrainGyms ?? []) {
+      if (gym.kind === options.exceptGymKind) continue;
+      reserved.researchers += Math.max(0, gym.assignedResearchers ?? 0);
+      reserved.engineers += Math.max(0, gym.assignedEngineers ?? 0);
+      reserved.dataStaff += Math.max(0, gym.assignedDataStaff ?? 0);
+    }
   }
   if (state.player.safetyCampaign) {
     reserved.researchers += Math.max(

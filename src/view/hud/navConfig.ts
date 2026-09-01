@@ -57,7 +57,7 @@ export const NAV_GROUPS: NavGroup[] = [
     description: 'P&L, rivals, forecasts & world signals',
     key: '1',
     items: [
-      { id: 'stats', label: 'Command', hint: 'P&L · capital · compute', key: '1', presentation: 'workbench' },
+      { id: 'stats', label: 'Command', hint: 'P&L · capital', key: '1', presentation: 'workbench' },
       { id: 'rivals', label: 'Rivals', hint: 'Intentions, capacity & launches', key: '2' },
     ],
   },
@@ -141,12 +141,12 @@ export const SHELL_NAV_GROUPS: ShellNavGroup[] = [
     id: 'operate',
     label: 'Operate',
     short: 'Operate',
-    description: 'Overview, workloads, processes & finances',
+    description: 'Overview, workloads, companies & finances',
     items: [
       { id: 'map', label: 'Overview', hint: 'Fleet, facilities, construction & map' },
       { id: 'computeMarket', label: 'Workloads', hint: 'Cloud, reserved, spot & rival PF' },
-      { id: 'rivals', label: 'Processes', hint: 'Intentions, capacity & launches' },
-      { id: 'stats', label: 'Finances', hint: 'P&L · capital · compute' },
+      { id: 'rivals', label: 'Companies', hint: 'Intentions, capacity & launches' },
+      { id: 'stats', label: 'Finances', hint: 'P&L · capital' },
     ],
   },
   {

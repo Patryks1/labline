@@ -368,8 +368,18 @@ export interface PostTrainGym {
   researchShare?: number;
   /** Real HQ researchers reserved for this gym and unavailable to pods. */
   assignedResearchers?: number;
+  /** HQ engineers reserved for this gym. */
+  assignedEngineers?: number;
+  /** HQ data specialists reserved for this gym. */
+  assignedDataStaff?: number;
   /** Recurring operation / experiment burn while the gym is staffed. */
   operatingCostPerDay?: number;
+  /**
+   * 0–1 curriculum bias for this lab. 0 is the conservative pole
+   * (known work, defense, pragmatic), 1 is the exploratory pole
+   * (greenfield, new maths, warmth).
+   */
+  focusBias?: number;
 }
 
 export type ToolSkillId = "json" | "grep" | "python" | "shell" | "web";
@@ -669,6 +679,19 @@ export type HqSize = "small" | "medium" | "large";
 export type StaffRole = "researcher" | "data_processor" | "engineer" | "ops";
 
 export type StaffHeadcount = Record<StaffRole, number>;
+
+/** Rival raid on HQ staff. The employee stays until the window closes or the player matches pay. */
+export interface StaffPoachThreat {
+  id: string;
+  rivalId: string;
+  rivalName: string;
+  role: StaffRole;
+  count: number;
+  startDay: number;
+  /** Last day the player can match the offer. */
+  resolveDay: number;
+  retainCost: number;
+}
 
 /** Map scenery — blocks construction, rendered as detailed 3D kits. */
 export type ScenicKind =
@@ -1193,6 +1216,8 @@ export interface ResearchNodeDef {
   minResearchers?: number;
   /** Experimental methods are visually flagged and can widen training outcome risk. */
   riskLevel?: "elevated" | "high";
+  /** Omit or 1 = one-shot. Higher values stack the same effects per completion. */
+  maxRanks?: number;
 }
 
 export interface ResearchEffects {
@@ -1227,6 +1252,10 @@ export interface ResearchEffects {
   overtrainCapBonus?: number;
   /** Unlocks omni-only closed-loop research campaigns; grants no passive gain. */
   unlockClosedLoopResearch?: boolean;
+  /** Added to gym quality (0–1) before clamp; stacks per rank. */
+  gymQualityBonus?: number;
+  /** Fractional cut to hosted-model opex after scaling; stacks per rank, capped in opex. */
+  hostingOpexDiscount?: number;
 }
 
 export interface ResearchProgress {
@@ -1640,6 +1669,8 @@ export interface Model {
    * Train / distill remain available; restore returns it to public serving.
    */
   archived?: boolean;
+  /** Weights sold to a buyer. Cannot restore; IP is gone. */
+  soldIp?: boolean;
   tokPerSecMult: number;
   inferCostMult: number;
   serviceProfile?: ServiceProfile;
@@ -2184,6 +2215,10 @@ export interface TrainingJob {
    * funded gym quality then lifts that domain while the model trains.
    */
   attachedGymKinds?: PostTrainGymKind[];
+  /** Consecutive active days with at least one gym attached. */
+  gymAttachDays?: number;
+  /** Mean quality of gyms attached on the last training tick. */
+  gymAttachQuality?: number;
   dataQualityByDomain?: Partial<Record<DataDomain, number>>;
   lowQualityShareByDomain?: Partial<Record<DataDomain, number>>;
   syntheticProvenance?: SyntheticFillRecord[];
@@ -3065,7 +3100,7 @@ export interface MarketingOutcome {
   effectiveCac: number;
 }
 
-/** Cash-distress ladder surfaced to UI; bankruptcy ends the run. */
+/** Cash-distress ladder surfaced to UI. `bankrupt` is the insolvency floor; the run ends only after the recovery window expires. */
 export type CashDistressStage =
   "stable" | "distressed" | "severe" | "final" | "bankrupt";
 
@@ -3900,6 +3935,8 @@ export interface PlayerState {
    * Capacity comes from completed HQ buildings.
    */
   staff?: StaffHeadcount;
+  /** Open rival raids the player can still match with a raise. */
+  pendingStaffPoaches?: StaffPoachThreat[];
   /**
    * When true, the next small `hq` placement is free (build + land waived)
    * and completes instantly. Cleared after use.
@@ -3943,6 +3980,10 @@ export interface PlayerState {
   researchQueue: string[];
   /** Named-pod method queue; kept separate from the legacy single-worker queue. */
   researchProgramQueue?: string[];
+  /** Completed ranks per method. Missing + unlocked id is treated as 1. */
+  researchRanks?: Record<string, number>;
+  /** When idle after a method finishes, enqueue the cheapest available follow-up. */
+  autoQueueResearch?: boolean;
   models: Model[];
   /** In-flight immutable weight snapshots undergoing private evaluation. */
   trainingCheckpoints?: TrainingCheckpointCandidate[];

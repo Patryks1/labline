@@ -62,6 +62,8 @@ import {
   renewPowerExportContract,
 } from "./powerPanelActions";
 
+import { HudDesktopDefaultDetails } from "../ui/HudDesktopDefaultDetails";
+
 type NegotiationState = {
   mode: "import" | "export";
   cityId: string;
@@ -263,7 +265,7 @@ export function PowerPanel() {
               strong
             />
           </div>
-          <details className="group mt-2 rounded-md border border-line/60 bg-void/30">
+          <HudDesktopDefaultDetails className="group mt-2 rounded-md border border-line/60 bg-void/30">
             <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-muted marker:hidden">
               <span>Power flow details</span>
               <span className="shrink-0 font-mono tabular-nums text-bone">
@@ -291,10 +293,10 @@ export function PowerPanel() {
                 tone="positive"
               />
             </div>
-          </details>
+          </HudDesktopDefaultDetails>
         </GameCard>
 
-        <details className="group rounded-lg border border-line/70 bg-panel-2/45">
+        <HudDesktopDefaultDetails className="group rounded-lg border border-line/70 bg-panel-2/45">
           <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5 marker:hidden">
             <span>
               <span className="hud-eyebrow block">Efficiency</span>
@@ -307,7 +309,7 @@ export function PowerPanel() {
           <div className="border-t border-line/60 p-2">
             <PowerEfficiencyCard state={state} />
           </div>
-        </details>
+        </HudDesktopDefaultDetails>
 
         <SegmentedTabs
           ariaLabel="Power sections"

@@ -209,7 +209,7 @@ export function tickOrg(state: SimState): SimState {
       },
     }
   }
-  const effects = aggregateEffects(state.player.researchUnlocked)
+  const effects = aggregateEffects(state.player.researchUnlocked, state.player.researchRanks)
   let dataQuality = state.player.dataQuality
   const brandTrust = state.player.brandTrust
 

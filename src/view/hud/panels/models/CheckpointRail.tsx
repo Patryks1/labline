@@ -29,6 +29,8 @@ import {
 } from "./checkpointUi";
 import { checkpointBranchDirectionLabel } from "./checkpointBranching";
 
+import { HudDesktopDefaultDetails } from "../../ui/HudDesktopDefaultDetails";
+
 function clampedPercent(value: number): number {
   return Math.round(Math.max(0, Math.min(1, value)) * 100);
 }
@@ -437,7 +439,7 @@ export function CheckpointRail({
           ) : null}
         </div>
 
-        <details className="group rounded-md border border-line/60 bg-void/20" data-checkpoint-evidence-disclosure="true">
+        <HudDesktopDefaultDetails className="group rounded-md border border-line/60 bg-void/20" data-checkpoint-evidence-disclosure="true">
           <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
             <span>
               <span className="hud-eyebrow block">Evidence &amp; review</span>
@@ -574,11 +576,11 @@ export function CheckpointRail({
             ) : null}
           </section>
         </div>
-        </details>
+        </HudDesktopDefaultDetails>
       </div>
 
       {selected.evidenceReports.length > 0 ? (
-        <details className="mt-3 rounded-md border border-line/60 bg-void/30">
+        <HudDesktopDefaultDetails className="mt-3 rounded-md border border-line/60 bg-void/30">
           <summary className="flex min-h-11 cursor-pointer list-none items-center px-3 py-2.5 text-[0.75rem] font-semibold text-bone transition hover:bg-panel-2/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-mint/45">
             Evidence ledger · {selected.evidenceReports.length} report
             {selected.evidenceReports.length === 1 ? "" : "s"} · consensus
@@ -590,7 +592,7 @@ export function CheckpointRail({
               adds evidence; it does not replace an inconvenient result.
             </p>
             {selected.evidenceReports.map((report) => (
-              <details
+              <HudDesktopDefaultDetails
                 key={report.id}
                 className="rounded-md border border-line/50 bg-panel/25"
               >
@@ -706,10 +708,10 @@ export function CheckpointRail({
                     </div>
                   </div>
                 </div>
-              </details>
+              </HudDesktopDefaultDetails>
             ))}
           </div>
-        </details>
+        </HudDesktopDefaultDetails>
       ) : null}
 
       <div

@@ -19,10 +19,13 @@ import {
   applyResearchEffectsToPlayer,
   labResearchDayProgress,
   minResearchersForNode,
+  nextAutoQueueResearchId,
   planResearchPath,
   researchCashPerPf,
   researchDaysTarget,
+  researchFullyDone,
   researchLabMultiplier,
+  researchMaxRanks,
   researchPfTarget,
 } from "./research";
 import { playerStaff } from "./staff";
@@ -511,7 +514,7 @@ export function researchMethodRunnableOnPod(
   } catch {
     return { ok: false, reason: "Unknown research method." };
   }
-  if (state.player.researchUnlocked.includes(methodId)) {
+  if (researchFullyDone(state, methodId)) {
     return { ok: false, reason: `${method.name} is already integrated.` };
   }
   const lead = (state.player.researchLeads ?? []).find(
@@ -741,7 +744,7 @@ export function startResearchProgram(
   } catch {
     return withAlert(state, "warn", "Unknown research method.");
   }
-  if (state.player.researchUnlocked.includes(methodId)) {
+  if (researchFullyDone(state, methodId)) {
     return withAlert(state, "warn", `${method.name} is already integrated.`);
   }
   const parked = (state.player.researchPrograms ?? []).find(
@@ -871,7 +874,7 @@ export function queueResearchProgram(
   } catch {
     return withAlert(state, "warn", "Unknown research method.");
   }
-  if (state.player.researchUnlocked.includes(methodId)) return state;
+  if (researchFullyDone(state, methodId)) return state;
   const programQueue = state.player.researchProgramQueue ?? [];
   if (programQueue.includes(methodId)) return state;
   const activeMethods = (state.player.researchPrograms ?? [])
@@ -884,6 +887,7 @@ export function queueResearchProgram(
     state.player.researchUnlocked,
     [...activeMethods, ...programQueue],
     methodId,
+    state.player.researchRanks,
   );
   if (path.reason) return withAlert(state, "warn", path.reason);
   if (programQueue.length + path.nodeIds.length > 12) {
@@ -1038,8 +1042,11 @@ function assignQueuedPrograms(
       (candidate) => {
         try {
           const method = getResearchNode(candidate);
-          return method.prereqs.every((prerequisite) =>
-            next.player.researchUnlocked.includes(prerequisite),
+          return (
+            !researchFullyDone(next, candidate) &&
+            method.prereqs.every((prerequisite) =>
+              next.player.researchUnlocked.includes(prerequisite),
+            )
           );
         } catch {
           return false;
@@ -1114,11 +1121,23 @@ function addEvidence(
   ];
 }
 
+function maybeAutoQueueResearchProgram(
+  state: SimState,
+  lastCompletedNodeId?: string,
+): SimState {
+  const id = nextAutoQueueResearchId(state, lastCompletedNodeId);
+  if (!id) return state;
+  return queueResearchProgram(state, id);
+}
+
 export function tickResearchPrograms(state: SimState): SimState {
   // An in-flight legacy project retains authority until it completes. This
   // guard also protects direct system callers outside the daily tick.
   if (state.player.activeResearch) return state;
-  const assigned = assignQueuedPrograms(state, {
+  const opened = state.player.autoQueueResearch
+    ? maybeAutoQueueResearchProgram(state)
+    : state;
+  const assigned = assignQueuedPrograms(opened, {
     announceBlocks: state.day % 4 === 0,
   });
   const scheduled = clampResearchPodsToHqStaff(assigned);
@@ -1143,8 +1162,16 @@ export function tickResearchPrograms(state: SimState): SimState {
   );
   let cash = scheduled.player.cash;
   let unlocked = [...scheduled.player.researchUnlocked];
+  let ranks = { ...(scheduled.player.researchRanks ?? {}) };
   let pods = [...(scheduled.player.researchPods ?? [])];
-  const completed: Array<{ id: string; name: string; methodId: string }> = [];
+  const completed: Array<{
+    id: string;
+    name: string;
+    methodId: string;
+    rank: number;
+    maxRanks: number;
+    firstRank: boolean;
+  }> = [];
   const effectsToApply: ResearchNodeDef[] = [];
   let stallMessage: string | undefined;
   const programs = (scheduled.player.researchPrograms ?? []).map(
@@ -1285,9 +1312,17 @@ export function tickResearchPrograms(state: SimState): SimState {
       let effectsApplied = program.effectsApplied ?? false;
       if (complete) {
         phase = "complete";
-        const newlyUnlocked = !unlocked.includes(program.methodId);
-        if (newlyUnlocked) {
-          unlocked.push(program.methodId);
+        const maxRanks = researchMaxRanks(method);
+        const prevRank =
+          ranks[program.methodId] ??
+          (unlocked.includes(program.methodId) ? 1 : 0);
+        const alreadyDone = prevRank >= maxRanks;
+        const nextRank = alreadyDone ? prevRank : prevRank + 1;
+        if (!alreadyDone) {
+          ranks[program.methodId] = nextRank;
+          if (!unlocked.includes(program.methodId)) {
+            unlocked.push(program.methodId);
+          }
           effectsToApply.push(method);
         }
         effectsApplied = true;
@@ -1298,7 +1333,14 @@ export function tickResearchPrograms(state: SimState): SimState {
             ? { ...candidate, assignmentId: null }
             : candidate,
         );
-        completed.push({ id: program.id, name: method.name, methodId: method.id });
+        completed.push({
+          id: program.id,
+          name: method.name,
+          methodId: method.id,
+          rank: nextRank,
+          maxRanks,
+          firstRank: prevRank === 0,
+        });
       } else if (progress <= 0 && !fundedCalendarDay) {
         const reason = !prerequisitesMet
           ? `waiting on a prerequisite for ${method.name}`
@@ -1334,6 +1376,7 @@ export function tickResearchPrograms(state: SimState): SimState {
       researchPrograms: programs,
       researchPods: pods,
       researchUnlocked: unlocked,
+      researchRanks: ranks,
       researchCashBurnToday: spent,
     },
   };
@@ -1345,14 +1388,18 @@ export function tickResearchPrograms(state: SimState): SimState {
     next = {
       ...next,
       news: [
-        `Day ${scheduled.day}: ${completion.name} integrated by a research pod.`,
+        completion.firstRank
+          ? `Day ${scheduled.day}: ${completion.name} integrated by a research pod.`
+          : `Day ${scheduled.day}: Rank ${completion.rank}/${completion.maxRanks} complete: ${completion.name}`,
         ...next.news,
       ].slice(0, 64),
     };
     next = withAlert(
       next,
       "info",
-      `${completion.name} integrated. Choose secrecy, publication, or licensing.`,
+      completion.firstRank
+        ? `${completion.name} integrated. Choose secrecy, publication, or licensing.`
+        : `${completion.name} rank ${completion.rank}/${completion.maxRanks} complete.`,
     );
   }
   if (stallMessage && scheduled.day % 4 === 0) {
@@ -1364,17 +1411,29 @@ export function tickResearchPrograms(state: SimState): SimState {
       id: `feed-research-program-complete-${completion.id}-${scheduled.day}`,
       day: scheduled.day,
       category: "models" as const,
-      title: `${completion.name} integrated by a research pod`,
-      body: "The method cleared its evidence and engineering gates. Choose whether to keep it secret, publish it, or license it.",
+      title: completion.firstRank
+        ? `${completion.name} integrated by a research pod`
+        : `Rank ${completion.rank}/${completion.maxRanks} complete: ${completion.name}`,
+      body: completion.firstRank
+        ? "The method cleared its evidence and engineering gates. Choose whether to keep it secret, publish it, or license it."
+        : `Rank ${completion.rank}/${completion.maxRanks} complete`,
       source: scheduled.player.name,
       tone: "positive" as const,
       entityId: completion.id,
       kind: "research_program_completed",
     })),
   );
-  return assignQueuedPrograms(next, {
+  next = assignQueuedPrograms(next, {
     announceBlocks: completed.length > 0 || scheduled.day % 4 === 0,
   });
+  if (next.player.autoQueueResearch) {
+    const lastCompleted = completed.at(-1)?.methodId;
+    next = maybeAutoQueueResearchProgram(next, lastCompleted);
+    next = assignQueuedPrograms(next, {
+      announceBlocks: completed.length > 0 || scheduled.day % 4 === 0,
+    });
+  }
+  return next;
 }
 
 export function publishMethod(state: SimState, programId: string): SimState {

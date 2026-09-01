@@ -228,13 +228,32 @@ export function peakPricingRevenueFactor(priceMultiplier: number): number {
   )
 }
 
-/** True when the inference pool is empty or coverage cannot admit demand. */
-export function isInferenceOutage(
-  capacityPf: number,
-  unservedRatio: number,
-): boolean {
-  if (!Number.isFinite(capacityPf) || capacityPf <= 1e-6) return true
-  return Number.isFinite(unservedRatio) && unservedRatio >= 0.4
+/** Demand below this is a cold start / idle lab, not an outage. */
+export const SERVE_OUTAGE_MIN_DEMAND_MTOK = 0.05
+/** Unserved share at which coverage, not just an empty pool, is an outage. */
+export const SERVE_OUTAGE_UNSERVED_RATIO = 0.4
+
+/**
+ * True when customers are asking and Serve cannot admit them: empty inference
+ * pool, or ≥40% of demand unserved. Zero demand (fresh game, no public model)
+ * is never an outage.
+ */
+export function isInferenceOutage(input: {
+  capacityPf: number
+  unservedRatio: number
+  demandMTok: number
+}): boolean {
+  if (
+    !Number.isFinite(input.demandMTok) ||
+    input.demandMTok <= SERVE_OUTAGE_MIN_DEMAND_MTOK
+  ) {
+    return false
+  }
+  if (!Number.isFinite(input.capacityPf) || input.capacityPf <= 1e-6) return true
+  return (
+    Number.isFinite(input.unservedRatio) &&
+    input.unservedRatio >= SERVE_OUTAGE_UNSERVED_RATIO
+  )
 }
 
 /** Small gouging-perception brand hit while a posted surge is live. */

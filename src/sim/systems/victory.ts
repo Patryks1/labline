@@ -13,8 +13,9 @@ export const CASH_DISTRESS_FINAL = -250_000_000
 
 /**
  * Cash-distress ladder. Cash keeps falling unclamped between stages — credit
- * gets expensive and emergency funding may appear — until the bankruptcy
- * floor ends the run.
+ * gets expensive and emergency funding may appear. Hitting the insolvency
+ * floor opens an asset-sale window; the run ends only after that window
+ * expires without a recovery.
  */
 export function cashDistressStage(cash: number): CashDistressStage {
   if (cash <= ECONOMY.victory.bankruptCash) return 'bankrupt'
@@ -22,6 +23,71 @@ export function cashDistressStage(cash: number): CashDistressStage {
   if (cash < CASH_DISTRESS_SEVERE) return 'severe'
   if (cash < 0) return 'distressed'
   return 'stable'
+}
+
+/** Board-forced recovery window after cash hits the insolvency floor. */
+export function insolvencyGraceDays(): number {
+  return ECONOMY.victory.bankruptcyGraceDays ?? 30
+}
+
+export function playerRestructuring(state: SimState) {
+  return (
+    state.player.capital?.restructuring ?? {
+      active: false,
+      daysLeft: 0,
+      stage: 'none' as const,
+    }
+  )
+}
+
+export function isInsolvencyLoss(reason: string): boolean {
+  return /bankrupt/i.test(reason)
+}
+
+/** Reopen play after a bankruptcy overlay so credit, equity, and model sales stay usable. */
+export function resumeInsolvency(state: SimState): SimState {
+  const graceDays = insolvencyGraceDays()
+  const recovered = state.player.cash >= 0
+  const capital = state.player.capital
+  const runPhase =
+    state.progression.runPhase === 'failed'
+      ? state.config?.campaignRules
+        ? 'campaign'
+        : 'endless'
+      : state.progression.runPhase
+  return {
+    ...state,
+    paused: true,
+    progression: { ...state.progression, runPhase },
+    victory: {
+      ...state.victory,
+      outcome: 'playing',
+      reason: '',
+      bankruptDay: recovered ? 0 : state.victory.bankruptDay,
+    },
+    player: {
+      ...state.player,
+      capital: capital
+        ? {
+            ...capital,
+            restructuring: recovered
+              ? { active: false, daysLeft: 0, stage: 'none' }
+              : { active: true, daysLeft: graceDays, stage: 'asset_sale' },
+          }
+        : capital,
+    },
+    alerts: [
+      {
+        id: `insolvency-resume-${state.day}`,
+        day: state.day,
+        severity: recovered ? ('info' as const) : ('danger' as const),
+        message: recovered
+          ? 'Cash is non-negative again. The board lifted bankruptcy review.'
+          : `The board reopened a ${graceDays}-day recovery window. Take credit, sell equity, or sell models.`,
+      },
+      ...state.alerts,
+    ].slice(0, 40),
+  }
 }
 
 function formatCashM(n: number) {
@@ -81,6 +147,42 @@ export function modelIpValue(state: SimState): number {
   const sotaPremium = sota * sota * (80_000_000 + bestCap * 2_200_000)
 
   return flagship + portfolio + sotaPremium
+}
+
+function ipSaleHaircut(cash: number): number {
+  const stage = cashDistressStage(cash)
+  if (stage === 'bankrupt') return 0.48
+  if (stage === 'final') return 0.56
+  if (stage === 'severe') return 0.64
+  if (stage === 'distressed') return 0.72
+  return 0.88
+}
+
+/**
+ * Secondary-market bid for one model's IP. Distressed sales take a haircut
+ * but still clear cash the same day.
+ */
+export function modelIpSaleQuote(state: SimState, model: Model): number {
+  if (model.soldIp) return 0
+  const cap = Math.max(0, model.capability)
+  if (cap < 1 && (model.trainComputeSpent ?? 0) <= 0) return 0
+  const { sota, bestCap } = playerSotaProximity(state)
+  const publicOrShipped = isLivePublicModel(model) || model.shipped
+  const flagship = cap + 0.01 >= bestCap && publicOrShipped
+  const base = Math.pow(cap, 1.65) * (publicOrShipped ? 200_000 : 95_000)
+  const sotaPremium = flagship ? sota * sota * (50_000_000 + cap * 1_400_000) : 0
+  const raw = (base + sotaPremium) * ipSaleHaircut(state.player.cash)
+  const floor = publicOrShipped ? 2_000_000 : 500_000
+  return Math.max(floor, Math.round(raw / 100_000) * 100_000)
+}
+
+export function sellableModelQuotes(
+  state: SimState,
+): { model: Model; cash: number }[] {
+  return state.player.models
+    .map((model) => ({ model, cash: modelIpSaleQuote(state, model) }))
+    .filter((row) => row.cash > 0)
+    .sort((a, b) => b.cash - a.cash || a.model.id.localeCompare(b.model.id))
 }
 
 /** Real estate + plant: halls, HQs, labs, power, fabs (completed + WIP). */
@@ -338,12 +440,15 @@ export function tickVictory(state: SimState): SimState {
   // Surface cash-distress stages in state once per day (UI reads the same
   // ladder via cashDistressStage).
   const distress = cashDistressStage(player.cash)
+  const restructuring = playerRestructuring(state)
   const distressMessage =
     distress === 'severe'
-      ? `Severe cash distress (${formatCashM(player.cash)}). Credit is expensive and terms are worsening — raise cash or cut burn.`
+      ? `Severe cash distress (${formatCashM(player.cash)}). Credit is expensive and terms are worsening — take credit, sell equity, or sell models.`
       : distress === 'final'
-        ? `Final warning (${formatCashM(player.cash)}). At ${formatCashM(v.bankruptCash)} the company is forced into a fire sale.`
-        : null
+        ? `Final warning (${formatCashM(player.cash)}). At ${formatCashM(v.bankruptCash)} the board opens a ${insolvencyGraceDays()}-day recovery window — raise or sell before bankruptcy review.`
+        : distress === 'bankrupt'
+          ? `Insolvency (${formatCashM(player.cash)}). Take credit, sell equity, or sell models — the run ends only after the recovery window expires.`
+          : null
   const alerts =
     distressMessage &&
     !state.alerts.some((a) => a.id === `cash-distress-${distress}-${state.day}`)
@@ -377,9 +482,10 @@ export function tickVictory(state: SimState): SimState {
     }
   }
 
-  // loss: bankrupt (campaign + endless share the same cash floor) — checked
-  // after all daily financing and settlement, cash is never clamped above it
-  if (player.cash <= v.bankruptCash) {
+  // Insolvency is not instant: tickCapital opens an asset-sale window so the
+  // player can take credit, sell equity, or sell models. Loss only after that
+  // window expires (restructuring stage `bankruptcy`).
+  if (restructuring.stage === 'bankruptcy') {
     return {
       ...state,
       player,
@@ -392,9 +498,8 @@ export function tickVictory(state: SimState): SimState {
       victory: {
         ...victoryProgress,
         outcome: 'lost',
-        reason: state.config?.campaignRules
-          ? 'Restructuring failed and the company entered bankruptcy.'
-          : `Cash hit ${formatCashM(v.bankruptCash)}. The board forces a fire sale.`,
+        reason: 'Restructuring failed and the company entered bankruptcy.',
+        bankruptDay: state.day,
       },
     }
   }

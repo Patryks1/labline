@@ -9,6 +9,8 @@ import { EmptyState, HudButton, HudRange, MetricTile, PanelScaffold } from '../u
 import { GameCard, MeterBar, StatRow } from '../ui/kit'
 import { buildFinanceDashboardModel } from '../data/financeDashboardModel'
 
+import { HudDesktopDefaultDetails } from '../ui/HudDesktopDefaultDetails'
+
 export function AllocatePanel() {
   const state = useGameStore((s) => s.state)
   const setPanel = useGameStore((s) => s.setPanel)
@@ -112,7 +114,7 @@ export function AllocatePanel() {
               tone={poolOk ? 'serve' : 'warning'}
             />
           </div>
-          <details className="group mt-2 rounded-md border border-line/60 bg-void/30">
+          <HudDesktopDefaultDetails className="group mt-2 rounded-md border border-line/60 bg-void/30">
             <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-muted marker:hidden">
               <span>Traffic details</span>
               <span className="shrink-0 font-mono tabular-nums text-bone">
@@ -130,7 +132,7 @@ export function AllocatePanel() {
                 tone={financeModel.costs.hosting > 0 ? 'warning' : 'neutral'}
               />
             </div>
-          </details>
+          </HudDesktopDefaultDetails>
         </GameCard>
 
         <GameCard
@@ -163,7 +165,7 @@ export function AllocatePanel() {
             />
           </div>
 
-          <details className="group mt-2 rounded-md border border-line/60 bg-void/30">
+          <HudDesktopDefaultDetails className="group mt-2 rounded-md border border-line/60 bg-void/30">
             <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-muted marker:hidden">
               <span>Memory &amp; capacity</span>
               <span className="shrink-0 font-mono tabular-nums text-bone">{pct(host.vramCoverage, 0)} HBM</span>
@@ -199,14 +201,14 @@ export function AllocatePanel() {
                 tone={host.systemRamCoverage >= 1 ? 'positive' : 'warning'}
               />
             </div>
-          </details>
+          </HudDesktopDefaultDetails>
 
           {host.models.length === 0 ? (
             <div className="mt-2">
               <EmptyState title="No models hosted" description="Release a model to see hosting needs." />
             </div>
           ) : (
-            <details className="group mt-2 rounded-md border border-line/60 bg-void/30">
+            <HudDesktopDefaultDetails className="group mt-2 rounded-md border border-line/60 bg-void/30">
               <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-muted marker:hidden">
                 <span>Hosted models</span>
                 <span className="shrink-0 font-mono tabular-nums text-bone">{host.models.length}</span>
@@ -238,7 +240,7 @@ export function AllocatePanel() {
                   <p className="text-[0.75rem] text-muted">{host.recommendedSkuReason}</p>
                 ) : null}
               </div>
-            </details>
+            </HudDesktopDefaultDetails>
           )}
         </GameCard>
 
@@ -279,7 +281,7 @@ export function AllocatePanel() {
           </div>
         </GameCard>
 
-        <details className="group rounded-lg border border-line/70 bg-panel-2/45">
+        <HudDesktopDefaultDetails className="group rounded-lg border border-line/70 bg-panel-2/45">
           <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5 text-[0.8125rem] text-muted marker:hidden">
             <span>Setup guide</span>
             <span className="shrink-0 font-mono tabular-nums text-bone">{setupComplete}/4 complete</span>
@@ -314,7 +316,7 @@ export function AllocatePanel() {
             </HudButton>
           </Step>
           </ol>
-        </details>
+        </HudDesktopDefaultDetails>
       </div>
     </PanelScaffold>
   )

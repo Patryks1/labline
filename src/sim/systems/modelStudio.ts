@@ -1,19 +1,24 @@
 import {
+  autoAssignedGymStaffing,
   defaultPostTrainGyms,
   defaultToolSkills,
   ensureModelStudio,
   gymPackageById,
   GYM_PACKAGES,
   gymUnlocked,
+  POST_TRAIN_GYM_KINDS,
   normalizeModelRouters,
   normalizePostTrainGyms,
   normalizeToolSkills,
   packageTotalCash,
   routerUnlocked,
   toolPackageById,
+  toolPackageUnlocked,
   toolProficiencyFromInvestment,
+  toolSkillUnlocked,
   type StudioSpendPackage,
 } from "../balance/modelStudio";
+import { createRng, hashSeed } from "../rng";
 import type {
   ModelRouter,
   ModelRouterLane,
@@ -51,6 +56,30 @@ function withStudioPlayer(state: SimState): SimState {
   };
 }
 
+function autoAssignUnlockedGyms(state: SimState): SimState {
+  const studio = withStudioPlayer(state)
+  const unlockedKinds = new Set(
+    POST_TRAIN_GYM_KINDS.filter((kind) =>
+      gymUnlocked(kind, studio.player.researchUnlocked),
+    ),
+  )
+  const available = availableHqStaff(studio, { exceptAllGyms: true })
+  const dataShare = dataResearchReservationShare(studio.player.data)
+  const safetyShare = studio.player.safetyCampaign ? 0.4 : 0
+  const gyms = autoAssignedGymStaffing({
+    gyms: studio.player.postTrainGyms,
+    unlockedKinds,
+    availableResearchers: available.researchers,
+    availableEngineers: available.engineers,
+    availableDataStaff: available.dataStaff,
+    researchShareBudget: Math.max(0, 0.85 - dataShare - safetyShare),
+  })
+  return {
+    ...studio,
+    player: { ...studio.player, postTrainGyms: gyms },
+  }
+}
+
 function affordOrWarn(
   state: SimState,
   pack: StudioSpendPackage,
@@ -72,7 +101,7 @@ export function investPostTrainGym(
   kind: PostTrainGymKind,
   packageId: string,
 ): SimState {
-  const studio = withStudioPlayer(state);
+  const studio = autoAssignUnlockedGyms(withStudioPlayer(state));
   if (!gymUnlocked(kind, studio.player.researchUnlocked)) {
     return withAlert(
       studio,
@@ -101,11 +130,15 @@ export function investPostTrainGym(
     return withAlert(
       studio,
       "warn",
-      `Assign ${pack.minResearchers} HQ researchers before starting ${pack.label}.`,
+      `Need ${pack.minResearchers} free HQ researchers for ${pack.label}. Hire or free pods first.`,
     );
   }
   if ((current.researchShare ?? 0) < 0.05) {
-    return withAlert(studio, "warn", `Reserve at least 5% research compute for ${current.name}.`);
+    return withAlert(
+      studio,
+      "warn",
+      `Need spare research compute for ${current.name} (data/safety reservations are too high).`,
+    );
   }
   const blocked = affordOrWarn(studio, pack, `${kind} gym · ${pack.label}`);
   if (blocked) return blocked;
@@ -135,7 +168,10 @@ export function investPostTrainGym(
 
 export interface PostTrainGymAllocation {
   assignedResearchers?: number;
+  assignedEngineers?: number;
+  assignedDataStaff?: number;
   researchShare?: number;
+  focusBias?: number;
 }
 
 /** Reserve real HQ researchers and a slice of the one shared research pool. */
@@ -181,8 +217,29 @@ export function setPostTrainGymAllocation(
     Math.min(maxShare, allocation.researchShare ?? current.researchShare ?? 0),
   );
 
+  const focusBias =
+    allocation.focusBias == null
+      ? current.focusBias ?? 0.5
+      : Math.max(0, Math.min(1, allocation.focusBias));
+  const assignedEngineers = Math.max(
+    0,
+    Math.round(allocation.assignedEngineers ?? current.assignedEngineers ?? 0),
+  );
+  const assignedDataStaff = Math.max(
+    0,
+    Math.round(allocation.assignedDataStaff ?? current.assignedDataStaff ?? 0),
+  );
   const next = gyms.map((gym) =>
-    gym.kind === kind ? { ...gym, assignedResearchers, researchShare } : gym,
+    gym.kind === kind
+      ? {
+          ...gym,
+          assignedResearchers,
+          assignedEngineers,
+          assignedDataStaff,
+          researchShare,
+          focusBias,
+        }
+      : gym,
   );
   const wasClamped =
     assignedResearchers !== Math.round(allocation.assignedResearchers ?? assignedResearchers) ||
@@ -198,7 +255,7 @@ export function setPostTrainGymAllocation(
 
 /** Advance gym construction and continuous curriculum R&D once per game day. */
 export function tickPostTrainGyms(state: SimState): SimState {
-  const studio = withStudioPlayer(state);
+  const studio = autoAssignUnlockedGyms(state);
   const normalized = normalizePostTrainGyms(studio.player.postTrainGyms);
   if (
     !normalized.some(
@@ -217,6 +274,8 @@ export function tickPostTrainGyms(state: SimState): SimState {
   const messages: string[] = [];
   const gyms = normalized.map((gym) => {
     const researchers = Math.max(0, gym.assignedResearchers ?? 0);
+    const engineers = Math.max(0, gym.assignedEngineers ?? 0);
+    const dataStaff = Math.max(0, gym.assignedDataStaff ?? 0);
     const share = Math.max(0, gym.researchShare ?? 0);
     const activePack = GYM_PACKAGES.find((pack) => pack.id === gym.activePackageId);
     const completedPack = GYM_PACKAGES.find((pack) => pack.tier === (gym.tier ?? 0));
@@ -233,7 +292,9 @@ export function tickPostTrainGyms(state: SimState): SimState {
     }
     remainingCash -= dailyCost;
     operatingSpend += dailyCost;
-    const staffMult = Math.min(1.35, Math.sqrt(researchers / Math.max(1, minResearchers)));
+    const crew =
+      researchers + engineers * 0.55 + dataStaff * 0.4;
+    const staffMult = Math.min(1.35, Math.sqrt(crew / Math.max(1, minResearchers)));
     // The share is the physical PF reservation. Extra staff improves how much
     // research progress that fixed compute produces; it does not draw more PF.
     const reservedPfToday = grossResearchPf * share;
@@ -269,7 +330,18 @@ export function tickPostTrainGyms(state: SimState): SimState {
     const improvement =
       (ceiling - gym.quality) *
       Math.min(0.04, effectiveProgressToday / Math.max(80, tier * 180));
-    return { ...gym, quality: Math.min(ceiling, gym.quality + Math.max(0, improvement)) };
+    let quality = Math.min(ceiling, gym.quality + Math.max(0, improvement));
+    if (quality < 0.62) {
+      const rng = createRng(
+        hashSeed(studio.seed, studio.day, gym.id, "gym-quality-jitter"),
+      );
+      const amplitude = (0.62 - quality) * 0.04;
+      quality = Math.max(
+        0,
+        Math.min(ceiling, quality + rng.range(-amplitude, amplitude * 0.55)),
+      );
+    }
+    return { ...gym, quality };
   });
 
   let next: SimState = {
@@ -289,6 +361,20 @@ export function teachToolSkill(
   const studio = withStudioPlayer(state);
   const pack = toolPackageById(packageId);
   if (!pack) return withAlert(studio, "warn", "Unknown tool curriculum.");
+  if (!toolSkillUnlocked(skillId, studio.player.researchUnlocked)) {
+    return withAlert(
+      studio,
+      "warn",
+      `Research the ${skillId} unlock before buying curriculum.`,
+    );
+  }
+  if (!toolPackageUnlocked(packageId, studio.player.researchUnlocked)) {
+    return withAlert(
+      studio,
+      "warn",
+      `${pack.label} needs a later alignment node.`,
+    );
+  }
   const blocked = affordOrWarn(studio, pack, `${skillId} · ${pack.label}`);
   if (blocked) return blocked;
   const toolSkills = normalizeToolSkills(studio.player.toolSkills).map((skill) => {

@@ -10,6 +10,7 @@ import type {
   InvestorPitchRecord,
   SimState,
 } from '../types'
+import { ECONOMY } from '../balance/economy'
 import { createRng, hashSeed } from '../rng'
 import { getLab, updateLab } from './labEngine'
 import {
@@ -1519,10 +1520,23 @@ export function tickCapital(state: SimState): SimState {
     if (remaining > 0.01) debts.push({ ...debt, remaining, daysLeft, breached: covenantBreached })
   }
   // Player recovery ladder: negative cash only (runway soft-warns elsewhere).
+  // Hitting the insolvency floor skips ahead to a 30-day asset-sale window so
+  // credit, equity, and model sales stay usable before bankruptcy review.
   const cashNegative = cash < 0
+  const insolvent = cash <= ECONOMY.victory.bankruptCash
+  const graceDays = ECONOMY.victory.bankruptcyGraceDays ?? 30
   let restructuring = capital.restructuring
   if (!cashNegative && restructuring.stage !== 'bankruptcy') {
     restructuring = { active: false, daysLeft: 0, stage: 'none' }
+  } else if (insolvent && restructuring.stage !== 'bankruptcy') {
+    if (restructuring.stage === 'asset_sale' && restructuring.active) {
+      restructuring =
+        restructuring.daysLeft > 1
+          ? { ...restructuring, daysLeft: restructuring.daysLeft - 1 }
+          : { active: true, daysLeft: 0, stage: 'bankruptcy' }
+    } else {
+      restructuring = { active: true, daysLeft: graceDays, stage: 'asset_sale' }
+    }
   } else if (cashNegative && !restructuring.active) {
     restructuring = { active: true, daysLeft: 60, stage: 'warning' }
   } else if (cashNegative && restructuring.active && restructuring.daysLeft > 1) {
@@ -1531,7 +1545,7 @@ export function tickCapital(state: SimState): SimState {
     const nextStage: Record<CapitalStack['restructuring']['stage'], CapitalStack['restructuring']> = {
       none: { active: true, daysLeft: 60, stage: 'warning' },
       warning: { active: true, daysLeft: 45, stage: 'refinance' },
-      refinance: { active: true, daysLeft: 30, stage: 'asset_sale' },
+      refinance: { active: true, daysLeft: graceDays, stage: 'asset_sale' },
       asset_sale: { active: true, daysLeft: 0, stage: 'bankruptcy' },
       bankruptcy: { active: true, daysLeft: 0, stage: 'bankruptcy' },
     }
@@ -1566,9 +1580,9 @@ export function tickCapital(state: SimState): SimState {
   if (restructuring.stage !== capital.restructuring.stage) {
     const messages: Record<CapitalStack['restructuring']['stage'], string> = {
       none: 'Recovery complete: cash is non-negative again.',
-      warning: 'Cash negative: cut commitments, refinance, or raise equity within 60 days.',
+      warning: 'Cash negative: take credit, sell equity, or sell models within 60 days.',
       refinance: 'Refinancing stage: lenders and investors now demand corrective terms.',
-      asset_sale: 'Forced-recovery stage: sell assets, accept a down round, or restructure within 30 days.',
+      asset_sale: `Forced-recovery stage: take credit, sell equity, or sell models within ${graceDays} days.`,
       bankruptcy: 'Restructuring failed; the lab has entered bankruptcy review.',
     }
     const severity = restructuring.stage === 'none' ? 'info' : restructuring.stage === 'warning' ? 'warn' : 'danger'

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createGame } from '../createGame'
 import type { DataDomain, SimState } from '../types'
 import { ensureLabData } from './data'
+import { trainingDataModalityRequirements } from '../balance/trainingV3'
 import {
   completeTrainingJobsNow,
   defaultTrainingDataWeights,
@@ -171,5 +172,46 @@ describe('player multimodal training gates', () => {
     )
     expect(share).toBeGreaterThan(0)
     expect(share).toBeLessThan(15)
+  })
+
+  it('does not apply native image floors to omni runs', () => {
+    expect(trainingDataModalityRequirements('omni', 'omni')).toEqual({})
+    expect(trainingDataModalityRequirements('dense', 'omni')).toEqual({})
+
+    let state = withMediaStock(createGame(985), {
+      chat: 3000,
+      image: 290,
+      code: 0,
+      math: 0,
+      science: 0,
+      law: 0,
+      health: 0,
+      audio: 0,
+      video: 0,
+    })
+    state = withResearch(
+      state,
+      'mm_vision',
+      'mm_diff',
+      'mm_video',
+      'mm_omni',
+      'data_mix',
+    )
+    state = startTraining(state, {
+      name: 'Omni without image floor',
+      family: 'omni',
+      backbone: 'dense',
+      productPreset: 'omni',
+      paramsB: 0.01,
+      dataPlan: {
+        totalUnits: 3290,
+        totalMTok: 3290,
+        weights: { chat: 0.912, image: 0.088 },
+        allowSynthetic: false,
+      },
+    })
+
+    expect(state.player.trainingJob, state.alerts[0]?.message).not.toBeNull()
+    expect(state.alerts[0]?.message ?? '').not.toContain('actual image data')
   })
 })

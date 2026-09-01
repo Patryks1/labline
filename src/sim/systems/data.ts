@@ -643,7 +643,7 @@ export function synthTeacherFreshness(
 
 export function collectFromTraffic(state: SimState): SimState {
   const flywheel =
-    aggregateEffects(state.player.researchUnlocked).dataFlywheel ?? 0;
+    aggregateEffects(state.player.researchUnlocked, state.player.researchRanks).dataFlywheel ?? 0;
   const servedByPlan = state.lastMarket.servedMTokByPlanId ?? {};
   const planSlices = state.player.pricing.plans.map((plan) => ({
     id: plan.id,
@@ -2096,7 +2096,7 @@ export function tickData(state: SimState): SimState {
     dataQuality: state.player.dataQuality,
     staff: dataRuntimeStaff,
   });
-  const effects = aggregateEffects(state.player.researchUnlocked);
+  const effects = aggregateEffects(state.player.researchUnlocked, state.player.researchRanks);
   const processing = processDataJobs({
     data,
     cash,
@@ -2164,7 +2164,7 @@ export interface ConsumeResult {
 export function hasCorpusSpecialists(state: SimState): boolean {
   return (
     state.player.researchUnlocked.includes("data_specialists") ||
-    (aggregateEffects(state.player.researchUnlocked).unlockCorpusSpecialists ??
+    (aggregateEffects(state.player.researchUnlocked, state.player.researchRanks).unlockCorpusSpecialists ??
       false)
   );
 }

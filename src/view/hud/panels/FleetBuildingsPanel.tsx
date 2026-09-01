@@ -33,6 +33,8 @@ import {
 } from '../ui/HudPrimitives'
 import { GameCard, LiveDot, MeterBar, StatRow } from '../ui/kit'
 
+import { HudDesktopDefaultDetails } from '../ui/HudDesktopDefaultDetails'
+
 type GroupId = 'hq' | 'lab' | 'dc' | 'power' | 'fab' | 'other'
 
 const GROUP_ORDER: GroupId[] = ['hq', 'lab', 'dc', 'power', 'fab', 'other']
@@ -256,7 +258,7 @@ export function FleetBuildingsPanel() {
         )}
 
         {hqCap > 0 ? (
-          <details className="group rounded-lg border border-line/70 bg-panel-2/45">
+          <HudDesktopDefaultDetails className="group rounded-lg border border-line/70 bg-panel-2/45">
             <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5 marker:hidden">
               <span>
                 <span className="hud-eyebrow block">People</span>
@@ -271,7 +273,7 @@ export function FleetBuildingsPanel() {
                 <StatRow key={role} label={STAFF_LABELS[role]} value={staff[role]} />
               ))}
             </div>
-          </details>
+          </HudDesktopDefaultDetails>
         ) : null}
       </div>
     </PanelScaffold>

@@ -15,6 +15,7 @@ import {
   keepInternal,
   releaseFromJob,
   restoreArchivedModel,
+  sellModelIp,
   startTraining,
 } from "./training";
 
@@ -206,5 +207,52 @@ describe("model archive", () => {
     expect(isLivePublicModel(next.player.models.find((row) => row.id === model.id)!)).toBe(true);
     expect(next.player.safetyCampaign?.modelId).toBe(model.id);
     expect(next.alerts[0]?.message).toMatch(/active safety campaign before archiving/);
+  });
+});
+
+describe("model IP sale", () => {
+  it("pays cash, delists the model, and blocks restore", () => {
+    const { state, model } = releasedSpark(4420);
+    const before = state.player.cash;
+    const sold = sellModelIp(state, model.id);
+    const next = sold.player.models.find((row) => row.id === model.id)!;
+    expect(sold.player.cash).toBeGreaterThan(before);
+    expect(next.soldIp).toBe(true);
+    expect(next.archived).toBe(true);
+    expect(isLivePublicModel(next)).toBe(false);
+    expect(hostedServingModels(sold.player).map((row) => row.id)).not.toContain(
+      model.id,
+    );
+
+    const restored = restoreArchivedModel(sold, model.id);
+    expect(restored.player.models.find((row) => row.id === model.id)?.soldIp).toBe(
+      true,
+    );
+    expect(isLivePublicModel(restored.player.models.find((row) => row.id === model.id)!)).toBe(
+      false,
+    );
+    expect(restored.alerts[0]?.message).toMatch(/was sold/);
+
+    const loaded = roundTripState(sold);
+    expect(loaded.player.models.find((row) => row.id === model.id)?.soldIp).toBe(
+      true,
+    );
+  });
+
+  it("can lift cash off the insolvency floor without ending the run", () => {
+    const { state, model } = releasedSpark(4421);
+    const floor = state.player.cash;
+    const insolvent = {
+      ...state,
+      player: {
+        ...state.player,
+        cash: -500_000_000,
+        finance: { ...state.player.finance, cash: -500_000_000 },
+      },
+    };
+    const sold = sellModelIp(insolvent, model.id);
+    expect(sold.player.cash).toBeGreaterThan(-500_000_000);
+    expect(sold.player.cash).toBeLessThan(floor);
+    expect(sold.victory.outcome).toBe("playing");
   });
 });

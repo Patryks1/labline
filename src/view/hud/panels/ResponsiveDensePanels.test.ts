@@ -100,6 +100,20 @@ describe('dense workspace mobile presentation', () => {
     expect(markup).not.toContain('team seats')
   })
 
+  it('keeps credit, equity, and model-sale recovery at the insolvency floor', async () => {
+    const source = await readFile(
+      fileURLToPath(new URL('./OrgPanel.tsx', import.meta.url)),
+      'utf8',
+    )
+    expect(source).toContain('data-testid="distress-recovery"')
+    expect(source).toContain('Insolvency window')
+    expect(source).toContain('Take emergency credit')
+    expect(source).toContain('Sell equity')
+    expect(source).toContain('Sell {model.name}')
+    expect(source).not.toContain('wound down')
+    expect(source).not.toContain('forces a fire sale')
+  })
+
   it('exposes project finance alongside the other capital products', () => {
     useGameStore.setState({ state: createGame(64_2121) })
     const markup = renderToStaticMarkup(
@@ -138,6 +152,7 @@ describe('dense workspace mobile presentation', () => {
 
     expect(markup).toContain('aria-label="Command sections"')
     expect(markup).toContain('>Capital</span>')
+    expect(markup).not.toContain('>Compute</span>')
     expect(markup).not.toContain('>Models</span>')
     expect(markup).not.toContain('Capital stack')
     expect(markup).not.toContain('Ownership, credit, and recovery decisions.')

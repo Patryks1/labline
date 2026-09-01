@@ -13,6 +13,8 @@ import { ResearchUnlockLink } from '../ui/ResearchUnlockLink'
 import { EmptyState, HudButton, MetricTile, PanelScaffold, StatusChip } from '../ui/HudPrimitives'
 import { BlockerList, GameCard, MeterBar, StatRow } from '../ui/kit'
 
+import { HudDesktopDefaultDetails } from '../ui/HudDesktopDefaultDetails'
+
 const CHIP_FOCUSES: { id: ChipDesignFocus; label: string; detail: string }[] = [
   { id: 'training', label: 'Training', detail: 'More PF, more power' },
   { id: 'balanced', label: 'Balanced', detail: 'Flexible accelerator' },
@@ -90,7 +92,7 @@ export function ChipsPanel() {
             <StatRow label="Editable" value={editable ? 'Yes' : 'Locked mid-run'} tone={editable ? 'positive' : 'warning'} />
           </div>
 
-          <details className="group mt-3 rounded-md border border-line/60 bg-void/30">
+          <HudDesktopDefaultDetails className="group mt-3 rounded-md border border-line/60 bg-void/30">
             <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] text-muted marker:hidden">
               <span>Architecture modifiers</span>
               <span className="shrink-0 font-mono tabular-nums text-bone">
@@ -153,7 +155,7 @@ export function ChipsPanel() {
                 Open chip research →
               </HudButton>
             </div>
-          </details>
+          </HudDesktopDefaultDetails>
         </GameCard>
 
         <GameCard

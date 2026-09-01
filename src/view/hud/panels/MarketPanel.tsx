@@ -24,6 +24,8 @@ import {
 } from '../ui/kit'
 import { buildFinanceDashboardModel } from '../data/financeDashboardModel'
 
+import { HudDesktopDefaultDetails } from '../ui/HudDesktopDefaultDetails'
+
 const PRODUCT_CHANNEL_LABELS: Record<ProductChannel, string> = {
   free_assistant: 'Free assistant',
   consumer_pro: 'Consumer Pro',
@@ -246,7 +248,7 @@ function ShareView({
             )
           })}
         </div>
-        <details className="group mt-3 border-t border-line/50 pt-1">
+        <HudDesktopDefaultDetails className="group mt-3 border-t border-line/50 pt-1">
           <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 py-2 text-[0.75rem] marker:hidden lg:min-h-0">
             <span className="font-medium text-bone">Market reach</span>
             <span className="font-mono text-muted">{audience(aiUsers)} AI users · <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-180">⌄</span></span>
@@ -281,7 +283,7 @@ function ShareView({
             </div>
           </div>
         </div>
-        </details>
+        </HudDesktopDefaultDetails>
       </GameCard>
 
       <GameCard
@@ -307,7 +309,7 @@ function ShareView({
             tone={demandPf > capacityPf * 1.02 ? 'danger' : 'serve'}
           />
         </div>
-        <details className="group mt-2 border-t border-line/50 pt-1">
+        <HudDesktopDefaultDetails className="group mt-2 border-t border-line/50 pt-1">
           <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 py-2 text-[0.75rem] marker:hidden lg:min-h-0">
             <span className="font-medium text-bone">Operational detail</span>
             <span className={unserved > 0.08 ? 'font-mono text-danger' : 'font-mono text-muted'}>
@@ -334,7 +336,7 @@ function ShareView({
             tone={servicePain > 0.2 ? 'danger' : servicePain > 0.08 ? 'warning' : 'neutral'}
           />
         </div>
-        </details>
+        </HudDesktopDefaultDetails>
         {overloaded ? (
           <p className="mt-2 text-[0.8125rem] leading-snug text-danger">
             Demand exceeds inference PF. Add racks, power, Serve %, or serving-efficiency research.

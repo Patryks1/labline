@@ -122,6 +122,8 @@ import {
   type PlansTabId,
 } from "./plansPanelNavigation";
 
+import { HudDesktopDefaultDetails } from "../ui/HudDesktopDefaultDetails";
+
 export function ApiCostSummary({
   estimatedCostPerMTok,
   modelCount,
@@ -1223,7 +1225,7 @@ export function PlansPanel() {
                           </p>
                         ) : null}
 
-                        <details className="group mt-2 rounded-md border border-line/60 bg-void/40">
+                        <HudDesktopDefaultDetails className="group mt-2 rounded-md border border-line/60 bg-void/40">
                           <summary className="flex min-h-11 cursor-pointer list-none flex-col justify-center gap-0.5 px-2.5 py-2 marker:hidden sm:flex-row sm:items-center sm:justify-between sm:gap-2">
                             <span className="text-[0.8125rem] font-medium text-bone">
                               Serving quality & benchmarks
@@ -1311,7 +1313,7 @@ export function PlansPanel() {
                             </p>
                           ) : null}
                           </div>
-                        </details>
+                        </HudDesktopDefaultDetails>
 
                         <div className="mt-2 grid gap-2 sm:grid-cols-2">
                           <label className="text-[0.8125rem] text-muted">
@@ -1375,7 +1377,7 @@ export function PlansPanel() {
                             />
                           </label>
                         </div>
-                        <details
+                        <HudDesktopDefaultDetails
                           className="group mt-2 overflow-hidden rounded-md border border-line/50 bg-void/30"
                           data-testid={`api-pricing-context-${m.id}`}
                         >
@@ -1443,7 +1445,7 @@ export function PlansPanel() {
                               . {pricingStatus.explanation}
                             </p>
                           </div>
-                        </details>
+                        </HudDesktopDefaultDetails>
                       </GameCard>
                     </div>
                   );
@@ -1622,7 +1624,7 @@ export function PlansCapacitySummary({
         />
       </div>
 
-      <details
+      <HudDesktopDefaultDetails
         className="group min-w-0 border-t border-line/50 bg-void/25"
         data-testid="plans-capacity-details"
       >
@@ -1677,7 +1679,7 @@ export function PlansCapacitySummary({
             />
           </ComputeAllocationChart>
         </div>
-      </details>
+      </HudDesktopDefaultDetails>
     </section>
   );
 }
@@ -1890,7 +1892,7 @@ function PlanDemandSection({
         </div>
       </GameCard>
 
-      <details
+      <HudDesktopDefaultDetails
         className="group overflow-hidden rounded-lg border border-line/70 bg-panel-2/55"
         data-testid="plan-demand-analysis-details"
       >
@@ -2021,7 +2023,7 @@ function PlanDemandSection({
         </GameCard>
       ) : null}
         </div>
-      </details>
+      </HudDesktopDefaultDetails>
     </div>
   );
 }
@@ -3784,7 +3786,7 @@ function PlanCard({
           </div>
         </section>
 
-        <details
+        <HudDesktopDefaultDetails
           className="group plan-card-section overflow-hidden rounded-lg border border-line/60 bg-void/45"
           data-testid={`plan-entitlement-details-${plan.id}`}
         >
@@ -3826,7 +3828,7 @@ function PlanCard({
             </div>
             ) : null}
           </div>
-        </details>
+        </HudDesktopDefaultDetails>
 
         {(() => {
           const collectCap = maxPlanDataCollectionShare(plan.pricePerMonth);
@@ -3894,7 +3896,7 @@ function PlanCard({
           />
         </section>
 
-        <details
+        <HudDesktopDefaultDetails
           className="group plan-card-section overflow-hidden rounded-lg border border-line/60 bg-void/30"
           data-testid={`plan-settlement-details-${plan.id}`}
         >
@@ -3947,7 +3949,7 @@ function PlanCard({
           </div>
         ) : null}
           </div>
-        </details>
+        </HudDesktopDefaultDetails>
 
         {premiumScrutiny.applies ? (
           <div

@@ -24,6 +24,8 @@ import { HudButton, HudInput, StatusChip } from "../../ui/HudPrimitives";
 import { ResearchUnlockLink } from "../../ui/ResearchUnlockLink";
 import { SliderField } from "../../ui/SliderField";
 
+import { HudDesktopDefaultDetails } from "../../ui/HudDesktopDefaultDetails";
+
 function biasLabel(bias: number): string {
   if (bias < 0.35) return "efficient";
   if (bias > 0.65) return "capable";
@@ -127,7 +129,7 @@ export function EffortStudio({
   ).length;
 
   return (
-    <details
+    <HudDesktopDefaultDetails
       className="group rounded-md border border-line/60 bg-void/30 p-2.5"
       data-effort-studio="true"
     >
@@ -148,11 +150,9 @@ export function EffortStudio({
       </summary>
       <div className="mt-2 border-t border-line/50 pt-2">
         <p className="hud-mobile-detail text-[0.6875rem] leading-5 text-muted">
-          Instant is always free to serve. Split Train PF across heads, watch
-          loss, and slide each toward capability (costly) or efficiency (cheaper
-          tokens). Prompt tokens stay fixed; generated and hidden-reasoning
-          tokens are billed at the output rate and count toward total billed
-          tokens.
+          Instant is the default serve path. Its quality is the trained base
+          plus SFT, RLHF, thinking, and tools. Extra thinking heads need a
+          training run, not more Instant compute.
         </p>
       <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
         {recipes.map((recipe) => (
@@ -194,14 +194,15 @@ export function EffortStudio({
         ))}
       </div>
 
+      {live ? (
       <div className="mt-3 rounded-md border border-line/50 bg-void/40 p-2">
-        <p className="text-[0.75rem] font-semibold text-bone">Train a head</p>
+        <p className="text-[0.75rem] font-semibold text-bone">Train a thinking head</p>
         {!unlocked ? (
           <ResearchUnlockLink
             className="mt-1.5"
             compact
             nodeId={EFFORT_UNLOCK_RESEARCH}
-            label="Unlock with Process Reward"
+            label="Unlock thinking"
           />
         ) : trainedCount >= MAX_TRAINED_EFFORTS ? (
           <p className="mt-1 text-[0.6875rem] text-muted">
@@ -272,8 +273,13 @@ export function EffortStudio({
           </div>
         )}
       </div>
+      ) : (
+        <p className="mt-3 text-[0.6875rem] leading-5 text-muted">
+          Train further to add thinking heads. Instant stays the base serve path.
+        </p>
+      )}
       </div>
-    </details>
+    </HudDesktopDefaultDetails>
   );
 }
 
@@ -411,7 +417,11 @@ function EffortHeadCard({
           {live ? " of Train pool" : ""}
         </p>
       ) : null}
-      {unlocked ? (
+      {recipe.kind === "instant" ? (
+        <p className="mt-1.5 text-[0.6875rem] leading-5 text-muted">
+          Free to serve. Quality follows the base run and post-train, not extra Instant compute.
+        </p>
+      ) : live && unlocked ? (
         <div className="mt-1.5 space-y-1.5">
           <SliderField
             label="Train PF share"
@@ -420,11 +430,7 @@ function EffortHeadCard({
             max={EFFORT_HEAD_SHARE_MAX}
             step={0.01}
             format={(value) => `${Math.round(value * 100)}%`}
-            sublabel={
-              live
-                ? "Slice of this job's Train PF"
-                : "Applies on the next training run"
-            }
+            sublabel="Slice of this job's Train PF"
             onChange={onShare}
           />
           <SliderField
@@ -434,30 +440,22 @@ function EffortHeadCard({
             max={1}
             step={0.05}
             format={biasLabel}
-            sublabel={
-              freeServe
-                ? `free to serve · cap ${
-                    baseCap > 0
-                      ? `${Math.round(preview.capability)} (${preview.capDelta >= 0 ? "+" : ""}${Math.round(preview.capDelta)})`
-                      : "—"
-                  }`
-                : `${preview.tokenMult.toFixed(1)}× generated · ${request.billedTokenMultiplier.toFixed(1)}× billed · cap ${
-                    baseCap > 0
-                      ? `${Math.round(preview.capability)} (${preview.capDelta >= 0 ? "+" : ""}${Math.round(preview.capDelta)})`
-                      : "—"
-                  }`
-            }
+            sublabel={`${preview.tokenMult.toFixed(1)}× generated · ${request.billedTokenMultiplier.toFixed(1)}× billed · cap ${
+              baseCap > 0
+                ? `${Math.round(preview.capability)} (${preview.capDelta >= 0 ? "+" : ""}${Math.round(preview.capDelta)})`
+                : "—"
+            }`}
             onChange={onBias}
           />
         </div>
-      ) : recipe.kind !== "instant" ? (
+      ) : unlocked ? null : (
         <ResearchUnlockLink
           className="mt-1.5"
           compact
           nodeId={EFFORT_UNLOCK_RESEARCH}
-          label="Unlock training"
+          label="Unlock thinking"
         />
-      ) : null}
+      )}
       <div className="mt-1.5 flex flex-col gap-1">
         <HudButton
           type="button"
@@ -478,7 +476,7 @@ function EffortHeadCard({
             Make default
           </HudButton>
         ) : null}
-        {unlocked ? (
+        {unlocked && live && recipe.kind !== "instant" ? (
           <HudButton
             type="button"
             variant="ghost"

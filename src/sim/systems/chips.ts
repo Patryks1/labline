@@ -37,7 +37,7 @@ export function buyChips(state: SimState, defId: string, count: number): SimStat
     }
   }
 
-  const effects = aggregateEffects(state.player.researchUnlocked)
+  const effects = aggregateEffects(state.player.researchUnlocked, state.player.researchRanks)
   const discount = effects.chipDiscount ?? 0
   const unit = def.price * (1 - discount)
   const total = unit * count

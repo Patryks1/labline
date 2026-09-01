@@ -44,31 +44,38 @@ import { EffortStudio } from "./EffortStudio";
 import { buildModelProductProfile } from "../../../../sim/balance/modelProduct";
 import { describeCampaignIntervention } from "../../../../sim/balance/trainingCampaignIntervention";
 
+import { HudDesktopDefaultDetails } from "../../ui/HudDesktopDefaultDetails";
+
 type TrainStage = Exclude<PostTrainStage, "none">;
 
 const POST_TRAIN_META: Record<
   TrainStage,
-  { feature: string; research?: string; data: string; spike: string }
+  { label: string; feature: string; research?: string; data: string; spike: string }
 > = {
   sft: {
+    label: "SFT",
     feature: "Instruction following",
     data: "Curated instruction data",
     spike: "+0.2–0.5, then recovery",
   },
   rlhf: {
+    label: "RLHF",
     feature: "Preference alignment",
     research: "align_rlhf",
     data: "Preference comparisons",
     spike: "+0.3–0.7, then recovery",
   },
   process: {
-    feature: "Process reward",
+    label: "Thinking",
+    feature: "Thinking",
     research: "align_process",
     data: "Step-level judgments",
     spike: "+0.4–0.8, then recovery",
   },
   tools: {
+    label: "Tools",
     feature: "Tool use in benchmarks",
+    research: "domain_agents",
     data: "Tool-call trajectories",
     spike: "+0.2–0.6, then recovery",
   },
@@ -341,11 +348,6 @@ export function ActiveTrainingCard({
           }
           onFocus={setSpineFocus}
         />
-        <p className="hud-mobile-detail font-mono text-[0.6875rem] leading-5 text-muted">
-          You are here: {campaignStageLabel(job)}. Train, evaluate, align, and
-          launch from one run. Benchmarks and snapshots are optional; alignment
-          uses the reserved recipe mix and attached gyms.
-        </p>
 
         {job.pendingCampaignEvent ? (
           <div className="rounded-md border border-amber/45 bg-amber/10 p-3">
@@ -451,7 +453,7 @@ export function ActiveTrainingCard({
           />
         </div>
 
-        <details className="group rounded-md border border-line/50 bg-void/25">
+        <HudDesktopDefaultDetails className="group rounded-md border border-line/50 bg-void/25">
           <summary className="flex min-h-11 cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-2.5 py-2 marker:hidden">
             <span className="hud-eyebrow">{blueprint.label} frontier</span>
             <span className="inline-flex items-center gap-2 font-mono text-[0.6875rem] tabular-nums text-bone">
@@ -480,7 +482,7 @@ export function ActiveTrainingCard({
               output burden · {blueprint.trainingStability} stability
             </p>
           </div>
-        </details>
+        </HudDesktopDefaultDetails>
 
         {job.failed ? (
           <div className="rounded-md border border-danger/35 bg-danger/10 p-2.5">
@@ -523,7 +525,7 @@ export function ActiveTrainingCard({
         ) : null}
 
         {(job.campaignEventHistory?.length ?? 0) > 0 ? (
-          <details className="group rounded-md border border-line/50 bg-void/25">
+          <HudDesktopDefaultDetails className="group rounded-md border border-line/50 bg-void/25">
             <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 marker:hidden">
               <span className="hud-eyebrow">Campaign log</span>
               <span className="font-mono text-[0.625rem] text-muted">
@@ -554,7 +556,7 @@ export function ActiveTrainingCard({
                 );
               })}
             </div>
-          </details>
+          </HudDesktopDefaultDetails>
         ) : null}
 
         <section data-campaign-stage="measure" className="space-y-3">
@@ -566,7 +568,7 @@ export function ActiveTrainingCard({
         </section>
 
         {onSetLabs ? (
-          <details
+          <HudDesktopDefaultDetails
             className="group rounded-md border border-line/60 bg-void/30"
             data-run-gyms-disclosure="true"
           >
@@ -584,7 +586,7 @@ export function ActiveTrainingCard({
                 onChange={(kinds) => onSetLabs(job.id, kinds)}
               />
             </div>
-          </details>
+          </HudDesktopDefaultDetails>
         ) : null}
 
         {diagnosticStall ? (
@@ -610,7 +612,7 @@ export function ActiveTrainingCard({
         ) : null}
 
         {dataEvidence ? (
-          <details className="group rounded-md border border-line/50 bg-void/25">
+          <HudDesktopDefaultDetails className="group rounded-md border border-line/50 bg-void/25">
             <summary className="flex min-h-11 cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-2.5 py-2 marker:hidden">
               <span className="hud-eyebrow">Frozen corpus evidence</span>
               <span className="font-mono text-[0.625rem] text-muted">
@@ -659,7 +661,7 @@ export function ActiveTrainingCard({
                   : ""}
               </p>
             </div>
-          </details>
+          </HudDesktopDefaultDetails>
         ) : null}
 
         {job.postTrain !== "none" ? (
@@ -675,7 +677,7 @@ export function ActiveTrainingCard({
           />
         ) : null}
 
-        <details
+        <HudDesktopDefaultDetails
           className="group rounded-md border border-line/50 bg-void/25"
           data-run-telemetry-disclosure="true"
           data-shell-gesture-ignore="true"
@@ -717,7 +719,7 @@ export function ActiveTrainingCard({
               checkpoints={checkpointMarkers}
             />
           </div>
-        </details>
+        </HudDesktopDefaultDetails>
 
         {!job.failed ? (
           <label className="block text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
@@ -923,10 +925,6 @@ export function ActiveTrainingCard({
                 <p className="col-span-2 basis-full text-[0.75rem] text-amber min-[560px]:col-span-3">
                   {haircutCopy}
                 </p>
-              ) : releaseDisabledReason ? (
-                <p className="col-span-2 basis-full text-[0.75rem] text-muted min-[560px]:col-span-3">
-                  Launch locked: {releaseDisabledReason}
-                </p>
               ) : null}
             </>
           )}
@@ -958,7 +956,7 @@ export function ActiveTrainingCard({
         ) : null}
 
         {done ? (
-          <details
+          <HudDesktopDefaultDetails
             data-campaign-stage="specialize"
             className="group rounded-md border border-research/25 bg-research/5"
             data-specialize-disclosure="true"
@@ -968,12 +966,12 @@ export function ActiveTrainingCard({
                 Specialize
               </span>
               <span className="font-mono text-[0.6875rem] text-muted">
-                SFT · RLHF · process · tools · <span className="group-open:hidden">Configure</span><span className="hidden group-open:inline">Hide</span>
+                SFT · RLHF · thinking · tools · <span className="group-open:hidden">Configure</span><span className="hidden group-open:inline">Hide</span>
               </span>
             </summary>
             <div className="border-t border-research/20 p-2.5">
             <p className="mb-2 text-[0.6875rem] leading-5 text-muted">
-              SFT, RLHF, process, and tools are paid campaigns. Fund gyms first
+              SFT, RLHF, thinking, and tools are paid campaigns. Fund gyms first
               or you will burn extra PF-days for weaker outcomes. Continue-train
               released or internal models to refresh a stage.
             </p>
@@ -1024,7 +1022,7 @@ export function ActiveTrainingCard({
                   >
                     <span className="flex items-center justify-between gap-2">
                       <strong className="text-[0.75rem] uppercase tracking-[0.12em] text-bone">
-                        {stage}
+                        {meta.label}
                       </strong>
                       <span className="font-mono text-[0.625rem] uppercase tracking-[0.1em]">
                         {stateLabel}
@@ -1060,11 +1058,18 @@ export function ActiveTrainingCard({
               <ResearchUnlockLink
                 className="mt-2"
                 nodeId="align_process"
-                label="Unlock Process Reward Models for the next stage"
+                label="Unlock thinking for the next stage"
+              />
+            ) : null}
+            {job.postTrain === "process" && !unlocked.includes("domain_agents") ? (
+              <ResearchUnlockLink
+                className="mt-2"
+                nodeId="domain_agents"
+                label="Unlock Tool-Use Gym for tools post-train"
               />
             ) : null}
             </div>
-          </details>
+          </HudDesktopDefaultDetails>
         ) : null}
       </div>
     </GameCard>

@@ -13,6 +13,8 @@ import type {
   CheckpointUiRecord,
 } from "./checkpointUi";
 
+import { HudDesktopDefaultDetails } from "../../ui/HudDesktopDefaultDetails";
+
 export interface CheckpointWorkspaceEntry {
   sourceJobId: string;
   checkpoint: CheckpointUiRecord;
@@ -117,7 +119,7 @@ export function CheckpointWorkspace({
         </div>
       </section>
 
-      <details className="group rounded-lg border border-line/65 bg-panel-2/45" data-manual-checkpoint-disclosure="true">
+      <HudDesktopDefaultDetails className="group rounded-lg border border-line/65 bg-panel-2/45" data-manual-checkpoint-disclosure="true">
         <summary className="flex min-h-11 cursor-pointer list-none items-start justify-between gap-3 rounded-lg p-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
           <div>
             <p className="hud-eyebrow">Manual checkpoint</p>
@@ -189,7 +191,7 @@ export function CheckpointWorkspace({
           </p>
         )}
         </div>
-      </details>
+      </HudDesktopDefaultDetails>
 
       {selectedGroup ? (
         <>

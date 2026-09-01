@@ -73,6 +73,7 @@ export function ConsoleDialog({
   maxWidthClass = 'max-w-3xl',
   closeLabel = 'Close dialog',
   canClose = true,
+  shellClassName,
 }: {
   open: boolean
   titleId: string
@@ -88,6 +89,7 @@ export function ConsoleDialog({
   closeLabel?: string
   /** Some terminal game states must be resolved with an explicit action. */
   canClose?: boolean
+  shellClassName?: string
 }) {
   const dialogRef = useRef<HTMLDivElement>(null)
   const swipeRef = useRef<{
@@ -225,7 +227,7 @@ export function ConsoleDialog({
         onLostPointerCapture={(event) => {
           if (swipeRef.current?.pointerId === event.pointerId) resetSwipe(event.currentTarget)
         }}
-        className={`hud-dialog-shell relative flex h-[100dvh] max-h-[100dvh] w-full ${maxWidthClass} flex-col overflow-hidden border-y-0 border-mint/25 bg-panel shadow-[0_30px_110px_rgba(0,7,11,0.78)] outline-none ring-1 ring-white/5 sm:h-auto sm:max-h-[92dvh] sm:rounded-xl sm:border`}
+        className={`hud-dialog-shell relative flex h-[100dvh] max-h-[100dvh] w-full ${maxWidthClass} flex-col overflow-hidden border-y-0 border-mint/25 bg-panel shadow-[0_30px_110px_rgba(0,7,11,0.78)] outline-none ring-1 ring-white/5 sm:h-auto sm:max-h-[92dvh] sm:rounded-xl sm:border${shellClassName ? ` ${shellClassName}` : ''}`}
       >
         {canClose ? (
           <div className="hud-dialog-grabber" aria-hidden="true">
@@ -273,7 +275,7 @@ export function ConsoleDialog({
           ) : null}
         </header>
         <div
-          className="hud-dialog-content panel-scroll min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-5 sm:py-4"
+          className="hud-dialog-content panel-scroll flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-3 sm:px-5 sm:py-4"
           data-swipe-ignore="true"
         >
           {children}

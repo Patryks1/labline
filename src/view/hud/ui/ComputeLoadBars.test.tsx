@@ -11,6 +11,7 @@ import {
   ServeModelLoadBar,
   ServeOutageBanner,
   channelLoadsFromServePool,
+  serveOutageActive,
 } from './ComputeLoadBars'
 
 function withServeMarket(seed: number) {
@@ -168,8 +169,74 @@ describe('ComputeLoadBars', () => {
       }),
     )
     expect(markup).toContain('data-testid="serve-outage-banner"')
+    expect(markup).toContain('Coverage outage')
     expect(markup).toContain('Pause new API')
     expect(markup).toContain('Pause new subs')
+  })
+
+  it('shows an inference outage when demand exists and the pool is empty', () => {
+    const { state } = withServeMarket(9_506)
+    const empty = {
+      ...state,
+      lastMarket: {
+        ...state.lastMarket,
+        capacityPf: 0,
+        servedPf: 0,
+        unservedRatio: 1,
+        playerDemandMTok: 12,
+        serveOutage: true,
+      },
+    }
+    expect(serveOutageActive(empty)).toBe(true)
+    const markup = renderToStaticMarkup(
+      createElement(ServeOutageBanner, {
+        state: empty,
+        onPauseApi: () => undefined,
+        onPauseSubs: () => undefined,
+      }),
+    )
+    expect(markup).toContain('data-testid="serve-outage-banner"')
+    expect(markup).toContain('Inference outage')
+    expect(markup).toContain('data-testid="pause-new-api"')
+    expect(markup).toContain('data-testid="pause-new-subs"')
+  })
+
+  it('hides the outage banner on a fresh game', () => {
+    const state = createGame(9_504)
+    expect(serveOutageActive(state)).toBe(false)
+    const markup = renderToStaticMarkup(
+      createElement(ServeOutageBanner, {
+        state,
+        onPauseApi: () => undefined,
+        onPauseSubs: () => undefined,
+      }),
+    )
+    expect(markup).not.toContain('data-testid="serve-outage-banner"')
+    expect(markup).not.toContain('Coverage outage')
+    expect(markup).not.toContain('Inference outage')
+  })
+
+  it('ignores a stale serveOutage flag when nobody is asking', () => {
+    const base = createGame(9_505)
+    const state = {
+      ...base,
+      lastMarket: {
+        ...base.lastMarket,
+        capacityPf: 12,
+        unservedRatio: 0.9,
+        playerDemandMTok: 0,
+        serveOutage: true,
+      },
+    }
+    expect(serveOutageActive(state)).toBe(false)
+    const markup = renderToStaticMarkup(
+      createElement(ServeOutageBanner, {
+        state,
+        onPauseApi: () => undefined,
+        onPauseSubs: () => undefined,
+      }),
+    )
+    expect(markup).not.toContain('data-testid="serve-outage-banner"')
   })
 
   it('renders peak pricing copy when surge is live', () => {

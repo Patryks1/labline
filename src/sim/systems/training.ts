@@ -122,6 +122,13 @@ import {
   estimateBenchmarkRun,
 } from "../balance/benchmarkCost";
 
+function playerGymQualityBonus(state: SimState): number {
+  return (
+    aggregateEffects(state.player.researchUnlocked, state.player.researchRanks)
+      .gymQualityBonus ?? 0
+  );
+}
+
 /** @deprecated Fixed PF targets replace calendar extensions. */
 export const TRAINING_EXTENSION_DAYS = 10;
 export const TRAINING_BENCHMARK_MIN_PROGRESS = 0.1;
@@ -289,6 +296,7 @@ import { syntheticTeacherGenerationEconomics } from "../balance/syntheticTeacher
 import { fleetStats, resolveRackSku } from "./racks";
 import { modelCanCurateDataDomain } from "./modelEligibility";
 import { isLivePublicModel } from "../modelRelease";
+import { modelIpSaleQuote } from "./victory";
 import type {
   DataDomain,
   DataMix,
@@ -1382,6 +1390,9 @@ export function trainingLoss(
         | "outcomeRisk"
         | "effectiveDataRatio"
         | "repeatedDataEpochs"
+        | "attachedGymKinds"
+        | "gymAttachDays"
+        | "gymAttachQuality"
       >
     >,
   stage: TrainableStage,
@@ -1541,6 +1552,20 @@ export function trainingLoss(
     const direction = rng.next() < 0.58 ? 1 : -1;
     observed *= 1 + direction * rng.range(0.015, 0.055) * volatility;
   }
+  const gymCount = job.attachedGymKinds?.length ?? 0;
+  if (gymCount > 0) {
+    const gymQuality = Math.max(0, Math.min(1, job.gymAttachQuality ?? 0.28));
+    const attachDays = Math.max(0, job.gymAttachDays ?? 0);
+    const spike =
+      (0.38 + (1 - gymQuality) * 0.52) *
+      Math.exp(-3.2 * p) *
+      (0.55 + gymCount * 0.28);
+    const overfitWobble =
+      Math.min(0.12, Math.max(0, attachDays - 10) * 0.006) *
+      rng.range(-0.4, 1);
+    observed += spike + rng.range(-(1 - gymQuality) * 0.07, (1 - gymQuality) * 0.04) + overfitWobble;
+  }
+
   const floor = baseBand * 0.82;
   return Math.max(floor, Math.round(observed * 1000) / 1000);
 }
@@ -2278,7 +2303,8 @@ export function startTraining(
     Boolean(opts.continueFromCheckpointId);
   const specialistsUnlocked =
     state.player.researchUnlocked.includes("data_specialists") ||
-    !!aggregateEffects(state.player.researchUnlocked).unlockCorpusSpecialists;
+    !!aggregateEffects(state.player.researchUnlocked, state.player.researchRanks)
+      .unlockCorpusSpecialists;
   const minMTok = minDataMTokForParams(paramsB);
   const continueBaseModel = mode === "continue" ? continuationBase : undefined;
   const priorDataMTok = continueBaseModel?.dataTokensUsedMTok ?? 0;
@@ -3130,22 +3156,6 @@ export function advancePostTrain(state: SimState, jobId?: string): SimState {
     return state;
 
   const nextStage = POST_TRAIN_ORDER[idx + 1]!;
-  if (
-    nextStage === "rlhf" &&
-    !state.player.researchUnlocked.includes("align_rlhf")
-  ) {
-    return withAlert(
-      state,
-      "warn",
-      "Unlock RLHF Pipeline for preference training.",
-    );
-  }
-  if (
-    nextStage === "process" &&
-    !state.player.researchUnlocked.includes("align_process")
-  ) {
-    return withAlert(state, "warn", "Unlock Process Reward Models first.");
-  }
 
   return selectPostTrain(
     state,
@@ -3196,12 +3206,19 @@ export function selectPostTrain(
     nextStage === "process" &&
     !state.player.researchUnlocked.includes("align_process")
   ) {
-    return withAlert(state, "warn", "Unlock Process Reward Models first.");
+    return withAlert(state, "warn", "Unlock thinking (Process Reward Models) first.");
+  }
+  if (
+    nextStage === "tools" &&
+    !state.player.researchUnlocked.includes("domain_agents")
+  ) {
+    return withAlert(state, "warn", "Unlock Tool-Use Gym on the agents branch first.");
   }
   const quote = postTrainStageQuote(
     job,
     nextStage,
     gymsLinkedToJob(state, job),
+    playerGymQualityBonus(state),
   );
   if (state.player.cash + 1e-9 < quote.cash) {
     return withAlert(
@@ -3393,6 +3410,7 @@ export function completeTrainingJobsNow(state: SimState): SimState {
               daysElapsed: completedJob.postTrainDaysElapsed,
               gyms: state.player.postTrainGyms,
               tools: state.player.toolSkills,
+              gymQualityBonus: playerGymQualityBonus(state),
             }),
           );
     const accountedJob = pass ? { ...completedJob, ...pass } : completedJob;
@@ -3406,6 +3424,7 @@ export function completeTrainingJobsNow(state: SimState): SimState {
         state.player.models,
         state.player.postTrainGyms,
         state.player.toolSkills,
+        playerGymQualityBonus(state),
       ),
     };
   });
@@ -3426,7 +3445,9 @@ function benchmarkSuiteLatentScore(
   const preset = job.productPreset ?? presetFromFamily(job.family);
   const io = job.io ?? ioForPreset(preset, capability);
   const dataQuality = Math.max(1, Math.min(100, job.dataQualityUsed ?? 50));
-  const gymLift = trainingGymLatentLift(gyms, job.attachedGymKinds);
+  const gymLift = trainingGymLatentLift(gyms, job.attachedGymKinds, {
+    attachDays: job.gymAttachDays,
+  });
   const output = (modality: keyof typeof io.outputs) =>
     Math.max(0, Math.min(100, io.outputs[modality] ?? 0));
   switch (suiteId) {
@@ -3542,6 +3563,7 @@ export function resolveTrainingBenchmarkEvaluation(
         trainingGymLatentLift(
           state.player.postTrainGyms,
           job.attachedGymKinds,
+          { attachDays: job.gymAttachDays },
         ) *
           0.35,
     ),
@@ -4427,6 +4449,7 @@ export function recoverFailedPostTrainFromCheckpoint(
         recoveryStage,
         failedJob.targetParamsB,
         state.player.postTrainGyms,
+        playerGymQualityBonus(state),
       ),
   );
   const stagedChild: TrainingJob = {
@@ -5035,6 +5058,13 @@ export function restoreArchivedModel(state: SimState, modelId: string): SimState
   const idx = state.player.models.findIndex((model) => model.id === modelId);
   if (idx < 0) return withAlert(state, "warn", "Model not found.");
   const current = state.player.models[idx]!;
+  if (current.soldIp) {
+    return withAlert(
+      state,
+      "warn",
+      `${current.name} was sold. The buyer owns that IP.`,
+    );
+  }
   if (!current.archived) {
     return withAlert(state, "warn", `${current.name} is not archived.`);
   }
@@ -5079,6 +5109,85 @@ export function restoreArchivedModel(state: SimState, modelId: string): SimState
   };
   next = attachModelToEmptyPlans(next, restored.id);
   return next;
+}
+
+function modelInActiveTraining(state: SimState, modelId: string): boolean {
+  return playerTrainingJobs(state).some(
+    (job) =>
+      (job.continueFromId === modelId && job.parentCheckpointId == null) ||
+      job.teacherId === modelId ||
+      (job.dataPlan?.domainModels &&
+        Object.values(job.dataPlan.domainModels).includes(modelId)) ||
+      (job.dataPlan?.syntheticTeacherIds &&
+        Object.values(job.dataPlan.syntheticTeacherIds).includes(modelId)),
+  );
+}
+
+/** Fire-sale a model's IP for cash. Weights leave the serving fleet permanently. */
+export function sellModelIp(state: SimState, modelId: string): SimState {
+  const idx = state.player.models.findIndex((model) => model.id === modelId);
+  if (idx < 0) return withAlert(state, "warn", "Model not found.");
+  const current = state.player.models[idx]!;
+  if (current.soldIp) {
+    return withAlert(state, "warn", `${current.name} was already sold.`);
+  }
+  if (state.player.safetyCampaign?.modelId === modelId) {
+    return withAlert(
+      state,
+      "warn",
+      `Finish or cancel ${current.name}'s active safety campaign before selling it.`,
+    );
+  }
+  if (modelInActiveTraining(state, modelId)) {
+    return withAlert(
+      state,
+      "warn",
+      "Cannot sell — in use by the active training job.",
+    );
+  }
+  const cashIn = modelIpSaleQuote(state, current);
+  if (cashIn <= 0) {
+    return withAlert(state, "warn", `${current.name} has no buyers right now.`);
+  }
+
+  const models = state.player.models.slice();
+  models[idx] = {
+    ...current,
+    archived: true,
+    soldIp: true,
+    commerciallyOffered: false,
+  };
+  const remainingLive = models.filter((model) => isLivePublicModel(model));
+  const pricing = stripModelFromProductSurface(
+    state.player.pricing,
+    remainingLive,
+    modelId,
+  );
+  const cash = state.player.cash + cashIn;
+
+  return {
+    ...state,
+    player: {
+      ...state.player,
+      models,
+      pricing,
+      cash,
+      finance: { ...state.player.finance, cash },
+    },
+    alerts: [
+      {
+        id: `sell-model-ip-${modelId}-${state.day}`,
+        day: state.day,
+        severity: "info" as const,
+        message: `Sold ${current.name} for $${(cashIn / 1e6).toFixed(2)}M. Off the fleet — that IP belongs to the buyer.`,
+      },
+      ...state.alerts,
+    ].slice(0, 40),
+    news: [
+      `Day ${state.day}: ${state.player.name} sells ${current.name} for $${(cashIn / 1e6).toFixed(1)}M.`,
+      ...state.news,
+    ].slice(0, 20),
+  };
 }
 
 /** Delete a model checkpoint (cannot delete while training job targets it). */
@@ -5391,11 +5500,7 @@ export function setEffortHeadComputeShare(
     recipeId !== INSTANT_EFFORT_ID &&
     !effortReasoningUnlocked(state.player.researchUnlocked)
   ) {
-    return withAlert(
-      state,
-      "warn",
-      "Process Reward research is required to train extra effort heads.",
-    );
+    return withAlert(state, "warn", "Unlock thinking first.");
   }
   const paramsB = job?.targetParamsB ?? model?.paramsB ?? 1;
   const gymQuality = gymQualityByKind(state.player.postTrainGyms, "math");
@@ -5435,11 +5540,7 @@ export function setEffortHeadCapabilityBias(
     recipeId !== INSTANT_EFFORT_ID &&
     !effortReasoningUnlocked(state.player.researchUnlocked)
   ) {
-    return withAlert(
-      state,
-      "warn",
-      "Process Reward research is required to train extra effort heads.",
-    );
+    return withAlert(state, "warn", "Unlock thinking first.");
   }
   return patchProductProfile(state, id, (profile) =>
     withEffortRecipePatch(profile, recipeId, {
@@ -5454,19 +5555,26 @@ export function startEffortTraining(
 ): SimState {
   const continueId = request.recipeId?.trim();
   const continuingInstant = continueId === INSTANT_EFFORT_ID;
-  if (
-    !continuingInstant &&
-    !effortReasoningUnlocked(state.player.researchUnlocked)
-  ) {
+  if (continuingInstant) {
     return withAlert(
       state,
       "warn",
-      "Process Reward research is required to train extra effort heads.",
+      "Instant quality follows the base run and post-train, not extra Instant compute.",
     );
+  }
+  if (!effortReasoningUnlocked(state.player.researchUnlocked)) {
+    return withAlert(state, "warn", "Unlock thinking first.");
   }
   const jobs = playerTrainingJobs(state);
   const job = jobs.find((candidate) => candidate.id === request.id);
   const model = state.player.models.find((candidate) => candidate.id === request.id);
+  if (!job && model) {
+    return withAlert(
+      state,
+      "warn",
+      "Extra thinking heads need a training run.",
+    );
+  }
   if (
     model &&
     jobs.some((candidate) => candidate.effortOnlySourceModelId === model.id)
@@ -5937,6 +6045,7 @@ function buildModelFromJob(
     modelContext,
     state.player.postTrainGyms,
     state.player.toolSkills,
+    playerGymQualityBonus(state),
   );
   const investmentMaturity = fundedTrainingMaturity(job);
   const completedPostStages = completedPostTrainStages(job);
@@ -5946,6 +6055,7 @@ function buildModelFromJob(
     modelContext,
     state.player.postTrainGyms,
     state.player.toolSkills,
+    playerGymQualityBonus(state),
   );
   const hasCompletedPostStage = (stage: Exclude<PostTrainStage, "none">) =>
     completedPostStages.includes(stage) &&
@@ -7415,7 +7525,20 @@ export function tickTraining(state: SimState): SimState {
       };
     }
     const headed = applyEffortHeadTick(state, job, allocatedPf, state.day);
-    const working = headed.job;
+    const attachedGyms = gymsLinkedToJob(state, headed.job);
+    const gymAttachQuality =
+      attachedGyms.length === 0
+        ? 0
+        : attachedGyms.reduce((sum, gym) => sum + gym.quality, 0) /
+          attachedGyms.length;
+    const working = {
+      ...headed.job,
+      gymAttachDays:
+        attachedGyms.length > 0
+          ? (headed.job.gymAttachDays ?? 0) + (active ? 1 : 0)
+          : 0,
+      gymAttachQuality,
+    };
     const remainderPf = headed.remainderPf;
     const usefulBasePf = Math.min(
       remainderPf,
@@ -7570,6 +7693,7 @@ export function tickTraining(state: SimState): SimState {
             daysElapsed: postTrainDaysElapsed,
             gyms: state.player.postTrainGyms,
             tools: state.player.toolSkills,
+            gymQualityBonus: playerGymQualityBonus(state),
           })
         : undefined;
       const failureProgress =

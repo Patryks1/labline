@@ -2,8 +2,14 @@ import type { BuildableKind, PanelId, SimState } from '../../sim/types'
 import { computeSnapshot } from '../../sim/systems/compute'
 import { planExposedModelIds } from '../../sim/balance/modelRouter'
 import { isDcAnchor, isDcKind, isHqAnchor, isHqKind } from '../../sim/systems/map'
-import { playerHqStaffCap, playerStaff, staffTotal } from '../../sim/systems/staff'
+import {
+  pendingStaffPoaches,
+  playerHqStaffCap,
+  playerStaff,
+  staffTotal,
+} from '../../sim/systems/staff'
 import { facilityAnchorTiles } from '../../sim/systems/worldAccess'
+import { ECONOMY } from '../../sim/balance/economy'
 import { money } from './format'
 import {
   buildTrainingJobViewModel,
@@ -77,7 +83,39 @@ export function buildObjectives(state: SimState, includeGuidance = true): Object
     : undefined
   const finance = selectFinanceDashboardReadouts(state).current
 
-  if (finance.runwayDays < 30) {
+  const poach = pendingStaffPoaches(state)[0]
+  if (poach) {
+    const daysLeft = Math.max(0, poach.resolveDay - state.day)
+    objectives.push({
+      id: `staff-poach-${poach.id}`,
+      title: 'Match a poach offer',
+      description: `${poach.rivalName} is raiding your team. Pay a raise before the window closes or they leave.`,
+      progress: `${money(poach.retainCost)} · ${daysLeft}d left`,
+      severity: 'warning',
+      panel: 'org',
+      actionLabel: 'Match the offer',
+    })
+  }
+
+  if (finance.cash < 0) {
+    const restructuring = state.player.capital?.restructuring
+    const atFloor = finance.cash <= ECONOMY.victory.bankruptCash
+    objectives.push({
+      id: 'cash-recovery',
+      title: atFloor
+        ? 'Use the insolvency window'
+        : 'Raise cash before bankruptcy',
+      description:
+        'Take credit, sell equity, or sell models. The run ends only after the recovery window expires.',
+      progress:
+        restructuring?.active
+          ? `${restructuring.daysLeft}d · ${restructuring.stage.replace('_', ' ')}`
+          : money(finance.cash),
+      severity: 'danger',
+      panel: 'stats',
+      actionLabel: 'Open Capital',
+    })
+  } else if (finance.runwayDays < 30) {
     objectives.push({
       id: 'runway-risk',
       title: 'Protect the cash runway',

@@ -4,6 +4,8 @@ import { HudButton, StatusChip } from "../../ui/HudPrimitives";
 import type { CheckpointUiRecord } from "./checkpointUi";
 import { effectiveEffortBoardUsdPerBaseMTok } from "../../data/benchmarkLeaderboard";
 
+import { HudDesktopDefaultDetails } from "../../ui/HudDesktopDefaultDetails";
+
 const verdictLabel = (
   verdict: NonNullable<CheckpointUiRecord["review"]>["verdict"],
 ): string => {
@@ -59,7 +61,7 @@ export function TrainingEvidencePanel({
     evidenceCheckpoints.length > 0;
 
   return (
-    <details
+    <HudDesktopDefaultDetails
       className="group rounded-lg border border-research/35 bg-research/5"
       aria-label={`${job.name} benchmark results and reviews`}
       data-training-evidence="true"
@@ -254,7 +256,7 @@ export function TrainingEvidencePanel({
         </div>
       ) : null}
       </div>
-    </details>
+    </HudDesktopDefaultDetails>
   );
 }
 

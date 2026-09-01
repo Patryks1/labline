@@ -1,5 +1,6 @@
 import type { SimState } from '../types'
 import { servingPlacementNeed } from '../systems/servingPlacement'
+import { aggregateEffects } from '../systems/research'
 import { activeBalanceTuning } from './tuning'
 
 /**
@@ -73,7 +74,18 @@ export function hostedModelOpexDay(
     Math.max(0, servedInferPfDay) * HOSTING_LOAD_PER_PF_DAY
   const raw = residencyDay + endpointDay + loadDay
   const scaled = raw * tuning.hostingCostMult * tuning.expenseMult
-  const scale = raw > 1e-9 ? scaled / raw : 1
+  const discount = Math.min(
+    0.25,
+    Math.max(
+      0,
+      aggregateEffects(
+        state.player.researchUnlocked,
+        state.player.researchRanks,
+      ).hostingOpexDiscount ?? 0,
+    ),
+  )
+  const factor = 1 - discount
+  const scale = raw > 1e-9 ? (scaled * factor) / raw : factor
   return {
     models: models.map((item) => ({
       ...item,
@@ -83,6 +95,6 @@ export function hostedModelOpexDay(
     residencyDay: residencyDay * scale,
     endpointDay: endpointDay * scale,
     loadDay: loadDay * scale,
-    totalDay: scaled,
+    totalDay: scaled * factor,
   }
 }

@@ -1,21 +1,37 @@
 import { Code, Flask, Function as FunctionIcon, MagnifyingGlass, Terminal } from "@phosphor-icons/react";
 import type { PostTrainGym, PostTrainGymKind, ToolSkill, ToolSkillId } from "../../../../sim/types";
 import {
+  GYM_FOCUS_AXES,
   GYM_PACKAGES,
   GYM_UNLOCK_RESEARCH,
   POST_TRAIN_GYM_KINDS,
   POST_TRAIN_GYM_META,
   TOOL_PACKAGES,
+  TOOL_PACKAGE_UNLOCK,
   TOOL_SKILL_META,
+  TOOL_SKILL_UNLOCK,
   gymUnlocked,
   normalizePostTrainGyms,
   normalizeToolSkills,
   packageTotalCash,
+  toolPackageUnlocked,
+  toolSkillUnlocked,
 } from "../../../../sim/balance/modelStudio";
 import { money } from "../../format";
 import { GameCard, MeterBar } from "../../ui/kit";
-import { HudButton, HudInput, HudRange, StatusChip } from "../../ui/HudPrimitives";
+import { HudButton, StatusChip } from "../../ui/HudPrimitives";
 import { ResearchUnlockLink } from "../../ui/ResearchUnlockLink";
+import { SliderField } from "../../ui/SliderField";
+
+import { HudDesktopDefaultDetails } from "../../ui/HudDesktopDefaultDetails";
+
+type LabsResearchAllocation = {
+  dataShare: number;
+  safetyShare: number;
+  employedResearchers: number;
+  podResearchers: number;
+  fixedResearchers: number;
+};
 
 const TOOL_ICONS: Record<ToolSkillId, typeof Code> = {
   json: FunctionIcon,
@@ -88,6 +104,15 @@ export function TrainingLabsPicker({
   );
 }
 
+function gymFreeResearchers(researchAllocation: LabsResearchAllocation): number {
+  return Math.max(
+    0,
+    researchAllocation.employedResearchers -
+      researchAllocation.podResearchers -
+      researchAllocation.fixedResearchers,
+  );
+}
+
 export function LabsTab({
   cash,
   gyms,
@@ -105,19 +130,18 @@ export function LabsTab({
   onInvestGym: (kind: PostTrainGymKind, packageId: string) => void;
   onSetGymAllocation: (
     kind: PostTrainGymKind,
-    allocation: { assignedResearchers?: number; researchShare?: number },
+    allocation: {
+      assignedResearchers?: number;
+      researchShare?: number;
+      focusBias?: number;
+    },
   ) => void;
   onTeachTool: (skillId: ToolSkillId, packageId: string) => void;
-  researchAllocation: {
-    dataShare: number;
-    safetyShare: number;
-    employedResearchers: number;
-    podResearchers: number;
-    fixedResearchers: number;
-  };
+  researchAllocation: LabsResearchAllocation;
 }) {
   const normalizedGyms = normalizePostTrainGyms(gyms);
   const normalizedTools = normalizeToolSkills(tools);
+  const freeResearchers = gymFreeResearchers(researchAllocation);
   const meanGym =
     normalizedGyms.reduce((sum, gym) => sum + gym.quality, 0) /
     Math.max(1, normalizedGyms.length);
@@ -165,7 +189,7 @@ export function LabsTab({
             tone="train"
           />
         </div>
-        <details className="group mt-3 rounded-md border border-line/55 bg-void/25" data-labs-research-split="collapsed">
+        <HudDesktopDefaultDetails className="group mt-3 rounded-md border border-line/55 bg-void/25" data-labs-research-split="collapsed">
           <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.6875rem] text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-research/60 [&::-webkit-details-marker]:hidden">
             <span>Research compute split</span>
             <span className="font-mono tabular-nums text-bone">Gym {Math.round(gymShare * 100)}% · <span className="group-open:hidden">Details</span><span className="hidden group-open:inline">Hide</span></span>
@@ -198,50 +222,26 @@ export function LabsTab({
             </div>
           ))}
         </div>
-        </details>
+        </HudDesktopDefaultDetails>
       </section>
 
-      <div className="grid gap-3 xl:grid-cols-3">
+      <div className="grid gap-3 xl:grid-cols-3" data-labs-gym-grid="true">
         {normalizedGyms.map((gym) => {
           const meta = POST_TRAIN_GYM_META[gym.kind];
           const unlocked = gymUnlocked(gym.kind, researchUnlocked);
           const tier = Math.max(0, gym.tier ?? 0);
           const activePack = GYM_PACKAGES.find((pack) => pack.id === gym.activePackageId);
           const nextPack = GYM_PACKAGES.find((pack) => pack.tier === tier + 1);
-          const otherGymResearchers = normalizedGyms.reduce(
-            (sum, entry) =>
-              sum + (entry.kind === gym.kind ? 0 : Math.max(0, entry.assignedResearchers ?? 0)),
-            0,
-          );
-          const researcherMax = Math.max(
-            0,
-              researchAllocation.employedResearchers -
-              researchAllocation.podResearchers -
-              researchAllocation.fixedResearchers -
-              otherGymResearchers,
-          );
-          const otherGymShare = normalizedGyms.reduce(
-            (sum, entry) =>
-              sum + (entry.kind === gym.kind ? 0 : Math.max(0, entry.researchShare ?? 0)),
-            0,
-          );
-          const shareMax = Math.max(
-            0,
-            0.85 -
-              researchAllocation.dataShare -
-              researchAllocation.safetyShare -
-              otherGymShare,
-          );
-          const allocationReady =
-            Boolean(nextPack) &&
-            (gym.assignedResearchers ?? 0) >= (nextPack?.minResearchers ?? 0) &&
-            (gym.researchShare ?? 0) >= 0.05;
+          const staffed =
+            (gym.assignedResearchers ?? 0) > 0 ||
+            (gym.assignedEngineers ?? 0) > 0 ||
+            (gym.assignedDataStaff ?? 0) > 0;
           return (
             <GameCard
               key={gym.id}
               eyebrow={meta.grades}
               title={meta.name}
-              mobileSummary={`${Math.round(gym.quality * 100)}% quality · tier ${tier}`}
+              mobileSummary={`${Math.round(gym.quality * 100)}% quality · ${unlocked ? `tier ${tier}` : "locked"}`}
               tone="research"
               actions={
                 activePack ? (
@@ -262,71 +262,48 @@ export function LabsTab({
                   tone="research"
                 />
               </div>
-              <p className="hud-mobile-detail mt-2 font-mono text-[0.625rem] text-muted">
-                Sunk {money(gym.investedCash)} cash · {money(gym.investedComputeCash)} compute
-              </p>
               {unlocked ? (
-                <details className="group mt-3 rounded-md border border-research/25 bg-research/5" data-gym-allocation="collapsed">
-                  <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-research/60 [&::-webkit-details-marker]:hidden">
-                    <span className="hud-eyebrow">HQ research team</span>
-                    <span className="font-mono text-[0.625rem] text-muted">
-                      {gym.assignedResearchers ?? 0} people · {Math.round((gym.researchShare ?? 0) * 100)}% PF · <span className="group-open:hidden">Edit</span><span className="hidden group-open:inline">Hide</span>
-                    </span>
-                  </summary>
-                  <div className="border-t border-research/20 p-2.5">
-                  <label className="mt-2 grid grid-cols-[1fr_4.5rem] items-center gap-2 text-[0.6875rem] text-muted">
-                    Researchers assigned
-                    <HudInput
-                      type="number"
-                      min={0}
-                      max={researcherMax}
-                      step={1}
-                      value={gym.assignedResearchers ?? 0}
-                      aria-label={`${meta.name} assigned researchers`}
-                      onChange={(event) =>
-                        onSetGymAllocation(gym.kind, {
-                          assignedResearchers: Number(event.currentTarget.value),
-                        })
-                      }
-                    />
-                  </label>
-                  <label className="mt-2 block text-[0.6875rem] text-muted">
-                    <span className="flex items-center justify-between gap-2">
-                      Research compute
-                      <strong className="font-mono text-mint">
-                        {Math.round((gym.researchShare ?? 0) * 100)}%
-                      </strong>
-                    </span>
-                    <HudRange
-                      min={0}
-                      max={Math.round(shareMax * 100)}
-                      step={5}
-                      value={Math.round((gym.researchShare ?? 0) * 100)}
-                      aria-label={`${meta.name} research compute percentage`}
-                      onChange={(event) =>
-                        onSetGymAllocation(gym.kind, {
-                          researchShare: Number(event.currentTarget.value) / 100,
-                        })
-                      }
-                    />
-                  </label>
-                  <p className="mt-1 text-[0.625rem] leading-4 text-muted">
-                    Shared with tech research and synthetic data. Staff are reserved from the HQ pool.
-                  </p>
-                  </div>
-                </details>
+                <div className="mt-3">
+                  <SliderField
+                    label="Focus"
+                    sublabel={
+                      <span className="font-mono text-[0.5625rem] text-muted">
+                        {GYM_FOCUS_AXES[gym.kind].low} → {GYM_FOCUS_AXES[gym.kind].high}
+                      </span>
+                    }
+                    value={gym.focusBias ?? 0.5}
+                    hint
+                    hoverContent={
+                      <p className="text-[0.6875rem] leading-5 text-muted">
+                        {GYM_FOCUS_AXES[gym.kind].hint}
+                      </p>
+                    }
+                    onChange={(next) =>
+                      onSetGymAllocation(gym.kind, { focusBias: next })
+                    }
+                  />
+                </div>
+              ) : null}
+              {unlocked ? (
+                <p className="mt-2 font-mono text-[0.625rem] leading-4 text-muted" data-gym-auto-staff="true">
+                  Auto {gym.assignedResearchers ?? 0} researchers
+                  {" · "}
+                  {gym.assignedEngineers ?? 0} engineers
+                  {" · "}
+                  {gym.assignedDataStaff ?? 0} data
+                  {" · "}
+                  {Math.round((gym.researchShare ?? 0) * 100)}% PF
+                  {staffed ? "" : " · fills from free HQ seats"}
+                </p>
               ) : null}
               {activePack ? (
-                <div className="mt-3">
+                <div className="mt-2">
                   <MeterBar
                     label={`${activePack.label} research`}
                     value={(gym.progressPfDays ?? 0) / Math.max(0.001, gym.targetPfDays ?? activePack.researchPfDays)}
                     detail={`${(gym.progressPfDays ?? 0).toFixed(1)} / ${(gym.targetPfDays ?? activePack.researchPfDays).toFixed(1)} PF-d`}
                     tone="research"
                   />
-                  <p className="mt-1 font-mono text-[0.625rem] text-muted">
-                    Opex {money(activePack.operatingCostPerDay)}/day · needs {activePack.minResearchers} researchers
-                  </p>
                 </div>
               ) : null}
               <div className="mt-3 grid gap-1.5">
@@ -334,7 +311,8 @@ export function LabsTab({
                   nextPack && !activePack ? [nextPack].map((pack) => {
                     const total = packageTotalCash(pack);
                     const unaffordable = cash + 1e-9 < total;
-                    const disabled = unaffordable || !allocationReady;
+                    const shortStaff = freeResearchers < pack.minResearchers;
+                    const disabled = unaffordable || shortStaff;
                     return (
                       <HudButton
                         key={pack.id}
@@ -344,8 +322,8 @@ export function LabsTab({
                         title={
                           unaffordable
                             ? `Needs ${money(total)}.`
-                            : !allocationReady
-                              ? `Assign ${pack.minResearchers} researchers and at least 5% research compute.`
+                            : shortStaff
+                              ? `Need ${pack.minResearchers} free HQ researchers.`
                               : pack.hint
                         }
                         className="!min-h-11 !w-full !items-start !justify-between !px-2.5 !py-2 !text-left"
@@ -354,7 +332,7 @@ export function LabsTab({
                         <span>
                           <strong className="block text-[0.75rem]">{pack.label}</strong>
                           <span className="hud-mobile-detail block text-[0.625rem] font-normal text-muted">
-                            {pack.researchPfDays} PF-days · {pack.minResearchers} researchers · {money(pack.operatingCostPerDay)}/day
+                            {pack.researchPfDays} PF-days · auto {pack.minResearchers} researchers · {money(pack.operatingCostPerDay)}/day
                           </span>
                         </span>
                         <span className="shrink-0 font-mono text-[0.6875rem] text-mint">
@@ -364,7 +342,7 @@ export function LabsTab({
                     );
                   }) : activePack ? null : (
                     <p className="rounded-md border border-research/25 bg-research/5 p-2.5 text-[0.6875rem] text-muted">
-                      Full campus commissioned. Keep staff and compute assigned to improve curriculum quality.
+                      Full campus commissioned. Crew stays auto-assigned.
                     </p>
                   )
                 ) : (
@@ -385,6 +363,7 @@ export function LabsTab({
           {normalizedTools.map((skill) => {
             const meta = TOOL_SKILL_META[skill.id];
             const Icon = TOOL_ICONS[skill.id];
+            const skillUnlocked = toolSkillUnlocked(skill.id, researchUnlocked);
             return (
               <GameCard
                 key={skill.id}
@@ -395,9 +374,23 @@ export function LabsTab({
                     {meta.name}
                   </span>
                 }
-                mobileSummary={`${Math.round(skill.proficiency * 100)}% proficiency`}
+                mobileSummary={
+                  skillUnlocked
+                    ? `${Math.round(skill.proficiency * 100)}% proficiency`
+                    : "research locked"
+                }
+                actions={
+                  skillUnlocked ? (
+                    <StatusChip tone="train">{Math.round(skill.proficiency * 100)}%</StatusChip>
+                  ) : (
+                    <StatusChip tone="warning">locked</StatusChip>
+                  )
+                }
               >
                 <p className="hud-mobile-detail text-[0.6875rem] leading-5 text-muted">{meta.blurb}</p>
+                <p className="mt-1 font-mono text-[0.5625rem] uppercase tracking-wider text-muted">
+                  Feeds the tools post-train stage
+                </p>
                 <div className="mt-2">
                   <MeterBar
                     label="Proficiency"
@@ -407,25 +400,52 @@ export function LabsTab({
                   />
                 </div>
                 <div className="mt-3 grid gap-1.5">
-                  {TOOL_PACKAGES.map((pack) => {
-                    const total = packageTotalCash(pack);
-                    return (
-                      <HudButton
-                        key={pack.id}
-                        type="button"
-                        variant="ghost"
-                        disabled={cash + 1e-9 < total}
-                        title={pack.hint}
-                        className="!min-h-11 !w-full !justify-between !px-2 !text-left"
-                        onClick={() => onTeachTool(skill.id, pack.id)}
-                      >
-                        <span className="text-[0.6875rem]">{pack.label}</span>
-                        <span className="font-mono text-[0.625rem] text-muted">
-                          {money(total)}
-                        </span>
-                      </HudButton>
-                    );
-                  })}
+                  {!skillUnlocked ? (
+                    <ResearchUnlockLink
+                      nodeId={TOOL_SKILL_UNLOCK[skill.id]}
+                      label="Unlock this tool"
+                    />
+                  ) : (
+                    TOOL_PACKAGES.map((pack) => {
+                      const total = packageTotalCash(pack);
+                      const packNode = TOOL_PACKAGE_UNLOCK[pack.id];
+                      const packUnlocked = toolPackageUnlocked(
+                        pack.id,
+                        researchUnlocked,
+                      );
+                      const unaffordable = cash + 1e-9 < total;
+                      const disabled = unaffordable || !packUnlocked;
+                      return (
+                        <HudButton
+                          key={pack.id}
+                          type="button"
+                          variant="ghost"
+                          disabled={disabled}
+                          title={
+                            !packUnlocked && packNode
+                              ? pack.hint
+                              : unaffordable
+                                ? `Needs ${money(total)}.`
+                                : pack.hint
+                          }
+                          className="!min-h-11 !w-full !items-start !justify-between !px-2 !py-2 !text-left"
+                          onClick={() => onTeachTool(skill.id, pack.id)}
+                        >
+                          <span>
+                            <span className="block text-[0.6875rem] font-semibold text-bone">
+                              {pack.label}
+                            </span>
+                            <span className="mt-0.5 block text-[0.5625rem] leading-4 text-muted">
+                              {pack.hint}
+                            </span>
+                          </span>
+                          <span className="shrink-0 text-right font-mono text-[0.625rem] text-mint">
+                            {money(total)}
+                          </span>
+                        </HudButton>
+                      );
+                    })
+                  )}
                 </div>
               </GameCard>
             );

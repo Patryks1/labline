@@ -81,7 +81,7 @@ export function BenchmarkRunDialog({
       titleId={`benchmark-run-${job.id}`}
       eyebrow="Measure, do not train"
       title={`Benchmark ${job.name}`}
-      description="This snapshots the current weights and scores Instant plus every trained effort head. Named heads need Process Reward research. Extra spend buys tighter intervals, not a stronger model."
+      description="This snapshots the current weights and scores Instant plus every trained effort head. Named heads need thinking research. Extra spend buys tighter intervals, not a stronger model."
       mobileDescription="Pick suites and effort, check the live cost, then run."
       onClose={onClose}
       maxWidthClass="max-w-4xl"

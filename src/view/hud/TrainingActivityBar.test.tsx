@@ -53,6 +53,22 @@ describe('TrainingActivityBar', () => {
     expect(rect.right).toBeLessThanOrEqual(1440)
   })
 
+  it('spans only the map column between workspace and intel on wide desktops', () => {
+    const rect = desktopTrainingActivityRect({
+      viewportWidth: 1920,
+      railWidth: 200,
+      workspaceWidth: 1134,
+      intelWidth: 48,
+    })
+
+    expect(rect.left).toBe(1334)
+    expect(rect.right).toBe(1872)
+    expect(rect.width).toBe(538)
+    expect(rect.width).not.toBe(1672)
+    expect(rect.left).toBeGreaterThanOrEqual(200 + 1134)
+    expect(rect.right).toBeLessThanOrEqual(1920 - 48)
+  })
+
   it('suppresses only the duplicate summary while the Models workspace is open', () => {
     expect(shouldSuppressTrainingSummary(true, 'models')).toBe(true)
     expect(shouldSuppressTrainingSummary(false, 'models')).toBe(false)

@@ -318,6 +318,8 @@ export const ECONOMY = {
     minPaidServeRate: 0.995,
     minHeadroom: 0.25,
     bankruptCash: -500_000_000,
+    /** Days of forced asset-sale recovery after cash hits the insolvency floor. */
+    bankruptcyGraceDays: 30,
   },
 
   /** Max facility upgrade level */

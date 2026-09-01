@@ -720,6 +720,15 @@ describe('pause-new traffic', () => {
     )
   })
 
+  it('does not flag a coverage outage before anyone is asking', () => {
+    const cold = tickMarket(createGame(37))
+    expect(cold.lastMarket.playerDemandMTok).toBeLessThanOrEqual(0.05)
+    expect(cold.lastMarket.serveOutage).toBeFalsy()
+    expect(
+      cold.feedEvents?.some((event) => event.kind === 'serve_outage'),
+    ).toBe(false)
+  })
+
   it('zero inference PF posts an outage feed event instead of staying silent', () => {
     let empty = withReleasedModel(withRacks(createGame(36), 0))
     empty = {

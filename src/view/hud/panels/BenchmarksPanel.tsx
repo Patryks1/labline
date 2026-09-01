@@ -80,6 +80,8 @@ import {
   StatusChip,
 } from '../ui/HudPrimitives'
 
+import { HudDesktopDefaultDetails } from '../ui/HudDesktopDefaultDetails'
+
 const PAGE = 15
 
 type BenchTab = 'leaderboard' | 'internal' | 'compare' | 'reviews'
@@ -138,7 +140,7 @@ export function BenchmarksPanel() {
           suiteId,
           unitUsdPerMTokFor: (row) =>
             modelListUsdBase(state, row.model, row.labId),
-        }).filter((row) => row.recipeId === INSTANT_EFFORT_ID),
+        }),
         sortId,
         sortDirection,
       ),
@@ -247,7 +249,7 @@ export function BenchmarksPanel() {
     (recipe) => recipe.id === reviewRecipeId,
   )
     ? reviewRecipeId
-    : INSTANT_EFFORT_ID
+    : (selectedRow?.recipeId ?? INSTANT_EFFORT_ID)
   const selectedPublishedReviews = selectedRow
     ? state.reviews.filter((review) => {
         const labId = selectedRow.isPlayer ? state.playerLabId : selectedRow.labId
@@ -348,7 +350,7 @@ export function BenchmarksPanel() {
     <PanelScaffold
       eyebrow="Evals"
       title="Benchmarks"
-      description="Official public Instant scores, one row per released model. Trained effort projections stay in the detailed review; training snapshots stay on Internal."
+      description="Official public scores, one row per trained thinking level. Training snapshots stay on Internal."
       mobileDescription="Ranks, model economics and reviews."
     >
       <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4 sm:gap-2">
@@ -501,19 +503,18 @@ export function BenchmarksPanel() {
             <div className="flex flex-wrap items-center gap-2 text-[0.6875rem] text-muted">
               <StatusChip tone="positive">PUBLIC</StatusChip>
               <span className="hud-mobile-summary">
-                Official Instant ranks. Tap a model for speed, cost and trained
-                effort projections.
+                One row per trained thinking level. Tap a row for speed, cost
+                and task economics.
               </span>
               <span className="hud-mobile-detail">
-                Official ranks use each release&apos;s persisted Instant scores.
-                Select a model to inspect trained 1–100× effort projections,
-                task pricing, speed and physical PF without rewriting the
-                public board.
+                Official ranks include Instant plus every trained thinking head
+                on a release. Select a row for task pricing, speed and physical
+                PF at that thinking budget.
               </span>
             </div>
 
             {pendingEvals.length > 0 && (
-              <details
+              <HudDesktopDefaultDetails
                 className="group rounded-lg border border-research/35 bg-research/5"
               >
                 <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-3 py-2 text-[0.75rem] font-medium text-bone marker:hidden focus-visible:outline focus-visible:outline-1 focus-visible:outline-research">
@@ -563,7 +564,7 @@ export function BenchmarksPanel() {
                     )
                   })}
                 </div>
-              </details>
+              </HudDesktopDefaultDetails>
             )}
 
             <div className="hud-mobile-summary">
@@ -611,7 +612,7 @@ export function BenchmarksPanel() {
                     servingEfficiency={servingEfficiency}
                     onSelect={() => {
                       setSelectedModelKey(rowKey)
-                      setReviewRecipeId(INSTANT_EFFORT_ID)
+                      setReviewRecipeId(row.recipeId)
                     }}
                   />
                 )
@@ -687,7 +688,7 @@ export function BenchmarksPanel() {
                             type="button"
                             onClick={() => {
                               setSelectedModelKey(rowKey)
-                              setReviewRecipeId(INSTANT_EFFORT_ID)
+                              setReviewRecipeId(r.recipeId)
                             }}
                             aria-controls="benchmark-model-review"
                             aria-expanded={selected}
@@ -784,7 +785,13 @@ export function BenchmarksPanel() {
                 suiteId={suiteId}
                 metrics={metrics}
                 recipeId={selectedRecipeId}
-                onRecipeChange={setReviewRecipeId}
+                onRecipeChange={(id) => {
+                  setReviewRecipeId(id)
+                  if (!selectedRow) return
+                  setSelectedModelKey(
+                    leaderboardEffortRowKey({ ...selectedRow, recipeId: id }),
+                  )
+                }}
                 prices={selectedPrices}
                 servingEfficiency={selectedServingEfficiency}
                 publishedReviews={selectedPublishedReviews}
@@ -1060,8 +1067,8 @@ export function MobileBenchmarkCard({
           </span>
         </div>
         <div className="min-w-0 px-1.5">
-          <span className="block truncate text-[0.5625rem] uppercase tracking-wide text-muted">Official</span>
-          <span className="block truncate font-mono text-[0.75rem] text-bone">Instant</span>
+          <span className="block truncate text-[0.5625rem] uppercase tracking-wide text-muted">Think</span>
+          <span className="block truncate font-mono text-[0.75rem] text-bone">{row.recipeName}</span>
         </div>
       </div>
 
@@ -1461,12 +1468,12 @@ export function SelectedBenchmarkModelReview({
     <div id="benchmark-model-review" className="scroll-mt-3">
       <GameCard
         eyebrow={`Detailed review · official rank #${rank}`}
-        title={row.model.name}
+        title={row.displayName}
         tone="mint"
         mobileSummary={`${row.labName} · cap ${num(row.capability, 0)} · ${recipe.name} ${recipe.thinkingTokenMult.toFixed(1)}×`}
         actions={
           <span className="hidden sm:inline-flex">
-            <StatusChip tone="positive">Instant rank preserved</StatusChip>
+            <StatusChip tone="positive">{row.recipeName}</StatusChip>
           </span>
         }
       >
@@ -1490,18 +1497,18 @@ export function SelectedBenchmarkModelReview({
             </select>
           </label>
         </div>
-        {projectionActive ? (
+        {projectionActive && recipe.id !== row.recipeId ? (
           <p className="mt-2 rounded-md border border-amber/35 bg-amber/10 px-2.5 py-2 text-[0.6875rem] leading-5 text-amber">
             Unofficial projection: applies this trained recipe&apos;s rapidly
-            diminishing capability lift to reasoning-compatible tasks. It does
-            not alter published Instant scores or official rank #{rank}.
+            diminishing capability lift to reasoning-compatible tasks. Official
+            rank #{rank} is the {row.recipeName} row on the public board.
           </p>
         ) : null}
         <div className="mt-3 grid grid-cols-2 gap-1.5 sm:grid-cols-4 sm:gap-2 min-[1181px]:grid-cols-5">
           <MetricTile label="Speed" value={`${num(averageSpeed, 1)} tok/s`} detail={`${num(averageTtft, 0)} ms TTFT`} tone="research" />
           <MetricTile label="Cost / task" value={formatTaskCost(averageCost)} detail={`$${num(prices.priceIn, 2)} in · $${num(prices.priceOut, 2)} out`} tone="warning" />
           <MetricTile label="PF / task" value={formatTaskPf(averagePf)} detail={`${num(tasks[0]?.estimate.computeIntensityMultiplier ?? 1, 2)}× intensity`} tone="research" />
-          <MetricTile label="Reasoning budget" value={`${recipe.thinkingTokenMult.toFixed(1)}×`} detail={projectionActive ? 'unofficial view' : 'official Instant'} tone={projectionActive ? 'warning' : 'positive'} />
+          <MetricTile label="Reasoning budget" value={`${recipe.thinkingTokenMult.toFixed(1)}×`} detail={recipe.id === row.recipeId ? `official ${row.recipeName}` : 'unofficial view'} tone={recipe.id === row.recipeId ? 'positive' : 'warning'} />
           <div className="hud-mobile-detail">
             <MetricTile label="Effective $/MTok" value={money(effectiveUsdPerMTok)} detail={`${recipe.name} billed mix`} tone="warning" />
           </div>
@@ -1537,7 +1544,7 @@ export function SelectedBenchmarkModelReview({
             )}
           </section>
         </div>
-        <details className="mt-3 rounded-md border border-line/60 bg-void/30">
+        <HudDesktopDefaultDetails className="mt-3 rounded-md border border-line/60 bg-void/30">
           <summary className="flex min-h-11 cursor-pointer items-center justify-between gap-2 px-2.5 py-2 text-[0.75rem] font-medium text-bone hover:bg-panel-2/60">
             <span>Per-task benchmark ledger</span>
             <span className="hidden font-mono text-[0.6875rem] text-muted sm:inline">{tasks.length} tasks · scores, tokens, cost, PF</span>
@@ -1568,7 +1575,7 @@ export function SelectedBenchmarkModelReview({
               </tbody>
             </table>
           </div>
-        </details>
+        </HudDesktopDefaultDetails>
       </GameCard>
     </div>
   )
@@ -1850,7 +1857,7 @@ function MobileInternalBenchmarkCard({
         />
       </div>
 
-      <details className="group/internal border-t border-line/50">
+      <HudDesktopDefaultDetails className="group/internal border-t border-line/50">
         <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-[0.6875rem] text-muted marker:hidden focus-visible:outline focus-visible:outline-1 focus-visible:outline-research">
           <span>Scores &amp; trained effort</span>
           <span aria-hidden className="transition group-open/internal:rotate-90">›</span>
@@ -1895,7 +1902,7 @@ function MobileInternalBenchmarkCard({
             <p className="text-[0.6875rem] text-muted">No trained effort board yet.</p>
           )}
         </div>
-      </details>
+      </HudDesktopDefaultDetails>
     </article>
   )
 }

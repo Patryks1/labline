@@ -121,8 +121,9 @@ export function studioPostTrainTargetPfDays(
   stage: TrainablePostStage,
   paramsB = 1,
   gyms?: readonly PostTrainGym[],
+  gymQualityBonus = 0,
 ): number {
-  const quality = gymQualityForStage(stage, gyms)
+  const quality = gymQualityForStage(stage, gyms, gymQualityBonus)
   return Math.round(postTrainTargetPfDays(job, stage, paramsB) * postTrainGymWorkMult(quality) * 10) / 10
 }
 
@@ -131,11 +132,12 @@ export function postTrainStageQuote(
     Partial<Pick<TrainingJob, 'postTrainStageRuns' | 'activeParamsB'>>,
   stage: TrainablePostStage,
   gyms?: readonly PostTrainGym[],
+  gymQualityBonus = 0,
 ): { pfDays: number; cash: number; gymQuality: number } {
   const paramsB = job.targetParamsB ?? 1
-  const gymQuality = gymQualityForStage(stage, gyms)
+  const gymQuality = gymQualityForStage(stage, gyms, gymQualityBonus)
   return {
-    pfDays: studioPostTrainTargetPfDays(job, stage, paramsB, gyms),
+    pfDays: studioPostTrainTargetPfDays(job, stage, paramsB, gyms, gymQualityBonus),
     cash: postTrainStageCashCost(paramsB, stage, gymQuality),
     gymQuality,
   }
@@ -362,6 +364,7 @@ export interface PostTrainEffectivenessInput {
   daysElapsed?: number
   gyms?: readonly PostTrainGym[]
   tools?: readonly ToolSkill[]
+  gymQualityBonus?: number
 }
 
 /**
@@ -394,11 +397,11 @@ export function postTrainStageEffectiveness(input: PostTrainEffectivenessInput):
   const gymMult =
     input.gyms == null
       ? 1
-      : 0.7 + 0.3 * gymQualityForStage(input.stage, input.gyms)
+      : 0.7 + 0.3 * gymQualityForStage(input.stage, input.gyms, input.gymQualityBonus ?? 0)
   const toolMult =
     input.tools == null || input.stage !== 'tools'
       ? 1
-      : 0.6 + 0.4 * meanToolProficiency(input.tools)
+      : 0.42 + 0.58 * meanToolProficiency(input.tools)
   // A selected stage with no allocated work is neutral; partial PF exposes at
   // most that fraction of the stage evidence.
   return clamp01(evidence * compute * gymMult * toolMult)
@@ -411,12 +414,14 @@ export function resolvedPostTrainStageEffectiveness(
   models: readonly Model[],
   gyms?: readonly PostTrainGym[],
   tools?: readonly ToolSkill[],
+  gymQualityBonus = 0,
 ): Partial<Record<TrainablePostStage, number>> {
   const resolved = { ...(job.postTrainStageEffectiveness ?? {}) }
   for (const stage of completedPostTrainStages(job)) {
     resolved[stage] ??= postTrainStageEffectiveness({
       job,
       stage,
+      gymQualityBonus,
       researchUnlocked,
       models,
       gyms,
@@ -432,6 +437,7 @@ export function postTrainEffectProfile(
   models: readonly Model[],
   gyms?: readonly PostTrainGym[],
   toolSkills?: readonly ToolSkill[],
+  gymQualityBonus = 0,
 ): {
   scaleStrength: number
   alignmentEquivalent: number
@@ -459,6 +465,7 @@ export function postTrainEffectProfile(
         models,
         gyms,
         tools: toolSkills,
+        gymQualityBonus,
       })
       const priorRuns =
         job.postTrainStageRuns?.[stage] ?? (frozen != null ? 1 : 0)
@@ -473,6 +480,7 @@ export function postTrainEffectProfile(
         models,
         gyms,
         tools: toolSkills,
+        gymQualityBonus,
       })
     }
     return 0

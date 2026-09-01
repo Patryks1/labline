@@ -18,6 +18,7 @@ import type { SimState, WorldFeedCategory } from '../../sim/types'
 import { useUiStore } from '../../store/uiStore'
 import { selectFinanceDashboardReadouts } from './data/financeDashboardModel'
 import { FacilitiesIntelView } from './panels/command/FacilitiesIntelView'
+import { hudDesktopDefaultDisclosureOpen } from './ui/hudDesktopDisclosure'
 
 /** Totals for a command-dock channel must come from the same rows the list shows. */
 export function sumChannelRows(
@@ -276,7 +277,7 @@ function ChannelBreakdown({
   usage: string
   children: ReactNode
 }) {
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(hudDesktopDefaultDisclosureOpen)
   const net = revenue - cogs
   const panelId = `command-channel-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
   return (

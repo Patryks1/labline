@@ -68,7 +68,29 @@ export function syntheticTeacherSelectOptions(
           label: `${teacher.name} · ${recipe.name} · cap ${economics.effectiveDomainCapability.toFixed(1)} / q ${Math.round(economics.effortQuality * 100)}% · ${economics.billedTokenMultiplier.toFixed(1)}× billed · ${economics.computeIntensityMultiplier.toFixed(2)}× PF intensity · ${compactMoney(SYNTHETIC_GENERATION_CASH_PER_BILLED_MTOK)}/billed MTok → ${compactMoney(economics.cashPerAcceptedMTok)}/accepted MTok · ${compactPf(economics.computePfDaysPerAcceptedMTok)} PF/accepted MTok`,
         };
       }),
+    )
+    .sort(
+      (left, right) =>
+        right.effectiveCapability - left.effectiveCapability ||
+        right.effortQuality - left.effortQuality ||
+        left.label.localeCompare(right.label),
     );
+}
+
+/** Strongest model × recipe for this corpus. */
+export function preferredSyntheticTeacherOption(
+  options: readonly SyntheticTeacherSelectOption[],
+): SyntheticTeacherSelectOption | undefined {
+  return options[0];
+}
+
+export function filterSyntheticTeacherSelectOptions(
+  options: readonly SyntheticTeacherSelectOption[],
+  query: string,
+): SyntheticTeacherSelectOption[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [...options];
+  return options.filter((option) => option.label.toLowerCase().includes(needle));
 }
 
 export function parseSyntheticTeacherSelectValue(value: string): {

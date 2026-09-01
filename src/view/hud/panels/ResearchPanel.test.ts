@@ -55,6 +55,8 @@ describe("ResearchPanel mobile presentation", () => {
     expect(markup).toContain("research-tree-shell");
     expect(markup).toContain("--research-tree-zoom");
     expect(markup).toContain("Pods &amp; queue");
+    expect(markup).toContain("Auto-queue");
+    expect(markup).toContain("aria-pressed");
     expect(markup).toContain('aria-controls="research-pods-and-queue"');
     expect(markup).toContain('data-mobile-collapsed="true"');
     expect(markup).toContain('data-mobile-secondary-metrics="collapsed"');

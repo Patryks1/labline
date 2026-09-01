@@ -320,12 +320,6 @@ export function BottomBar() {
           </AllocationSlot>
         </div>
 
-        {(a.training <= 0 || a.inference <= 0 || a.research <= 0) ? (
-          <p className="operations-zero-note relative z-10 mt-2 text-[0.6875rem] leading-snug text-amber">
-            Zero allocation pauses that queue. Restore compute whenever you want work to resume.
-          </p>
-        ) : null}
-
         {expanded ? (
           <div className="operations-expanded-meta relative z-10 mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line/50 pt-2 font-mono text-[0.6875rem] text-muted">
             <span>

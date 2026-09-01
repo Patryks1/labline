@@ -210,7 +210,7 @@ export function startFabCampaign(state: SimState): SimState {
     }
   }
 
-  const effects = aggregateEffects(state.player.researchUnlocked)
+  const effects = aggregateEffects(state.player.researchUnlocked, state.player.researchRanks)
   const speed = 1 + (effects.fabSpeed ?? 0)
   const phase = ECONOMY.fabPhases.architecture
   const days = Math.max(8, Math.round(phase.days / speed))
@@ -259,7 +259,7 @@ function advancePhase(state: SimState, next: FabPhase): SimState {
   }
   const key = next as keyof typeof ECONOMY.fabPhases
   const phase = ECONOMY.fabPhases[key]
-  const effects = aggregateEffects(state.player.researchUnlocked)
+  const effects = aggregateEffects(state.player.researchUnlocked, state.player.researchRanks)
   const speed = 1 + (effects.fabSpeed ?? 0)
   const days = Math.max(6, Math.round(phase.days / speed))
   if (state.player.cash < phase.cash) {

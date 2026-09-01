@@ -99,4 +99,20 @@ describe("training loss realism", () => {
     expect(postRecovered).toBeGreaterThan(2.5);
     expect(postRecovered).toBeLessThan(5);
   });
+
+  it("spikes early loss when low-quality gyms are attached", () => {
+    const plain = trainingLoss(baseJob, "base", 0.04, 2);
+    const gymmed = trainingLoss(
+      {
+        ...baseJob,
+        attachedGymKinds: ["code", "math"],
+        gymAttachDays: 1,
+        gymAttachQuality: 0.18,
+      },
+      "base",
+      0.04,
+      2,
+    );
+    expect(gymmed).toBeGreaterThan(plain);
+  });
 });

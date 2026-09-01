@@ -5,6 +5,8 @@ import { money } from '../../format'
 import { GameCard, MeterBar, StatRow, BlockerList } from '../../ui/kit'
 import { HudButton, HudRange } from '../../ui/HudPrimitives'
 
+import { HudDesktopDefaultDetails } from '../../ui/HudDesktopDefaultDetails'
+
 export function SafetyCampaignSection({
   model,
   campaign,
@@ -93,7 +95,7 @@ export function SafetyCampaignSection({
         </span>
       }
     >
-      <details
+      <HudDesktopDefaultDetails
         key={model.id}
         className="group rounded-md border border-research/25 bg-research/5"
         data-safety-setup-disclosure="true"
@@ -171,7 +173,7 @@ export function SafetyCampaignSection({
             </HudButton>
           </div>
         </div>
-      </details>
+      </HudDesktopDefaultDetails>
     </GameCard>
   )
 }

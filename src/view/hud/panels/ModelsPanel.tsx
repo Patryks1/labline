@@ -25,6 +25,7 @@ import {
   isInternalFleetModel,
   isLivePublicModel,
 } from "../../../sim/modelRelease";
+import { modelIpSaleQuote } from "../../../sim/systems/victory";
 import {
   PARAM_PRESETS,
   distillRetentionFor,
@@ -112,6 +113,7 @@ import { safetyCampaignEstimate } from "../../../sim/systems/safetyCampaigns";
 import { playerStaff } from "../../../sim/systems/staff";
 import { TrainingDataRadar } from "../ui/TrainingDataRadar";
 import { RecipePlanModal } from "./models/RecipePlanModal";
+import { RecipeRadarDialog } from "./models/RecipeRadarDialog";
 import {
   allocationsFromMix,
   clampEnvelopeSplit,
@@ -172,7 +174,10 @@ import {
   ModelsTrainingQueue,
   type ModelsWorkspaceView,
 } from "./models/ModelsTrainingQueue";
-import type { ModelsWorkflowStep } from "./models/ModelsWorkflowStepper";
+import {
+  MODELS_CONTINUE_STEPS,
+  type ModelsWorkflowStep,
+} from "./models/ModelsWorkflowStepper";
 import { ModelsTrainingModal } from "./models/ModelsTrainingModal";
 import {
   CheckpointBranchDialog,
@@ -293,6 +298,7 @@ export function ModelsPanel({
   const releaseModel = useGameStore((s) => s.releaseModel);
   const archiveModel = useGameStore((s) => s.archiveModel);
   const restoreArchivedModel = useGameStore((s) => s.restoreArchivedModel);
+  const sellModelIp = useGameStore((s) => s.sellModelIp);
   const deleteModel = useGameStore((s) => s.deleteModel);
   const setDefaultEffort = useGameStore((s) => s.setDefaultEffort);
   const setServedEffort = useGameStore((s) => s.setServedEffort);
@@ -369,6 +375,7 @@ export function ModelsPanel({
   );
   const recipeTouchedRef = useRef(false);
   const [planLibraryOpen, setPlanLibraryOpen] = useState(false);
+  const [spiderMixOpen, setSpiderMixOpen] = useState(false);
   const [allowSynthetic, setAllowSynthetic] = useState(true);
   const [includeSynthHQ, setIncludeSynthHQ] = useState(true);
   const [includeSynthLQ] = useState(false);
@@ -765,8 +772,8 @@ export function ModelsPanel({
     weights,
   ]);
   const researchEffects = useMemo(
-    () => aggregateEffects(unlocked),
-    [unlocked],
+    () => aggregateEffects(unlocked, state.player.researchRanks),
+    [unlocked, state.player.researchRanks],
   );
   const trainingResearchMult =
     1 +
@@ -1462,19 +1469,35 @@ export function ModelsPanel({
             ? "compute"
             : undefined;
 
-  const openNewModel = () => {
+  const openNewModel = (opts?: {
+    step?: ModelsWorkflowStep;
+    mode?: TrainMode;
+    continueFromId?: string;
+  }) => {
+    const nextMode = opts?.mode ?? mode;
+    const nextContinueFromId = opts?.continueFromId ?? continueFromId;
+    const capSource =
+      nextMode === "continue"
+        ? teachers.find((teacher) => teacher.id === nextContinueFromId)
+        : undefined;
     recipeTouchedRef.current = false;
     setPanelTab("runs");
+    if (opts?.mode) setMode(opts.mode);
+    if (opts?.continueFromId !== undefined) {
+      setContinueFromId(opts.continueFromId);
+    }
     setShowNewModel(true);
-    setNewModelStep("product");
+    setNewModelStep(opts?.step ?? "product");
     const seeded = seedRecipeVolumes({
       weights,
       postTrainWeights,
-      paramsB: trainParamsB,
+      paramsB: capSource?.paramsB ?? trainParamsB,
       usableByDomain,
       postTrainShare: DEFAULT_RECIPE_ALIGN_SHARE,
       totalCapMTok:
-        mode === "continue" ? newSinceContinue : Number.POSITIVE_INFINITY,
+        nextMode === "continue"
+          ? newDataSinceModel(state, capSource)
+          : Number.POSITIVE_INFINITY,
     });
     setPostTrainShare(DEFAULT_RECIPE_ALIGN_SHARE);
     setRealDataMTok(seeded.totalMTok);
@@ -1484,13 +1507,17 @@ export function ModelsPanel({
 
   const prefillContinue = (model: Model) => {
     setPanelTab("runs");
-    openNewModel();
     setMode("continue");
     setContinueFromId(model.id);
     setName(model.name.replace(/\s+v\d+$/i, "") || model.name);
     const next = applyParamsB(model.paramsB);
     setSizeVal(next.val);
     setSizeUnit(next.unit);
+    openNewModel({
+      step: "data",
+      mode: "continue",
+      continueFromId: model.id,
+    });
   };
 
   const handleStartTraining = (request: StartTrainingOpts) => {
@@ -1800,6 +1827,26 @@ export function ModelsPanel({
                   completedThrough={workflowCompletedThrough}
                   onStepChange={setNewModelStep}
                   onCancel={() => setShowNewModel(false)}
+                  steps={
+                    mode === "continue" && continueFromId
+                      ? MODELS_CONTINUE_STEPS
+                      : undefined
+                  }
+                  title={
+                    mode === "continue" && continueFromId
+                      ? "Continue training"
+                      : undefined
+                  }
+                  description={
+                    mode === "continue" && continueFromId
+                      ? "Add extra data and compute priority. Mix and topology stay inherited."
+                      : undefined
+                  }
+                  mobileDescription={
+                    mode === "continue" && continueFromId
+                      ? "Data extras → launch"
+                      : undefined
+                  }
                   footerAction={
                     newModelStep === "review" ? (
                       <HudButton
@@ -1846,7 +1893,12 @@ export function ModelsPanel({
                         title="How do you want to train?"
                         mobileSummary={`${MODE_META[mode].label} selected`}
                         tone="train"
-                        className={newModelStep === "architecture" ? "hidden" : undefined}
+                        className={
+                          newModelStep === "architecture" ||
+                          (mode === "continue" && Boolean(continueFromId))
+                            ? "hidden"
+                            : undefined
+                        }
                       >
                         <div className="grid gap-2 sm:grid-cols-3">
                           {(
@@ -2099,8 +2151,8 @@ export function ModelsPanel({
                                   {BACKBONE_OPTIONS.map((option) => {
                                     const candidatePreset =
                                       option.value === "diffusion" &&
-                                      productPreset !== "image_generation" &&
-                                      productPreset !== "video_generation"
+                                      (productPreset === "language" ||
+                                        productPreset === "vision_language")
                                         ? "image_generation"
                                         : productPreset;
                                     const locked = !trainingUnlockEligibility({
@@ -2342,7 +2394,11 @@ export function ModelsPanel({
                     >
                       <GameCard
                         eyebrow="Data recipe"
-                        title="Spider mix"
+                        title={
+                          mode === "continue" && continueFromId
+                            ? "New tokens"
+                            : "Spider mix"
+                        }
                         mobileSummary={`${formatTokens(dataMTok)} selected · ${Math.round(trainShare * 100)}% train`}
                         tone="train"
                       >
@@ -2438,7 +2494,45 @@ export function ModelsPanel({
                             </p>
                           ) : null}
 
-                          <div className="min-w-0 overflow-hidden" data-shell-gesture-ignore="true" data-models-radar="training-data">
+                          <HudButton
+                            type="button"
+                            variant="primary"
+                            className="w-full sm:w-auto"
+                            onClick={() => setSpiderMixOpen(true)}
+                          >
+                            {mode === "continue" && continueFromId
+                              ? "Edit new tokens"
+                              : "Edit spider mix"}
+                          </HudButton>
+
+                          {!mixUnlocked ? (
+                            <ResearchUnlockLink
+                              nodeId="data_mix"
+                              label="Unlock Mixture Engineering"
+                            />
+                          ) : null}
+                          {!synthUnlocked ? (
+                            <ResearchUnlockLink
+                              nodeId="data_synth"
+                              label="Unlock Synthetic Generators"
+                            />
+                          ) : null}
+                        </div>
+                      </GameCard>
+                      <RecipeRadarDialog
+                        open={spiderMixOpen}
+                        title={
+                          mode === "continue" && continueFromId
+                            ? "New tokens"
+                            : "Spider mix"
+                        }
+                        onClose={() => setSpiderMixOpen(false)}
+                      >
+                        <div
+                          className="min-w-0 overflow-hidden"
+                          data-shell-gesture-ignore="true"
+                          data-models-radar="training-data"
+                        >
                           <TrainingDataRadar
                             baseWeights={weights}
                             postWeights={postTrainWeights}
@@ -2487,7 +2581,10 @@ export function ModelsPanel({
                               const expansionOn =
                                 synthExpansionUnlocked && !!strongestTeacher;
                               if (expansionOn && extra > 0) {
-                                const real = Math.max(1, recipe.realMTok || owned);
+                                const real = Math.max(
+                                  1,
+                                  recipe.realMTok || owned,
+                                );
                                 const total = real + extra;
                                 const mult = Math.max(
                                   0,
@@ -2516,22 +2613,8 @@ export function ModelsPanel({
                             trainShare={trainShare}
                             onTrainShareChange={setTrainShare}
                           />
-                          </div>
-
-                          {!mixUnlocked ? (
-                            <ResearchUnlockLink
-                              nodeId="data_mix"
-                              label="Unlock Mixture Engineering"
-                            />
-                          ) : null}
-                          {!synthUnlocked ? (
-                            <ResearchUnlockLink
-                              nodeId="data_synth"
-                              label="Unlock Synthetic Generators"
-                            />
-                          ) : null}
                         </div>
-                      </GameCard>
+                      </RecipeRadarDialog>
                       <RecipePlanModal
                         open={planLibraryOpen}
                         plans={recipePlans}
@@ -2581,6 +2664,12 @@ export function ModelsPanel({
                         mobileSummary={`${TRAINING_PRECISION_PROFILES[trainingFormat].label} · ${daysEst === Infinity ? "no pool" : `${daysEst.toFixed(1)}d`}`}
                       >
                         <div className="space-y-3">
+                          {mode === "continue" && continueFromId ? (
+                            <p className="font-mono text-[0.6875rem] text-muted">
+                              {TRAINING_PRECISION_PROFILES[trainingFormat].label}{" "}
+                              · inherited topology
+                            </p>
+                          ) : (
                           <div className="grid gap-2 sm:grid-cols-2">
                             <label className="models-compute-choice text-[0.8125rem] text-muted">
                               <span className="flex items-center justify-between gap-2">
@@ -2593,12 +2682,6 @@ export function ModelsPanel({
                               </span>
                               <HudSelect
                                 value={trainingFormat}
-                                disabled={mode === "continue"}
-                                title={
-                                  mode === "continue"
-                                    ? "Inherited from the source checkpoint"
-                                    : undefined
-                                }
                                 onChange={(event) => {
                                   const next = event.target
                                     .value as TrainingComputeFormat;
@@ -2610,7 +2693,7 @@ export function ModelsPanel({
                                     setNativeWeightFormat("float");
                                   }
                                 }}
-                                className="mt-1 min-h-11 w-full text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                                className="mt-1 min-h-11 w-full text-sm"
                               >
                                 {TRAINING_FORMAT_OPTIONS.map((option) => {
                                   const locked = Boolean(
@@ -2678,12 +2761,6 @@ export function ModelsPanel({
                               </span>
                               <HudSelect
                                 value={nativeWeightFormat}
-                                disabled={mode === "continue"}
-                                title={
-                                  mode === "continue"
-                                    ? "Inherited from the source checkpoint"
-                                    : undefined
-                                }
                                 onChange={(event) => {
                                   const next = event.target
                                     .value as NativeWeightFormat;
@@ -2691,7 +2768,7 @@ export function ModelsPanel({
                                   if (next === "ternary_1_58")
                                     setTrainingFormat("bf16_mixed");
                                 }}
-                                className="mt-1 min-h-11 w-full text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                                className="mt-1 min-h-11 w-full text-sm"
                               >
                                 <option value="float">Float weights</option>
                                 <option
@@ -2710,6 +2787,7 @@ export function ModelsPanel({
                               </HudSelect>
                             </label>
                           </div>
+                          )}
                           <div
                             className="models-numerics-summary rounded-md border border-line/60 bg-void/45 p-2"
                             title={
@@ -2782,6 +2860,7 @@ export function ModelsPanel({
                             </div>
                           </div>
 
+                          {mode === "continue" && continueFromId ? null : (
                           <ModelsDesktopDefaultDetails className="group rounded-md border border-line/50 bg-void/25" data-model-stack-disclosure="true">
                             <summary className="flex min-h-11 cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-2.5 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-mint/60 [&::-webkit-details-marker]:hidden">
                               <h4 className="text-[0.8125rem] font-semibold text-bone">Model stack</h4>
@@ -2874,6 +2953,7 @@ export function ModelsPanel({
                             </CardGrid>
                             </div>
                           </ModelsDesktopDefaultDetails>
+                          )}
                         </div>
                       </GameCard>
                     </div>
@@ -3178,6 +3258,8 @@ export function ModelsPanel({
                 onRelease={handleReleaseModel}
                 onArchive={archiveModel}
                 onRestore={restoreArchivedModel}
+                onSellIp={sellModelIp}
+                ipSaleQuoteFor={(model) => modelIpSaleQuote(state, model)}
                 onDelete={deleteModel}
                 onTrainFurther={prefillContinue}
                 onDistill={prefillDistill}

@@ -38,10 +38,11 @@ export function channelLoadsFromServePool(
 
 export function serveOutageActive(state: SimState): boolean {
   const lm = state.lastMarket
-  return (
-    lm.serveOutage === true ||
-    isInferenceOutage(lm.capacityPf ?? 0, lm.unservedRatio ?? 0)
-  )
+  return isInferenceOutage({
+    capacityPf: lm.capacityPf ?? 0,
+    unservedRatio: lm.unservedRatio ?? 0,
+    demandMTok: lm.playerDemandMTok ?? 0,
+  })
 }
 
 function loadTone(fill: number, warn: boolean, pool: 'train' | 'serve' | 'research'): HudMeterTone {
