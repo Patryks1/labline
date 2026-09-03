@@ -2,7 +2,7 @@ type NamedModel = { name: string }
 
 const VERSION_SUFFIX = /\s+v(\d+)$/i
 
-const NAME_POOL = [
+export const MODEL_NAME_POOL = [
   'Spark',
   'Nova',
   'Atlas',
@@ -34,6 +34,8 @@ const NAME_POOL = [
   'North',
   'Oxide',
 ] as const
+
+const NAME_POOL = MODEL_NAME_POOL
 
 export function modelTemplateName(name: string): string {
   const trimmed = name.trim()
@@ -105,12 +107,21 @@ export function isModelNameTaken(
 export const MODEL_NAME_TAKEN_MESSAGE = 'That model name is already in use.'
 
 /** Generate a unique display name not used by player, rivals, or active jobs. */
-export function generateUniqueModelName(sources: {
-  playerModels?: readonly NamedModel[]
-  rivalModels?: readonly NamedModel[]
-  jobs?: readonly NamedModel[]
-}): string {
+export function generateUniqueModelName(
+  sources: {
+    playerModels?: readonly NamedModel[]
+    rivalModels?: readonly NamedModel[]
+    jobs?: readonly NamedModel[]
+  },
+  opts?: { avoid?: string },
+): string {
   const taken = new Set<string>()
+  const avoid = opts?.avoid?.trim()
+  if (avoid) {
+    taken.add(avoid.toLocaleLowerCase())
+    const avoidedTemplate = modelTemplateName(avoid).toLocaleLowerCase()
+    if (avoidedTemplate) taken.add(avoidedTemplate)
+  }
   for (const list of [sources.playerModels, sources.rivalModels, sources.jobs]) {
     if (!list) continue
     for (const entry of list) {
@@ -137,4 +148,13 @@ export function generateUniqueModelName(sources: {
   }
 
   return `Model ${Date.now().toString(36)}`
+}
+
+/** Continue a lineage: keep the family name and bump v2, v3, … */
+export function continueRunName(
+  parentName: string,
+  existing: readonly NamedModel[],
+): string {
+  const template = modelTemplateName(parentName)
+  return resolveModelIteration(existing, template).name
 }
