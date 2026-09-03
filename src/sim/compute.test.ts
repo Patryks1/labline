@@ -371,9 +371,9 @@ describe('training and ship', () => {
     )
     s = shipModel(s)
     expect(s.player.models.length).toBe(1)
-    // Smoke threshold: a minimal 1B FP32 train lands around 9–10 capability
-    // under current scaling; balance gates live in play/calibration tests.
-    expect(s.player.models[0]!.capability).toBeGreaterThan(9)
+    // Smoke threshold: a minimal 1B FP32 train lands around 7 capability
+    // under V4 scaling (capK 1.45); balance gates live in play/calibration tests.
+    expect(s.player.models[0]!.capability).toBeGreaterThan(6)
     expect(s.player.models[0]!.benchmarks.coding).toBeGreaterThan(0)
     expect(s.player.pricing.plans.some((p) => p.modelIds.includes(s.player.models[0]!.id))).toBe(
       true,

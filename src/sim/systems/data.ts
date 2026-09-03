@@ -35,7 +35,9 @@ import type {
   DataPruneJob,
   DataSellerKind,
   LabData,
+  LabId,
   Model,
+  ModelFamily,
   ProcessJob,
   SimState,
   SyntheticFillRecord,
@@ -62,10 +64,22 @@ import {
 } from "../balance/syntheticTraining";
 import { activeBalanceTuning } from "../balance/tuning";
 import { gymResearchReservationShare } from "../balance/modelStudio";
+import { v4GymResearchReservationShare } from "../training/gyms";
 import {
+  domainCapFromCapabilities,
   synthAcceptanceChances,
   synthTeacherActiveParamsB,
+  syntheticMTokFromPfDays,
+  syntheticQualityFor,
+  type SynthTierBudget,
+  type SyntheticGenerationJob,
 } from "../balance/syntheticGeneration";
+import {
+  addToPool,
+  POST_TRAIN_TRAFFIC_TO_POOL,
+} from "../training/dataBridge";
+import { trainingStateOf } from "../training/state";
+import type { Checkpoint } from "../training/types";
 import {
   appendDatasetAsset,
   pruneDatasetAssetsForDomain,
@@ -166,6 +180,18 @@ function treeResearchActive(state: SimState): boolean {
   );
 }
 
+/** Legacy studio gyms plus V4 training gyms, capped at the gym research slice. */
+export function reservedGymResearchShare(state: SimState): number {
+  return Math.max(
+    0,
+    Math.min(
+      0.75,
+      gymResearchReservationShare(state.player.postTrainGyms) +
+        v4GymResearchReservationShare(state.player.training?.gyms),
+    ),
+  );
+}
+
 /** Research PF fraction available for tech (1 − data gen / gyms / safety). */
 export function researchPoolForTech(
   state: SimState,
@@ -173,8 +199,7 @@ export function researchPoolForTech(
 ): number {
   const data = ensureLabData(state);
   const share =
-    dataResearchReservationShare(data) +
-    gymResearchReservationShare(state.player.postTrainGyms);
+    dataResearchReservationShare(data) + reservedGymResearchShare(state);
   const safetyShare = state.player.safetyCampaign ? 0.4 : 0;
   const remainder = Math.max(0, 1 - share - safetyShare);
   if (options?.reserveTree || treeResearchActive(state)) {
@@ -201,7 +226,7 @@ export function dataResearchReservationShare(data: LabData): number {
 
 /** Maximum data-generation share after gym and safety reservations. */
 export function maxDataResearchShareForState(state: SimState): number {
-  const gymShare = gymResearchReservationShare(state.player.postTrainGyms);
+  const gymShare = reservedGymResearchShare(state);
   const safetyShare = state.player.safetyCampaign ? 0.4 : 0;
   return Math.max(
     0,
@@ -665,7 +690,7 @@ export function collectFromTraffic(state: SimState): SimState {
     segments: state.segments,
     planSlices,
   });
-  return {
+  let next: SimState = {
     ...state,
     player: {
       ...state.player,
@@ -673,6 +698,20 @@ export function collectFromTraffic(state: SimState): SimState {
       brandTrust: result.brandTrust,
     },
   };
+  const freeChat = result.data.dayCollectChatFree ?? 0;
+  next = addToPool(
+    next,
+    state.playerLabId,
+    "instructionMTok",
+    freeChat * POST_TRAIN_TRAFFIC_TO_POOL.instructionPerFreeChatMTok,
+  );
+  next = addToPool(
+    next,
+    state.playerLabId,
+    "preferenceMTok",
+    freeChat * POST_TRAIN_TRAFFIC_TO_POOL.preferencePerFreeChatMTok,
+  );
+  return next;
 }
 
 export function setCollectionRate(state: SimState, rate: number): SimState {
@@ -1441,6 +1480,293 @@ export function cancelSynthGen(state: SimState, jobId: string): SimState {
   return { ...state, player: { ...state.player, data } };
 }
 
+const V4_VERIFIER_STRENGTH = 0.2;
+
+function modelsForLab(state: SimState, labId: LabId): Model[] {
+  if (labId === state.playerLabId) return state.player.models ?? [];
+  return state.rivals.find((rival) => rival.id === labId)?.models ?? [];
+}
+
+function parseTeacherRef(ref: string): {
+  kind: "model" | "checkpoint" | "any";
+  id: string;
+} {
+  if (ref.startsWith("checkpoint:")) {
+    return { kind: "checkpoint", id: ref.slice("checkpoint:".length) };
+  }
+  if (ref.startsWith("model:")) {
+    return { kind: "model", id: ref.slice("model:".length) };
+  }
+  return { kind: "any", id: ref };
+}
+
+export interface V4SynthTeacher {
+  name: string;
+  domainCap: number;
+  activeParamsB: number;
+  family?: ModelFamily;
+  modelId?: string;
+  checkpointId?: string;
+  maxSyntheticDepth: number;
+}
+
+function teacherFromModel(model: Model, domain: DataDomain): V4SynthTeacher {
+  return {
+    name: model.name,
+    domainCap: teacherCapabilityForDataDomain(model, domain),
+    activeParamsB: synthTeacherActiveParamsB(model),
+    family: model.family,
+    modelId: model.id,
+    maxSyntheticDepth: (model.syntheticShare ?? 0) > 0 ? 1 : 0,
+  };
+}
+
+function teacherFromCheckpoint(
+  checkpoint: Checkpoint,
+  domain: DataDomain,
+): V4SynthTeacher {
+  return {
+    name: checkpoint.name,
+    domainCap: domainCapFromCapabilities(checkpoint.truth, domain),
+    activeParamsB: Math.max(
+      0.007,
+      checkpoint.arch.activeParamsB ?? checkpoint.arch.totalParamsB,
+    ),
+    checkpointId: checkpoint.id,
+    maxSyntheticDepth:
+      (checkpoint.trainingSummary.syntheticShare ?? 0) > 0 ? 1 : 0,
+  };
+}
+
+export function resolveV4SynthTeacher(
+  state: SimState,
+  labId: LabId,
+  teacherRef: string,
+  domain: DataDomain,
+): V4SynthTeacher | null {
+  const parsed = parseTeacherRef(teacherRef);
+  const models = modelsForLab(state, labId);
+  const checkpoints = trainingStateOf(state, labId).checkpoints;
+  const model =
+    parsed.kind !== "checkpoint"
+      ? (models.find((candidate) => candidate.id === parsed.id) ?? null)
+      : null;
+  const checkpoint =
+    parsed.kind !== "model"
+      ? (checkpoints.find((candidate) => candidate.id === parsed.id) ?? null)
+      : null;
+  if (parsed.kind === "model") return model ? teacherFromModel(model, domain) : null;
+  if (parsed.kind === "checkpoint") {
+    return checkpoint ? teacherFromCheckpoint(checkpoint, domain) : null;
+  }
+  if (model) return teacherFromModel(model, domain);
+  if (checkpoint) return teacherFromCheckpoint(checkpoint, domain);
+  return null;
+}
+
+/** Start an explicit V4 generation job. Tokens are written as a DatasetAsset on complete. */
+export function startSyntheticGenerationJob(
+  state: SimState,
+  opts: {
+    domain: DataDomain;
+    teacherRef: string;
+    tierBudget: SynthTierBudget;
+    targetMTok: number;
+    verify?: boolean;
+  },
+): SimState {
+  const target = Math.max(0, opts.targetMTok);
+  if (!(target > 0)) {
+    return alert(state, "warn", "Synthetic generation needs a positive token target.");
+  }
+  const teacher = resolveV4SynthTeacher(
+    state,
+    state.playerLabId,
+    opts.teacherRef,
+    opts.domain,
+  );
+  if (!teacher) {
+    return alert(state, "warn", "Pick a finished model or checkpoint as teacher.");
+  }
+  const data = cloneLabData(ensureLabData(state));
+  const job: SyntheticGenerationJob = {
+    id: seededId(
+      "v4synth",
+      state.seed,
+      state.day,
+      opts.domain,
+      opts.teacherRef,
+      data.syntheticJobs?.length ?? 0,
+    ),
+    domain: opts.domain,
+    teacherRef: opts.teacherRef,
+    tierBudget: opts.tierBudget,
+    targetMTok: target,
+    generatedMTok: 0,
+    verify: opts.verify === true,
+    startDay: state.day,
+    status: "running",
+  };
+  data.syntheticJobs = [...(data.syntheticJobs ?? []), job];
+  return {
+    ...state,
+    player: { ...state.player, data },
+    alerts: [
+      {
+        id: job.id,
+        day: state.day,
+        severity: "info" as const,
+        message: `Generating ${formatTokens(target)} ${DATA_DOMAIN_META[opts.domain].label} via ${teacher.name} (tier ${opts.tierBudget}).`,
+      },
+      ...state.alerts,
+    ].slice(0, 40),
+  };
+}
+
+function completeV4SyntheticJob(
+  state: SimState,
+  data: LabData,
+  job: SyntheticGenerationJob,
+  teacher: V4SynthTeacher,
+): LabData {
+  const depth = 1 + teacher.maxSyntheticDepth;
+  const verifierStrength = job.verify ? V4_VERIFIER_STRENGTH : 0;
+  const quality01 = syntheticQualityFor({
+    teacherDomainCap: teacher.domainCap,
+    tierBudget: job.tierBudget,
+    verifierStrength,
+    depth,
+  });
+  const volume = Math.max(job.generatedMTok, job.targetMTok);
+  const method = job.verify ? "verifier" : "imitation";
+  const assetId = `dataset-v4-${job.id}`;
+  const next = appendDatasetAsset(data, {
+    id: assetId,
+    name: `${teacher.name} ${DATA_DOMAIN_META[job.domain].label} synthetic`,
+    volumeMTok: volume,
+    domainWeights: { [job.domain]: 1 },
+    verticalTags: [job.domain, "synthetic", "v4"],
+    quality: quality01 * 100,
+    diversity: job.verify ? 0.72 : 0.48,
+    freshness: 1,
+    rights: "owned",
+    source: "synthetic",
+    exclusiveUntilDay: null,
+    contaminationRisk: job.verify ? 0.08 : 0.22,
+    synthetic: {
+      method,
+      teacherModelIds: teacher.modelId ? [teacher.modelId] : [],
+      generationDepth: depth,
+      promptDiversity: job.verify ? 0.72 : 0.48,
+      verifierStrength,
+      candidatesPerAccepted: job.verify ? 4 : 1,
+      humanAnchorShare: 0.08,
+    },
+    v4Synthetic: {
+      teacherCheckpointId: teacher.checkpointId,
+      teacherModelId: teacher.modelId,
+      teacherName: teacher.name,
+      tierBudget: job.tierBudget,
+      depth,
+      verifiedShare: job.verify ? 1 : 0,
+      method,
+      quality: quality01,
+      generatedDay: state.day,
+    },
+    acquiredDay: state.day,
+  });
+  const stock = normalizeDomainStock(next.stocks[job.domain]);
+  const prior = stock.processed;
+  stock.processed = prior + volume;
+  stock.fromSynth = (stock.fromSynth ?? 0) + volume;
+  if (quality01 >= 0.58) stock.fromSynthHQ = (stock.fromSynthHQ ?? 0) + volume;
+  else stock.fromSynthLQ = (stock.fromSynthLQ ?? 0) + volume;
+  stock.quality =
+    stock.processed > 0
+      ? (stock.quality * prior + quality01 * 100 * volume) / stock.processed
+      : quality01 * 100;
+  next.stocks[job.domain] = stock;
+  next.daySynthMTok += volume;
+  next.dayProcessed += volume;
+  next.lifetimeProcessed += volume;
+  next.lifetimeCollected += volume;
+  return next;
+}
+
+function advanceV4SyntheticJobs(
+  state: SimState,
+  dataIn: LabData,
+  cash: number,
+  alerts: SimState["alerts"],
+): { data: LabData; cash: number; alerts: SimState["alerts"] } {
+  const jobs: SyntheticGenerationJob[] = (dataIn.syntheticJobs ?? []).map(
+    (job) => ({ ...job }),
+  );
+  const running = jobs.filter((job) => job.status === "running");
+  if (running.length === 0) {
+    return { data: { ...dataIn, syntheticJobs: jobs }, cash, alerts };
+  }
+  const live = { ...state, player: { ...state.player, data: dataIn } };
+  const snap = computeSnapshot(live);
+  const pfPool =
+    snap.pools.inference * 0.2 + grossResearchPoolPf(live) * 0.12;
+  const pfPerJob = pfPool / running.length;
+  let data = dataIn;
+  let nextCash = cash;
+  let nextAlerts = alerts;
+  for (const job of jobs) {
+    if (job.status !== "running") continue;
+    const teacher = resolveV4SynthTeacher(
+      live,
+      state.playerLabId,
+      job.teacherRef,
+      job.domain,
+    );
+    if (!teacher) continue;
+    const remaining = Math.max(0, job.targetMTok - job.generatedMTok);
+    const minted = Math.min(
+      remaining,
+      syntheticMTokFromPfDays({
+        pfDays: pfPerJob,
+        tierBudget: job.tierBudget,
+        teacherActiveParamsB: teacher.activeParamsB,
+        domain: job.domain,
+        family: teacher.family,
+      }),
+    );
+    if (minted > 0) {
+      const unitCost = syntheticMTokFromPfDays({
+        pfDays: 1,
+        tierBudget: job.tierBudget,
+        teacherActiveParamsB: teacher.activeParamsB,
+        domain: job.domain,
+        family: teacher.family,
+      });
+      const pfDays = unitCost > 0 ? minted / unitCost : 0;
+      nextCash -=
+        minted * SYNTHETIC_GENERATION_CASH_PER_BILLED_MTOK * job.tierBudget +
+        pfDays * ECONOMY.researchCashPerPfDay * 0.55;
+      job.generatedMTok += minted;
+    }
+    if (job.generatedMTok >= job.targetMTok - 1e-6) {
+      job.generatedMTok = job.targetMTok;
+      job.status = "completed";
+      data = completeV4SyntheticJob(state, data, job, teacher);
+      nextAlerts = [
+        {
+          id: `v4synth-done-${job.id}`,
+          day: state.day,
+          severity: "info" as const,
+          message: `Synth complete: ${formatTokens(job.targetMTok)} ${DATA_DOMAIN_META[job.domain].label} via ${teacher.name}.`,
+        },
+        ...nextAlerts,
+      ].slice(0, 40);
+    }
+  }
+  data = { ...data, syntheticJobs: jobs };
+  return { data, cash: nextCash, alerts: nextAlerts };
+}
+
 /** Estimate MTok/day for a synth config (UI). */
 export function estimateSynthMTokPerDay(
   state: SimState,
@@ -2074,6 +2400,11 @@ export function tickData(state: SimState): SimState {
   data.synthQueue = synthQueue;
   data.dataGenResearchShare = dataResearchReservationShare(data);
 
+  const v4Synth = advanceV4SyntheticJobs(state, data, cash, alerts);
+  data = v4Synth.data;
+  cash = v4Synth.cash;
+  alerts = v4Synth.alerts;
+
   const pruning = processDataPruneJobs(state, data, cash, alerts);
   data = pruning.data;
   cash = pruning.cash;
@@ -2353,8 +2684,8 @@ export function consumeForLabData(
       synthLqUnits += takeLQ;
       syntheticUnits += takeHQ + takeLQ;
     }
-    // V3 never conjures a synthetic shortfall at train start. Labs must first
-    // generate or buy those tokens, so player and rivals contest real stocks.
+    // V4-DELETE: leftover shortfall used to conjure virtual synth at train start.
+    // V4 tokens come only from explicit generation jobs that write DatasetAssets.
     void short;
   }
 
@@ -2427,6 +2758,9 @@ export function consumeForTraining(
     !!planIn?.allowSynthetic &&
     state.player.researchUnlocked.includes("data_synth") &&
     state.player.models.length > 0;
+  // V4-DELETE: train-start virtual synthetic fill and radar expansion.
+  // Requested multiplier oversubscribes owned corpus with generated tokens
+  // that never become DatasetAssets. V4 requires an explicit generation job.
   if (canAutoSynthesize) {
     const weights = normalizeWeights(base.plan.weights);
     const wanted = Math.max(

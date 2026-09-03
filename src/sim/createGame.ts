@@ -12,6 +12,8 @@ import {
   type GameConfig,
 } from './balance/gameConfig'
 import { createRivals } from './systems/rivals'
+import { emptyTrainingState } from './training/state'
+import { starterTrainingState } from './training/createStarterTraining'
 import { createWorldMarkets, refreshPublicEstimates, syncLabIndex } from './systems/labEngine'
 import { withCanonicalCompanies } from './company'
 import { migrateDataHallLayouts } from './systems/dataHallLayouts'
@@ -242,7 +244,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
     regions.map((region) => region.id),
     ECONOMY.incumbentStartingEnterpriseValue,
     cfg.difficulty,
-  )
+  ).map((rival) => ({ ...rival, training: emptyTrainingState() }))
   const compactWorld = staticWorld ? createDynamicWorld(staticWorld) : undefined
   if (compactWorld) seedCompactRivalFacilities(compactWorld, rivals)
   const map = staticWorld
@@ -339,7 +341,7 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       researchLeads: starterResearchPodTemplates().map((template) => ({ ...template.lead })),
       researchPods: starterResearchPodTemplates().map(researchPodFromTemplate),
       researchPrograms: [],
-      trainingPrograms: [],
+      trainingPrograms: [], // V4-DELETE:
       cloudCredits: 3_000_000,
       dataQuality: ECONOMY.startingDataQuality,
       data: createEmptyLabData(),
@@ -351,15 +353,16 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
       activeResearch: null,
       researchQueue: [],
       models: [],
-      trainingCheckpoints: [],
-      privateEvaluationJobs: [],
-      trainingJobs: [],
-      trainingJob: null,
-      safetyCampaign: null,
-      postTrainGyms: defaultPostTrainGyms(),
-      toolSkills: defaultToolSkills(),
-      modelRouters: [],
-      activeModelRouterId: null,
+      training: starterTrainingState(seed, 0),
+      trainingCheckpoints: [], // V4-DELETE:
+      privateEvaluationJobs: [], // V4-DELETE:
+      trainingJobs: [], // V4-DELETE:
+      trainingJob: null, // V4-DELETE:
+      safetyCampaign: null, // V4-DELETE:
+      postTrainGyms: defaultPostTrainGyms(), // V4-DELETE:
+      toolSkills: defaultToolSkills(), // V4-DELETE:
+      modelRouters: [], // V4-DELETE:
+      activeModelRouterId: null, // V4-DELETE:
       dataSupplierContracts: [],
       pricing: {
         apiPricePerMTok: 2.4,
@@ -468,8 +471,8 @@ export function createGame(seedOrOpts: number | CreateGameOpts = 42): SimState {
         status: 'active',
         signedDay: 1,
         acceleratorGeneration: 2,
-        supportedTrainingFormats: ['fp32', 'fp16_mixed', 'bf16_mixed', 'fp8_hybrid'],
-        supportedServePrecisions: ['fp32', 'fp16', 'bf16', 'fp8', 'int8', 'int4', 'ternary_1_58'],
+        supportedTrainingFormats: ['fp32', 'fp16_mixed', 'bf16_mixed', 'fp8_hybrid', 'fp6'],
+        supportedServePrecisions: ['fp32', 'fp16', 'bf16', 'fp8', 'fp6', 'int8', 'int4', 'ternary_1_58'],
       },
     ],
     computeListing: null,

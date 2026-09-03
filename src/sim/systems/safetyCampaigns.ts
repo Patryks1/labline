@@ -4,11 +4,11 @@ import { computeSnapshot } from './compute'
 import { playerTrainingResourcePlan } from './training'
 import { playerStaff } from './staff'
 import { availableHqStaff } from './staffReservations'
-import { dataResearchReservationShare } from './data'
-import { gymResearchReservationShare } from '../balance/modelStudio'
+import { dataResearchReservationShare, reservedGymResearchShare } from './data'
 import { createRng, hashSeed, seededId } from '../rng'
 import { chargeExpense } from './financeLedger'
 
+// V4-DELETE: safety campaigns fold into the preference stage's safetyFocus (WS-C).
 const INTENSITY_MULT: Record<SafetyCampaignIntensity, number> = {
   targeted: 1,
   standard: 2,
@@ -74,7 +74,7 @@ export function safetyCampaignEstimate(
   const researchers = availableHqStaff(state).researchers
   const reservedResearchShare =
     dataResearchReservationShare(state.player.data) +
-    gymResearchReservationShare(state.player.postTrainGyms)
+    reservedGymResearchShare(state)
   const reason =
     !state.player.researchUnlocked.includes('align_rlhf')
       ? 'Unlock RLHF Pipeline first.'

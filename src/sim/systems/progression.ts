@@ -13,6 +13,8 @@ import type {
   SimState,
 } from '../types'
 import { isLivePublicModel } from '../modelRelease'
+import { trainingStateOf } from '../training/state'
+import type { Eval, EvalTier } from '../training/types'
 import { modelOfferApiPrice } from './market'
 
 export interface QuarterlyLabSnapshot {
@@ -39,6 +41,11 @@ const clamp = (value: number, low = 0, high = 100) =>
   Math.max(low, Math.min(high, Number.isFinite(value) ? value : low))
 
 const roundScore = (value: number) => Math.round(clamp(value) * 100) / 100
+
+export function liveEndpointCount(state: SimState, labId = state.playerLabId): number {
+  return trainingStateOf(state, labId).endpoints.filter((endpoint) => endpoint.status === 'live')
+    .length
+}
 
 function releasedModels(models: readonly Model[]): Model[] {
   return models.filter(isLivePublicModel)
@@ -112,12 +119,55 @@ function modelSnapshot(
   }
 }
 
+function latestCompleteEval(
+  evals: readonly Eval[],
+  checkpointIds: ReadonlySet<string>,
+  tier: EvalTier,
+): Eval | undefined {
+  return evals
+    .filter(
+      (row) =>
+        row.status === 'complete' &&
+        row.tier === tier &&
+        checkpointIds.has(row.checkpointId) &&
+        row.result?.measured.overall != null,
+    )
+    .toSorted((a, b) => b.completeDay - a.completeDay || b.id.localeCompare(a.id))[0]
+}
+
+function independentCapabilityFromV4(state: SimState, labId: string): number | undefined {
+  const training = trainingStateOf(state, labId)
+  const live = training.endpoints.filter((endpoint) => endpoint.status === 'live')
+  const primaryIds = new Set(
+    live.flatMap((endpoint) => {
+      const primary =
+        endpoint.members.find((member) => member.role === 'primary') ?? endpoint.members[0]
+      return primary ? [primary.checkpointId] : []
+    }),
+  )
+  if (primaryIds.size === 0) return undefined
+  const audit = latestCompleteEval(training.evals, primaryIds, 'audit')
+  const auditMean = audit?.result?.measured.overall?.mean
+  if (typeof auditMean === 'number') return auditMean
+  const suite = latestCompleteEval(training.evals, primaryIds, 'suite')
+  const suiteMean = suite?.result?.measured.overall?.mean
+  if (typeof suiteMean === 'number') return suiteMean
+  return undefined
+}
+
 function independentCapabilityFor(
   state: SimState,
   labId: string,
   models: readonly Model[],
   fallback: number,
-): number {
+): number | undefined {
+  const fromV4 = independentCapabilityFromV4(state, labId)
+  if (fromV4 != null) return fromV4
+  if (labId === (state.playerLabId || 'player')) {
+    // Never substitute hidden truth for the player's independent score.
+    return undefined
+  }
+  // V4-DELETE: rival legacy blind audits.
   const modelIds = new Set(releasedModels(models).map((model) => model.id))
   const audited = state.evaluations.filter(
     (evaluation) =>
@@ -200,6 +250,8 @@ export function collectQuarterlyLabSnapshots(state: SimState): QuarterlyLabSnaps
       state.victory?.outcome !== 'lost' &&
       state.player.cash > -20_000_000 &&
       state.player.capital?.restructuring.stage !== 'bankruptcy',
+    hasReleasedModel:
+      playerMetrics.hasReleasedModel || liveEndpointCount(state, state.playerLabId) > 0,
     independentCapability: independentCapabilityFor(
       state,
       state.playerLabId,
@@ -237,6 +289,7 @@ export function collectQuarterlyLabSnapshots(state: SimState): QuarterlyLabSnaps
       servedDemandShare: shares[rival.id] ?? rival.marketShare ?? 0,
       grossMargin: revenue > 0 ? (gross == null ? 0.1 : gross / revenue) : -1,
       solvent: rival.cash > -20_000_000,
+      hasReleasedModel: metrics.hasReleasedModel || liveEndpointCount(state, rival.id) > 0,
       independentCapability: independentCapabilityFor(
         state,
         rival.id,

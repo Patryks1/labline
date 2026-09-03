@@ -19,6 +19,7 @@ import type {
   SimState,
   TrainingProgram,
 } from "../types";
+import { emptyTrainingState } from "../training/state";
 import { isLivePublicModel } from "../modelRelease";
 import { createRng, hashSeed } from "../rng";
 import { BENCHMARK_DEFS } from "../balance/benchmarks";
@@ -150,6 +151,9 @@ import { computeLabSnapshot } from "./labEngine";
 
 /** Legacy compatibility marker; v3 never checks this as a release gate. */
 export const RIVAL_FIRST_RELEASE_DAY = 1;
+
+/** Phase 2: V4 `tickTrainingCore` owns rival runs. Keep false. */
+const LEGACY_RIVAL_TRAINING_JOBS = false;
 
 /** Competitive, affordable daily demand-generation target for a rival lab. */
 export function rivalMarketingBudgetTarget(
@@ -838,14 +842,16 @@ export function rivalResearchTrainingModifiers(
   overtrainCapBonus: number;
 } {
   const effects = aggregateEffects([...unlocked]);
+  const paramBoost = Math.max(0, 1 - (effects.paramEfficiency ?? 1));
+  const throughputBoost = Math.max(0, (effects.computeThroughput ?? 1) - 1);
   return {
     trainEfficiency: Math.min(
       1.5,
-      ECONOMY.startingTrainEfficiency + 0.05 + (effects.trainEfficiency ?? 0),
+      ECONOMY.startingTrainEfficiency + 0.05 + (effects.trainEfficiency ?? 0) + paramBoost,
     ),
     researchMult:
       1 +
-      Math.min(0.12, (effects.capabilityBonus ?? 0) * 0.015) +
+      Math.min(0.12, (effects.capabilityBonus ?? 0) * 0.015 + paramBoost + throughputBoost * 0.5) +
       ((backbone === "moe" || (backbone == null && family === "moe")) &&
       unlocked.includes("moe_hier")
         ? 0.04
@@ -874,12 +880,16 @@ function rivalResearchDisclosure(
 export function rivalHostedServicePriceMultiplier(
   archetype: RivalLab["archetype"],
   capabilityGap: number,
+  frontierRef = 65,
 ): number {
   if (archetype === "efficiency") return 0.35;
   if (archetype === "open_weights") return 0.55;
-  if (capabilityGap > 4) return 1.25;
-  if (capabilityGap > -2) return 1.05;
-  if (capabilityGap > -10) return 0.82;
+  // Relative gap: the legacy +4/−2/−10 point edges at frontier ~65 become
+  // +6%/−3%/−15% shares, so positioning means the same at any magnitude.
+  const share = capabilityGap / Math.max(1, frontierRef);
+  if (share > 0.06) return 1.25;
+  if (share > -0.03) return 1.05;
+  if (share > -0.15) return 0.82;
   return 0.65;
 }
 
@@ -957,6 +967,7 @@ function rivalTrainingMemoryReady(
  * caller conserves the raw PF pool before converting it through the job's
  * hardware-supported format; catch-up policy never mints raw compute.
  */
+// V4-DELETE: progressRivalTrainingJob — Phase 2, V4 tickRuns owns progression.
 export function progressRivalTrainingJob(
   job: RivalTrainJob,
   availableEffectivePfDays: number,
@@ -1273,7 +1284,7 @@ export function createRivals(
   const rng = createRng(seed + 99);
   const regionAt = (i: number) =>
     regionIds[i % regionIds.length] ?? regionIds[0] ?? "west";
-  const all: Omit<RivalLab, "dataMTok" | "dataQuality" | "domainMTok">[] = [
+  const all: Omit<RivalLab, "dataMTok" | "dataQuality" | "domainMTok" | "training">[] = [
     {
       id: "rival_nova",
       name: "NovaScale",
@@ -1534,6 +1545,7 @@ export function createRivals(
         trainingPrograms: [],
         researchDaysSpent: 0,
         capital: initialRivalCapital(r.id),
+        training: emptyTrainingState(),
       } satisfies RivalLab;
     });
 }
@@ -2120,16 +2132,31 @@ export function tickRivals(state: SimState): SimState {
               : next.archetype === "hyperscale"
                 ? 0.38
                 : 0.32;
-        const sustainableCostIn =
-          Math.max(0.01, m.costApiPriceIn ?? 0.1) / (1 - targetGrossMargin);
-        const sustainableCostOut =
-          Math.max(0.01, m.costApiPriceOut ?? 0.4) / (1 - targetGrossMargin);
-        const costFloor = blendApiPrice(sustainableCostIn, sustainableCostOut);
+        const trueCostIn = Math.max(0.01, m.costApiPriceIn ?? 0.1);
+        const trueCostOut = Math.max(0.01, m.costApiPriceOut ?? 0.4);
+        const sustainableCostIn = trueCostIn / (1 - targetGrossMargin);
+        const sustainableCostOut = trueCostOut / (1 - targetGrossMargin);
+        // Tiered floor by frontier share: flagships (≥0.8 of the player
+        // frontier) hold the full sustainable-margin floor and never price
+        // below it; small models (≤0.5) may descend to true hosting cost and
+        // compete on quantity over quality. Linear tier between the two.
+        const frontierShare =
+          m.capability / Math.max(1, playerCap || m.capability);
+        const floorTier = Math.max(
+          0,
+          Math.min(1, (frontierShare - 0.5) / 0.3),
+        );
+        const floorIn =
+          trueCostIn + (sustainableCostIn - trueCostIn) * floorTier;
+        const floorOut =
+          trueCostOut + (sustainableCostOut - trueCostOut) * floorTier;
+        const costFloor = blendApiPrice(floorIn, floorOut);
         const capGap = m.capability - (playerCap || m.capability * 0.9);
         // Stronger than player → premium; weaker → discount; open weights stay cheap
         let targetMult = rivalHostedServicePriceMultiplier(
           next.archetype,
           capGap,
+          Math.max(1, playerCap || 65),
         );
         if (unserved > 0.15 && playerShare > 0.08) targetMult *= 0.92; // undercut overloaded player
         if (share < 0.06 && m.capability > 8) targetMult *= 0.9; // buy share
@@ -2163,8 +2190,8 @@ export function tickRivals(state: SimState): SimState {
         // default moved while this model kept its launch suggestion, so every
         // market and milestone ignored ten years of rival pricing decisions.
         const list = splitBlendedApiPrice(blended);
-        const listIn = Math.max(sustainableCostIn, list.priceIn);
-        const listOut = Math.max(sustainableCostOut, list.priceOut);
+        const listIn = Math.max(floorIn, list.priceIn);
+        const listOut = Math.max(floorOut, list.priceOut);
         const nextPlusPrice = Math.max(
           0,
           next.pricing.subPlusPrice * 0.9 +
@@ -2214,6 +2241,17 @@ export function tickRivals(state: SimState): SimState {
             },
           ],
         };
+        // Rival storefront follows the active model: set_api_price is
+        // per-model only, so move the lab default explicitly here.
+        next = {
+          ...next,
+          pricing: {
+            ...next.pricing,
+            apiPricePerMTok: blended,
+            apiPriceInPerMTok: listIn,
+            apiPriceOutPerMTok: listOut,
+          },
+        };
         next = applyLabActionToTarget(next, {
           kind: "set_api_price",
           modelId: m.id,
@@ -2252,6 +2290,10 @@ export function tickRivals(state: SimState): SimState {
       }
     }
 
+    // V4-DELETE: legacy rival training (progressRivalTrainingJob, trainingJob
+    // start/finalize, cadence, naming). New jobs are V4-only (`tickRivalTraining`).
+    // In-flight `trainingJob` still progresses so injected-job tests and old
+    // saves can finish.
     // ── Multi-day training job (same scale formula + data coverage as player) ──
     const cadence =
       pace.releaseCadence +
@@ -2529,7 +2571,7 @@ export function tickRivals(state: SimState): SimState {
       } else {
         next.trainingJob = job;
       }
-    } else if (!next.trainingJob) {
+    } else if (!next.trainingJob && LEGACY_RIVAL_TRAINING_JOBS) {
       const cadenceHit = state.day % cadence === 0;
       const startRoll =
         next.models.length === 0

@@ -1,6 +1,7 @@
 import type { DynamicWorld } from "./world/dynamicWorld";
 import type { BalanceTuning } from "./balance/tuning";
 import type { CityGrowthMetadata, CityPalette, CityTier } from "./world/types";
+import type { TrainingUnlock } from "./training/types";
 
 export type LabId = string;
 export type LabController = "player" | "rival";
@@ -22,14 +23,14 @@ export type ModelIOModality = "text" | "image" | "audio" | "video";
 
 /** Numerical format used by matrix engines while a checkpoint is trained. */
 export type TrainingComputeFormat =
-  "fp32" | "fp16_mixed" | "bf16_mixed" | "fp8_hybrid" | "nvfp4";
+  "fp32" | "fp16_mixed" | "bf16_mixed" | "fp8_hybrid" | "fp6" | "nvfp4";
 
 /** Native weight topology is independent from the training compute format. */
 export type NativeWeightFormat = "float" | "ternary_1_58";
 
 /** Precision of a concrete serving artifact, not of its source checkpoint. */
 export type ServePrecision =
-  "fp32" | "fp16" | "bf16" | "fp8" | "int8" | "int4" | "nvfp4" | "ternary_1_58";
+  "fp32" | "fp16" | "bf16" | "fp8" | "fp6" | "int8" | "int4" | "nvfp4" | "ternary_1_58";
 
 /**
  * Weight precision a released checkpoint natively carries out of training.
@@ -38,7 +39,7 @@ export type ServePrecision =
  * pay its 4-byte residency and TF32-rate serving cost.
  */
 export type NativeWeightPrecision =
-  "fp32" | "fp16" | "bf16" | "fp8" | "nvfp4" | "ternary_1_58";
+  "fp32" | "fp16" | "bf16" | "fp8" | "fp6" | "nvfp4" | "ternary_1_58";
 
 export interface TrainingNumerics {
   computeFormat: TrainingComputeFormat;
@@ -1223,29 +1224,34 @@ export interface ResearchNodeDef {
 export interface ResearchEffects {
   utilCap?: number;
   servingEfficiency?: number;
+  /** @deprecated V4-DELETE Legacy additive train speed. V4 uses computeThroughput via modifiersForLab. */
   trainEfficiency?: number;
   energyPue?: number;
+  /** @deprecated V4-DELETE Legacy additive capability. V4 uses paramEfficiency / ceilingLift. */
   capabilityBonus?: number;
   moeInferMult?: number;
   denseInferMult?: number;
   safetyBonus?: number;
   rlhfQuality?: number;
+  /** @deprecated V4-DELETE Legacy family gate. V4 uses unlock: TrainingUnlock[]. */
   unlockFamily?: ModelFamily;
   chipDiscount?: number;
   fabSpeed?: number;
+  /** @deprecated V4-DELETE Legacy talent magnet; staff still reads this until Phase 2. */
   talentAttract?: number;
   dataFlywheel?: number;
-  /** Additive boosts to named benchmarks when unlocked */
+  /** @deprecated V4-DELETE Additive boosts to named benchmarks when unlocked */
   benchmarkBoost?: Partial<BenchmarkScores>;
   /** Unlock assigning specialist models per corpus domain at train time */
   unlockCorpusSpecialists?: boolean;
-  /** Adds probability mass to breakthrough outcomes on completed training runs. */
+  /** @deprecated V4-DELETE Adds probability mass to breakthrough outcomes on completed training runs. */
   trainingBreakthroughBias?: number;
-  /** Adds probability mass to stumble outcomes on completed training runs. */
+  /** @deprecated V4-DELETE Adds probability mass to stumble outcomes on completed training runs. */
   trainingStumbleRisk?: number;
-  /** Direct safety-axis penalty applied to models trained with this method unlocked. */
+  /** @deprecated V4-DELETE Direct safety-axis penalty applied to models trained with this method unlocked. */
   trainingSafetyPenalty?: number;
   /**
+   * @deprecated V4-DELETE
    * Raises the hard cap on overtrain / compute-intensity capability points
    * (added to the early-game 1.5 base, clamped at 8 total).
    */
@@ -1256,6 +1262,40 @@ export interface ResearchEffects {
   gymQualityBonus?: number;
   /** Fractional cut to hosted-model opex after scaling; stacks per rank, capped in opex. */
   hostingOpexDiscount?: number;
+  /** Multiply Kaplan A (1 = baseline, <1 better). Stacks as value^rank. */
+  paramEfficiency?: number;
+  /** Multiply Kaplan B (1 = baseline, <1 better). Stacks as value^rank. */
+  dataEfficiency?: number;
+  /** Multiply allocated PF throughput. Stacks as value^rank. */
+  computeThroughput?: number;
+  /** Multiply outcome σ (1 = baseline, <1 tighter). Stacks as value^rank. */
+  stability?: number;
+  /** Multiply precision gap penalty. Stacks as value^rank. */
+  precisionPenaltyMult?: number;
+  /** Additive capability ceiling points. Stacks as value·rank. */
+  ceilingLift?: number;
+  /** Multiply post-train PF adequacy. Stacks as value^rank. */
+  postTrainEfficiency?: number;
+  /** Additive RL quality (0–1 after clamp). Stacks as value·rank. */
+  rlQuality?: number;
+  /** Multiply synthetic data quality. Stacks as value^rank. */
+  syntheticQuality?: number;
+  /** Additive verifier strength (0–1 after clamp). Stacks as value·rank. */
+  verifierStrength?: number;
+  /** Multiply distill compute/gap terms. Stacks as value^rank. */
+  distillEfficiency?: number;
+  /** Additive router quality (0–1 after clamp). Stacks as value·rank. */
+  routerQuality?: number;
+  /** Multiply serving efficiency for V4 endpoints. Stacks as value^rank. */
+  serveEfficiency?: number;
+  /** Multiply hosted opex (1 = baseline, <1 cheaper). Stacks as value^rank. */
+  hostingDiscount?: number;
+  /** Multiply quantization quality penalty. Stacks as value^rank. */
+  quantPenaltyMult?: number;
+  /** Multiply cross-modal transfer. Stacks as value^rank. */
+  modalityBridge?: number;
+  /** V4 training unlocks granted by this node. Mirrors TrainingUnlock. */
+  unlock?: TrainingUnlock[];
 }
 
 export interface ResearchProgress {
@@ -1322,6 +1362,21 @@ export interface DatasetAsset {
   exclusiveUntilDay: number | null;
   contaminationRisk: number;
   synthetic?: SyntheticProvenance;
+  /**
+   * V4 synthetic lineage from explicit generation jobs. `synthetic` remains
+   * the legacy provenance record; both are set when a V4 job completes.
+   */
+  v4Synthetic?: {
+    teacherCheckpointId?: string;
+    teacherModelId?: string;
+    teacherName: string;
+    tierBudget: 1 | 2 | 4 | 8 | 12 | 20 | 100;
+    depth: number;
+    verifiedShare: number;
+    method: string;
+    quality: number;
+    generatedDay: number;
+  };
   acquiredDay: number;
 }
 
@@ -1496,6 +1551,22 @@ export interface LabData {
   pruneAuditValidUntilDay?: number;
   /** Active AI data-generation jobs */
   synthQueue: SynthGenJob[];
+  /**
+   * V4 explicit synthetic generation jobs. Completing a job writes a
+   * DatasetAsset with `v4Synthetic` lineage; tokens are never invented at
+   * train start.
+   */
+  syntheticJobs?: {
+    id: string;
+    domain: DataDomain;
+    teacherRef: string;
+    tierBudget: 1 | 2 | 4 | 8 | 12 | 20 | 100;
+    targetMTok: number;
+    generatedMTok: number;
+    verify: boolean;
+    startDay: number;
+    status: "running" | "completed" | "cancelled";
+  }[];
   autoProcess: boolean;
   collectionRate: number;
   lifetimeCollected: number;
@@ -1621,6 +1692,8 @@ export interface Model {
   paramsB: number;
   /** MoE: parameters active per token (billions) */
   activeParamsB?: number;
+  /** Trained context window in thousands of tokens (4 = 4k). */
+  contextK?: number;
   backbone?: ModelBackbone;
   productPreset?: ModelProductPreset;
   io?: ModelIO;
@@ -1765,6 +1838,14 @@ export interface Model {
    */
   corpusDriftTotal?: number;
   corpusDriftLastDay?: number;
+  /** V4 serving endpoint this market model is projected from. Equals `Endpoint.id`. */
+  endpointId?: string;
+  /** V4 checkpoint backing this projection (primary member for routers). */
+  v4CheckpointId?: string;
+  /** Member checkpoint ids when this projection is a V4 router. */
+  routerMembers?: string[];
+  /** 1→0 demand ramp while the backing endpoint is sunsetting. */
+  sunsetDemandMult?: number;
 }
 
 export interface SyntheticFillRecord {
@@ -2491,6 +2572,11 @@ export interface SubPlan {
    * Members do not need to be listed again in `modelIds`.
    */
   routerIds?: string[];
+  /**
+   * V4 endpoints this plan exposes. Projected `Model.id` equals `Endpoint.id`.
+   * Served roster is the union of `modelIds` and these ids.
+   */
+  endpointIds?: string[];
   /** Relative share of the subscription PF pool under load (10–100). */
   computePriority?: number;
   /**
@@ -3409,6 +3495,8 @@ export interface RivalLab {
   powerExportEnabled?: boolean;
   publicEstimate?: RivalPublicEstimate;
   strategy?: RivalControllerState;
+  /** Training Overhaul V4 core slice (runs, checkpoints, recipes, evals, endpoints, gyms). */
+  training: import("./training/types").TrainingState;
   /**
    * Latest infrastructure build target derived from the scale-ladder decision.
    * Optional so old saves load unchanged; recomputed when stale or missing.
@@ -3509,6 +3597,8 @@ export interface LabState {
   researchQueue: string[];
   models: Model[];
   trainingJob: TrainingJob | RivalTrainJob | null;
+  /** V4 training slice projection; PlayerState/RivalLab remain the write source. */
+  training?: import("./training/types").TrainingState;
   pricing: ProductPricing;
   /** Player serving routers; rivals omit this. */
   modelRouters?: ModelRouter[];
@@ -4019,6 +4109,8 @@ export interface PlayerState {
   powerEfficiencyHistory?: PowerEfficiencySample[];
   /** Latest settled daily marketing result (written once per day by systems/marketing). */
   marketingOutcome?: MarketingOutcome;
+  /** Training Overhaul V4 core slice (runs, checkpoints, recipes, evals, endpoints, gyms). */
+  training: import("./training/types").TrainingState;
 }
 
 export interface WorldEvent {

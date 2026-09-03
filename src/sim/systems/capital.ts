@@ -1521,7 +1521,7 @@ export function tickCapital(state: SimState): SimState {
   }
   // Player recovery ladder: negative cash only (runway soft-warns elsewhere).
   // Hitting the insolvency floor skips ahead to a 30-day asset-sale window so
-  // credit, equity, and model sales stay usable before bankruptcy review.
+  // credit and equity stay usable before bankruptcy review.
   const cashNegative = cash < 0
   const insolvent = cash <= ECONOMY.victory.bankruptCash
   const graceDays = ECONOMY.victory.bankruptcyGraceDays ?? 30
@@ -1580,9 +1580,9 @@ export function tickCapital(state: SimState): SimState {
   if (restructuring.stage !== capital.restructuring.stage) {
     const messages: Record<CapitalStack['restructuring']['stage'], string> = {
       none: 'Recovery complete: cash is non-negative again.',
-      warning: 'Cash negative: take credit, sell equity, or sell models within 60 days.',
+      warning: 'Cash negative: take credit or sell equity within 60 days.',
       refinance: 'Refinancing stage: lenders and investors now demand corrective terms.',
-      asset_sale: `Forced-recovery stage: take credit, sell equity, or sell models within ${graceDays} days.`,
+      asset_sale: `Forced-recovery stage: take credit or sell equity within ${graceDays} days.`,
       bankruptcy: 'Restructuring failed; the lab has entered bankruptcy review.',
     }
     const severity = restructuring.stage === 'none' ? 'info' : restructuring.stage === 'warning' ? 'warn' : 'danger'

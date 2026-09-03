@@ -1,5 +1,8 @@
 import { defaultServePrecisionForModel, estimateServingMemory } from "../balance/tokenServe";
-import { planExposedModelIds, soldApiRouters, releasedRouterMemberIds } from "../balance/modelRouter";
+import { soldApiRouters, releasedRouterMemberIds } from "../balance/modelRouter";
+import { planExposedModelIdsWithEndpoints } from "./plans";
+import { endpointHbmGB } from "../training/endpoints";
+import { trainingStateOf } from "../training/state";
 import type {
   Model,
   ModelRouter,
@@ -7,7 +10,7 @@ import type {
   ServePrecision,
   SimState,
 } from "../types";
-import { isLivePublicModel } from "../modelRelease";
+import { isLivePublicModel, isV4ProjectedModel } from "../modelRelease";
 
 export interface HostedServingPlacement {
   model: Model;
@@ -45,6 +48,9 @@ export function hostedServingModels(input: {
       (id) => publicIds.has(id),
     ),
   );
+  for (const model of published) {
+    if (isV4ProjectedModel(model)) apiIds.add(model.id);
+  }
   for (const router of soldApiRouters({
     apiRouterIds: input.pricing.apiRouterIds,
     apiModelIds: input.pricing.apiModelIds,
@@ -59,7 +65,7 @@ export function hostedServingModels(input: {
   const subscriptionIds = new Set<string>();
   for (const plan of input.pricing.plans) {
     if (!plan.enabled) continue;
-    for (const id of planExposedModelIds(
+    for (const id of planExposedModelIdsWithEndpoints(
       plan,
       input.models,
       input.modelRouters,
@@ -91,7 +97,7 @@ export function servingPrecisionForModel(
       .filter(
         (plan) =>
           plan.enabled &&
-          planExposedModelIds(plan, [model], routers).includes(model.id),
+          planExposedModelIdsWithEndpoints(plan, [model], routers).includes(model.id),
       )
       .map(
         (plan) =>
@@ -134,7 +140,6 @@ export function servingPlacementNeedForLab(input: {
     1,
     Math.ceil(peakConcurrency / models.length),
   );
-  const contextTokens = 1_024;
   const apiIds = new Set(input.pricing.apiModelIds ?? []);
   for (const router of soldApiRouters({
     apiRouterIds: input.pricing.apiRouterIds,
@@ -155,6 +160,10 @@ export function servingPlacementNeedForLab(input: {
       apiIds.has(model.id) ||
         (implicitApiFallback && model.id === input.pricing.activeModelId),
       input.modelRouters,
+    );
+    const contextTokens = Math.max(
+      1_024,
+      Math.round((model.contextK ?? 1) * 1_024),
     );
     return {
       model,
@@ -183,11 +192,41 @@ export function servingPlacementNeedForLab(input: {
 }
 
 export function servingPlacementNeed(state: SimState): ServingPlacementNeed {
-  return servingPlacementNeedForLab({
+  const need = servingPlacementNeedForLab({
     models: state.player.models,
     pricing: state.player.pricing,
     modelRouters: state.player.modelRouters,
     activeModelRouterId: state.player.activeModelRouterId,
     demandMTok: state.lastMarket?.playerDemandMTok ?? 0,
   });
+  const training = trainingStateOf(state, state.playerLabId);
+  if (training.endpoints.length === 0) return need;
+  const placements = need.placements.map((placement) => {
+    const endpoint = training.endpoints.find(
+      (entry) =>
+        entry.id === placement.model.endpointId ||
+        entry.id === placement.model.id,
+    );
+    if (!endpoint) return placement;
+    const residentMemoryGb = endpointHbmGB(state, endpoint);
+    return {
+      ...placement,
+      memory: {
+        ...placement.memory,
+        weightMemoryGb: residentMemoryGb / 1.15,
+        residentMemoryGb,
+      },
+    };
+  });
+  return {
+    placements,
+    hbmNeedGb: placements.reduce(
+      (sum, placement) => sum + placement.memory.residentMemoryGb,
+      0,
+    ),
+    systemRamNeedGb: placements.reduce(
+      (sum, placement) => sum + placement.memory.requiredSystemRamGb,
+      0,
+    ),
+  };
 }

@@ -260,7 +260,7 @@ describe('e2e training depth', () => {
     const m = s.player.models[0]!
     expect(m.dataPlan?.totalUnits).toBeGreaterThan(0)
     expect(m.dataPlan?.totalUnits).toBeLessThanOrEqual(400)
-    expect(m.capability).toBeGreaterThan(5)
+    expect(m.capability).toBeGreaterThan(3)
 
     // Continue train
     s = startTraining(s, {

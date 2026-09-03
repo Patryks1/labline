@@ -68,10 +68,10 @@ export const NAV_GROUPS: NavGroup[] = [
     description: 'Models, datasets, research pods & evaluation',
     key: '2',
     items: [
-      { id: 'models', label: 'Models', hint: 'Train · intervene · release', key: '1', presentation: 'workbench' },
+      { id: 'models', label: 'Models', hint: 'Design, train and release models; manage endpoints and gyms', key: '1', presentation: 'workbench' },
       { id: 'data', label: 'Data', hint: 'Assets, rights, manifests & synth', key: '2', presentation: 'workbench' },
       { id: 'research', label: 'Research', hint: 'Leads, pods, evidence & methods', key: '3', presentation: 'immersive' },
-      { id: 'benchmarks', label: 'Evals', hint: 'Seasons, audits & field reviews', key: '4', presentation: 'workbench' },
+      { id: 'benchmarks', label: 'Evals', hint: 'Seasons, tiers, audits and public boards', key: '4', presentation: 'workbench' },
     ],
   },
   {
@@ -166,9 +166,9 @@ export const SHELL_NAV_GROUPS: ShellNavGroup[] = [
     short: 'Products',
     description: 'Models, datasets, benchmarks & plans',
     items: [
-      { id: 'models', label: 'Models', hint: 'Train · intervene · release', presentation: 'workbench' },
+      { id: 'models', label: 'Models', hint: 'Design, train and release models; manage endpoints and gyms', presentation: 'workbench' },
       { id: 'data', label: 'Datasets', hint: 'Assets, rights, manifests & synth', presentation: 'workbench' },
-      { id: 'benchmarks', label: 'Benchmarks', hint: 'Seasons, audits & field reviews', presentation: 'workbench' },
+      { id: 'benchmarks', label: 'Benchmarks', hint: 'Seasons, tiers, audits and public boards', presentation: 'workbench' },
       { id: 'plans', label: 'Plans', hint: 'Tiers & API list', presentation: 'workbench' },
       { id: 'market', label: 'Market', hint: 'Share & segments' },
     ],

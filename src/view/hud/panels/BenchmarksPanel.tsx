@@ -27,16 +27,22 @@ import { blendApiPrice } from '../../../sim/balance/pricing'
 import { apiUnitCostPerMTok } from '../../../sim/balance/unitEconomics'
 import { computeSnapshot } from '../../../sim/tick'
 import {
-  EVALUATION_MARKETS,
-  evaluationMarketsForModel,
   suiteForEvaluationMarket,
   type EvaluationMarket,
   type BenchmarkMetricDef,
 } from '../../../sim/balance/evaluationSuites'
-import { collectLeaderboardModels } from '../../../sim/systems/rivals'
-import { modelOfferApiInOut } from '../../../sim/systems/market'
 import { playerTrainingJobs } from '../../../sim/systems/training'
 import { isInternalFleetModel } from '../../../sim/modelRelease'
+import { TRAINING_V4 } from '../../../sim/training/constants'
+import { isTierBudget } from '../../../sim/training/thinking'
+import { currentSeason } from '../../../sim/training/evaluate'
+import {
+  leaderboardRows,
+  type LeaderboardRow as V4LeaderboardRow,
+} from '../../../sim/training/leaderboard'
+import { trainingStateOf } from '../../../sim/training/state'
+import { EvalBarChart } from './models/v4/EvalCharts'
+import type { EvalMeasurement, EvalMetric, TierBudget } from '../../../sim/training/types'
 import { useGameStore } from '../../../store/gameStore'
 import { money, num } from '../format'
 import {
@@ -45,13 +51,7 @@ import {
   type PlanAudienceReview,
 } from './planReviews'
 import {
-  expandLeaderboardEffortRows,
   effectiveEffortBoardUsdPerBaseMTok,
-  leaderboardEffortRowKey,
-  leaderboardMetricCostTitle,
-  nextLeaderboardSortDirection,
-  officialLeaderboardRankByKey,
-  rankLeaderboardEffortRows,
   type LeaderboardEffortRow,
   type LeaderboardSortDirection,
   type LeaderboardSortId,
@@ -71,7 +71,6 @@ import {
   BenchmarkCompareTab,
 } from './BenchmarkCompareTab'
 import { GameCard, MeterBar, SegmentedTabs, StatRow } from '../ui/kit'
-import { HudFilterBar } from '../ui/HudFilterBar'
 import {
   EmptyState,
   HudButton,
@@ -83,6 +82,57 @@ import {
 import { HudDesktopDefaultDetails } from '../ui/HudDesktopDefaultDetails'
 
 const PAGE = 15
+const TIER_BUDGETS = TRAINING_V4.postTrain.tierBudgets
+const FOG_HINT =
+  'Your unreleased checkpoints are private — order an Eval from the Pipeline'
+
+const BOARD_COLUMNS: readonly { id: EvalMetric; label: string; short: string }[] = [
+  { id: 'overall', label: 'Overall', short: 'Ovr' },
+  { id: 'language', label: 'Language', short: 'Lang' },
+  { id: 'code', label: 'Code', short: 'Code' },
+  { id: 'math', label: 'Math', short: 'Math' },
+  { id: 'reasoning', label: 'Reasoning', short: 'Rsn' },
+  { id: 'science', label: 'Science', short: 'Sci' },
+  { id: 'safety', label: 'Safety', short: 'Saf' },
+]
+
+type V4SortId = 'name' | 'lab' | 'kind' | EvalMetric
+
+function safeLeaderboardRows(state: SimState, budget: TierBudget): V4LeaderboardRow[] {
+  try {
+    return leaderboardRows(state, budget)
+  } catch {
+    return []
+  }
+}
+
+function seasonNumber(state: SimState): number {
+  try {
+    return currentSeason(state).season
+  } catch {
+    return 1
+  }
+}
+
+function sortV4Rows(
+  rows: readonly V4LeaderboardRow[],
+  sortId: V4SortId,
+  direction: LeaderboardSortDirection,
+): V4LeaderboardRow[] {
+  const sign = direction === 'asc' ? 1 : -1
+  return [...rows].sort((a, b) => {
+    const raw =
+      sortId === 'name'
+        ? a.name.localeCompare(b.name)
+        : sortId === 'lab'
+          ? a.labName.localeCompare(b.labName)
+          : sortId === 'kind'
+            ? a.kind.localeCompare(b.kind)
+            : (a.scores[sortId] ?? -Infinity) - (b.scores[sortId] ?? -Infinity)
+    if (raw !== 0) return raw * sign
+    return b.overall - a.overall || a.name.localeCompare(b.name)
+  })
+}
 
 type BenchTab = 'leaderboard' | 'internal' | 'compare' | 'reviews'
 
@@ -97,6 +147,7 @@ type InternalBenchmarkRow = {
   pending: boolean
   model: Model | null
   effortBoards?: EffortBoard[]
+  measured?: Partial<Record<EvalMetric, EvalMeasurement>>
 }
 
 type InternalBenchmarkSortKey =
@@ -109,53 +160,77 @@ type InternalBenchmarkSortKey =
   | `effort:${string}:usd`
 
 /**
- * Cross-lab eval leaderboard — top 15 by default, load older/weaker models on demand.
+ * Cross-lab eval leaderboard — public endpoint rows by thinking-tier budget.
  */
-export function BenchmarksPanel() {
-  const state = useGameStore((s) => s.state)
+export function BenchmarksPanel({
+  state: injected,
+}: {
+  state?: SimState
+}) {
+  const storeState = useGameStore((s) => s.state)
+  const state = injected ?? storeState
   const [showAll, setShowAll] = useState(false)
-  const [sortId, setSortId] = useState<LeaderboardSortId>('cap')
+  const [sortId, setSortId] = useState<V4SortId>('overall')
   const [sortDirection, setSortDirection] =
     useState<LeaderboardSortDirection>('desc')
-  const [market, setMarket] = useState<EvaluationMarket>('language')
+  const [tierBudget, setTierBudget] = useState<TierBudget>(1)
+  const market: EvaluationMarket = 'language'
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null)
-  const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null)
-  const [reviewRecipeId, setReviewRecipeId] = useState(INSTANT_EFFORT_ID)
+  const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
   const [tab, setTab] = useState<BenchTab>('leaderboard')
 
   const suiteId = suiteForEvaluationMarket(market)
   const metrics = benchmarkMetricsForSuite(suiteId)
+  const season = seasonNumber(state)
 
-  const boardModels = useMemo(() => {
-    const all = collectLeaderboardModels(state)
-    return all.filter((row) =>
-      evaluationMarketsForModel(row.model).includes(market),
-    )
-  }, [state, market])
-
-  const rows = useMemo(
-    () =>
-      rankLeaderboardEffortRows(
-        expandLeaderboardEffortRows(boardModels, {
-          suiteId,
-          unitUsdPerMTokFor: (row) =>
-            modelListUsdBase(state, row.model, row.labId),
-        }),
-        sortId,
-        sortDirection,
-      ),
-    [boardModels, sortId, sortDirection, suiteId, state],
+  const boardRows = useMemo(
+    () => sortV4Rows(safeLeaderboardRows(state, tierBudget), sortId, sortDirection),
+    [state, tierBudget, sortId, sortDirection],
   )
 
-  const changeSort = (nextId: LeaderboardSortId) => {
-    setSortDirection((current) =>
-      nextLeaderboardSortDirection(sortId, current, nextId),
-    )
+  const changeSort = (nextId: V4SortId) => {
+    setSortDirection((current) => {
+      if (nextId === sortId) return current === 'asc' ? 'desc' : 'asc'
+      return nextId === 'name' || nextId === 'lab' || nextId === 'kind' ? 'asc' : 'desc'
+    })
     setSortId(nextId)
     setShowAll(false)
   }
 
   const internalRows = useMemo(() => {
+    const v4 = trainingStateOf(state, state.playerLabId)
+    const v4Rows: InternalBenchmarkRow[] = v4.checkpoints
+      .filter((checkpoint) =>
+        checkpoint.status === 'stealth' ||
+        checkpoint.status === 'kept' ||
+        checkpoint.status === 'released',
+      )
+      .map((checkpoint) => {
+        const latest = [...v4.evals]
+          .filter(
+            (entry) =>
+              entry.checkpointId === checkpoint.id &&
+              entry.status === 'complete' &&
+              entry.result,
+          )
+          .sort((a, b) => b.completeDay - a.completeDay || b.orderedDay - a.orderedDay)[0]
+        const overall = latest?.result?.measured.overall
+        const pending = v4.evals.some(
+          (entry) => entry.checkpointId === checkpoint.id && entry.status === 'running',
+        )
+        return {
+          id: checkpoint.id,
+          name: `${checkpoint.name} ${checkpoint.version}`,
+          status: 'internal' as const,
+          day: latest?.completeDay || checkpoint.createdDay,
+          capability: overall?.mean ?? null,
+          safety: latest?.result?.measured.safety?.mean ?? null,
+          suite: overall?.mean ?? null,
+          pending,
+          model: null,
+          measured: latest?.result?.measured,
+        }
+      })
     const jobs = playerTrainingJobs(state).filter((job) => !job.failed)
     const training = jobs.map((job) => {
       const snapshot = job.benchmarkSnapshots?.at(-1)
@@ -187,133 +262,48 @@ export function BenchmarksPanel() {
         model,
         effortBoards: undefined as EffortBoard[] | undefined,
       }))
-    return [...training, ...internal]
+    return [...v4Rows, ...training, ...internal]
   }, [state, market])
 
-  const visible = showAll ? rows : rows.slice(0, PAGE)
   const effortColumns = useMemo(
     () =>
-      namedEffortColumns([
-        ...visible.map((row) => row.model),
-        ...internalRows
+      namedEffortColumns(
+        internalRows
           .map((row) => row.model)
           .filter((model): model is Model => model != null),
-      ]),
-    [internalRows, visible],
+      ),
+    [internalRows],
   )
-  const hidden = Math.max(0, rows.length - PAGE)
-  const pricingByLab = useMemo(
-    () =>
-      new Map([
-        ['player', state.player.pricing] as const,
-        ...state.rivals.map((rival) => [rival.id, rival.pricing] as const),
-      ]),
-    [state.player.pricing, state.rivals],
-  )
-  const servingEfficiencyByLab = useMemo(
-    () =>
-      new Map([
-        ['player', state.player.servingEfficiency] as const,
-        ...state.rivals.map(
-          (rival) => [rival.id, rival.servingEfficiency] as const,
-        ),
-      ]),
-    [state.player.servingEfficiency, state.rivals],
-  )
+  const visible = showAll ? boardRows : boardRows.slice(0, PAGE)
+  const hidden = Math.max(0, boardRows.length - PAGE)
   const selectedRow =
-    rows.find((row) => leaderboardEffortRowKey(row) === selectedModelKey) ??
-    rows[0]
-  const selectedRowKey = selectedRow
-    ? leaderboardEffortRowKey(selectedRow)
-    : null
-  const officialRanks = useMemo(
-    () => officialLeaderboardRankByKey(rows),
-    [rows],
-  )
-  const selectedRank = selectedRow
-    ? (officialRanks.get(selectedRowKey!) ?? 0)
-    : 0
-  const selectedPrices = selectedRow
-    ? modelOfferApiInOut(
-        pricingByLab.get(selectedRow.labId) ?? state.player.pricing,
-        selectedRow.model,
-      )
-    : null
-  const selectedServingEfficiency = selectedRow
-    ? (servingEfficiencyByLab.get(selectedRow.labId) ?? 1)
-    : 1
-  const selectedRecipes = selectedRow
-    ? benchmarkEffortRecipes(selectedRow.model)
-    : []
-  const selectedRecipeId = selectedRecipes.some(
-    (recipe) => recipe.id === reviewRecipeId,
-  )
-    ? reviewRecipeId
-    : (selectedRow?.recipeId ?? INSTANT_EFFORT_ID)
-  const selectedPublishedReviews = selectedRow
-    ? state.reviews.filter((review) => {
-        const labId = selectedRow.isPlayer ? state.playerLabId : selectedRow.labId
-        return (
-          review.modelId === selectedRow.model.id &&
-          (review.labId ?? state.playerLabId) === labId
-        )
-      })
-    : []
+    boardRows.find((row) => row.entryId === selectedEntryId) ?? boardRows[0]
   const reviewGroups = useMemo(() => buildAudienceReviewGroups(state), [state])
   const selectedReviewGroup =
     reviewGroups.find((group) => group.reviewId === selectedReviewId) ??
     reviewGroups[0]
-  const selectedAudienceGroup = selectedRow?.isPlayer
-    ? reviewGroups.find(
-        (group): group is ApiReviewGroup =>
-          group.reviewKind === 'api' && group.modelId === selectedRow.model.id,
-      )
-    : undefined
-
-  const leaders = useMemo(() => {
-    const map: Record<string, number> = {}
-    for (const d of metrics) {
-      let best = -1
-      for (const r of rows) {
-        const s = r.scores[d.id] ?? 0
-        if (s > best) best = s
-      }
-      map[d.id] = best
-    }
-    return map
-  }, [rows, metrics])
 
   const playerBest = useMemo(() => {
     let best = 0
-    for (const r of rows) {
-      if (r.isPlayer && r.capability > best) best = r.capability
+    for (const row of boardRows) {
+      if (row.isPlayer && row.overall > best) best = row.overall
     }
     return best
-  }, [rows])
+  }, [boardRows])
 
   const rivalBest = useMemo(() => {
     let best = 0
-    for (const r of rows) {
-      if (!r.isPlayer && r.capability > best) best = r.capability
+    for (const row of boardRows) {
+      if (!row.isPlayer && row.overall > best) best = row.overall
     }
     return best
-  }, [rows])
+  }, [boardRows])
 
   const frontierGap = playerBest - rivalBest
-
-  const bestSuite = useMemo(() => {
-    let best = 0
-    for (const r of rows) {
-      if (!r.isPlayer) continue
-      const scores = metrics.map((d) => r.scores[d.id] ?? 0)
-      const avg =
-        scores.length === 0
-          ? 0
-          : scores.reduce((sum, value) => sum + value, 0) / scores.length
-      if (avg > best) best = avg
-    }
-    return best
-  }, [rows, metrics])
+  const playerTraining = trainingStateOf(state, state.playerLabId)
+  const showFogHint =
+    playerTraining.checkpoints.some((checkpoint) => checkpoint.status === 'kept') &&
+    !playerTraining.endpoints.some((endpoint) => endpoint.status === 'live')
 
   const activeAudits = useMemo(() => {
     const day = state.day
@@ -350,8 +340,8 @@ export function BenchmarksPanel() {
     <PanelScaffold
       eyebrow="Evals"
       title="Benchmarks"
-      description="Official public scores, one row per trained thinking level. Training snapshots stay on Internal."
-      mobileDescription="Ranks, model economics and reviews."
+      description="Official public scores by thinking-tier budget. Unreleased checkpoints stay private."
+      mobileDescription="Seasons, tiers and public boards."
     >
       <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4 sm:gap-2">
         <MetricTile
@@ -365,11 +355,11 @@ export function BenchmarksPanel() {
           tone={gapTone}
         />
         <MetricTile
-          label="Best suite"
-          value={bestSuite > 0 ? num(bestSuite, 0) : '—'}
-          detail={<span className="hidden sm:inline">your avg suite</span>}
+          label="Your best"
+          value={playerBest > 0 ? num(playerBest, 0) : '—'}
+          detail={<span className="hidden sm:inline">public overall</span>}
           tone={
-            bestSuite >= 70 ? 'positive' : bestSuite > 0 ? 'warning' : 'neutral'
+            playerBest >= 70 ? 'positive' : playerBest > 0 ? 'warning' : 'neutral'
           }
         />
         <div className="hidden sm:block">
@@ -385,8 +375,8 @@ export function BenchmarksPanel() {
         <div className="hidden sm:block">
           <MetricTile
             label="Board size"
-            value={String(rows.length)}
-            detail={showAll ? 'all shown' : `top ${Math.min(PAGE, rows.length)}`}
+            value={String(boardRows.length)}
+            detail={showAll ? 'all shown' : `top ${Math.min(PAGE, boardRows.length)}`}
           />
         </div>
         <div className="col-span-2 flex min-h-9 items-center justify-between rounded-md border border-line/60 bg-panel-2/55 px-2.5 text-[0.6875rem] sm:hidden">
@@ -413,7 +403,7 @@ export function BenchmarksPanel() {
                 <span className="inline-flex items-center gap-1.5">
                   Leaderboard
                   <span className="hidden font-mono text-[0.625rem] text-muted sm:inline">
-                    {rows.length}
+                    {boardRows.length}
                   </span>
                 </span>
               ),
@@ -451,65 +441,44 @@ export function BenchmarksPanel() {
       <div key={tab} className="panel-swap mt-3 space-y-3">
         {tab === 'leaderboard' ? (
           <>
-            <HudFilterBar
-              ariaLabel="Benchmark filters"
-              activeCount={(market === 'language' ? 0 : 1) + (sortId === 'cap' ? 0 : 1)}
-              onClear={() => {
-                setMarket('language')
-                setSortId('cap')
-                setSortDirection('desc')
-                setShowAll(false)
-              }}
-              groups={[
-                {
-                  id: 'market',
-                  label: 'Market',
-                  description: 'Public evaluation suite',
-                  options: EVALUATION_MARKETS.map((candidate) => ({
-                    id: candidate.id,
-                    label: candidate.label,
-                    active: market === candidate.id,
-                    onSelect: () => {
-                      setMarket(candidate.id)
-                      setSortId('cap')
-                      setSortDirection('desc')
-                      setShowAll(false)
-                    },
-                  })),
-                },
-                {
-                  id: 'metric',
-                  label: 'Rank by',
-                  description: 'Capability or suite score',
-                  options: [
-                    {
-                      id: 'capability',
-                      label: 'Capability',
-                      active: sortId === 'cap',
-                      onSelect: () => changeSort('cap'),
-                    },
-                    ...metrics.map((metric) => ({
-                      id: metric.id,
-                      label: metric.short,
-                      active: sortId === metric.id,
-                      onSelect: () => changeSort(metric.id),
-                      title: metric.label,
-                    })),
-                  ],
-                },
-              ]}
-            />
+            <div className="flex flex-wrap items-center gap-2">
+              <SegmentedTabs
+                ariaLabel="Thinking-tier budget"
+                active={String(tierBudget)}
+                onChange={(id) => {
+                  const next = Number(id)
+                  if (isTierBudget(next)) {
+                    setTierBudget(next)
+                    setShowAll(false)
+                  }
+                }}
+                items={TIER_BUDGETS.map((budget) => ({
+                  id: String(budget),
+                  label: `×${budget}`,
+                }))}
+              />
+              <StatusChip tone="research" title="Public eval season">
+                Season {season}
+              </StatusChip>
+              <StatusChip tone="positive">PUBLIC</StatusChip>
+            </div>
+
+            {showFogHint ? (
+              <p
+                data-benchmark-fog-hint
+                className="rounded-md border border-line/70 bg-panel-2/60 px-2.5 py-2 text-[0.75rem] text-muted"
+              >
+                {FOG_HINT}
+              </p>
+            ) : null}
 
             <div className="flex flex-wrap items-center gap-2 text-[0.6875rem] text-muted">
-              <StatusChip tone="positive">PUBLIC</StatusChip>
               <span className="hud-mobile-summary">
-                One row per trained thinking level. Tap a row for speed, cost
-                and task economics.
+                Live endpoints only. Thinking budget ×{tierBudget}.
               </span>
               <span className="hud-mobile-detail">
-                Official ranks include Instant plus every trained thinking head
-                on a release. Select a row for task pricing, speed and physical
-                PF at that thinking budget.
+                Official ranks are live endpoints at the selected thinking-tier
+                budget. Unreleased checkpoints never appear.
               </span>
             </div>
 
@@ -571,15 +540,17 @@ export function BenchmarksPanel() {
               <MobileBenchmarkSort
                 sortId={sortId}
                 direction={sortDirection}
-                metrics={metrics}
+                metrics={BOARD_COLUMNS}
                 onSort={(nextId) => {
                   if (nextId === sortId) return
                   setSortId(nextId)
-                  setSortDirection(defaultSortDirection(nextId))
+                  setSortDirection(
+                    nextId === 'name' || nextId === 'lab' || nextId === 'kind' ? 'asc' : 'desc',
+                  )
                   setShowAll(false)
                 }}
                 onDirectionChange={() => {
-                  setSortDirection((current) => current === 'asc' ? 'desc' : 'asc')
+                  setSortDirection((current) => (current === 'asc' ? 'desc' : 'asc'))
                   setShowAll(false)
                 }}
               />
@@ -591,30 +562,36 @@ export function BenchmarksPanel() {
               className="hud-mobile-summary anim-stagger space-y-2"
             >
               {visible.map((row, index) => {
-                const rowKey = leaderboardEffortRowKey(row)
-                const rank = officialRanks.get(rowKey) ?? index + 1
-                const selected = rowKey === selectedRowKey
-                const prices = modelOfferApiInOut(
-                  pricingByLab.get(row.labId) ?? state.player.pricing,
-                  row.model,
-                )
-                const servingEfficiency =
-                  servingEfficiencyByLab.get(row.labId) ?? 1
+                const selected = row.entryId === (selectedRow?.entryId ?? null)
                 return (
-                  <MobileBenchmarkCard
-                    key={rowKey}
-                    row={row}
-                    rank={rank}
-                    selected={selected}
-                    metrics={metrics}
-                    sortId={sortId}
-                    prices={prices}
-                    servingEfficiency={servingEfficiency}
-                    onSelect={() => {
-                      setSelectedModelKey(rowKey)
-                      setReviewRecipeId(row.recipeId)
-                    }}
-                  />
+                  <button
+                    key={`${row.labId}:${row.entryId}`}
+                    type="button"
+                    onClick={() => setSelectedEntryId(row.entryId)}
+                    aria-controls="benchmark-model-review"
+                    aria-expanded={selected}
+                    className={`flex min-h-11 w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left ${
+                      selected
+                        ? 'border-mint/50 bg-mint/10'
+                        : row.isPlayer
+                          ? 'border-mint/25 bg-mint/5'
+                          : 'border-line/70 bg-panel-2/50'
+                    }`}
+                  >
+                    <span className="w-6 shrink-0 font-mono text-[0.75rem] tabular-nums text-muted">
+                      {index + 1}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[0.8125rem] text-bone">{row.name}</span>
+                      <span className="block truncate text-[0.6875rem] text-muted">{row.labName}</span>
+                    </span>
+                    <span className="shrink-0 font-mono text-[0.8125rem] tabular-nums text-mint">
+                      {num(row.overall, 1)}
+                    </span>
+                    {row.contaminated.length > 0 ? (
+                      <StatusChip tone="warning">{row.contaminated[0]}</StatusChip>
+                    ) : null}
+                  </button>
                 )
               })}
             </div>
@@ -627,149 +604,85 @@ export function BenchmarksPanel() {
               data-desktop-official-benchmarks
               className="hud-mobile-detail touch-pan-x touch-pan-y overflow-x-auto overscroll-x-contain rounded-lg border border-line/70"
             >
-              <table className="w-full min-w-[720px] border-collapse text-left text-[0.8125rem]">
+              <table className="w-full min-w-[640px] border-collapse text-left text-[0.8125rem]">
                 <thead className="sticky top-0 z-20">
                   <tr className="border-b border-line bg-panel-2 font-mono text-[0.6875rem] uppercase tracking-[0.12em] text-muted">
-                    <th className="sticky left-0 z-10 bg-panel-2 px-2 py-2">
-                      #
-                    </th>
-                    <SortableHeader label="Model" sortKey="model" activeKey={sortId} direction={sortDirection} onSort={changeSort} className="sticky left-6 z-10 bg-panel-2 px-2" />
+                    <th className="sticky left-0 z-10 bg-panel-2 px-2 py-2">#</th>
+                    <SortableHeader label="Endpoint" sortKey="name" activeKey={sortId} direction={sortDirection} onSort={changeSort} className="sticky left-6 z-10 bg-panel-2 px-2" />
                     <SortableHeader label="Lab" sortKey="lab" activeKey={sortId} direction={sortDirection} onSort={changeSort} />
-                    <SortableHeader label="Size" sortKey="size" activeKey={sortId} direction={sortDirection} onSort={changeSort} />
-                    <SortableHeader label="Cap" fullLabel="Capability" sortKey="cap" activeKey={sortId} direction={sortDirection} onSort={changeSort} />
-                    <SortableHeader label="Think" fullLabel="Official inference recipe" sortKey="think" activeKey={sortId} direction={sortDirection} onSort={changeSort} />
-                    <SortableHeader label="Tokens" fullLabel="Official generated-token multiplier" sortKey="tokens" activeKey={sortId} direction={sortDirection} onSort={changeSort} />
-                    <SortableHeader label="List $/MTok" fullLabel="Blended input/output list price" sortKey="price" activeKey={sortId} direction={sortDirection} onSort={changeSort} />
-                    {metrics.map((d) => (
+                    <SortableHeader label="Kind" sortKey="kind" activeKey={sortId} direction={sortDirection} onSort={changeSort} />
+                    {BOARD_COLUMNS.map((column) => (
                       <SortableHeader
-                        key={d.id}
-                        label={d.short}
-                        fullLabel={d.label}
-                        sortKey={d.id}
+                        key={column.id}
+                        label={column.short}
+                        fullLabel={column.label}
+                        sortKey={column.id}
                         activeKey={sortId}
                         direction={sortDirection}
                         onSort={changeSort}
                         className="px-1 text-center"
                       />
                     ))}
-                    <SortableHeader label="Day" sortKey="day" activeKey={sortId} direction={sortDirection} onSort={changeSort} />
+                    <th className="px-1.5 py-2">Flags</th>
                   </tr>
                 </thead>
                 <tbody className="anim-stagger">
-                  {visible.map((r, i) => {
-                    const rowKey = leaderboardEffortRowKey(r)
-                    const rank = officialRanks.get(rowKey) ?? i + 1
-                    const selected = rowKey === selectedRowKey
-                    const prices = modelOfferApiInOut(
-                      pricingByLab.get(r.labId) ?? state.player.pricing,
-                      r.model,
-                    )
-                    const servingEfficiency =
-                      servingEfficiencyByLab.get(r.labId) ?? 1
+                  {visible.map((row, index) => {
+                    const selected = row.entryId === (selectedRow?.entryId ?? null)
                     return (
                       <tr
-                        key={rowKey}
+                        key={`${row.labId}:${row.entryId}`}
                         aria-selected={selected}
                         className={`border-b border-line/60 ${
                           selected
                             ? 'bg-mint/12 outline outline-1 -outline-offset-1 outline-mint/35'
-                            : r.isPlayer
-                            ? 'bg-mint/5'
-                            : i % 2 === 0
-                              ? 'bg-void/30'
-                              : ''
+                            : row.isPlayer
+                              ? 'bg-mint/5'
+                              : index % 2 === 0
+                                ? 'bg-void/30'
+                                : ''
                         }`}
                       >
                         <td className="sticky left-0 z-10 bg-inherit px-2 py-1.5 font-mono tabular-nums text-muted">
-                          {rank}
+                          {index + 1}
                         </td>
                         <td className="sticky left-6 z-10 max-w-[180px] bg-inherit px-2 py-1.5 font-medium text-bone">
                           <button
                             type="button"
-                            onClick={() => {
-                              setSelectedModelKey(rowKey)
-                              setReviewRecipeId(r.recipeId)
-                            }}
+                            onClick={() => setSelectedEntryId(row.entryId)}
                             aria-controls="benchmark-model-review"
                             aria-expanded={selected}
                             className="group/model flex min-w-0 items-center gap-1 rounded-sm text-left focus-visible:outline focus-visible:outline-1 focus-visible:outline-mint"
                           >
-                            <span className="min-w-0 truncate">
-                              {r.displayName}
-                            </span>
-                            {r.isPlayer && (
-                              <StatusChip tone="positive">you</StatusChip>
-                            )}
-                            {r.kind === 'router' && (
-                              <StatusChip tone="research">router</StatusChip>
-                            )}
+                            <span className="min-w-0 truncate">{row.name}</span>
+                            {row.isPlayer ? <StatusChip tone="positive">you</StatusChip> : null}
                           </button>
                         </td>
-                        <td className="px-1.5 py-1.5">
-                          <span className="inline-flex items-center gap-1 text-muted">
-                            <span
-                              className="inline-block h-1.5 w-1.5 rounded-full"
-                              style={{
-                                backgroundColor: `#${r.color.toString(16).padStart(6, '0')}`,
-                              }}
-                            />
-                            {r.labName}
-                          </span>
+                        <td className="px-1.5 py-1.5 text-muted">{row.labName}</td>
+                        <td className="px-1.5 py-1.5 font-mono text-[0.6875rem] uppercase tracking-[0.08em] text-muted">
+                          {row.kind === 'endpoint' ? 'endpoint' : 'legacy'}
                         </td>
-                        <td className="px-1.5 py-1.5 font-mono tabular-nums text-muted">
-                          {formatParams(r.model.paramsB)}
-                        </td>
-                        <td
-                          className="px-1.5 py-1.5 font-mono tabular-nums text-bone"
-                          title={leaderboardMetricCostTitle(r, {
-                            id: 'cap',
-                            label: 'Capability',
-                          })}
-                        >
-                          {num(r.capability, 0)}
-                        </td>
-                        <td
-                          className="px-1 py-1.5 text-center font-mono text-muted"
-                          title={`${r.recipeName} · ${r.tokenMult.toFixed(1)}× tokens`}
-                        >
-                          {r.recipeName}
-                        </td>
-                        <td
-                          className="px-1 py-1.5 text-center font-mono tabular-nums text-muted"
-                          title={`${r.tokenMult.toFixed(1)}× tokens vs Instant. Total $ for a run can rise with longer traces.`}
-                        >
-                          {r.tokenMult.toFixed(1)}×
-                        </td>
-                        <td
-                          className="px-1 py-1.5 text-center font-mono tabular-nums text-muted"
-                          title="List price per million tokens — not a Deep premium."
-                        >
-                          {r.usdPerMTok != null ? money(r.usdPerMTok) : '—'}
-                        </td>
-                        {metrics.map((d) => {
-                          const s = r.scores[d.id] ?? 0
-                          const isLead =
-                            s >= (leaders[d.id] ?? 0) - 0.05 && s > 1
+                        {BOARD_COLUMNS.map((column) => {
+                          const score = row.scores[column.id]
                           return (
                             <td
-                              key={d.id}
+                              key={column.id}
                               className={`px-1 py-1.5 text-center font-mono tabular-nums ${
-                                isLead ? 'text-mint' : 'text-muted'
+                                score == null ? 'text-muted/50' : 'text-bone'
                               }`}
                             >
-                              <BenchmarkScoreCost
-                                model={r.model}
-                                metric={d}
-                                score={s}
-                                prices={prices}
-                                servingEfficiency={servingEfficiency}
-                                placeAbove={i >= visible.length - 3}
-                              />
+                              {score == null ? '—' : num(score, 1)}
                             </td>
                           )
                         })}
-                        <td className="px-1.5 py-1.5 font-mono tabular-nums text-muted">
-                          {r.model.releaseDay}
+                        <td className="px-1.5 py-1.5">
+                          <span className="inline-flex flex-wrap gap-1">
+                            {row.contaminated.map((metric) => (
+                              <StatusChip key={metric} tone="warning" title={`Contaminated: ${metric}`}>
+                                {metric}
+                              </StatusChip>
+                            ))}
+                          </span>
                         </td>
                       </tr>
                     )
@@ -778,39 +691,10 @@ export function BenchmarksPanel() {
               </table>
             </div>
 
-            {selectedRow && selectedPrices ? (
-              <SelectedBenchmarkModelReview
-                row={selectedRow}
-                rank={selectedRank}
-                suiteId={suiteId}
-                metrics={metrics}
-                recipeId={selectedRecipeId}
-                onRecipeChange={(id) => {
-                  setReviewRecipeId(id)
-                  if (!selectedRow) return
-                  setSelectedModelKey(
-                    leaderboardEffortRowKey({ ...selectedRow, recipeId: id }),
-                  )
-                }}
-                prices={selectedPrices}
-                servingEfficiency={selectedServingEfficiency}
-                publishedReviews={selectedPublishedReviews}
-                audienceGroup={selectedAudienceGroup}
-                onOpenReviews={
-                  selectedAudienceGroup
-                    ? () => {
-                        setSelectedReviewId(selectedAudienceGroup.reviewId)
-                        setTab('reviews')
-                      }
-                    : undefined
-                }
-              />
-            ) : null}
-
-            {rows.length === 0 && (
+            {boardRows.length === 0 && (
               <EmptyState
-                title="No models yet"
-                description="Train and release, or wait for rivals to appear on the board."
+                title="No live endpoints yet"
+                description="Train, keep a checkpoint, order an eval, then release an endpoint — or wait for rivals."
               />
             )}
 
@@ -823,7 +707,7 @@ export function BenchmarksPanel() {
                 Load {hidden} older / lower-ranked models
               </HudButton>
             )}
-            {showAll && rows.length > PAGE && (
+            {showAll && boardRows.length > PAGE && (
               <HudButton
                 variant="ghost"
                 className="w-full"
@@ -842,18 +726,7 @@ export function BenchmarksPanel() {
             columns={effortColumns}
           />
         ) : tab === 'compare' ? (
-          <BenchmarkCompareTab
-            rows={boardModels}
-            suiteId={suiteId}
-            metrics={metrics}
-            market={market}
-            onMarketChange={(candidate) => {
-              setMarket(candidate)
-              setSortId('cap')
-              setSortDirection('desc')
-              setShowAll(false)
-            }}
-          />
+          <BenchmarkCompareTab rows={boardRows} />
         ) : (
           <ReviewsTab
             reviewGroups={reviewGroups}
@@ -877,10 +750,10 @@ function SortableHeader({
 }: {
   label: string
   fullLabel?: string
-  sortKey: LeaderboardSortId
-  activeKey: LeaderboardSortId
+  sortKey: V4SortId
+  activeKey: V4SortId
   direction: LeaderboardSortDirection
-  onSort: (key: LeaderboardSortId) => void
+  onSort: (key: V4SortId) => void
   className?: string
 }) {
   const active = sortKey === activeKey
@@ -888,7 +761,7 @@ function SortableHeader({
     ? direction === 'asc'
       ? 'descending'
       : 'ascending'
-    : sortKey === 'model' || sortKey === 'lab' || sortKey === 'think'
+    : sortKey === 'name' || sortKey === 'lab' || sortKey === 'kind'
       ? 'ascending'
       : 'descending'
   return (
@@ -914,12 +787,6 @@ function SortableHeader({
   )
 }
 
-function defaultSortDirection(sortId: LeaderboardSortId): LeaderboardSortDirection {
-  return sortId === 'model' || sortId === 'lab' || sortId === 'think'
-    ? 'asc'
-    : 'desc'
-}
-
 function MobileBenchmarkSort({
   sortId,
   direction,
@@ -927,10 +794,10 @@ function MobileBenchmarkSort({
   onSort,
   onDirectionChange,
 }: {
-  sortId: LeaderboardSortId
+  sortId: V4SortId
   direction: LeaderboardSortDirection
-  metrics: readonly BenchmarkMetricDef[]
-  onSort: (id: LeaderboardSortId) => void
+  metrics: readonly { id: EvalMetric; label: string }[]
+  onSort: (id: V4SortId) => void
   onDirectionChange: () => void
 }) {
   return (
@@ -944,17 +811,14 @@ function MobileBenchmarkSort({
           aria-label="Mobile benchmark sort"
           className="hud-select mt-1 w-full"
           value={sortId}
-          onChange={(event) => onSort(event.target.value as LeaderboardSortId)}
+          onChange={(event) => onSort(event.target.value as V4SortId)}
         >
-          <option value="cap">Capability</option>
           {metrics.map((metric) => (
             <option key={metric.id} value={metric.id}>{metric.label}</option>
           ))}
-          <option value="model">Model name</option>
+          <option value="name">Endpoint</option>
           <option value="lab">Lab</option>
-          <option value="size">Parameters</option>
-          <option value="price">List price</option>
-          <option value="day">Release day</option>
+          <option value="kind">Kind</option>
         </select>
       </label>
       <button
@@ -1675,11 +1539,12 @@ export function InternalBenchmarksTab({
       <div className="flex flex-wrap items-center gap-2 text-[0.6875rem] text-muted">
         <StatusChip tone="research">LAB</StatusChip>
         <span className="hud-mobile-summary">
-          Private snapshots and unreleased checkpoints.
+          Private checkpoint evals stay here until you release an endpoint.
         </span>
         <span className="hud-mobile-detail">
-          In-training snapshots and unreleased models. Use Benchmark on a run
-          in Models to measure weights without releasing them.
+          V4 checkpoint evals and unreleased models. Order an Eval in Models to
+          measure weights without going public. Instant/Deep columns remain for
+          older shipped models.
         </span>
       </div>
 
@@ -1863,6 +1728,7 @@ function MobileInternalBenchmarkCard({
           <span aria-hidden className="transition group-open/internal:rotate-90">›</span>
         </summary>
         <div className="space-y-2 border-t border-line/40 p-2">
+          {row.measured ? <EvalBarChart measured={row.measured} title="Last eval" /> : null}
           <div className="grid grid-cols-2 gap-1.5">
             {scores.map(({ metric, score }) => (
               <div
@@ -2089,21 +1955,6 @@ function modelUsdBase(
   const out = model.costApiPriceOut
   if (inn == null && out == null) return null
   return blendApiPrice(inn ?? out ?? 0, out ?? inn ?? 0)
-}
-
-/** Public list price, never hosting cost, for benchmark billing displays. */
-function modelListUsdBase(
-  state: SimState,
-  model: Model,
-  labId: string,
-): number {
-  const pricing =
-    labId === 'player'
-      ? state.player.pricing
-      : (state.rivals.find((rival) => rival.id === labId)?.pricing ??
-        state.player.pricing)
-  const offer = modelOfferApiInOut(pricing, model)
-  return blendApiPrice(offer.priceIn, offer.priceOut)
 }
 
 function boardForColumn(

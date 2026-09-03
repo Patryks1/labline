@@ -1,3 +1,4 @@
+// V4-DELETE: superseded by src/sim/training/evaluate.ts (Phase 2 cutover).
 import { BENCHMARK_DEFS } from '../balance/benchmarks'
 import { API_PRICE_EPSILON } from '../balance/pricing'
 import { createRng, hashSeed } from '../rng'

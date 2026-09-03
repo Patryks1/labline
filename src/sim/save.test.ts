@@ -15,8 +15,8 @@ import { TERRAIN_KIND, tileId } from "./world";
 import {
   SAVE_FORMAT,
   SAVE_VERSION,
-  V1_INCOMPATIBILITY_REASON,
-  V3_INCOMPATIBILITY_REASON,
+  TRAINING_OVERHAUL_INCOMPATIBILITY_REASON,
+  SaveError,
   buildSaveFile,
   buildSaveMeta,
   clearAllSaves,
@@ -33,8 +33,173 @@ import {
   serializeSave,
   writeSaveSlot,
 } from "./save";
+import { baselineModifiers } from "./training/modifiers";
+import {
+  defaultArchitecture,
+  defaultDesign,
+  emptyTrainingState,
+} from "./training/state";
+import type {
+  Checkpoint,
+  Endpoint,
+  TrainingRun,
+  TrainingState,
+} from "./training/types";
 
-describe("save / load v13", () => {
+const SAMPLE_DOMAINS = {
+  language: 12,
+  reasoning: 9,
+  code: 14,
+  math: 7,
+  science: 5,
+  vision: 0,
+  video: 0,
+  audio: 0,
+  tools: 3,
+} as const;
+
+function sampleTrainingSlice(): TrainingState {
+  const design = defaultDesign(3);
+  const modifiers = baselineModifiers();
+  const forecast = {
+    compute: {
+      trainPfDays: 8,
+      holdoutPfDays: 1,
+      totalPfDays: 9,
+      archCost: 1,
+      modalityCost: 1,
+      throughput: 1,
+      days: 12,
+      paceFloorDays: 8,
+      trainHbmGB: 40,
+      cashEstimate: 90_000,
+    },
+    loss: {
+      nEff: 7e9,
+      dEff: 1.4e11,
+      paramTerm: 0.4,
+      dataTerm: 0.3,
+      loss: 2.1,
+      precisionPenalty: 0,
+      gap: 0.41,
+    },
+    effectiveData: {
+      rawMTok: 140,
+      uniqueMTok: 140,
+      effectiveMTok: 140,
+      qualityWeight: 1,
+      diversity: 1,
+      epochs: 1,
+      epochFactor: 1,
+      syntheticShare: 0,
+      syntheticDiscount: 1,
+      domainMix: { chat: 1 },
+      perDomain: {},
+    },
+    capability: { p10: 40, p50: 48, p90: 55, ceiling: 82, sigma: 0.06 },
+    domains: { ...SAMPLE_DOMAINS },
+    blockers: [],
+    warnings: [],
+  };
+  const run: TrainingRun = {
+    id: "run-aurora",
+    labId: "player",
+    design,
+    forecast,
+    modifiersFrozen: modifiers,
+    seed: 99,
+    status: "running",
+    startDay: 3,
+    progress: 0.4,
+    pfDaysDone: 3.6,
+    pfDaysTotal: 9,
+    cashSpent: 12_000,
+    etaDays: 7,
+    incidents: [],
+    sigmaMult: 1,
+    costMult: 1,
+    gapDelta: 0,
+    checkpointIds: ["ckpt-aurora-40"],
+    autoCheckpointEvery: 0.25,
+    lossCurve: [{ progress: 0.4, loss: 2.2 }],
+  };
+  const checkpoint: Checkpoint = {
+    id: "ckpt-aurora-40",
+    labId: "player",
+    lineageId: "line-aurora",
+    runId: run.id,
+    name: "Aurora 40%",
+    version: "0.4",
+    stage: "base",
+    status: "stealth",
+    arch: defaultArchitecture(),
+    createdDay: 5,
+    progressAtSnapshot: 0.4,
+    truth: {
+      domains: { ...SAMPLE_DOMAINS },
+      factuality: 44,
+      steerability: 41,
+      robustness: 38,
+      safety: 52,
+      reliability: 47,
+    },
+    trainingSummary: {
+      pfDays: 3.6,
+      effectiveMTok: 140,
+      loss: 2.2,
+      gap: 0.41,
+      dataMix: { chat: 1 },
+      syntheticShare: 0,
+    },
+    postTrain: { stages: {} },
+    tiers: [{ budget: 1, served: true }],
+    endpointIds: ["ep-aurora"],
+  };
+  const endpoint: Endpoint = {
+    id: "ep-aurora",
+    labId: "player",
+    name: "Aurora",
+    members: [{ checkpointId: checkpoint.id, role: "primary" }],
+    policy: "single",
+    tiers: [{ budget: 1, served: true }],
+    precision: "bf16",
+    status: "live",
+    releaseDay: 8,
+    pricing: { inPerMTok: 0.8, outPerMTok: 3.2 },
+    openWeights: false,
+    modelId: "ep-aurora",
+  };
+  return {
+    ...emptyTrainingState(),
+    runs: [run],
+    checkpoints: [checkpoint],
+    endpoints: [endpoint],
+    gyms: [
+      {
+        id: "gym-7-code",
+        labId: "player",
+        kind: "code",
+        tier: 0,
+        quality: 0.2,
+        tasksPerDay: 12,
+        researchers: 0,
+        researchShare: 0,
+        budgetPerDay: 0,
+      },
+    ],
+    pools: {
+      instructionMTok: 2,
+      preferenceMTok: 0.5,
+      verifiableTasks: 200,
+      toolTrajectories: 0,
+    },
+    seasons: [
+      { season: 1, startDay: 0, difficultyIndex: 1, contamination: {} },
+    ],
+  };
+}
+
+describe("save / load v15", () => {
   beforeEach(async () => {
     await clearAllSaves();
   });
@@ -61,15 +226,25 @@ describe("save / load v13", () => {
     expect(back.config.difficulty).toBe("normal");
   });
 
-  it("accepts v12 saves and migrates the unified private evaluation queue", () => {
+  it("rejects v14 saves as incompatible with the training overhaul", () => {
     const state = createGame(10_012);
     const legacy = JSON.parse(serializeSave(buildSaveFile(state, "1")));
-    legacy.version = 12;
-    legacy.meta.version = 12;
-    delete legacy.state.player.privateEvaluationJobs;
-    const loaded = parseSave(JSON.stringify(legacy));
-    expect(loaded.version).toBe(12);
-    expect(loaded.state.player.privateEvaluationJobs).toEqual([]);
+    legacy.version = 14;
+    legacy.meta.version = 14;
+    expect(() => parseSave(JSON.stringify(legacy))).toThrow(
+      TRAINING_OVERHAUL_INCOMPATIBILITY_REASON,
+    );
+    try {
+      parseSave(JSON.stringify(legacy));
+      throw new Error("expected parseSave to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(SaveError);
+      expect((error as SaveError).code).toBe("incompatible-training-overhaul");
+    }
+    expect(inspectSaveCompatibility(legacy)).toEqual({
+      compatible: false,
+      reason: TRAINING_OVERHAUL_INCOMPATIBILITY_REASON,
+    });
   });
 
   it("normalizes legacy cloud pools and additive investor-pitch state", () => {
@@ -639,7 +814,7 @@ describe("save / load v13", () => {
     expect(back.map.cities![0]!.population).toBe(snapshotPopulation);
   });
 
-  it("continues to accept v6 envelopes for preserved campaigns", () => {
+  it("rejects v6 envelopes that predate the training overhaul", () => {
     const state = createGame({
       seed: 706,
       difficulty: "normal",
@@ -649,12 +824,12 @@ describe("save / load v13", () => {
     const legacy = JSON.parse(serializeSave(buildSaveFile(state, "1")));
     legacy.version = 6;
     legacy.meta.version = 6;
-    const loaded = parseSave(JSON.stringify(legacy));
-    expect(loaded.state.seed).toBe(706);
-    expect(loaded.state.map.storage).toBe("legacy");
+    expect(() => parseSave(JSON.stringify(legacy))).toThrow(
+      TRAINING_OVERHAUL_INCOMPATIBILITY_REASON,
+    );
   });
 
-  it("preserves rival topology and product fields while canonicalizing legacy jobs", () => {
+  it("preserves rival topology and product fields on a v15 round-trip", () => {
     const state = createGame({ seed: 707, difficulty: "normal" });
     const rival = state.rivals[0]!;
     rival.trainingJobs = [];
@@ -680,13 +855,15 @@ describe("save / load v13", () => {
     };
 
     const restored = roundTripState(state);
-    expect(restored.rivals[0]!.trainingJobs?.[0]).toMatchObject({
+    expect(restored.rivals[0]!.trainingJobs).toEqual([]);
+    expect(restored.rivals[0]!.trainingJob).toMatchObject({
       family: "omni",
       backbone: "moe",
       productPreset: "omni",
       activeParamsB: 10,
       io: { inputs: { text: 80, image: 70 }, outputs: { text: 80 }, tools: 60 },
     });
+    expect(restored.rivals[0]!.training).toEqual(emptyTrainingState());
   });
 
   it("never serializes million-tile static buffers or runtime indexes", () => {
@@ -995,7 +1172,9 @@ describe("save / load v13", () => {
       meta: {},
       state: {},
     });
-    expect(() => parseSave(legacy)).toThrow(V1_INCOMPATIBILITY_REASON);
+    expect(() => parseSave(legacy)).toThrow(
+      TRAINING_OVERHAUL_INCOMPATIBILITY_REASON,
+    );
   });
 
   it("rejects v3 economies explicitly without attempting migration", () => {
@@ -1008,7 +1187,7 @@ describe("save / load v13", () => {
           state: {},
         }),
       ),
-    ).toThrow(V3_INCOMPATIBILITY_REASON);
+    ).toThrow(TRAINING_OVERHAUL_INCOMPATIBILITY_REASON);
   });
 
   it("rejects bad and newer formats", () => {
@@ -1120,6 +1299,51 @@ describe("save / load v13", () => {
     expect(restored.industryDataPack.demand.reportYearMinMultiplier).toBe(5.25);
   });
 
+  it("round-trips the V4 training slice on a v15 save", () => {
+    const state = createGame({ seed: 15_001, difficulty: "easy" });
+    const training = sampleTrainingSlice();
+    state.player.training = training;
+    state.rivals[0] = {
+      ...state.rivals[0]!,
+      training: {
+        ...emptyTrainingState(),
+        gyms: [
+          {
+            id: "rival-gym",
+            labId: state.rivals[0]!.id,
+            kind: "math",
+            tier: 1,
+            quality: 0.45,
+            tasksPerDay: 40,
+            researchers: 2,
+            researchShare: 0.05,
+            budgetPerDay: 5_000,
+          },
+        ],
+      },
+    };
+
+    const restored = roundTripState(state);
+    expect(restored.player.training.runs).toEqual(training.runs);
+    expect(restored.player.training.checkpoints).toEqual(training.checkpoints);
+    expect(restored.player.training.endpoints).toEqual(training.endpoints);
+    expect(restored.player.training.gyms).toEqual(training.gyms);
+    expect(restored.player.training.pools).toEqual(training.pools);
+    expect(restored.player.training.seasons).toEqual(training.seasons);
+    expect(restored.rivals[0]!.training.gyms).toHaveLength(1);
+    expect(restored.rivals[0]!.training.gyms[0]?.kind).toBe("math");
+  });
+
+  it("fills missing v15 training slices with the empty state", () => {
+    const state = createGame({ seed: 15_002, difficulty: "easy" });
+    const file = JSON.parse(serializeSave(buildSaveFile(state, "1")));
+    delete file.state.player.training;
+    delete file.state.rivals[0].training;
+    const restored = parseSave(JSON.stringify(file)).state;
+    expect(restored.player.training).toEqual(emptyTrainingState());
+    expect(restored.rivals[0]!.training).toEqual(emptyTrainingState());
+  });
+
   it("does not import malformed v3 rack blueprints", () => {
     const json = JSON.stringify({
       format: SAVE_FORMAT,
@@ -1164,6 +1388,8 @@ describe("save / load v13", () => {
     });
 
     expect(extractV3RackBlueprints(json)).toEqual([blueprint]);
-    expect(() => parseSave(json)).toThrowError(V3_INCOMPATIBILITY_REASON);
+    expect(() => parseSave(json)).toThrowError(
+      TRAINING_OVERHAUL_INCOMPATIBILITY_REASON,
+    );
   });
 });

@@ -269,6 +269,7 @@ export function companyFromPlayer(state: SimState, player = state.player): Compa
       researchCashBurnToday: player.researchCashBurnToday,
       powerEfficiencyHistory: player.powerEfficiencyHistory,
       marketingOutcome: player.marketingOutcome,
+      training: player.training,
     },
     strategy: {
       archetype: "player",
@@ -356,6 +357,7 @@ export function companyFromRival(_state: SimState, rival: RivalLab): CompanyStat
       enterpriseContracts: rival.enterpriseContracts ?? 0,
       computeLeaseIncomeToday: rival.computeLeaseIncomeToday,
       computeLeaseCostToday: rival.computeLeaseCostToday,
+      training: rival.training,
     },
     strategy,
   };
@@ -395,6 +397,7 @@ export function labFromCompany(company: CompanyState): LabState {
     researchQueue: company.research.queue,
     models: orderedFromRecord(company.modelsById, company.modelOrder),
     trainingJob: jobs[0] ?? company.strategy?.rivalTrainingJob ?? null,
+    training: company.ops.training,
     pricing: company.ops.pricing,
     modelRouters: company.ops.modelRouters,
     activeModelRouterId: company.ops.activeModelRouterId,
@@ -480,6 +483,7 @@ export function playerFromCompany(company: CompanyState, previous: PlayerState):
     loans: company.ops.loans,
     capital: company.ops.capital,
     powerEfficiencyHistory: company.ops.powerEfficiencyHistory,
+    training: company.ops.training ?? previous.training,
   };
 }
 
@@ -552,6 +556,7 @@ export function rivalFromCompany(company: CompanyState, previous: RivalLab): Riv
     enterpriseContracts: company.ops.enterpriseContracts,
     wagesPerDay: company.organisation.wagesPerDay,
     publicEstimate: company.strategy?.publicEstimate,
+    training: company.ops.training ?? previous.training,
   };
 }
 

@@ -474,7 +474,8 @@ describe('gradual commercial elasticity and allowance abuse', () => {
     expect(language).toBeGreaterThan(0)
     expect(video).toBeGreaterThan(0)
     expect(video).toBeLessThan(language)
-    expect(language).toBeLessThanOrEqual(9)
+    // Uncapped: extreme premiums keep growing the penalty (no 9-point ceiling).
+    expect(apiDemandPricePenalty({ ratioToPeer: 8, kind: 'language' })).toBeGreaterThan(language)
   })
 
   it('large allowances attract a measurable near-cap heavy-user cohort', () => {

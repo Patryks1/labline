@@ -57,6 +57,17 @@ export function GameCard({
     ? ({ '--live-glow-color': `var(--color-${tone})` } as React.CSSProperties)
     : undefined
   const isInteractive = interactive && onActivate != null
+  const onActivateClick = (event: { currentTarget: EventTarget | null; target: EventTarget | null }) => {
+    if (!onActivate) return
+    const target = event.target
+    const el =
+      target instanceof Element ? target : target instanceof Node ? target.parentElement : null
+    if (!el) return
+    const nested = el.closest('button, a, input, select, textarea, summary, [role="button"]')
+    const current = event.currentTarget instanceof Element ? event.currentTarget : null
+    if (nested && nested !== current) return
+    onActivate()
+  }
   const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
     if (!isInteractive || !onActivate || (event.key !== 'Enter' && event.key !== ' ')) return
     event.preventDefault()
@@ -75,10 +86,14 @@ export function GameCard({
       data-mobile-priority={mobilePriority}
       role={isInteractive ? 'button' : undefined}
       tabIndex={isInteractive ? 0 : undefined}
-      onClick={isInteractive ? onActivate : undefined}
+      onClick={onActivate ? onActivateClick : undefined}
       onKeyDown={onKeyDown}
-      className={`hud-card rounded-lg border bg-panel-2/70 ${
-        live ? 'live-glow border-transparent' : 'border-line/70'
+      className={`hud-card relative rounded-lg border ${
+        live
+          ? 'live-glow border-transparent bg-panel-2/70'
+          : selected
+            ? 'border-mint/70 bg-mint/10'
+            : 'border-line/70 bg-panel-2/70'
       } ${interactive ? 'hud-card--interactive' : ''} ${selected ? 'hud-card--selected' : ''} ${className}`}
     >
       {title || actions || mobileSummary ? (
@@ -86,7 +101,12 @@ export function GameCard({
           <div className="min-w-0">
             {eyebrow ? <p className="hud-eyebrow">{eyebrow}</p> : null}
             {title ? (
-              <h3 id={headingId} className="hud-card__title mt-0.5 truncate text-sm font-semibold text-bone">
+              <h3
+                id={headingId}
+                className={`hud-card__title mt-0.5 truncate text-sm font-semibold ${
+                  selected ? 'text-mint' : 'text-bone'
+                }`}
+              >
                 {title}
               </h3>
             ) : null}

@@ -34,7 +34,6 @@ import {
 } from "../../../sim/balance/researchLayout";
 import { RESEARCH_POD_TEMPLATES } from "../../../sim/balance/researchPods";
 import type {
-  ResearchEffects,
   ResearchNodeDef,
   ResearchPod,
   ResearchProgram,
@@ -110,6 +109,7 @@ import {
   researchRelationshipTargets,
   shouldClearResearchSelection,
 } from "./researchPanelA11y";
+import { effectChips } from "./researchEffectChips";
 import { HudDesktopDefaultDetails } from "../ui/HudDesktopDefaultDetails";
 
 const FULL_RESEARCH_LAYOUT = layoutResearchTree();
@@ -1433,7 +1433,7 @@ function ResearchMethodDetail({
               </p>
             ) : null}
             <EffectsLine
-              effects={selected.effects}
+              node={selected}
               perRank={researchMaxRanks(selected) > 1}
             />
           </div>
@@ -1883,70 +1883,33 @@ function AutoQueueToggle({
 }
 
 function EffectsLine({
-  effects,
+  node,
   perRank = false,
 }: {
-  effects: ResearchEffects;
+  node: ResearchNodeDef;
   perRank?: boolean;
 }) {
-  const rank = perRank ? " per rank" : "";
-  const bits: string[] = [];
-  if (effects.utilCap)
-    bits.push(`usable compute +${(effects.utilCap * 100).toFixed(0)}%${rank}`);
-  if (effects.servingEfficiency) {
-    bits.push(`token speed +${(effects.servingEfficiency * 100).toFixed(0)}%${rank}`);
-    bits.push(
-      `inference compute/token −${(100 - 100 / (1 + effects.servingEfficiency)).toFixed(0)}%${rank}`,
-    );
-  }
-  if (effects.trainEfficiency) {
-    bits.push(`training speed +${(effects.trainEfficiency * 100).toFixed(0)}%${rank}`);
-    bits.push(
-      `training compute/token −${(100 - 100 / (1 + effects.trainEfficiency)).toFixed(0)}%${rank}`,
-    );
-  }
-  if (effects.energyPue)
-    bits.push(
-      `facility power ${effects.energyPue < 0 ? "−" : "+"}${Math.abs(effects.energyPue * 100).toFixed(0)} PUE pts`,
-    );
-  if (effects.capabilityBonus)
-    bits.push(`model capability +${effects.capabilityBonus}`);
-  if (effects.moeInferMult)
-    bits.push(
-      `MoE compute/token −${((1 - effects.moeInferMult) * 100).toFixed(0)}%`,
-    );
-  if (effects.denseInferMult)
-    bits.push(
-      `dense compute/token ${effects.denseInferMult < 1 ? "−" : "+"}${Math.abs((1 - effects.denseInferMult) * 100).toFixed(0)}%`,
-    );
-  if (effects.chipDiscount)
-    bits.push(`hardware cost −${(effects.chipDiscount * 100).toFixed(0)}%`);
-  if (effects.dataFlywheel)
-    bits.push(`data processing +${(effects.dataFlywheel * 100).toFixed(0)}%${rank}`);
-  if (effects.gymQualityBonus)
-    bits.push(
-      `gym quality +${(effects.gymQualityBonus * 100).toFixed(1)} pts per rank`,
-    );
-  if (effects.hostingOpexDiscount)
-    bits.push(
-      `hosting opex −${(effects.hostingOpexDiscount * 100).toFixed(0)}% per rank`,
-    );
-  if (effects.benchmarkBoost) bits.push("evaluation lift");
-  if (effects.unlockCorpusSpecialists) bits.push("specialist data processing");
-  if (effects.unlockFamily) bits.push(`unlock ${effects.unlockFamily}`);
-  if (effects.trainingBreakthroughBias)
-    bits.push(
-      `breakthrough odds +${(effects.trainingBreakthroughBias * 100).toFixed(0)} pts`,
-    );
-  if (effects.trainingStumbleRisk)
-    bits.push(
-      `failed-run risk +${(effects.trainingStumbleRisk * 100).toFixed(0)} pts`,
-    );
-  if (effects.trainingSafetyPenalty)
-    bits.push(`model safety −${effects.trainingSafetyPenalty.toFixed(0)}`);
-  if (bits.length === 0) return null;
+  const chips = effectChips(node);
+  if (chips.length === 0) return null;
+  const suffix = perRank ? " /rank" : "";
   return (
-    <p className="font-mono text-[0.75rem] text-research">{bits.join(" · ")}</p>
+    <div className="flex flex-wrap gap-1">
+      {chips.map((chip) => (
+        <StatusChip
+          key={chip.label}
+          tone={
+            chip.tone === "good"
+              ? "positive"
+              : chip.tone === "unlock"
+                ? "gold"
+                : "research"
+          }
+        >
+          {chip.label}
+          {suffix}
+        </StatusChip>
+      ))}
+    </div>
   );
 }
 

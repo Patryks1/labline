@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { ECONOMY } from '../balance/economy'
 import { createGame } from '../createGame'
 import type { SimState } from '../types'
+import { defaultArchitecture, emptyTrainingState, withTrainingState } from '../training/state'
 import { tickLoans } from './loans'
 import {
   cashDistressStage,
+  playerSotaProximity,
   resumeInsolvency,
   tickVictory,
 } from './victory'
@@ -51,7 +53,7 @@ describe('cash distress ladder', () => {
     expect(distressed.victory.outcome).toBe('playing')
   })
 
-  it('keeps playing at the -$500M floor so credit, equity, and model sales stay usable', () => {
+  it('keeps playing at the -$500M floor so credit and equity stay usable', () => {
     const floor = ECONOMY.victory.bankruptCash
     expect(floor).toBe(-500_000_000)
 
@@ -207,5 +209,93 @@ describe('capacity-backed market dominance', () => {
     const next = tickVictory(classic)
     expect(next.victory.dominanceQualifiedDays).toBe(180)
     expect(next.victory.outcome).toBe('won')
+  })
+})
+
+describe('V4 public capability and live endpoints', () => {
+  it('scores SOTA from the public leaderboard and treats live endpoints as released', () => {
+    const base = createGame(8901)
+    const quiet: SimState = {
+      ...base,
+      rivals: base.rivals.map((rival) => ({ ...rival, models: [], training: emptyTrainingState() })),
+    }
+    const checkpoint = {
+      id: 'cp-win',
+      labId: quiet.playerLabId,
+      lineageId: 'cp-win',
+      name: 'Win',
+      version: '1.0',
+      stage: 'post' as const,
+      status: 'released' as const,
+      arch: defaultArchitecture(),
+      createdDay: 1,
+      progressAtSnapshot: 1,
+      truth: {
+        domains: {
+          language: 70, reasoning: 70, code: 70, math: 70, science: 70,
+          vision: 0, video: 0, audio: 0, tools: 70,
+        },
+        factuality: 70, steerability: 70, robustness: 70, safety: 70, reliability: 70,
+      },
+      trainingSummary: {
+        pfDays: 10, effectiveMTok: 80, loss: 2, gap: 0.3, dataMix: {}, syntheticShare: 0,
+      },
+      postTrain: { stages: {} },
+      tiers: [{ budget: 1 as const, served: true }],
+      endpointIds: ['ep-win'],
+    }
+    const endpoint = {
+      id: 'ep-win',
+      labId: quiet.playerLabId,
+      name: 'Win Live',
+      members: [{ checkpointId: 'cp-win', role: 'primary' as const }],
+      policy: 'single' as const,
+      tiers: [{ budget: 1 as const, served: true }],
+      precision: 'bf16' as const,
+      status: 'live' as const,
+      releaseDay: 4,
+      pricing: { inPerMTok: 1, outPerMTok: 2 },
+      openWeights: false,
+      modelId: 'ep-win',
+    }
+    const state = withTrainingState(quiet, quiet.playerLabId, {
+      ...emptyTrainingState(),
+      checkpoints: [checkpoint],
+      endpoints: [endpoint],
+    })
+    const prox = playerSotaProximity(state)
+    expect(prox.bestCap).toBeGreaterThan(0)
+    expect(prox.frontier).toBeGreaterThanOrEqual(prox.bestCap)
+    expect(tickVictory(state).victory.outcome).toBe('playing')
+  })
+
+  it('still scores SOTA from live shipped models when the public board is empty', () => {
+    const base = createGame(8902)
+    const state: SimState = {
+      ...base,
+      player: {
+        ...base.player,
+        models: [
+          {
+            id: 'flagship',
+            name: 'Flagship',
+            family: 'dense',
+            paramsB: 10,
+            capability: 95,
+            release: 'released',
+            shipped: true,
+          } as SimState['player']['models'][number],
+        ],
+        training: emptyTrainingState(),
+      },
+      rivals: base.rivals.map((rival) => ({
+        ...rival,
+        models: [],
+        training: emptyTrainingState(),
+      })),
+    }
+    const prox = playerSotaProximity(state)
+    expect(prox.bestCap).toBe(95)
+    expect(prox.sota).toBe(1)
   })
 })

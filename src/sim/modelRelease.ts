@@ -4,8 +4,14 @@ export function isLivePublicModel(model: {
   soldIp?: boolean;
   release?: string;
   shipped?: boolean;
+  commerciallyOffered?: boolean;
+  endpointId?: string;
 }): boolean {
   if (model.archived || model.soldIp) return false;
+  if (isV4ProjectedModel(model)) {
+    return model.release === "released" && model.commerciallyOffered === true;
+  }
+  // V4-DELETE: legacy models use shipped or release.
   return model.release === "released" || model.shipped === true;
 }
 
@@ -33,4 +39,9 @@ export function isInternalFleetModel(model: {
   shipped?: boolean;
 }): boolean {
   return !isLivePublicModel(model) && !isArchivedModel(model);
+}
+
+/** Market projection produced from a V4 endpoint (`Endpoint.modelId === Endpoint.id`). */
+export function isV4ProjectedModel(model: { endpointId?: string }): boolean {
+  return typeof model.endpointId === "string" && model.endpointId.length > 0;
 }

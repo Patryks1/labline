@@ -20,8 +20,8 @@ function accelerator(
     'ternary_1_58',
   ]
   if (input.generation >= 2) {
-    training.push('fp8_hybrid')
-    serving.push('fp8')
+    training.push('fp8_hybrid', 'fp6')
+    serving.push('fp8', 'fp6')
   }
   if (input.generation >= 3) {
     training.push('nvfp4')

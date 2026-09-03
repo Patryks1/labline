@@ -1039,6 +1039,10 @@ export function PlansPanel() {
                     ),
                     fallbackPriceIn: m.suggestedApiPriceIn,
                     fallbackPriceOut: m.suggestedApiPriceOut,
+                    frontierCapability: Math.max(
+                      apiServedModel.capability,
+                      ...rivalApiInOutPeers.map((peer) => peer.capability),
+                    ),
                   });
                   const comparablePeers = apiComparablePeerRows(
                     blend,
@@ -2819,6 +2823,7 @@ const PLAN_PRECISION_LABELS: Record<PlanServePrecision, string> = {
   fp16: "FP16",
   bf16: "BF16",
   fp8: "FP8",
+  fp6: "FP6",
   int8: "INT8",
   int4: "INT4",
   nvfp4: "NVFP4",
@@ -2833,6 +2838,12 @@ function ServingPrecisionResearchLinks({ unlocked }: { unlocked: string[] }) {
       ) : null}
       {!unlocked.includes("opt_mixed") ? (
         <ResearchUnlockLink nodeId="opt_mixed" label="Unlock BF16 serving" />
+      ) : null}
+      {unlocked.includes("opt_mixed") && !unlocked.includes("sys_fp8") ? (
+        <ResearchUnlockLink nodeId="sys_fp8" label="Unlock FP8 serving" />
+      ) : null}
+      {unlocked.includes("sys_fp8") && !unlocked.includes("opt_fp6_train") ? (
+        <ResearchUnlockLink nodeId="opt_fp6_train" label="Unlock FP6 serving" />
       ) : null}
       {unlocked.includes("opt_fp16") && unlocked.includes("opt_mixed") && !unlocked.includes("sys_quant") ? (
         <ResearchUnlockLink nodeId="sys_quant" label="Unlock integer serving formats" />

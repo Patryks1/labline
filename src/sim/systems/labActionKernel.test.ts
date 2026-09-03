@@ -74,12 +74,14 @@ describe('shared lab action kernel', () => {
       input: 1.5,
       output: 4.5,
     }
+    const labBefore = withModel.player.pricing.apiPriceInPerMTok
     const applied = applyLabAction(withModel, withModel.playerLabId, action)
     const priced = applied.player.models.find((candidate) => candidate.id === model.id)
-    expect(applied.player.pricing.apiPriceInPerMTok).toBe(1.5)
-    expect(applied.player.pricing.apiPriceOutPerMTok).toBe(4.5)
     expect(priced?.apiPriceInPerMTok).toBe(1.5)
     expect(priced?.apiPriceOutPerMTok).toBe(4.5)
+    // Per-model edit must not leak into the lab default: sibling models that
+    // fall back to it would otherwise be silently re-priced.
+    expect(applied.player.pricing.apiPriceInPerMTok).toBe(labBefore)
   })
 
   it('clamps an API list below hosting cost up to the stored floor', () => {

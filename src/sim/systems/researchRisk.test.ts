@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { rollTrainingOutcome } from '../balance/trainingV3'
+import { getResearchNode } from '../balance/research'
 import { enqueueResearch, aggregateEffects } from './research'
 import { createGame } from '../createGame'
 
@@ -19,12 +20,13 @@ describe('research paths and high-risk methods', () => {
 
   it('risky methods provide upside while carrying explicit safety and failure costs', () => {
     const effects = aggregateEffects(['data_self_train', 'align_agent_redteam'])
-    expect(effects.capabilityBonus).toBe(13)
-    expect(effects.trainEfficiency).toBeCloseTo(0.2)
-    expect(effects.trainingBreakthroughBias).toBeCloseTo(0.23)
-    expect(effects.trainingStumbleRisk).toBeCloseTo(0.18)
-    expect(effects.trainingSafetyPenalty).toBe(13)
     expect(effects.safetyBonus).toBe(-3)
+    expect(effects.dataFlywheel).toBeCloseTo(0.18)
+    const self = getResearchNode('data_self_train').effects
+    const red = getResearchNode('align_agent_redteam').effects
+    expect(self.stability).toBeGreaterThan(1)
+    expect(red.stability).toBeGreaterThan(1)
+    expect((self.ceilingLift ?? 0) + (red.ceilingLift ?? 0)).toBeGreaterThan(2)
   })
 
   it('risk research widens both breakthrough and stumble tails deterministically', () => {

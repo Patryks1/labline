@@ -54,6 +54,7 @@ import {
 } from './mobileShellContracts'
 import { normalizeTrainingJobs } from './trainingJobViewModel'
 import { selectFinanceDashboardReadouts } from './data/financeDashboardModel'
+import { trainingStateOf } from '../../sim/training/state'
 
 /**
  * Floating workspace drawer over the full-bleed map.
@@ -150,7 +151,15 @@ export function LeftRail({
   )
 
   const badges = useMemo(() => {
-    const training = normalizeTrainingJobs(state).length > 0
+    const v4 = trainingStateOf(state, state.playerLabId)
+    const v4Busy =
+      v4.runs.some(
+        (run) =>
+          run.status === 'running' ||
+          run.status === 'queued' ||
+          run.status === 'awaiting_decision',
+      ) || v4.recipes.some((recipe) => recipe.status === 'running')
+    const training = v4Busy || normalizeTrainingJobs(state).length > 0
     const finance = selectFinanceDashboardReadouts(state)
     const rawData =
       state.player.data &&
@@ -420,7 +429,7 @@ export function LeftRail({
             </p>
             <div
               className={`workspace-drawer__body workspace-drawer__body--shell-reserved panel-scroll relative z-10 min-h-0 flex-1 p-4 ${
-                active === 'research'
+                active === 'research' || active === 'models'
                   ? 'flex flex-col overflow-y-auto xl:overflow-hidden'
                   : 'overflow-y-auto'
               }`}
@@ -428,7 +437,9 @@ export function LeftRail({
               <div
                 key={active}
                 className={`panel-swap min-h-0 ${
-                  active === 'research' ? 'flex min-h-full flex-1 flex-col xl:min-h-0' : ''
+                  active === 'research' || active === 'models'
+                    ? 'flex min-h-full flex-1 flex-col xl:min-h-0'
+                    : ''
                 }`}
               >
                 <PanelBody

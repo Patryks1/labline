@@ -99,6 +99,20 @@ export const TRAINING_PRECISION_PROFILES: Readonly<
     inferenceCostMultiplier: 0.82,
     stabilityRisk: 0.04,
   },
+  fp6: {
+    format: 'fp6',
+    label: 'FP6',
+    minimumHardwareGeneration: 2,
+    throughputByGeneration: { 2: 2.1, 3: 2.2, 4: 2.25, 5: 2.3 },
+    activationMemoryMultiplier: 0.8,
+    trainingWorkMultiplier: 0.72,
+    upfrontCashMultiplier: 0.74,
+    dailyCashMultiplier: 0.76,
+    qualityCeilingMultiplier: 0.93,
+    lossVolatilityMultiplier: 1.55,
+    inferenceCostMultiplier: 0.72,
+    stabilityRisk: 0.08,
+  },
   nvfp4: {
     format: 'nvfp4',
     label: 'NVFP4',
@@ -186,6 +200,8 @@ export function nativeWeightPrecisionForNumerics(
       return 'fp16'
     case 'fp8_hybrid':
       return 'fp8'
+    case 'fp6':
+      return 'fp6'
     case 'nvfp4':
       return 'nvfp4'
     case 'bf16_mixed':
@@ -204,6 +220,8 @@ export function nativeWeightBytesPerParam(precision: NativeWeightPrecision): num
       return 2
     case 'fp8':
       return 1
+    case 'fp6':
+      return 0.75
     case 'nvfp4':
       return 0.5
     case 'ternary_1_58':
@@ -216,6 +234,8 @@ export function nativeWeightStorageOverhead(precision: NativeWeightPrecision): n
   switch (precision) {
     case 'fp8':
       return 1.03
+    case 'fp6':
+      return 1.04
     case 'nvfp4':
       return 1.06
     case 'ternary_1_58':
@@ -310,6 +330,13 @@ export function validateTrainingNumerics(opts: {
     !unlocked.has('opt_fp8_train')
   ) {
     return { ok: false, reason: 'FP8 training requires the FP8 Training Stack.' }
+  }
+  if (
+    enforceResearch &&
+    numerics.computeFormat === 'fp6' &&
+    !unlocked.has('opt_fp6_train')
+  ) {
+    return { ok: false, reason: 'FP6 training requires FP6 Training Recipes.' }
   }
   if (
     enforceResearch &&

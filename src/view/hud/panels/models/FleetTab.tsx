@@ -80,7 +80,7 @@ function FleetEvidenceDisclosure({
   summary,
   children,
 }: {
-  status: "archived" | "released" | "internal";
+  status: "archived" | "released" | "internal" | "sold";
   summary: string;
   children: ReactNode;
 }) {
@@ -120,8 +120,6 @@ export function FleetTab({
   onRelease,
   onArchive,
   onRestore,
-  onSellIp,
-  ipSaleQuoteFor,
   onDelete,
   frontierCapability,
   onTrainFurther,
@@ -142,8 +140,6 @@ export function FleetTab({
   onRelease: (id: string) => void;
   onArchive?: (id: string) => void;
   onRestore?: (id: string) => void;
-  onSellIp?: (id: string) => void;
-  ipSaleQuoteFor?: (model: Model) => number;
   onDelete: (id: string) => void;
   frontierCapability: number;
   /** Canonical $/MTok unit cost for suggested list prices. */
@@ -563,24 +559,6 @@ export function FleetTab({
                         onClick={() => onRestore(model.id)}
                       >
                         Restore
-                      </HudButton>
-                    ) : null}
-                    {status !== "sold" && onSellIp ? (
-                      <HudButton
-                        type="button"
-                        variant="ghost"
-                        disabled={archiveBlocked}
-                        title={
-                          archiveBlocked
-                            ? "Finish or cancel this model's active safety campaign before selling it."
-                            : undefined
-                        }
-                        className="!px-2 !py-1 text-[0.6875rem]"
-                        onClick={() => onSellIp(model.id)}
-                      >
-                        {ipSaleQuoteFor
-                          ? `Sell IP · ${money(ipSaleQuoteFor(model))}`
-                          : "Sell IP"}
                       </HudButton>
                     ) : null}
                     <HudButton

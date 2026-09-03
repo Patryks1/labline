@@ -24,6 +24,7 @@ import {
   servingOpsDayEstimate,
   splitInOutCost,
 } from "./unitEconomics";
+import { OBSOLESCENCE_EPSILON } from "./obsolescence";
 import {
   billableTextMTok,
   CANONICAL_TEXT_INPUT_SHARE,
@@ -130,8 +131,16 @@ export interface ApiCompetitivePeerPrice {
 /**
  * Capability window for "similar public APIs" — close enough that buyers
  * actually compare list prices, not every toy checkpoint in the world.
- * A 8–12 point gap is "a bit worse"; ~14 points is the edge of the band.
+ * Relative to own capability (≈24%, min 8 points) so the band means the same
+ * thing at frontier 60 and frontier 600: ~13 points at 55 (legacy ~14),
+ * ~120 at 500. Absolute gaps would either drown small models in
+ * incomparable peers or blind frontier models to real competition.
  */
+export function similarApiCapabilityDelta(ownCapability: number): number {
+  if (!Number.isFinite(ownCapability) || ownCapability <= 0) return 8;
+  return Math.max(8, ownCapability * 0.24);
+}
+/** Legacy absolute edge, kept for reference; prefer similarApiCapabilityDelta. */
 export const SIMILAR_API_CAPABILITY_DELTA = 14;
 export const SIMILAR_API_QUALITY_RATIO = { lo: 0.78, hi: 1.28 } as const;
 
@@ -155,7 +164,8 @@ export function isSimilarCapabilityApiPeer(
   peer: { capability: number; featureScore: number; tokPerSec?: number },
 ): boolean {
   if (
-    Math.abs(peer.capability - own.capability) <= SIMILAR_API_CAPABILITY_DELTA
+    Math.abs(peer.capability - own.capability) <=
+    similarApiCapabilityDelta(own.capability)
   ) {
     return true;
   }
@@ -180,8 +190,10 @@ export function similarCapabilityApiPeers<
 /**
  * Recommend separate API list prices from quality-adjusted rival rates.
  * The target is a 12.5% undercut of similar-capability peers so the
- * suggestion sits inside the demand-producing band. Cost is a warning,
- * not a floor that can push the quote above what buyers will pay.
+ * suggestion sits inside the demand-producing band. The floor is tiered by
+ * frontier share: small models may be suggested down to true hosting cost
+ * (quantity over quality), while near-frontier models (≥0.8 share) hold
+ * ~30% headroom above cost and are never suggested below it.
  */
 export function suggestCompetitiveApiInOut(input: {
   costIn: number;
@@ -192,6 +204,8 @@ export function suggestCompetitiveApiInOut(input: {
   peers: ApiCompetitivePeerPrice[];
   fallbackPriceIn?: number;
   fallbackPriceOut?: number;
+  /** Best capability on the market; defaults to own (most permissive floor). */
+  frontierCapability?: number;
 }): { priceIn: number; priceOut: number; hasComparablePeers: boolean } {
   const ownQuality = apiDemandQuality(input);
   const validPeers = input.peers.filter(
@@ -206,19 +220,30 @@ export function suggestCompetitiveApiInOut(input: {
   );
   const targetIn = median(normalizedIn);
   const targetOut = median(normalizedOut);
-  const floorIn = Math.max(0, input.costIn);
-  const floorOut = Math.max(0, input.costOut);
+  const frontier = Math.max(
+    OBSOLESCENCE_EPSILON,
+    input.frontierCapability ?? input.capability,
+  );
+  const tier = Math.max(
+    0,
+    Math.min(1, (input.capability / frontier - 0.5) / 0.3),
+  );
+  const floorMult = 1 + 0.3 * tier;
+  const floorIn = Math.max(0, input.costIn) * floorMult;
+  const floorOut = Math.max(0, input.costOut) * floorMult;
   const roundUpCents = (value: number) => Math.ceil(value * 100 - 1e-9) / 100;
   if (targetIn == null || targetOut == null) {
     return {
-      priceIn: roundUpCents(Math.max(0, input.fallbackPriceIn ?? floorIn)),
-      priceOut: roundUpCents(Math.max(0, input.fallbackPriceOut ?? floorOut)),
+      priceIn: roundUpCents(Math.max(floorIn, input.fallbackPriceIn ?? floorIn)),
+      priceOut: roundUpCents(
+        Math.max(floorOut, input.fallbackPriceOut ?? floorOut),
+      ),
       hasComparablePeers: false,
     };
   }
   return {
-    priceIn: roundUpCents(Math.max(0, targetIn * 0.875)),
-    priceOut: roundUpCents(Math.max(0, targetOut * 0.875)),
+    priceIn: roundUpCents(Math.max(floorIn, targetIn * 0.875)),
+    priceOut: roundUpCents(Math.max(floorOut, targetOut * 0.875)),
     hasComparablePeers: true,
   };
 }
@@ -291,7 +316,12 @@ export function apiPriceToleranceRatio(
   return (premiumTolerance[kind ?? "language"] ?? 1.2) * capabilityPremium;
 }
 
-/** Continuous peer-relative price pressure; premiums decay demand, never erase it. */
+/**
+ * Continuous peer-relative price pressure, uncapped: extreme premiums drive
+ * utility arbitrarily negative so gouging exits procedurally instead of
+ * freezing at a 9-point penalty. Near-market pricing is unaffected (the curve
+ * below 9 is unchanged).
+ */
 export function apiDemandPricePenalty(input: {
   ratioToPeer: number | null;
   kind?: string;
@@ -314,7 +344,7 @@ export function apiDemandPricePenalty(input: {
     0,
     Math.log(Math.max(1, input.ratioToPeer / toleratedRatio)),
   );
-  return Math.min(9, excessLog * 3.2 + excessLog * excessLog * 0.95);
+  return excessLog * 3.2 + excessLog * excessLog * 0.95;
 }
 
 /**
@@ -342,7 +372,8 @@ export const API_PRICE_EPSILON = 0.0000001;
  * Multiplicative demand response to the peer-relative price ratio. Unlike the
  * utility penalty this scales realized MTok directly: inside the tolerated
  * ratio there is a mild undercut reward (≤1.15×), beyond it demand decays as
- * (tolerated / ratio)^elasticity with a 0.02 floor so gouging leaves a trickle.
+ * (tolerated / ratio)^elasticity toward epsilon with no trickle floor —
+ * gouging exits procedurally.
  */
 export function apiDemandElasticityMultiplier(input: {
   ratioToPeer: number | null;
@@ -364,7 +395,7 @@ export function apiDemandElasticityMultiplier(input: {
     );
   }
   return Math.max(
-    0.005,
+    OBSOLESCENCE_EPSILON,
     Math.pow(tolerated / input.ratioToPeer, Math.max(0, input.elasticity)),
   );
 }

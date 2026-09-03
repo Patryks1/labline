@@ -29,6 +29,12 @@ describe("shared HQ staff reservations", () => {
         postTrainGyms: base.player.postTrainGyms?.map((gym) =>
           gym.kind === "code" ? { ...gym, assignedResearchers: 4 } : gym,
         ),
+        training: {
+          ...base.player.training,
+          gyms: (base.player.training?.gyms ?? []).map((gym, index) =>
+            index === 0 ? { ...gym, researchers: 2 } : gym,
+          ),
+        },
         safetyCampaign: {
           id: "safety",
           modelId: "m",
@@ -69,17 +75,17 @@ describe("shared HQ staff reservations", () => {
     };
 
     expect(reservedHqStaff(state)).toEqual({
-      researchers: 14,
+      researchers: 16,
       engineers: 4,
       dataStaff: 3,
     });
     expect(availableHqStaff(state)).toEqual({
-      researchers: 6,
+      researchers: 4,
       engineers: 4,
       dataStaff: 3,
     });
     expect(unreservedStaffHeadcount(state)).toEqual({
-      researcher: 6,
+      researcher: 4,
       engineer: 4,
       data_processor: 3,
       ops: 2,

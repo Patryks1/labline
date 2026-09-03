@@ -15,7 +15,6 @@ import {
   releasedRouterMemberIds,
   soldApiRouters,
 } from '../balance/modelRouter'
-import { gymResearchReservationShare } from '../balance/modelStudio'
 import { getResearchNode } from '../balance/research'
 import { formatParams } from '../balance/training'
 import { defaultServePrecisionForModel } from '../balance/tokenServe'
@@ -34,6 +33,7 @@ import {
   dataResearchReservationShare,
   ensureLabData,
   researchPoolForTech,
+  reservedGymResearchShare,
 } from './data'
 import { planComputePriority, planModelTrafficMix } from './plans'
 import {
@@ -43,6 +43,9 @@ import {
 import { playerStaff } from './staff'
 import { assignedResearchPrograms } from './researchPrograms'
 import { playerTrainingJobs, playerTrainingResourcePlan } from './training'
+import { allocateLabTrainingPf } from '../training/run'
+import { utilForLab } from '../training/forecast'
+import { trainingStateOf } from '../training/state'
 import { serveInfraCost } from '../balance/pricing'
 import { energyPriceForState } from './map'
 
@@ -237,7 +240,7 @@ export function researchComputeUsage(
   const dataShare = dataResearchReservationShare(data)
   const synthShare = dataRaw > 1e-9 ? dataShare * (synthRaw / dataRaw) : 0
   const pruneShare = dataRaw > 1e-9 ? dataShare * (pruneRaw / dataRaw) : 0
-  const gymShare = gymResearchReservationShare(state.player.postTrainGyms)
+  const gymShare = reservedGymResearchShare(state)
   const safetyShare = state.player.safetyCampaign ? 0.4 : 0
   const techAvailableShare = researchPoolForTech(state)
   const techUsedShare = treeResearchActive(state) ? techAvailableShare : 0
@@ -438,6 +441,45 @@ export function trainPoolLoad(
       usefulPf: finiteNonNeg(resources.safetyCampaign?.effectivePf),
       share: 0,
     })
+  }
+  try {
+    const v4 = trainingStateOf(state, state.playerLabId)
+    const shares = allocateLabTrainingPf(state, state.playerLabId)
+    let util = 1
+    try {
+      util = utilForLab(state, state.playerLabId)
+    } catch {
+      util = 1
+    }
+    for (const run of v4.runs) {
+      if (run.status !== 'running' && run.status !== 'queued') continue
+      const usedPf = finiteNonNeg(shares[run.id])
+      if (usedPf <= 1e-12) continue
+      jobs.push({
+        id: run.id,
+        name: run.design.name,
+        kind: 'train',
+        usedPf,
+        usefulPf: usedPf * util,
+        share: 0,
+      })
+    }
+    for (const recipe of v4.recipes) {
+      if (recipe.status !== 'running') continue
+      const usedPf = finiteNonNeg(shares[recipe.id])
+      if (usedPf <= 1e-12) continue
+      const checkpoint = v4.checkpoints.find((row) => row.id === recipe.checkpointId)
+      jobs.push({
+        id: recipe.id,
+        name: checkpoint ? `Post-train · ${checkpoint.name}` : 'Post-train recipe',
+        kind: 'train',
+        usedPf,
+        usefulPf: usedPf * util,
+        share: 0,
+      })
+    }
+  } catch {
+    // Pre-V4 saves have no training slice.
   }
   const usedPf = jobs.reduce((sum, job) => sum + job.usedPf, 0)
   const usefulPf = jobs.reduce((sum, job) => sum + job.usefulPf, 0)
@@ -839,6 +881,7 @@ function buildTrainBreakdown(
       (entry.computePriority ?? 50) > 0,
   )
   const job = activeJobs[0] ?? legacyJob ?? listedJobs[0]
+  const hasV4TrainLoad = load.usedPf > 1e-9
   const lines: BreakdownLine[] = [
     {
       label: 'Pool PF',
@@ -882,26 +925,31 @@ function buildTrainBreakdown(
   let utilizationLabel = 'Idle'
   let summary = 'No training job — train PF is idle.'
 
-  if (activeJobs.length > 0 || state.player.safetyCampaign) {
+  if (activeJobs.length > 0 || state.player.safetyCampaign || hasV4TrainLoad) {
     const totalRemaining = activeJobs.reduce(
       (sum, entry) => sum + Math.max(0, entry.targetPfDays - entry.progressPfDays),
       0,
     )
     const burn = load.usefulPf
     const daysLeft = burn > 1e-6 ? totalRemaining / burn : Infinity
+    const activeConsumers = load.jobs.filter((entry) => entry.usedPf > 1e-12).length
     utilizationLabel =
       load.usedPf <= 1e-9
         ? 'Stalled'
-        : activeJobs.length > 1
-          ? `${activeJobs.length} jobs`
+        : activeConsumers > 1
+          ? `${activeConsumers} jobs`
           : 'In use'
     const headline = job
       ? `Training ${formatParams(job.targetParamsB)}`
-      : 'Safety campaign running'
+      : state.player.safetyCampaign
+        ? 'Safety campaign running'
+        : (load.jobs[0]?.name ?? 'Training')
     summary =
       activeJobs.length > 1
         ? `${headline} · ${activeJobs.length} active jobs share the train pool.`
-        : `${headline} · ${pct01(job ? job.progressPfDays / Math.max(1e-6, job.targetPfDays) : 0)} complete.`
+        : job
+          ? `${headline} · ${pct01(job.progressPfDays / Math.max(1e-6, job.targetPfDays))} complete.`
+          : `${headline} · drawing from the train pool.`
     if (job) {
       lines.push(
         {

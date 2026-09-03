@@ -1,9 +1,9 @@
 /**
- * Async save format v14.
+ * Async save format v15.
  *
- * v13 player/rival records become `companies[id]`. Compatibility player, rivals
- * and labs remain projections during Stage A. Compact worlds persist only their
- * deterministic descriptor and sparse dynamic snapshot.
+ * Campaigns below v15 are rejected (`incompatible-training-overhaul`).
+ * The V4 training slice (`player.training` / `rivals[].training`) is required
+ * and round-trips through a defensive normalizer that never invents checkpoints.
  *
  * Compact worlds persist only their deterministic descriptor and sparse
  * dynamic snapshot. Static typed layers, indexes, metrics, journals, and any
@@ -24,7 +24,6 @@ import type {
   PrivateEvaluationJob,
   RackDesign,
   RackInstall,
-  RivalTrainJob,
   SimState,
   SubPlan,
   SynthGenJob,
@@ -98,15 +97,20 @@ import {
   type DynamicWorldSnapshotV2,
   type StaticWorld,
 } from "./world";
+import { emptyTrainingState } from "./training/state";
+import { canonicalizeTierBudget, normalizeThinkingTiers } from "./training/thinking";
+import type { Checkpoint, Endpoint, Eval, PostTrainPools, TrainingState } from "./training/types";
 
 export const SAVE_FORMAT = "labline-save" as const;
-export const SAVE_VERSION = 14 as const;
+export const SAVE_VERSION = 15 as const;
 export const V1_INCOMPATIBILITY_REASON =
   "Save format v1 is incompatible with the compact-world renderer. This campaign cannot be migrated; start a new operation.";
 export const V2_INCOMPATIBILITY_REASON =
   "Save format v2 uses the retired split player/rival simulation. It remains stored but cannot be loaded in Simulation v3; start a new operation.";
 export const V3_INCOMPATIBILITY_REASON =
   "Save format v3 uses the short-run economy and cannot be converted into the 2026–2036 campaign. Its valid rack blueprints may still be imported into the profile library.";
+export const TRAINING_OVERHAUL_INCOMPATIBILITY_REASON =
+  "This campaign predates the Training Overhaul (save v15) and cannot be migrated. Start a new operation.";
 
 export type SaveSlotId = "auto" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8";
 
@@ -209,6 +213,7 @@ export interface LoadedSaveFile extends Omit<SaveFile, "state"> {
 export type SaveErrorCode =
   | "corrupt"
   | "incompatible-version"
+  | "incompatible-training-overhaul"
   | "newer-version"
   | "not-found"
   | "quota"
@@ -373,7 +378,7 @@ function legacyMeta(): SaveMeta[] {
             : new Date(0).toISOString(),
         version: 1,
         compatible: false,
-        incompatibilityReason: V1_INCOMPATIBILITY_REASON,
+        incompatibilityReason: TRAINING_OVERHAUL_INCOMPATIBILITY_REASON,
       });
     }
     return result;
@@ -498,6 +503,142 @@ function reviveInfinities(value: unknown, path = ""): unknown {
 
 function ensureArray<T>(value: unknown, fallback: T[] = []): T[] {
   return Array.isArray(value) ? (value as T[]) : fallback;
+}
+
+function finiteNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function clampUnit(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function normalizePoolQuality(raw: unknown): PostTrainPools | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const candidate = raw as Partial<PostTrainPools>;
+  const read = (key: keyof PostTrainPools): number | undefined => {
+    const value = candidate[key];
+    return typeof value === "number" && Number.isFinite(value)
+      ? clampUnit(value)
+      : undefined;
+  };
+  const instructionMTok = read("instructionMTok");
+  const preferenceMTok = read("preferenceMTok");
+  const verifiableTasks = read("verifiableTasks");
+  const toolTrajectories = read("toolTrajectories");
+  if (
+    instructionMTok === undefined &&
+    preferenceMTok === undefined &&
+    verifiableTasks === undefined &&
+    toolTrajectories === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    instructionMTok: instructionMTok ?? 0,
+    preferenceMTok: preferenceMTok ?? 0,
+    verifiableTasks: verifiableTasks ?? 0,
+    toolTrajectories: toolTrajectories ?? 0,
+  };
+}
+
+function normalizeCheckpointTiers(checkpoint: Checkpoint): Checkpoint {
+  return {
+    ...checkpoint,
+    tiers: normalizeThinkingTiers(checkpoint.tiers, checkpoint.postTrain),
+  };
+}
+
+function normalizeEndpointTiers(
+  endpoint: Endpoint,
+  checkpoints: Checkpoint[],
+): Endpoint {
+  const member = endpoint.members.find((row) => row.role === "primary") ?? endpoint.members[0];
+  const checkpoint = member
+    ? checkpoints.find((row) => row.id === member.checkpointId)
+    : undefined;
+  return {
+    ...endpoint,
+    tiers: normalizeThinkingTiers(endpoint.tiers, checkpoint?.postTrain),
+  };
+}
+
+function normalizeEvalBudget(item: Eval): Eval {
+  return {
+    ...item,
+    tierBudget: canonicalizeTierBudget(Number(item.tierBudget)),
+  };
+}
+
+/**
+ * Defensive v15 fill: missing arrays/pools/seasons become empty defaults.
+ * Never invents checkpoints or other records.
+ */
+function normalizeTrainingState(raw: unknown): TrainingState {
+  const empty = emptyTrainingState();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return empty;
+  }
+  const candidate = raw as Partial<TrainingState> & {
+    pools?: Partial<TrainingState["pools"]>;
+  };
+  const poolsRaw = candidate.pools;
+  const pools =
+    poolsRaw && typeof poolsRaw === "object" && !Array.isArray(poolsRaw)
+      ? {
+          instructionMTok: finiteNumber(
+            poolsRaw.instructionMTok,
+            empty.pools.instructionMTok,
+          ),
+          preferenceMTok: finiteNumber(
+            poolsRaw.preferenceMTok,
+            empty.pools.preferenceMTok,
+          ),
+          verifiableTasks: finiteNumber(
+            poolsRaw.verifiableTasks,
+            empty.pools.verifiableTasks,
+          ),
+          toolTrajectories: finiteNumber(
+            poolsRaw.toolTrajectories,
+            empty.pools.toolTrajectories,
+          ),
+        }
+      : empty.pools;
+  const checkpoints = Array.isArray(candidate.checkpoints)
+    ? candidate.checkpoints.map(normalizeCheckpointTiers)
+    : empty.checkpoints;
+  return {
+    runs: Array.isArray(candidate.runs) ? candidate.runs : empty.runs,
+    checkpoints,
+    recipes: Array.isArray(candidate.recipes)
+      ? candidate.recipes
+      : empty.recipes,
+    evals: Array.isArray(candidate.evals)
+      ? candidate.evals.map(normalizeEvalBudget)
+      : empty.evals,
+    endpoints: Array.isArray(candidate.endpoints)
+      ? candidate.endpoints.map((endpoint) =>
+          normalizeEndpointTiers(endpoint, checkpoints),
+        )
+      : empty.endpoints,
+    gyms: Array.isArray(candidate.gyms) ? candidate.gyms : empty.gyms,
+    pools,
+    poolQuality: normalizePoolQuality(candidate.poolQuality),
+    reservations: Array.isArray(candidate.reservations)
+      ? candidate.reservations
+      : empty.reservations,
+    seasons: Array.isArray(candidate.seasons)
+      ? candidate.seasons
+      : empty.seasons,
+    biggestTrainedParamsB: finiteNumber(
+      candidate.biggestTrainedParamsB,
+      empty.biggestTrainedParamsB,
+    ),
+    moeRunsCompleted: finiteNumber(
+      candidate.moeRunsCompleted,
+      empty.moeRunsCompleted,
+    ),
+  };
 }
 
 function ensureRecord(value: unknown): Record<string, number> {
@@ -739,6 +880,7 @@ const LEGACY_TRAINING_NUMERICS: TrainingNumerics = {
   recipeVersion: 1,
 };
 
+// V4-DELETE: effort-recipe fill for missing optional product-profile fields.
 function normalizeModelProductProfile(
   profile: Model["productProfile"],
 ): Model["productProfile"] {
@@ -793,6 +935,7 @@ function normalizeTrainingDataPlan(
   };
 }
 
+// V4-DELETE: legacy TrainingJob optional-field fill (kept for v15 payloads).
 function normalizeTrainingJob(job: TrainingJob): TrainingJob {
   const backbone = job.backbone ?? backboneFromFamily(job.family);
   const rawPreset = job.productPreset ?? presetFromFamily(job.family);
@@ -1002,6 +1145,7 @@ function normalizeTrainingJob(job: TrainingJob): TrainingJob {
   };
 }
 
+// V4-DELETE: legacy Model optional-field fill (kept for v15 payloads).
 function normalizeModelComputeV2(model: Model): Model {
   // Intentional: old saves without stored numerics keep historical bf16 mixed.
   const trainingNumerics = model.trainingNumerics ?? LEGACY_TRAINING_NUMERICS;
@@ -1083,55 +1227,6 @@ function normalizeModelComputeV2(model: Model): Model {
     archived: model.archived === true ? true : undefined,
     soldIp: model.soldIp === true ? true : undefined,
   };
-}
-
-function rivalJobToCanonical(job: RivalTrainJob): TrainingJob {
-  const totalMTok = Math.max(0, job.totalMTok ?? 0);
-  const trainShare = Math.max(0.4, Math.min(0.95, job.trainShare ?? 0.82));
-  return normalizeTrainingJob({
-    id: job.id,
-    name: job.name,
-    family: job.family,
-    backbone: job.backbone ?? backboneFromFamily(job.family),
-    productPreset: job.productPreset ?? presetFromFamily(job.family),
-    io:
-      job.io ?? ioForPreset(job.productPreset ?? presetFromFamily(job.family)),
-    targetParamsB: job.paramsB,
-    activeParamsB: job.activeParamsB,
-    targetPfDays: job.targetPfDays,
-    progressPfDays: job.progressPfDays,
-    postTrain: "none",
-    postTrainProgress: 0,
-    postTrainTarget: 0,
-    mode: "pretrain",
-    dataMix: "web",
-    dataPlan: {
-      totalUnits: totalMTok,
-      totalMTok,
-      trainShare,
-      weights: { chat: 1 },
-      allowSynthetic: job.includeSynthHQ || job.includeSynthLQ,
-      includeSynthHQ: job.includeSynthHQ,
-      includeSynthLQ: job.includeSynthLQ,
-    },
-    dataConsumed: { chat: totalMTok },
-    dataCoverage: job.dataCoverage,
-    dataQualityUsed: job.dataQuality,
-    syntheticUnits: totalMTok * Math.max(0, job.synthLqShare ?? 0),
-    trainShare,
-    trainMTok: totalMTok * trainShare,
-    verifyMTok: totalMTok * (1 - trainShare),
-    cashBurnPerDay: job.cashBurnPerDay ?? 0,
-    cashSunk: job.cashSunk ?? 0,
-    synthLqShare: job.synthLqShare,
-    outcomeSeed: job.outcomeSeed,
-    outcomeRisk: job.outcomeRisk,
-    effectiveDataRatio: job.effectiveDataRatio,
-    repeatedDataEpochs: job.repeatedDataEpochs,
-    modalityComputeMult: job.modalityComputeMult,
-    trainingFormulaVersion: 1,
-    trainingNumerics: LEGACY_TRAINING_NUMERICS,
-  });
 }
 
 function regionsFromStatic(world: StaticWorld): MapRegion[] {
@@ -1339,6 +1434,7 @@ function restoreState(
     };
   }
   restored.player.trainingCheckpoints =
+    // V4-DELETE:
     ensureArray<TrainingCheckpointCandidate>(
       restored.player.trainingCheckpoints,
     ).map((candidate) => {
@@ -1461,31 +1557,10 @@ function restoreState(
           source?.lineageId ?? source?.id ?? job.continueFromId,
       };
     });
-  if (restored.player.trainingJob) {
-    const normalizedLegacy = normalizeTrainingJob(restored.player.trainingJob);
-    const legacySource = normalizedLegacy.continueFromId
-      ? restored.player.models.find(
-          (model) => model.id === normalizedLegacy.continueFromId,
-        )
-      : undefined;
-    const legacy = normalizedLegacy.continueFromId
-      ? {
-          ...normalizedLegacy,
-          continueLineageId:
-            normalizedLegacy.continueLineageId ??
-            legacySource?.lineageId ??
-            legacySource?.id ??
-            normalizedLegacy.continueFromId,
-        }
-      : normalizedLegacy;
-    restored.player.trainingJobs = [
-      legacy,
-      ...restored.player.trainingJobs.filter((job) => job.id !== legacy.id),
-    ];
-  }
-  restored.player.trainingJob = restored.player.trainingJobs[0] ?? null;
-  // One authoritative scheduler replaces the two legacy singular pending
-  // fields. Backfill mirrors once, then keep unique IDs for concurrent work.
+  restored.player.trainingJob = restored.player.trainingJob
+    ? normalizeTrainingJob(restored.player.trainingJob)
+    : null;
+  // V4-DELETE: private evaluation queue integrity (not a pre-v15 version migrate).
   const evaluationQueue: PrivateEvaluationJob[] =
     ensureArray<PrivateEvaluationJob>(
       restored.player.privateEvaluationJobs,
@@ -1526,33 +1601,6 @@ function restoreState(
         },
       };
     });
-  const queuedIds = new Set(evaluationQueue.map((entry) => entry.id));
-  for (const job of restored.player.trainingJobs) {
-    const pending = job.pendingBenchmark;
-    if (!pending || queuedIds.has(pending.id)) continue;
-    evaluationQueue.push({
-      id: pending.id,
-      kind: "training_benchmark",
-      subjectId: job.id,
-      scheduledDay: pending.startedDay,
-      readyDay: pending.readyDay,
-      pending,
-    });
-    queuedIds.add(pending.id);
-  }
-  for (const checkpoint of restored.player.trainingCheckpoints) {
-    const pending = checkpoint.pendingEvaluation;
-    if (!pending || queuedIds.has(pending.id)) continue;
-    evaluationQueue.push({
-      id: pending.id,
-      kind: "checkpoint_evaluation",
-      subjectId: checkpoint.id,
-      scheduledDay: pending.scheduledDay,
-      readyDay: pending.readyDay,
-      pending,
-    });
-    queuedIds.add(pending.id);
-  }
   const validTrainingJobIds = new Set(
     restored.player.trainingJobs.map((job) => job.id),
   );
@@ -1594,7 +1642,6 @@ function restoreState(
       > => entry.kind === "training_benchmark" && entry.subjectId === job.id,
     )?.pending,
   }));
-  restored.player.trainingJob = restored.player.trainingJobs[0] ?? null;
   restored.player.pricing.plans = restored.player.pricing.plans.map((plan) => ({
     ...plan,
     subscriberCap:
@@ -1618,8 +1665,9 @@ function restoreState(
   restored.player.dataSupplierOffers = ensureArray<DataSupplierContract>(
     restored.player.dataSupplierOffers,
   ).map(normalizeDataSupplierContract);
-  restored.player.safetyCampaign = restored.player.safetyCampaign ?? null;
-  restored.player = ensureModelStudio(restored.player);
+  restored.player.safetyCampaign = restored.player.safetyCampaign ?? null; // V4-DELETE:
+  restored.player = ensureModelStudio(restored.player); // V4-DELETE: studio gyms/routers
+  restored.player.training = normalizeTrainingState(restored.player.training);
   restored.player.researchUnlocked = ensureArray(
     restored.player.researchUnlocked,
   );
@@ -1661,12 +1709,6 @@ function restoreState(
     .slice(-30);
   restored.rivals = (ensureArray(restored.rivals) as SimState["rivals"]).map(
     (rival) => {
-      const canonicalJobs = ensureArray<TrainingJob>(rival.trainingJobs).map(
-        normalizeTrainingJob,
-      );
-      if (canonicalJobs.length === 0 && rival.trainingJob) {
-        canonicalJobs.push(rivalJobToCanonical(rival.trainingJob));
-      }
       return {
         ...rival,
         capital: normalizeCapitalStack(rival.capital),
@@ -1691,7 +1733,10 @@ function restoreState(
           normalizeModelComputeV2,
         ),
         financialComeback: normalizeRivalFinancialComeback(rival),
-        trainingJobs: canonicalJobs,
+        trainingJobs: ensureArray<TrainingJob>(rival.trainingJobs).map(
+          normalizeTrainingJob,
+        ),
+        training: normalizeTrainingState(rival.training),
         researchQueue: ensureArray(rival.researchQueue),
         strategy: rival.strategy ?? {
           profileId: rival.archetype,
@@ -2149,14 +2194,11 @@ function validateSaveEnvelope(data: unknown): SaveFile {
     throw new SaveError("Not a Labline save file.");
   if (typeof candidate.version !== "number")
     throw new SaveError("Save is missing a version.");
-  if (candidate.version === 1) {
-    throw new SaveError(V1_INCOMPATIBILITY_REASON, "incompatible-version");
-  }
-  if (candidate.version === 2) {
-    throw new SaveError(V2_INCOMPATIBILITY_REASON, "incompatible-version");
-  }
-  if (candidate.version === 3) {
-    throw new SaveError(V3_INCOMPATIBILITY_REASON, "incompatible-version");
+  if (candidate.version < 15) {
+    throw new SaveError(
+      TRAINING_OVERHAUL_INCOMPATIBILITY_REASON,
+      "incompatible-training-overhaul",
+    );
   }
   if (candidate.version > SAVE_VERSION) {
     throw new SaveError(
@@ -2164,19 +2206,7 @@ function validateSaveEnvelope(data: unknown): SaveFile {
       "newer-version",
     );
   }
-  if (
-    candidate.version !== SAVE_VERSION &&
-    candidate.version !== 13 &&
-    candidate.version !== 12 &&
-    candidate.version !== 11 &&
-    candidate.version !== 10 &&
-    candidate.version !== 9 &&
-    candidate.version !== 8 &&
-    candidate.version !== 7 &&
-    candidate.version !== 6 &&
-    candidate.version !== 5 &&
-    candidate.version !== 4
-  ) {
+  if (candidate.version !== SAVE_VERSION) {
     throw new SaveError(
       `Unsupported save version ${candidate.version}.`,
       "incompatible-version",

@@ -1,6 +1,7 @@
 import type { SimState } from '../types'
 import { servingPlacementNeed } from '../systems/servingPlacement'
 import { aggregateEffects } from '../systems/research'
+import { modifiersForLab } from '../training/modifiers'
 import { activeBalanceTuning } from './tuning'
 
 /**
@@ -85,7 +86,13 @@ export function hostedModelOpexDay(
     ),
   )
   const factor = 1 - discount
-  const scale = raw > 1e-9 ? (scaled * factor) / raw : factor
+  let hostingDiscount = 1
+  try {
+    hostingDiscount = modifiersForLab(state, state.playerLabId).hostingDiscount
+  } catch {
+    hostingDiscount = 1
+  }
+  const scale = raw > 1e-9 ? (scaled * factor * hostingDiscount) / raw : factor * hostingDiscount
   return {
     models: models.map((item) => ({
       ...item,
@@ -95,6 +102,6 @@ export function hostedModelOpexDay(
     residencyDay: residencyDay * scale,
     endpointDay: endpointDay * scale,
     loadDay: loadDay * scale,
-    totalDay: scaled * factor,
+    totalDay: scaled * factor * hostingDiscount,
   }
 }

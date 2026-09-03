@@ -1,3 +1,4 @@
+// V4-DELETE: superseded by src/sim/training/evaluate.ts (Phase 2 cutover).
 import {
   createPendingCheckpointEvaluation,
   resolveCheckpointEvaluation,

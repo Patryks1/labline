@@ -9,10 +9,8 @@ import {
 
 import { tickRivals } from "./systems/rivals";
 import { tickResearch } from "./systems/research";
-import {
-  playerHasPendingTrainingDecision,
-  tickTraining,
-} from "./systems/training";
+import { playerHasPendingTrainingDecision, tickTraining } from "./systems/training";
+import { hasPendingDecision, tickTrainingCore } from "./training";
 import { tickChipDeliveries } from "./systems/chips";
 import { tickRackDeliveries } from "./systems/dcRacks";
 import { tickMap } from "./systems/map";
@@ -58,8 +56,6 @@ import { tickEnergyContracts, tickSiteProjects } from "./systems/siteEnergy";
 import { tickFacilityMarket } from "./systems/facilityMarket";
 import { tickDataHallLayouts } from "./systems/dataHallLayouts";
 import { resetDayLedgerCosts } from "./systems/financeLedger";
-import { tickCheckpointEvaluations } from "./systems/checkpointEvaluations";
-import { tickPostTrainGyms } from "./systems/modelStudio";
 import { tickMarketing } from "./systems/marketing";
 import { facilityAnchorTiles } from "./systems/worldAccess";
 
@@ -139,7 +135,8 @@ export function tickDay(state: SimState): SimState {
     state.progression.runPhase === "failed"
   )
     return state;
-  if (playerHasPendingTrainingDecision(state)) return state;
+  if (playerHasPendingTrainingDecision(state) || hasPendingDecision(state))
+    return state;
 
   // Balance knobs travel with the run; sync them so every balance function
   // below observes this campaign's tuning (and tests observe their own).
@@ -198,8 +195,7 @@ export function tickDay(state: SimState): SimState {
   s = runTickSystem(s, "tickData", tickData);
   s = runTickSystem(s, "tickDataSupplierContracts", tickDataSupplierContracts);
   // Gym programs reserve the same research pool as synthesis and catalog
-  // research. Advance them before tech research observes the remaining share.
-  s = runTickSystem(s, "tickPostTrainGyms", tickPostTrainGyms);
+  // research. V4 gyms tick inside tickTrainingCore; skip the legacy studio tick.
   s = runTickSystem(s, "tickRivals", tickRivals);
   s = runTickSystem(s, "tickRivalCloudPurchases", tickRivalCloudPurchases);
   // One player-research authority per day. Preserve an in-flight legacy
@@ -217,12 +213,9 @@ export function tickDay(state: SimState): SimState {
   s = podResearchAuthority
     ? runTickSystem(s, "tickResearchPrograms", tickResearchPrograms)
     : runTickSystem(s, "tickResearch", tickResearch);
+  s = runTickSystem(s, "tickTrainingCore", tickTrainingCore);
+  // Legacy player jobs (play-bot / store startTraining) still advance here.
   s = runTickSystem(s, "tickTraining", tickTraining);
-  s = runTickSystem(
-    s,
-    "tickCheckpointEvaluations",
-    tickCheckpointEvaluations,
-  );
   s = runTickSystem(s, "tickSafetyCampaign", tickSafetyCampaign);
 
   s = {

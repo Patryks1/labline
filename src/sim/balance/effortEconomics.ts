@@ -12,6 +12,7 @@ import {
   nativeWorkFromEquivalentMTokAtEffort,
 } from "./workload";
 
+// V4-DELETE: thinking tiers (tierLift) replace effort heads (WS-C).
 const TEXT_KINDS: readonly CommercialModelKind[] = [
   "language",
   "coding",

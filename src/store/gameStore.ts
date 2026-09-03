@@ -32,7 +32,6 @@ import {
   deleteModel,
   archiveModel,
   restoreArchivedModel,
-  sellModelIp,
   setModelApiPrice,
   setDefaultEffort,
   setServedEffort,
@@ -65,6 +64,8 @@ import {
   projectPlayerCompanyState,
   syncLabIndex,
 } from "../sim/systems/labEngine";
+import type { TrainingActions } from "./trainingActions";
+import { createTrainingActions } from "./trainingActionsImpl";
 import {
   setActiveBalanceTuning,
   resolveBalanceTuning,
@@ -237,7 +238,7 @@ export interface MapViewport {
   ];
 }
 
-interface GameStore {
+export interface GameStore extends TrainingActions {
   phase: GamePhase;
   loading: GameLoadingState | null;
   lifecycleError: string | null;
@@ -433,7 +434,6 @@ interface GameStore {
   releaseModel: (id: string, opts?: { list?: boolean }) => void;
   archiveModel: (id: string) => void;
   restoreArchivedModel: (id: string) => void;
-  sellModelIp: (id: string) => void;
   deleteModel: (id: string) => void;
   setModelApiPrice: (id: string, price: number | null) => void;
   setDefaultEffort: (id: string, effort: string) => void;
@@ -1316,7 +1316,6 @@ export const useGameStore = create<GameStore>((rawSet, get) => {
   archiveModel: (id) => set((st) => ({ state: archiveModel(st.state, id) })),
   restoreArchivedModel: (id) =>
     set((st) => ({ state: restoreArchivedModel(st.state, id) })),
-  sellModelIp: (id) => set((st) => ({ state: sellModelIp(st.state, id) })),
   deleteModel: (id) => set((st) => ({ state: deleteModel(st.state, id) })),
   setModelApiPrice: (id, price) =>
     set((st) => ({ state: setModelApiPrice(st.state, id, price) })),
@@ -1831,6 +1830,10 @@ export const useGameStore = create<GameStore>((rawSet, get) => {
   clearLifecycleError: () => set({ lifecycleError: null }),
 
   snapshot: () => computeSnapshot(get().state),
+
+  ...createTrainingActions((mutation) => {
+    set(mutation);
+  }, get),
   });
 });
 

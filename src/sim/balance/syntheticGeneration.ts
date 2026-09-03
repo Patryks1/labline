@@ -9,7 +9,8 @@
  * Live sliders (`syntheticVolumeMult`, `syntheticHqShareMult`) scale this
  * shipped curve without rewriting it.
  */
-import type { DataDomain, Model, ModelFamily } from '../types'
+import type { DataDomain, Model, ModelCapabilities, ModelFamily } from '../types'
+import { SYNTHETIC_GENERATION_CASH_PER_BILLED_MTOK } from './syntheticTeacherEffort'
 import { activeBalanceTuning } from './tuning'
 
 const clamp = (value: number, low: number, high: number) =>
@@ -218,3 +219,114 @@ export function synthAcceptanceChances(
   )
   return { usefulChance, hqChance, computeSignal }
 }
+
+/** Thinking-budget method factors for `syntheticQualityFor`. */
+export const SYNTH_QUALITY_METHOD_FACTOR = {
+  1: 0.85,
+  2: 0.9,
+  4: 0.97,
+  8: 1,
+  12: 1.015,
+  20: 1.03,
+  100: 1.06,
+} as const
+
+export type SynthTierBudget = keyof typeof SYNTH_QUALITY_METHOD_FACTOR
+
+export const SYNTH_QUALITY_DEPTH_BASE = 0.92
+
+export interface SyntheticGenerationJob {
+  id: string
+  domain: DataDomain
+  teacherRef: string
+  tierBudget: SynthTierBudget
+  targetMTok: number
+  generatedMTok: number
+  verify: boolean
+  startDay: number
+  status: 'running' | 'completed' | 'cancelled'
+}
+
+/**
+ * Sole V4 synthetic quality formula (0–1):
+ * (teacherDomainCap/100) · methodFactor · filterFactor · 0.92^(depth−1).
+ * methodFactor by thinking budget {1: 0.85, 2: 0.9, 4: 0.97, 8: 1.0, 12: 1.015, 20: 1.03, 100: 1.06}.
+ * filterFactor = 0.9 + 0.1 · verifierStrength.
+ */
+export function syntheticQualityFor(input: {
+  teacherDomainCap: number
+  tierBudget: SynthTierBudget
+  verifierStrength: number
+  depth: number
+}): number {
+  const cap = clamp(input.teacherDomainCap, 0, 100) / 100
+  const methodFactor = SYNTH_QUALITY_METHOD_FACTOR[input.tierBudget]
+  const filterFactor = 0.9 + 0.1 * clamp01(input.verifierStrength)
+  const depth = Math.max(1, input.depth)
+  return cap * methodFactor * filterFactor * SYNTH_QUALITY_DEPTH_BASE ** (depth - 1)
+}
+
+/** PF-days and cash to mint `generatedMTok` (generated × tierBudget × per-token work). */
+export function syntheticGenerationCost(input: {
+  generatedMTok: number
+  tierBudget: SynthTierBudget
+  teacherActiveParamsB: number
+  domain: DataDomain
+  family?: ModelFamily
+}): { pfDays: number; cash: number } {
+  const generated = Math.max(0, input.generatedMTok)
+  const work =
+    synthTeacherSizeScale(input.teacherActiveParamsB) *
+    synthModalityBurden(input.domain) *
+    synthArchitectureBurden(input.family) *
+    input.tierBudget
+  const pfPerMTok = work / SYNTH_GENERATION.refAttemptedMTokPerPfDay
+  return {
+    pfDays: generated * pfPerMTok,
+    cash: generated * SYNTHETIC_GENERATION_CASH_PER_BILLED_MTOK * input.tierBudget,
+  }
+}
+
+export function syntheticMTokFromPfDays(input: {
+  pfDays: number
+  tierBudget: SynthTierBudget
+  teacherActiveParamsB: number
+  domain: DataDomain
+  family?: ModelFamily
+}): number {
+  const cost = syntheticGenerationCost({
+    generatedMTok: 1,
+    tierBudget: input.tierBudget,
+    teacherActiveParamsB: input.teacherActiveParamsB,
+    domain: input.domain,
+    family: input.family,
+  })
+  if (!(cost.pfDays > 0)) return 0
+  return Math.max(0, input.pfDays) / cost.pfDays
+}
+
+/** Map a data domain onto checkpoint/model capability truth (0–100). */
+export function domainCapFromCapabilities(
+  capabilities: ModelCapabilities,
+  domain: DataDomain,
+): number {
+  const domains = capabilities.domains
+  if (domain === 'code') return domains.code
+  if (domain === 'math') return domains.math
+  if (domain === 'science') return domains.science
+  if (domain === 'image') return domains.vision
+  if (domain === 'video') return domains.video
+  if (domain === 'audio') return domains.audio
+  if (domain === 'law') {
+    return domains.language * 0.65 + domains.reasoning * 0.35
+  }
+  if (domain === 'health') {
+    return (
+      domains.science * 0.55 +
+      domains.reasoning * 0.25 +
+      capabilities.factuality * 0.2
+    )
+  }
+  return domains.language
+}
+

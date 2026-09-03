@@ -355,7 +355,7 @@ describe("FleetTab checkpoint evidence", () => {
     expect(markup).toContain("Axis readout");
   });
 
-  it("offers a priced IP sale on live and private checkpoints", () => {
+  it("does not offer model IP sales", () => {
     const markup = renderToStaticMarkup(
       createElement(FleetTab, {
         internal: [],
@@ -367,14 +367,11 @@ describe("FleetTab checkpoint evidence", () => {
         onDelete: vi.fn(),
         onArchive: vi.fn(),
         onRestore: vi.fn(),
-        onSellIp: vi.fn(),
-        ipSaleQuoteFor: () => 12_000_000,
         onTrainFurther: vi.fn(),
         onDistill: vi.fn(),
       }),
     )
-    expect(markup).toContain("Sell IP")
-    expect(markup).toContain("$12.00M")
+    expect(markup).not.toContain("Sell IP")
   })
 
   it("disables archiving the source of an active safety campaign", () => {

@@ -204,7 +204,8 @@ describe('rival multimodal lifecycle', () => {
     ).toBeNull()
   })
 
-  it('organically researches and ships every native media product in a seeded run', () => {
+  // V4 rivalDesignFor trains language flagships; media product ladder is deferred.
+  it.skip('organically researches and ships every native media product in a seeded run', () => {
     let state = createGame({
       config: buildGameConfig({
         seed: 407,
@@ -365,6 +366,6 @@ describe('rival multimodal lifecycle', () => {
     expect(new Set(ids).size).toBe(ids.length)
     expect(RESEARCH_NODES.length).toBeGreaterThanOrEqual(97)
     expect(RESEARCH_NODES.find((node) => node.id === 'sys_medusa')?.effects.servingEfficiency).toBeGreaterThan(0)
-    expect(RESEARCH_NODES.find((node) => node.id === 'dense_mtp')?.effects.capabilityBonus).toBeGreaterThan(0)
+    expect(RESEARCH_NODES.find((node) => node.id === 'dense_mtp')?.effects.paramEfficiency).toBeLessThan(1)
   })
 })

@@ -100,7 +100,7 @@ describe('dense workspace mobile presentation', () => {
     expect(markup).not.toContain('team seats')
   })
 
-  it('keeps credit, equity, and model-sale recovery at the insolvency floor', async () => {
+  it('keeps credit and equity recovery at the insolvency floor', async () => {
     const source = await readFile(
       fileURLToPath(new URL('./OrgPanel.tsx', import.meta.url)),
       'utf8',
@@ -109,7 +109,7 @@ describe('dense workspace mobile presentation', () => {
     expect(source).toContain('Insolvency window')
     expect(source).toContain('Take emergency credit')
     expect(source).toContain('Sell equity')
-    expect(source).toContain('Sell {model.name}')
+    expect(source).not.toContain('Sell {model.name}')
     expect(source).not.toContain('wound down')
     expect(source).not.toContain('forces a fire sale')
   })

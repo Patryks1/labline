@@ -5,10 +5,11 @@ import type { Model, Modality, SimState } from '../types'
 import { collectOffers, offerUtility } from '../systems/market'
 import { syncLabIndex } from '../systems/labEngine'
 import {
+  FLEET_AGE_IRRELEVANT_DAYS,
   MODEL_AGE_GRACE_DAYS,
-  MODEL_AGE_PENALTY_CAP,
   MODEL_AGE_POINTS_PER_30_DAYS,
   agedMarketView,
+  fleetAgingFraction,
   modelAgePenalty,
 } from './modelAging'
 
@@ -90,7 +91,7 @@ function withPublicTwins(state: SimState, releaseDay: number): SimState {
 }
 
 describe('model age penalty curve', () => {
-  it('stays at zero through the grace window, then ramps smoothly to a cap', () => {
+  it('stays at zero through the grace window, then ramps smoothly with no cap', () => {
     expect(modelAgePenalty(0)).toBe(0)
     expect(modelAgePenalty(MODEL_AGE_GRACE_DAYS)).toBe(0)
     expect(modelAgePenalty(MODEL_AGE_GRACE_DAYS + 0.5)).toBeGreaterThan(0)
@@ -100,8 +101,13 @@ describe('model age penalty curve', () => {
       modelAgePenalty(MODEL_AGE_GRACE_DAYS + 22)
     expect(month).toBeCloseTo(MODEL_AGE_POINTS_PER_30_DAYS, 5)
 
-    expect(modelAgePenalty(5_000)).toBe(MODEL_AGE_PENALTY_CAP)
-    expect(modelAgePenalty(5_000)).toBe(modelAgePenalty(8_000))
+    // No ceiling: ancient models keep decaying instead of freezing at a cap.
+    expect(modelAgePenalty(8_000)).toBeGreaterThan(modelAgePenalty(5_000))
+    const ancient = agedMarketView(
+      { capability: 80, benchmarks: { ...emptyBenchmarks(), coding: 80 }, releaseDay: 0 },
+      8_000,
+    )
+    expect(ancient.capability).toBe(0)
 
     const a = modelAgePenalty(MODEL_AGE_GRACE_DAYS + 10)
     const b = modelAgePenalty(MODEL_AGE_GRACE_DAYS + 11)
@@ -116,7 +122,7 @@ describe('model age penalty curve', () => {
       1 + MODEL_AGE_GRACE_DAYS + 200,
     )
     expect(aged.capability).toBeLessThan(80)
-    expect(aged.capability).toBeGreaterThan(80 - MODEL_AGE_PENALTY_CAP - 0.01)
+    expect(aged.capability).toBeGreaterThan(80 - 14 - 0.01)
     expect(aged.benchmarks.coding).toBeLessThan(80)
     expect(aged.benchmarks.coding).toBeGreaterThan(80 * 0.7)
   })
@@ -133,7 +139,7 @@ describe('market-facing aging parity', () => {
     expect(player.capability).toBeLessThan(72)
   })
 
-  it('keeps a 200-day-old model in the market (floors intact)', () => {
+  it('keeps a 200-day-old model in the market (grace + gentle ramp)', () => {
     const fresh = agedMarketView(
       { capability: 70, benchmarks: { ...emptyBenchmarks(), coding: 70 }, releaseDay: 400 },
       400,
@@ -161,5 +167,50 @@ describe('market-facing aging parity', () => {
     }
     expect(offerUtility(offer, 'indie_api')).toBeGreaterThan(-15)
     expect(offerUtility(offer, 'startup_api')).toBeGreaterThan(-20)
+  })
+})
+
+describe('fleet aging', () => {
+  it('reaches full irrelevance at 360 calendar days with a quiet field', () => {
+    expect(fleetAgingFraction({ releaseDay: 10, day: 10 })).toBe(0)
+    expect(fleetAgingFraction({ releaseDay: 10, day: 10 + FLEET_AGE_IRRELEVANT_DAYS / 2 })).toBeCloseTo(
+      0.5,
+      8,
+    )
+    expect(fleetAgingFraction({ releaseDay: 10, day: 10 + FLEET_AGE_IRRELEVANT_DAYS })).toBe(1)
+    expect(fleetAgingFraction({ releaseDay: 10, day: 10 + FLEET_AGE_IRRELEVANT_DAYS + 80 })).toBe(1)
+  })
+
+  it('ages faster when rivals ship more often than a 90-day cadence', () => {
+    const calendar = fleetAgingFraction({ releaseDay: 0, day: 90, rivalShips: [] })
+    const hot = fleetAgingFraction({
+      releaseDay: 0,
+      day: 90,
+      rivalShips: [
+        { day: 20, capability: 50 },
+        { day: 40, capability: 50 },
+        { day: 60, capability: 50 },
+        { day: 80, capability: 50 },
+      ],
+    })
+    expect(hot).toBeGreaterThan(calendar)
+    expect(hot).toBeLessThan(1)
+  })
+
+  it('ages slightly faster when a later rival ship leapfrogs capability', () => {
+    const even = fleetAgingFraction({
+      releaseDay: 0,
+      day: 90,
+      ownCapability: 70,
+      rivalShips: [{ day: 45, capability: 40 }],
+    })
+    const leap = fleetAgingFraction({
+      releaseDay: 0,
+      day: 90,
+      ownCapability: 70,
+      rivalShips: [{ day: 45, capability: 90 }],
+    })
+    expect(leap).toBeGreaterThan(even)
+    expect(leap).toBeLessThan(1)
   })
 })

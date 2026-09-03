@@ -10,12 +10,9 @@ import {
 } from '../../sim/systems/staff'
 import { facilityAnchorTiles } from '../../sim/systems/worldAccess'
 import { ECONOMY } from '../../sim/balance/economy'
+import { trainingStateOf } from '../../sim/training/state'
 import { money } from './format'
-import {
-  buildTrainingJobViewModel,
-  normalizeTrainingJobs,
-  selectPrimaryTrainingJob,
-} from './trainingJobViewModel'
+import { runActivityViewModel } from './runViewModel'
 import { selectFinanceDashboardReadouts } from './data/financeDashboardModel'
 
 export type ObjectiveSeverity = 'info' | 'warning' | 'danger'
@@ -76,12 +73,18 @@ export function buildObjectives(state: SimState, includeGuidance = true): Object
   const hasHq = playerHasCompletedHq(state)
   const researchers = playerStaff(state).researcher ?? 0
   const seats = playerHqStaffCap(state)
-  const trainingJobs = normalizeTrainingJobs(state)
-  const primaryTrainingJob = selectPrimaryTrainingJob(trainingJobs)
-  const primaryTrainingView = primaryTrainingJob
-    ? buildTrainingJobViewModel(primaryTrainingJob)
-    : undefined
+  const training = trainingStateOf(state, state.playerLabId)
+  const liveEndpoints = training.endpoints.filter((endpoint) => endpoint.status === 'live')
+  const keptCheckpoints = training.checkpoints.filter(
+    (checkpoint) => checkpoint.status === 'kept' || checkpoint.status === 'released',
+  )
+  const hasRouter = liveEndpoints.some(
+    (endpoint) => endpoint.policy !== 'single' || endpoint.members.length > 1,
+  )
+  const completedRecipe = training.recipes.some((recipe) => recipe.status === 'completed')
+  const activity = runActivityViewModel(state)
   const finance = selectFinanceDashboardReadouts(state).current
+  const hasPublicOffer = publicModels.length > 0 || liveEndpoints.length > 0
 
   const poach = pendingStaffPoaches(state)[0]
   if (poach) {
@@ -106,7 +109,7 @@ export function buildObjectives(state: SimState, includeGuidance = true): Object
         ? 'Use the insolvency window'
         : 'Raise cash before bankruptcy',
       description:
-        'Take credit, sell equity, or sell models. The run ends only after the recovery window expires.',
+        'Take credit or sell equity. The run ends only after the recovery window expires.',
       progress:
         restructuring?.active
           ? `${restructuring.daysLeft}d · ${restructuring.stage.replace('_', ' ')}`
@@ -187,7 +190,7 @@ export function buildObjectives(state: SimState, includeGuidance = true): Object
         panel: 'org',
         actionLabel: 'Open hiring',
       })
-    } else if (activeCloudPf <= 0 && publicModels.length === 0) {
+    } else if (activeCloudPf <= 0 && !hasPublicOffer) {
       objectives.push({
         id: 'secure-cloud',
         title: 'Secure launch compute',
@@ -197,7 +200,7 @@ export function buildObjectives(state: SimState, includeGuidance = true): Object
         panel: 'computeMarket',
         actionLabel: 'Open compute market',
       })
-    } else if (state.day <= 7 && publicModels.length === 0 && trainingJobs.length === 0) {
+    } else if (state.day <= 7 && !hasPublicOffer && training.runs.length === 0) {
       objectives.push({
         id: 'secure-cloud',
         title: 'Review your cloud runway',
@@ -207,19 +210,71 @@ export function buildObjectives(state: SimState, includeGuidance = true): Object
         panel: 'computeMarket',
         actionLabel: 'Review contracts',
       })
-    } else if (publicModels.length === 0) {
+    } else if (training.runs.length === 0 && liveEndpoints.length === 0) {
       objectives.push({
         id: 'ship-model',
-        title: primaryTrainingJob ? 'Finish and ship the model' : 'Train your first model',
-        description: primaryTrainingJob
-          ? 'The active training job needs compute before it can be released.'
-          : 'Turn rented compute and your foundation corpus into a marketable model.',
-        progress: primaryTrainingJob
-          ? `${Math.round((primaryTrainingView?.computeProgress ?? 0) * 100)}% trained`
-          : 'No training job active',
+        title: 'Train your first model',
+        description: 'Start a run from a design in Models. Progress, incidents, and checkpoints live on the run.',
+        progress: 'No training run started',
         severity: 'info',
         panel: 'models',
-        actionLabel: primaryTrainingJob ? 'Review training' : 'Configure training',
+        actionLabel: 'Configure training',
+      })
+    } else if (keptCheckpoints.length === 0) {
+      objectives.push({
+        id: 'keep-checkpoint',
+        title: 'Keep a checkpoint',
+        description: 'Retain a snapshot from the active run before you evaluate or release.',
+        progress: activity
+          ? `${Math.round(activity.progress * 100)}% · ${activity.name}`
+          : 'No checkpoint kept',
+        severity: 'info',
+        panel: 'models',
+        actionLabel: 'Open pipeline',
+      })
+    } else if (training.evals.length === 0) {
+      objectives.push({
+        id: 'order-eval',
+        title: 'Order your first eval',
+        description: 'Hidden truth stays fogged until you measure. Order a suite or audit from the Pipeline.',
+        progress: `${keptCheckpoints.length} kept checkpoint${keptCheckpoints.length === 1 ? '' : 's'}`,
+        severity: 'info',
+        panel: 'models',
+        actionLabel: 'Order eval',
+      })
+    } else if (liveEndpoints.length === 0) {
+      objectives.push({
+        id: 'ship-model',
+        title: 'Release a live endpoint',
+        description: activity
+          ? 'Finish the run, then publish an endpoint customers can buy.'
+          : 'Turn a kept checkpoint into a live endpoint.',
+        progress: activity
+          ? `${Math.round(activity.progress * 100)}% trained`
+          : `${training.evals.length} eval${training.evals.length === 1 ? '' : 's'} ordered`,
+        severity: 'info',
+        panel: 'models',
+        actionLabel: activity ? 'Review training' : 'Release endpoint',
+      })
+    } else if (!completedRecipe) {
+      objectives.push({
+        id: 'complete-recipe',
+        title: 'Run a post-training recipe',
+        description: 'Instruct, preference, reasoning, or agentic work improves the model. Extra stages update the same checkpoint.',
+        progress: `${liveEndpoints.length} live endpoint${liveEndpoints.length === 1 ? '' : 's'}`,
+        severity: 'info',
+        panel: 'models',
+        actionLabel: 'Open post-train',
+      })
+    } else if (!hasRouter) {
+      objectives.push({
+        id: 'create-router',
+        title: 'Create a router',
+        description: 'Compose a domain, cascade, or modality endpoint from more than one checkpoint.',
+        progress: 'Single-checkpoint endpoints only',
+        severity: 'info',
+        panel: 'models',
+        actionLabel: 'Open fleet',
       })
     } else if (!hasPublishedProduct) {
       objectives.push({

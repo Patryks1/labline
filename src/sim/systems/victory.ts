@@ -2,6 +2,8 @@ import { ECONOMY } from '../balance/economy'
 import { STAFF_HIRE_COST, STAFF_ROLES, STAFF_WAGE_PER_DAY } from '../balance/staff'
 import type { CashDistressStage, Model, SimState, TileKind } from '../types'
 import { isLivePublicModel } from '../modelRelease'
+import { frontierOverall, playerBestOverall } from '../training/leaderboard'
+import { liveEndpointCount } from './progression'
 import { isBuildableKind, isDcKind, isHqAnchor } from './map'
 import { playerStaff } from './staff'
 import { facilityAnchorTiles, usesCompactWorld } from './worldAccess'
@@ -44,7 +46,7 @@ export function isInsolvencyLoss(reason: string): boolean {
   return /bankrupt/i.test(reason)
 }
 
-/** Reopen play after a bankruptcy overlay so credit, equity, and model sales stay usable. */
+/** Reopen play after a bankruptcy overlay so credit and equity stay usable. */
 export function resumeInsolvency(state: SimState): SimState {
   const graceDays = insolvencyGraceDays()
   const recovered = state.player.cash >= 0
@@ -83,7 +85,7 @@ export function resumeInsolvency(state: SimState): SimState {
         severity: recovered ? ('info' as const) : ('danger' as const),
         message: recovered
           ? 'Cash is non-negative again. The board lifted bankruptcy review.'
-          : `The board reopened a ${graceDays}-day recovery window. Take credit, sell equity, or sell models.`,
+          : `The board reopened a ${graceDays}-day recovery window. Take credit or sell equity.`,
       },
       ...state.alerts,
     ].slice(0, 40),
@@ -103,20 +105,26 @@ export function playerSotaProximity(state: SimState): {
   frontier: number
   sota: number
 } {
-  const released = (ms: Model[]) =>
-    ms.filter(isLivePublicModel)
-  const bestCap = released(state.player.models).reduce(
-    (m, x) => Math.max(m, x.capability),
-    0,
-  )
-  let frontier = bestCap
+  const released = (ms: Model[]) => ms.filter(isLivePublicModel)
+  const liveBest = released(state.player.models).reduce((m, x) => Math.max(m, x.capability), 0)
+  let liveFrontier = liveBest
   for (const r of state.rivals) {
     for (const m of released(r.models)) {
-      frontier = Math.max(frontier, m.capability)
+      liveFrontier = Math.max(liveFrontier, m.capability)
     }
   }
-  frontier = Math.max(20, frontier)
-  // Within ~30 capability points of frontier = near SOTA
+
+  let boardBest = 0
+  let boardFrontier = 0
+  try {
+    boardBest = playerBestOverall(state) ?? 0
+    boardFrontier = frontierOverall(state)
+  } catch {
+    // Public board not wired yet.
+  }
+
+  const bestCap = Math.max(boardBest, liveBest)
+  const frontier = Math.max(20, boardFrontier, liveFrontier)
   const sota = Math.max(0, Math.min(1, 1 - Math.max(0, frontier - bestCap) / 30))
   return { bestCap, frontier, sota }
 }
@@ -127,8 +135,9 @@ export function playerSotaProximity(state: SimState): {
  */
 export function modelIpValue(state: SimState): number {
   const models = state.player.models.filter(isLivePublicModel)
-  if (models.length === 0) return 0
   const { bestCap, sota } = playerSotaProximity(state)
+  if (models.length === 0 && liveEndpointCount(state) === 0) return 0
+  if (bestCap <= 0 && models.length === 0) return 0
 
   // Absolute capability curve — frontier 70+ is multi-hundred-M to multi-B IP
   const flagship =
@@ -443,11 +452,11 @@ export function tickVictory(state: SimState): SimState {
   const restructuring = playerRestructuring(state)
   const distressMessage =
     distress === 'severe'
-      ? `Severe cash distress (${formatCashM(player.cash)}). Credit is expensive and terms are worsening — take credit, sell equity, or sell models.`
+      ? `Severe cash distress (${formatCashM(player.cash)}). Credit is expensive and terms are worsening — take credit or sell equity.`
       : distress === 'final'
-        ? `Final warning (${formatCashM(player.cash)}). At ${formatCashM(v.bankruptCash)} the board opens a ${insolvencyGraceDays()}-day recovery window — raise or sell before bankruptcy review.`
+        ? `Final warning (${formatCashM(player.cash)}). At ${formatCashM(v.bankruptCash)} the board opens a ${insolvencyGraceDays()}-day recovery window — raise before bankruptcy review.`
         : distress === 'bankrupt'
-          ? `Insolvency (${formatCashM(player.cash)}). Take credit, sell equity, or sell models — the run ends only after the recovery window expires.`
+          ? `Insolvency (${formatCashM(player.cash)}). Take credit or sell equity — the run ends only after the recovery window expires.`
           : null
   const alerts =
     distressMessage &&
@@ -483,7 +492,7 @@ export function tickVictory(state: SimState): SimState {
   }
 
   // Insolvency is not instant: tickCapital opens an asset-sale window so the
-  // player can take credit, sell equity, or sell models. Loss only after that
+  // player can take credit or sell equity. Loss only after that
   // window expires (restructuring stage `bankruptcy`).
   if (restructuring.stage === 'bankruptcy') {
     return {

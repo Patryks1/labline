@@ -263,8 +263,12 @@ describe("API vs subscription demand balance", () => {
     expect(nearShares[0]).toBeGreaterThan(0.2);
     expect(weakShares[0]).toBeGreaterThan(0);
     // Choice keeps a visible bargain niche; realized MTok is then multiplied
-    // by the much lower quality-competitiveness factor below.
-    expect(weakShares[0]).toBeLessThan(nearShares[0]! * 0.15);
+    // by the much lower quality-competitiveness factor below. The niche bound
+    // is 0.25 (not 0.15): proximity is relative now, so a young half-frontier
+    // offer scores ~0.5 instead of ~0 and earns a visibly larger choice share —
+    // while its realized demand stays below 5% of near-frontier (asserted
+    // below). The economic substance (realized ratio) is unchanged.
+    expect(weakShares[0]).toBeLessThan(nearShares[0]! * 0.25);
 
     const frontierQuality = segmentOfferQuality(frontier, "indie_api");
     const nearFactor = apiQualityCompetitivenessMultiplier({

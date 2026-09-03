@@ -182,7 +182,7 @@ describe('mission-control objectives', () => {
     }
     const next = buildObjectives(state, false)[0]
     expect(next?.id).toBe('cash-recovery')
-    expect(next?.description).toMatch(/sell models/i)
+    expect(next?.description).toMatch(/sell equity/i)
     expect(next?.progress).toMatch(/30d/)
   })
 })

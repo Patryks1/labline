@@ -363,8 +363,13 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
       !job.pendingCampaignEvent &&
       (job.computePriority ?? 50) > 0,
   );
+  const hasV4TrainingWork = Boolean(
+    player.training?.runs.some(
+      (run) => run.status === "running" || run.status === "queued",
+    ) || player.training?.recipes.some((recipe) => recipe.status === "running"),
+  );
   const hasTraining =
-    activeTrainingJobs.length > 0 || Boolean(player.safetyCampaign);
+    activeTrainingJobs.length > 0 || Boolean(player.safetyCampaign) || hasV4TrainingWork;
   const hasResearch =
     Boolean(player.activeResearch) ||
     (player.researchPrograms?.some((program) => program.phase !== 'complete') ?? false) ||
@@ -376,6 +381,8 @@ export function computeSnapshot(state: SimState): ComputeSnapshot {
         (gym.researchShare ?? 0) > 0 &&
         (Boolean(gym.activePackageId) || (gym.tier ?? 0) > 0),
     ) ?? false) ||
+    (player.training?.gyms?.some((gym) => (gym.researchShare ?? 0) > 0) ??
+      false) ||
     Boolean(player.safetyCampaign);
   const configured = normalizeAllocation(player.allocation);
   const trainingDuty = hasTraining ? configured.training * 0.9 : 0;

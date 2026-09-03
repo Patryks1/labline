@@ -14,6 +14,7 @@ import type {
   EffortRecipe,
   Model,
   ModelIOModality,
+  ModelRouter,
   PlanDemandShock,
   PlanDayStats,
   PlanEffortPolicy,
@@ -25,6 +26,7 @@ import type {
   SubPlan,
 } from "../types";
 import { isCommerciallyOffered, isLivePublicModel } from "../modelRelease";
+import { OPEN_WEIGHTS_PLAN_ATTRACT_MULT } from "../training/constants";
 import { agedMarketView } from "../balance/modelAging";
 import {
   INSTANT_EFFORT_ID,
@@ -306,6 +308,7 @@ export function unlockedPlanPrecisions(
   if (unlocked.includes("opt_mixed")) out.push("bf16");
   if (unlocked.includes("sys_quant")) out.push("int8");
   if (unlocked.includes("sys_fp8")) out.push("fp8");
+  if (unlocked.includes("opt_fp6_train")) out.push("fp6");
   if (unlocked.includes("sys_int4") || unlocked.includes("sys_fp8"))
     out.push("int4");
   if (unlocked.includes("sys_nvfp4_runtime")) out.push("nvfp4");
@@ -322,6 +325,7 @@ export function clampServePrecision(
   if (allowed.includes(want)) return want;
   if ((want === "int4" || want === "nvfp4") && allowed.includes("int8"))
     return "int8";
+  if (want === "fp6" && allowed.includes("fp8")) return "fp8";
   if (want === "fp8" && allowed.includes("bf16")) return "bf16";
   if (want === "bf16" && allowed.includes("fp16")) return "fp16";
   return "fp32";
@@ -490,6 +494,17 @@ export function planServeModifiers(
       label: "FP8 runtime",
     };
   }
+  if (p === "fp6") {
+    return {
+      precision: p,
+      computeMult: precisionComputeMult(p),
+      qualityMult: 0.98,
+      capabilityDelta: -1,
+      benchmarkDeltas: {},
+      brandRisk: 0.01,
+      label: "FP6 runtime",
+    };
+  }
   return {
     precision: p === "fp32" ? "fp32" : p === "bf16" ? "bf16" : "fp16",
     computeMult: precisionComputeMult(p),
@@ -631,8 +646,23 @@ export function allocatePlanCompute<
   return fractions;
 }
 
+/** Plan roster including V4 `endpointIds` (projected model id === endpoint id). */
+export function planExposedModelIdsWithEndpoints(
+  plan: Pick<SubPlan, "modelIds" | "routerIds" | "endpointIds">,
+  models: readonly Model[],
+  routers?: readonly ModelRouter[],
+): string[] {
+  const ids = planExposedModelIds(plan, models, routers);
+  for (const id of plan.endpointIds ?? []) {
+    if (ids.includes(id)) continue;
+    const model = models.find((candidate) => candidate.id === id);
+    if (model && isLivePublicModel(model)) ids.push(id);
+  }
+  return ids;
+}
+
 export function planServingModelIds(state: SimState, plan: SubPlan): string[] {
-  return planExposedModelIds(
+  return planExposedModelIdsWithEndpoints(
     plan,
     state.player.models,
     state.player.modelRouters,
@@ -941,6 +971,7 @@ export function createPlan(
     pricePerMonth: number;
     usageMultiplier: number;
     modelIds?: string[];
+    endpointIds?: string[];
     /** Authoritative fixed monthly allowance. */
     includedMTokPerMonth?: number;
     /** Legacy/display-only API-equivalent value. */
@@ -987,6 +1018,7 @@ export function createPlan(
     ),
     usageRate: null,
     modelIds,
+    endpointIds: input.endpointIds ? [...input.endpointIds] : [],
     computePriority: defaultPlanComputePriority({
       pricePerMonth: input.pricePerMonth,
     }),
@@ -1289,7 +1321,12 @@ export function attachModelToEmptyPlans(
   modelId: string,
 ): SimState {
   const plans = state.player.pricing.plans.map((p) => {
-    if (p.modelIds.length > 0 || (p.routerIds?.length ?? 0) > 0) return p;
+    if (
+      p.modelIds.length > 0 ||
+      (p.routerIds?.length ?? 0) > 0 ||
+      (p.endpointIds?.length ?? 0) > 0
+    )
+      return p;
     const model = state.player.models.find(
       (candidate) => candidate.id === modelId,
     );
@@ -3021,28 +3058,31 @@ export function planAttractiveness(
   const qualityWeight =
     plan.pricePerMonth <= 0 ? 0.28 : 0.32 + readiness * 0.14;
   const valueDeficitPenalty = valueDeficit * 18 * priceSensitivity;
+  const openHaircut = baseModel.openWeights ? OPEN_WEIGHTS_PLAN_ATTRACT_MULT : 1;
 
   return (
-    quality * qualityWeight +
-    priceScore * (0.2 + (1 - sota) * 0.08) * priceSensitivity +
-    tokenOfferScore * 0.14 +
-    valueScore * 0.24 +
-    tokenVsRival * 0.12 +
-    smarterAtPrice * 0.07 +
-    breadth +
-    massPrior +
-    readinessUnlock +
-    sotaPull +
-    upgradePull -
-    valueDeficitPenalty -
-    pricePenalty -
-    premiumPenalty * priceSensitivity -
-    allowancePenalty * priceSensitivity -
-    enterprisePenalty -
-    workloadPenalty -
-    instabilityPenalty -
-    personalityPenalty *
-      (segmentId === "consumer" || segmentId === "enterprise" ? 1 : 0.35)
+    (
+      quality * qualityWeight +
+      priceScore * (0.2 + (1 - sota) * 0.08) * priceSensitivity +
+      tokenOfferScore * 0.14 +
+      valueScore * 0.24 +
+      tokenVsRival * 0.12 +
+      smarterAtPrice * 0.07 +
+      breadth +
+      massPrior +
+      readinessUnlock +
+      sotaPull +
+      upgradePull -
+      valueDeficitPenalty -
+      pricePenalty -
+      premiumPenalty * priceSensitivity -
+      allowancePenalty * priceSensitivity -
+      enterprisePenalty -
+      workloadPenalty -
+      instabilityPenalty -
+      personalityPenalty *
+        (segmentId === "consumer" || segmentId === "enterprise" ? 1 : 0.35)
+    ) * openHaircut
   );
 }
 

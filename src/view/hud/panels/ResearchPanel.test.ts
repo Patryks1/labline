@@ -18,6 +18,8 @@ import {
   scrollMobileResearchSelection,
 } from "./researchPanelMobile";
 import { layoutResearchTree } from "../../../sim/balance/researchLayout";
+import { getResearchNode } from "../../../sim/balance/research";
+import { effectChips } from "./researchEffectChips";
 import {
   initialResearchViewportNodeId,
   nextResearchSelection,
@@ -310,5 +312,16 @@ describe("ResearchPanel pool tile", () => {
     expect(researchPoolTileDetail(usage)).toContain("synth ·");
     expect(researchPoolTileDetail(usage)).toContain("physical draw");
     expect(researchPoolTileDetail(usage)).not.toContain("idle ·");
+  });
+});
+
+describe("ResearchPanel V4 effect chips", () => {
+  it("describes methods with exact modifiers instead of capability copy", () => {
+    const chips = effectChips(getResearchNode("moe_basics"));
+    expect(chips.some((chip) => chip.label === "Unlock: MoE")).toBe(true);
+    expect(chips.some((chip) => chip.label.startsWith("A ×"))).toBe(true);
+    expect(chips.map((chip) => chip.label).join(" ")).not.toMatch(
+      /capability \+|training speed/i,
+    );
   });
 });

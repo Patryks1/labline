@@ -10,7 +10,7 @@ import {
 import {
   releaseEffortRecipes,
 } from './ReleaseCelebration'
-import { measuredReleaseEvidence, releasedModelForEvent } from './releaseReview'
+import { measuredReleaseEvidence, releasedModelForEvent, diffNewLiveEndpointIds } from './releaseReview'
 
 const releaseSource = readFileSync(
   fileURLToPath(new URL('./ReleaseCelebration.tsx', import.meta.url)),
@@ -208,14 +208,10 @@ describe('release celebration listing dialog', () => {
     expect(heads[1]?.thinkingTokenMult).toBe(4)
   })
 
-  it('keeps listing chrome to API, plans, peers, and thinking', () => {
-    expect(releaseSource).toContain('List it')
+  it('keeps listing chrome to API, plans, and peers', () => {
+    expect(releaseSource).toContain('isV4ProjectedModel')
     expect(releaseSource).toContain('API listing')
     expect(releaseSource).toContain('data-testid="release-comparable-peers"')
-    expect(releaseSource).toContain('data-testid="release-thinking-heads"')
-    expect(releaseSource).toContain('Similar capability')
-    expect(releaseSource).toContain('Thinking levels')
-    expect(releaseSource).toContain('sm:h-[92dvh]')
     expect(releaseSource).not.toContain('sm:max-h-36')
     expect(releaseSource).not.toContain('Measured evidence')
     expect(releaseSource).not.toContain('Sell this model')
@@ -223,5 +219,20 @@ describe('release celebration listing dialog', () => {
     expect(releaseSource).not.toContain('Hosting floor from energy')
     expect(releaseSource).not.toContain('Release without selling')
     expect(releaseSource).not.toContain("Don't list")
+  })
+})
+
+describe('V4 live endpoint celebration', () => {
+  it('fires once per new live endpoint id', () => {
+    const seen = new Set<string>(['ep-old'])
+    const endpoints = [
+      { id: 'ep-old', status: 'live' as const },
+      { id: 'ep-new', status: 'live' as const },
+      { id: 'ep-sunset', status: 'sunset' as const },
+    ]
+    expect(diffNewLiveEndpointIds(seen, endpoints)).toEqual(['ep-new'])
+    const next = new Set(seen)
+    for (const id of diffNewLiveEndpointIds(seen, endpoints)) next.add(id)
+    expect(diffNewLiveEndpointIds(next, endpoints)).toEqual([])
   })
 })

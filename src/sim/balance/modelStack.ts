@@ -13,6 +13,7 @@ export interface ModelStackModule {
   reasoningEnabled?: boolean
 }
 
+// V4-DELETE: stack speed/hosting multipliers remain until V4 serveEfficiency fully replaces them.
 export const MODEL_STACK_MODULES: readonly ModelStackModule[] = [
   {
     id: 'opt_flash', name: 'Flash Attention', focus: 'Speed',

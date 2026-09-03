@@ -1381,6 +1381,8 @@ export function tickResearchPrograms(state: SimState): SimState {
     },
   };
   if (spent > 0) next = chargeExpense(next, spent, "research");
+  // Serving/PUE/data only. Training unlocks are already on researchUnlocked
+  // so modifiersForLab sees them immediately.
   for (const method of effectsToApply) {
     next = applyResearchEffectsToPlayer(next, method.effects);
   }

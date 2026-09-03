@@ -1,3 +1,4 @@
+// V4-DELETE: superseded by `runViewModel.ts` (WS-K). Keep until Phase 2 cuts over.
 import type { PostTrainStage, SimState, TrainingJob } from "../../sim/types";
 import {
   canReleaseTrainingJob,

@@ -1,6 +1,11 @@
 import { ECONOMY, SEGMENTS } from "../balance/economy";
 import { segmentBenchmarkFit } from "../balance/benchmarks";
 import { API_PRICE_EPSILON } from "../balance/pricing";
+import {
+  obsolescenceDiscount,
+  obsolescenceUsage,
+  relativeSota,
+} from "../balance/obsolescence";
 import { tokenThroughputScore } from "../balance/tokenSpeed";
 import { offerDomainHeatBonus } from "../balance/domainHeat";
 import type { DomainHeat, MarketOffer, SegmentId } from "../types";
@@ -49,9 +54,10 @@ export function segmentOfferQuality(
 
 /**
  * Continuous API competitiveness from absolute usability and distance to the
- * best public offer. There is deliberately no rank/top-N admission gate:
- * every model retains a niche, while benchmark-poor bargain endpoints cannot
- * turn price alone into frontier-scale traffic.
+ * best public offer. Floor-free: relative exponential decay off the quality
+ * frontier times an absolute viability sigmoid (see obsolescenceDiscount).
+ * No residual trickle — far-lagging endpoints decay toward epsilon, so price
+ * alone cannot buy frontier-scale traffic.
  */
 export function apiQualityCompetitivenessMultiplier(input: {
   quality: number;
@@ -59,77 +65,27 @@ export function apiQualityCompetitivenessMultiplier(input: {
   qualityFloor: number;
   segmentId: SegmentId;
 }): number {
-  const quality = Math.max(0, Math.min(100, input.quality));
-  const frontierQuality = Math.max(quality, input.frontierQuality);
-  const gap = Math.max(0, frontierQuality - quality);
-  const gapScale =
-    input.segmentId === "science"
-      ? 8
-      : input.segmentId === "startup_api"
-        ? 9
-        : input.segmentId === "creative"
-          ? 10
-          : input.segmentId === "indie_api"
-            ? 12
-            : 14;
-  const residual =
-    input.segmentId === "science"
-      ? 0.025
-      : input.segmentId === "startup_api"
-        ? 0.045
-        : input.segmentId === "creative"
-          ? 0.065
-          : input.segmentId === "indie_api"
-            ? 0.09
-            : 0.13;
-  const relative = Math.exp(-gap / gapScale);
-  const absolute =
-    0.15 +
-    0.85 / (1 + Math.exp(-(quality - Math.max(1, input.qualityFloor)) / 6.5));
-  return Math.max(
-    residual,
-    Math.min(1, residual + (1 - residual) * relative * absolute),
-  );
-}
-
-/** How close capability is to the public frontier (0–1). */
-export function sotaProximity(capability: number, frontier: number): number {
-  const f = Math.max(18, frontier);
-  const gap = Math.max(0, f - capability);
-  // Softer curve: #2–4 still count as "in market" (gap 12 → ~0.62, gap 20 → ~0.38)
-  return Math.max(0, Math.min(1, 1 - gap / 32));
+  return obsolescenceDiscount(input);
 }
 
 /**
- * Token / engagement intensity from SOTA proximity.
- * SOTA → super high API & sub usage; lagging models stay light even with share.
+ * How close capability is to the public frontier (0–1), measured as a
+ * *relative* gap so the same curve holds at frontier 60 and frontier 600.
+ */
+export function sotaProximity(capability: number, frontier: number): number {
+  return relativeSota(capability, frontier);
+}
+
+/**
+ * Token / engagement intensity from SOTA proximity, through the origin:
+ * zero proximity means zero intensity, no additive baseline. Co-SOTA top
+ * ends match the legacy curve; everything below decays procedurally.
  */
 export function sotaUsageMultiplier(
   sota: number,
   segmentId: SegmentId,
 ): number {
-  const s = Math.max(0, Math.min(1, sota));
-  // Floors keep mid-pack (#3–4) generating real traffic, not near-zero
-  switch (segmentId) {
-    case "enterprise":
-    case "legal":
-    case "healthcare":
-    case "science":
-      // Enterprise piles onto frontier: ~0.55× lagging → ~5.2× co-SOTA
-      return 0.55 + Math.pow(s, 1.55) * 4.6;
-    case "startup_api":
-      return 0.62 + Math.pow(s, 1.35) * 3.8;
-    case "indie_api":
-      return 0.7 + Math.pow(s, 1.2) * 2.4;
-    case "creative":
-      return 0.65 + Math.pow(s, 1.3) * 2.7;
-    case "consumer":
-      return 0.6 + Math.pow(s, 1.3) * 2.8;
-    case "hobby":
-    default:
-      // Free tier: SOTA still busier, but #3–4 keep a pulse
-      return 0.65 + Math.pow(s, 1.1) * 1.6;
-  }
+  return obsolescenceUsage(sota, segmentId);
 }
 
 /** Softmax temperature — mixed enough that near-SOTA + cheap still gets users. */
@@ -285,8 +241,11 @@ function frontierQualityTerm(
           : segmentId === "creative"
             ? 4.5
             : 3.2;
-  // Softer curve so 70–90% of frontier still scores well
-  q += Math.pow(Math.max(0.15, sota), 1.25) * premium;
+  // Procedural curve through the origin: zero proximity contributes zero
+  // (no floor), co-SOTA keeps the full premium. Near-vs-mid spread is carried
+  // by value competition (price band) and relative proximity itself, not by
+  // an absolute-gap gate — gentler on mid-pack than convex alternatives.
+  q += Math.pow(Math.max(0, sota), 1.25) * premium;
   if (sota < 0.35) {
     q -=
       (0.35 - sota) *
@@ -311,7 +270,7 @@ export function peersInPriceBand(
     prefersSub ? 0.01 : API_PRICE_EPSILON,
     prefersSub ? offer.subPrice : offer.apiPrice,
   );
-  return candidates.filter((peer) => {
+  const inBand = candidates.filter((peer) => {
     if (peer.labId === offer.labId && peer.modelId === offer.modelId)
       return false;
     const peerPrice = Math.max(
@@ -321,6 +280,29 @@ export function peersInPriceBand(
     const ratio = peerPrice / price;
     return ratio >= band.lo && ratio <= band.hi;
   });
+  if (inBand.length > 0) return inBand;
+  // No peer in band: the offer priced itself out of the neighborhood. Fall
+  // back to the single nearest peer instead of reporting none — otherwise a
+  // drastic undercut (everyone else above 2.5×) forfeits its entire value
+  // bonus at exactly the moment it earned the most, a perverse cliff. The
+  // log-bounded bonus then keeps rewarding deeper cuts continuously up to
+  // its cap (and punishes drastic overpricing symmetrically).
+  let nearest: MarketOffer | null = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  for (const peer of candidates) {
+    if (peer.labId === offer.labId && peer.modelId === offer.modelId)
+      continue;
+    const peerPrice = Math.max(
+      prefersSub ? 0.01 : API_PRICE_EPSILON,
+      prefersSub ? peer.subPrice : peer.apiPrice,
+    );
+    const distance = Math.abs(Math.log(peerPrice / price));
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearest = peer;
+    }
+  }
+  return nearest ? [nearest] : [];
 }
 
 /**
@@ -354,7 +336,11 @@ export function priceBandCompetitionBonus(
     [...peerValues].sort((a, b) => a - b)[Math.floor(peerValues.length / 2)] ??
     ownValue;
   const relative = ownValue / Math.max(1e-6, medianPeer);
-  let bonus = Math.max(-2.2, Math.min(2.8, Math.log(relative) * 2.4));
+  // Sharper than the legacy 2.4 so a strictly dominated same-price offer
+  // (half the quality-per-dollar of its band median) loses decisively in
+  // choice share instead of riding proximity alone. Still log-bounded with
+  // the same ± caps — no cliff, just steeper continuous differentiation.
+  let bonus = Math.max(-2.2, Math.min(2.8, Math.log(relative) * 3.0));
   // Own-product cannibalization: undercutting a sibling subscription hurts less
   // on API-native segments (buyers wanted API) and more on sub-native ones.
   const ownSiblings = peers.filter((peer) => peer.labId === offer.labId);
@@ -384,22 +370,28 @@ export function offerUtility(
   const floor = seg.qualityFloor;
   const capOk = offer.capability + offer.reliability * 0.25;
   const gap = frontier - offer.capability;
-  const maxGap =
+  // Scale-free obsolescence cliff: the tolerated lag is a fraction of the
+  // frontier, not an absolute point count, so it holds at any magnitude.
+  // Calibrated to match the legacy 32/42/52-point gaps at frontier ~70.
+  const maxGapShare =
     segmentId === "enterprise" ||
     segmentId === "legal" ||
     segmentId === "healthcare"
-      ? 32
+      ? 0.45
       : segmentId === "startup_api" || segmentId === "consumer"
-        ? 42
-        : 52;
+        ? 0.6
+        : 0.72;
+  const maxGap = maxGapShare * Math.max(frontier, 1);
   const benchmarkDeficit =
     Math.max(0, floor * 0.35 - bench) / Math.max(1, floor * 0.35);
   const capabilityDeficit =
     Math.max(0, floor * 0.45 - capOk) / Math.max(1, floor * 0.45);
   const frontierDeficit = Math.max(0, 0.18 - f.sota) / 0.18;
+  // Beyond-cliff penalty in relative units (×21 ≈ legacy 0.3/pt at F≈70),
+  // so the cliff costs the same utility at any frontier magnitude.
   const viabilityPenalty =
     benchmarkDeficit * capabilityDeficit * frontierDeficit * 22 +
-    Math.max(0, gap - maxGap) * 0.3;
+    (Math.max(0, gap - maxGap) / Math.max(frontier, 1)) * 21;
 
   const w = seg.weights;
   const pLev = priceLeverage(f.sota, segmentId);
@@ -408,15 +400,12 @@ export function offerUtility(
   // Price matters more: cheap near-SOTA should win meaningful share
   const priceTerm = (f.price / 10) * (0.65 + pLev * 0.9) * (0.7 + w.price);
 
-  // Mid-pack / near-SOTA floor so #2–4 still pull real API & free-tier users
-  const nearSotaFloor =
-    f.sota >= 0.7
-      ? 1.5 + f.sota * 1.5
-      : f.sota >= 0.45
-        ? 1.15 + f.sota * 1.55
-        : f.sota >= 0.2
-          ? 0.85 + f.sota * 1.35 // 3rd–4th place still competes on API
-          : 0.25 + f.sota * 0.9;
+  // Procedural proximity reward through the origin: near-SOTA earns up to
+  // +3.0 like the legacy top band, zero proximity earns zero — no
+  // participation floor. Young weak models still score here because proximity
+  // itself is now relative, not an absolute-gap gate. Spread against
+  // near-frontier comes from value competition, not from this term.
+  const nearSotaFloor = f.sota * (1.5 + f.sota * 1.5);
 
   // API segments care less about brand polish and more about usable models
   const apiish =

@@ -4,6 +4,7 @@ import {
   synthAcceptanceChances,
   synthAttemptedMTokPerDay,
   synthTeacherSizeScale,
+  syntheticQualityFor,
 } from './syntheticGeneration'
 import {
   setActiveBalanceTuning,
@@ -108,5 +109,30 @@ describe('synthetic generation formula', () => {
       attempted({ tier: 'lq' }) * SYNTH_GENERATION.hqSpeed,
       8,
     )
+  })
+
+  it('uses one quality formula for teacher cap, method, filter, and depth', () => {
+    const q = syntheticQualityFor({
+      teacherDomainCap: 80,
+      tierBudget: 8,
+      verifierStrength: 0.2,
+      depth: 1,
+    })
+    expect(q).toBeCloseTo((80 / 100) * 1 * (0.9 + 0.1 * 0.2) * 1, 8)
+    const deep = syntheticQualityFor({
+      teacherDomainCap: 80,
+      tierBudget: 8,
+      verifierStrength: 0.2,
+      depth: 3,
+    })
+    expect(deep).toBeCloseTo(q * 0.92 ** 2, 8)
+    const cheap = syntheticQualityFor({
+      teacherDomainCap: 80,
+      tierBudget: 1,
+      verifierStrength: 0,
+      depth: 1,
+    })
+    expect(cheap).toBeCloseTo((80 / 100) * 0.85 * 0.9, 8)
+    expect(cheap).toBeLessThan(q)
   })
 })

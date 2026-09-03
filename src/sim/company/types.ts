@@ -36,6 +36,7 @@ import type {
   TrainingJob,
   TrainingProgram,
 } from "../types";
+import type { TrainingState } from "../training/types";
 
 export type CompanyController = LabController;
 
@@ -148,6 +149,8 @@ export interface CompanyOps {
   researchCashBurnToday?: number;
   powerEfficiencyHistory?: PlayerState["powerEfficiencyHistory"];
   marketingOutcome?: PlayerState["marketingOutcome"];
+  /** V4 training slice; projected verbatim so company round-trips never drop it. */
+  training?: TrainingState;
 }
 
 export interface CompanyState {

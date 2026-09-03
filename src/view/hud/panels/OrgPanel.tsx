@@ -52,9 +52,7 @@ import { computeMarketingOutcome } from "../../../sim/systems/marketing";
 import {
   cashDistressStage,
   insolvencyGraceDays,
-  sellableModelQuotes,
 } from "../../../sim/systems/victory";
-import { sellModelIp } from "../../../sim/systems/training";
 import { useGameStore } from "../../../store/gameStore";
 import { money, num, pct } from "../format";
 import { SliderField } from "../ui/SliderField";
@@ -226,7 +224,6 @@ function DistressRecoveryCard({
   onOpenOwnership,
   onTakeBailout,
   onAcceptEquity,
-  onSellModel,
 }: {
   state: SimState;
   distress: Exclude<CashDistressStage, "stable">;
@@ -234,7 +231,6 @@ function DistressRecoveryCard({
   onOpenOwnership: () => void;
   onTakeBailout: () => void;
   onAcceptEquity: (offer: EquityOffer) => void;
-  onSellModel: (id: string) => void;
 }) {
   const restructuring = state.player.capital?.restructuring;
   const windowLeft =
@@ -249,7 +245,6 @@ function DistressRecoveryCard({
         : "recovery";
   const bailoutOk = isBailoutEligible(state);
   const equityOffers = requestEquityOffers(state).slice(0, 2);
-  const modelSales = sellableModelQuotes(state).slice(0, 3);
   const headline =
     distress === "distressed"
       ? "Cash distress."
@@ -260,10 +255,10 @@ function DistressRecoveryCard({
           : "Insolvency window.";
   const body =
     distress === "bankrupt"
-      ? `Cash at the insolvency floor. Take credit, sell equity, or sell models — bankruptcy review in ${windowLeft}d if cash stays negative.`
+      ? `Cash at the insolvency floor. Take credit or sell equity — bankruptcy review in ${windowLeft}d if cash stays negative.`
       : distress === "final"
-        ? `Cash below -$250M. At -$500M the board opens a ${insolvencyGraceDays()}-day window to raise or sell before bankruptcy review.`
-        : "Cash is below zero. Credit, equity, and model sales stay available until the recovery window expires.";
+        ? `Cash below -$250M. At -$500M the board opens a ${insolvencyGraceDays()}-day window to raise before bankruptcy review.`
+        : "Cash is below zero. Credit and equity stay available until the recovery window expires.";
 
   return (
     <div
@@ -340,27 +335,6 @@ function DistressRecoveryCard({
           })}
         </div>
       ) : null}
-      {modelSales.length > 0 ? (
-        <div className="space-y-1">
-          {modelSales.map(({ model, cash }) => (
-            <HudButton
-              key={model.id}
-              type="button"
-              variant="ghost"
-              className="flex min-h-11 w-full items-center justify-between gap-2 rounded-lg border border-line/70 px-2 py-1 text-left text-[0.6875rem] text-bone lg:min-h-0"
-              onClick={() => onSellModel(model.id)}
-            >
-              <span className="truncate">Sell {model.name}</span>
-              <span className="shrink-0 font-mono text-mint">{money(cash)}</span>
-            </HudButton>
-          ))}
-        </div>
-      ) : (
-        <p className="text-[0.6875rem] text-muted">
-          No model IP to sell yet. Released or trained checkpoints can be sold
-          from Capital or the fleet.
-        </p>
-      )}
     </div>
   );
 }
@@ -770,7 +744,6 @@ export function OrgPanel({
           onOpenOwnership={() => setCapitalView("ownership")}
           onTakeBailout={() => takeLoan("bailout")}
           onAcceptEquity={(offer) => setState(acceptEquityOffer(state, offer))}
-          onSellModel={(id) => setState(sellModelIp(state, id))}
         />
       )}
 
@@ -875,7 +848,7 @@ export function OrgPanel({
                     Recovery ladder:{" "}
                     {state.player.capital.restructuring.stage.replace("_", " ")}{" "}
                     · {state.player.capital.restructuring.daysLeft}d to
-                    take credit, sell equity, or sell models.
+                    take credit or sell equity.
                   </div>
                 )}
 

@@ -161,8 +161,11 @@ export function routerLaneWeights(
 
   const raw = assigned.map((lane, index) => {
     const model = lanes[lane]!
-    const quality = Math.max(0.12, model.capability / maxCapability)
-    const efficiency = Math.max(0.12, cheapest / pfCosts[index]!)
+    // No 0.12 participation floors: zero capability/efficiency contributes
+    // zero weight, so obsolete lanes drop out procedurally. Epsilon guards
+    // only against exact-zero division, never grants share.
+    const quality = Math.max(1e-9, model.capability / maxCapability)
+    const efficiency = Math.max(1e-9, cheapest / pfCosts[index]!)
     const hardnessShare = hardness[lane]
     const gap = Math.max(0, maxCapability - model.capability)
     if (bias === 'cheap') {
@@ -382,6 +385,7 @@ export function planAssignedRouters(
 }
 
 /** Released models this plan actually serves: listed models plus router members. */
+// V4-DELETE: replace with V4 Endpoint routers; plan.endpointIds is the new roster.
 export function planExposedModelIds(
   plan: Pick<SubPlan, 'modelIds' | 'routerIds'>,
   models: readonly Model[],

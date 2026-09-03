@@ -18,6 +18,7 @@ import {
   planEnabledEffortRecipes,
   planEffortEntitlementDisplayName,
   planModelEntitlements,
+  planServingModelIds,
   unlockedPlanPrecisions,
   updatePlan,
 } from "./plans";
@@ -334,5 +335,24 @@ describe("plan model entitlement thinking levels", () => {
     );
     expect(shares[INSTANT_EFFORT_ID]).toBeCloseTo(0.55, 10);
     expect(shares.medium).toBeCloseTo(0.45, 10);
+  });
+});
+
+describe("plan endpointIds", () => {
+  it("unions endpointIds with modelIds in the served roster", () => {
+    const { state, plan, model } = lumenFixture();
+    const onlyEndpoints: SubPlan = {
+      ...plan,
+      modelIds: [],
+      routerIds: [],
+      endpointIds: [model.id],
+    };
+    expect(planServingModelIds(state, onlyEndpoints)).toEqual([model.id]);
+    const both: SubPlan = {
+      ...plan,
+      modelIds: [model.id],
+      endpointIds: [model.id],
+    };
+    expect(planServingModelIds(state, both)).toEqual([model.id]);
   });
 });

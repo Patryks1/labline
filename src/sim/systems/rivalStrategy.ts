@@ -405,7 +405,7 @@ function supportsServePrecision(rival: RivalLab, precision: PlanServePrecision):
   const live = (rival.rackFleet ?? []).filter((install) => install.status === 'live' && install.count > 0)
   // Legacy abstract fleets predate hardware profiles and represent the same
   // broadly-compatible commercial accelerator generation as the starter lab.
-  if (live.length === 0) return precision !== 'fp8' && precision !== 'nvfp4'
+  if (live.length === 0) return precision !== 'fp8' && precision !== 'fp6' && precision !== 'nvfp4'
   return live.some((install) => {
     try {
       return resolveRackSku(install.skuId, rival.rackDesigns ?? []).accelerator
@@ -451,6 +451,11 @@ export function chooseRivalTrainingNumerics(
     nativeWeightFormat: 'float',
     recipeVersion: 1,
   }
+  const fp6: TrainingNumerics = {
+    computeFormat: 'fp6',
+    nativeWeightFormat: 'float',
+    recipeVersion: 1,
+  }
   const nvfp4: TrainingNumerics = {
     computeFormat: 'nvfp4',
     nativeWeightFormat: 'float',
@@ -463,11 +468,11 @@ export function chooseRivalTrainingNumerics(
   }
   const preferred =
     rival.archetype === 'efficiency'
-      ? [ternary, nvfp4, fp8, bf16, fp16]
+      ? [ternary, nvfp4, fp6, fp8, bf16, fp16]
       : rival.archetype === 'open_weights'
-        ? [ternary, fp8, bf16, fp16]
+        ? [ternary, fp6, fp8, bf16, fp16]
         : rival.archetype === 'hyperscale'
-          ? [nvfp4, fp8, bf16, fp16]
+          ? [nvfp4, fp6, fp8, bf16, fp16]
           : rival.archetype === 'multimodal'
             ? [fp8, bf16, fp16]
             : [bf16, fp16]
@@ -496,6 +501,13 @@ export function chooseRivalServePrecision(rival: RivalLab): PlanServePrecision {
     (pressure > 0.25 || (efficiencyBias && costPressure))
   ) {
     return 'int4'
+  }
+  if (
+    rival.researchUnlocked.includes('opt_fp6_train') &&
+    supportsServePrecision(rival, 'fp6') &&
+    (pressure > 0.12 || efficiencyBias || costPressure)
+  ) {
+    return 'fp6'
   }
   if (
     rival.researchUnlocked.includes('sys_quant') &&

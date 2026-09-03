@@ -56,6 +56,9 @@ describe('async game save lifecycle', () => {
     expect(await pending).toEqual({ ok: true })
     expect(useGameStore.getState().state.day).toBe(23)
     expect(useGameStore.getState().state.map.world).toBeDefined()
+    expect(useGameStore.getState().state.player.training).toBeDefined()
+    expect(useGameStore.getState().state.player.training.gyms.length).toBeGreaterThan(0)
+    expect(useGameStore.getState().state.rivals[0]?.training).toBeDefined()
   })
 
   it('retains the current run negotiation state when loading fails', async () => {

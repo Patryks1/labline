@@ -48,7 +48,7 @@ describe('mobile menu and overlay contracts', () => {
   it('uses compact, non-crushing settings and a compact release GTM on phones', async () => {
     const [settings, release] = await Promise.all([
       source('./menu/SettingsPanel.tsx'),
-      source('./ReleaseCelebration.tsx'),
+      source('./panels/models/v4/dialogs/ReleaseDialog.tsx'),
     ])
 
     expect(settings).toContain('grid-cols-2 gap-1.5 min-[420px]:grid-cols-4')
@@ -56,9 +56,9 @@ describe('mobile menu and overlay contracts', () => {
     expect(release).not.toContain('data-testid="release-evidence-mobile"')
     expect(release).not.toContain('Measured evidence')
     expect(release).toContain('data-testid="release-comparable-peers"')
-    expect(release).toContain('data-testid="release-thinking-heads"')
+    expect(release).toContain('data-release-plans')
+    expect(release).toContain('API listing')
     expect(release).not.toContain('sm:max-h-36')
-    expect(release).toContain('sm:h-[92dvh]')
   })
 
   it('separates the mobile HQ floor from its controls and never places during orbit drag', async () => {

@@ -64,6 +64,8 @@ describe('HUD streamline primitives', () => {
     expect(markup).toContain('aria-pressed="true"')
     expect(markup).toContain('data-interactive="true"')
     expect(markup).toContain('data-selected="true"')
+    expect(markup).toContain('hud-card--selected')
+    expect(markup).toContain('border-mint/70')
     expect(markup).toContain('data-mobile-card="true"')
     expect(markup).toContain('data-mobile-priority="primary"')
   })

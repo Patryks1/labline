@@ -99,6 +99,17 @@ describe('paid training benchmarks', () => {
       'video_generation',
       'audio_generation',
     ])
+
+    const visionLlm = eligibleTrainingBenchmarkSuites({
+      family: 'dense',
+      productPreset: 'vision_language',
+      io: {
+        inputs: { text: 50, image: 40, video: 20 },
+        outputs: { text: 50 },
+        tools: 0,
+      },
+    })
+    expect(visionLlm.map((suite) => suite.id)).toEqual(['language'])
     for (const suite of omni) {
       expect(suite.minSpend).toBeGreaterThanOrEqual(50_000)
       expect(suite.referenceSpend).toBeGreaterThanOrEqual(suite.minSpend)

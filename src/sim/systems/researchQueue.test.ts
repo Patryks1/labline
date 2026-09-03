@@ -111,24 +111,20 @@ describe("repeatable research ranks", () => {
     expect(canEnqueue(state, id).reason).toBe("Already unlocked");
   });
 
-  it("rank 2 stacks trainEfficiency / aggregate dataFlywheel * rank", () => {
+  it("rank 2 stacks V4 throughput via modifiersForLab and dataFlywheel * rank", () => {
     const tune = getResearchNode("sys_kernel_tune");
     let state = createGame(9_105);
     const trainBefore = state.player.trainEfficiency;
     state = completeResearchNode(state, tune);
     state = completeResearchNode(state, tune);
     expect(state.player.researchRanks?.["sys_kernel_tune"]).toBe(2);
-    expect(state.player.trainEfficiency).toBeCloseTo(
-      trainBefore + (tune.effects.trainEfficiency ?? 0) * 2,
-    );
+    // V4-DELETE: catalog no longer writes trainEfficiency onto the lab.
+    expect(state.player.trainEfficiency).toBeCloseTo(trainBefore);
 
     const stacked = aggregateEffects(["sys_kernel_tune", "data_ops_refine"], {
       sys_kernel_tune: 2,
       data_ops_refine: 2,
     });
-    expect(stacked.trainEfficiency).toBeCloseTo(
-      (tune.effects.trainEfficiency ?? 0) * 2,
-    );
     expect(stacked.dataFlywheel).toBeCloseTo(
       (getResearchNode("data_ops_refine").effects.dataFlywheel ?? 0) * 2,
     );

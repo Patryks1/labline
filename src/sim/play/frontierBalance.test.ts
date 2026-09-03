@@ -11,6 +11,7 @@ import {
   rivalTrainingWeights,
 } from "../systems/rivals";
 import { tickDay } from "../tick";
+import { isV4ProjectedModel } from "../modelRelease";
 import { runPlayBot } from "./bot";
 
 const env =
@@ -144,6 +145,10 @@ describe("frontier strategy balance", () => {
         (candidate) => candidate.id === model.dataManifestId,
       );
       expect(model.capabilities).toBeDefined();
+      if (isV4ProjectedModel(model)) {
+        expect(model.trainComputeSpent).toBeGreaterThan(0);
+        continue;
+      }
       expect(manifest).toBeDefined();
       const requested = rivalTrainingWeights(rival.archetype);
       const attributedWeights = Object.entries(manifest!.domainWeights).filter(

@@ -254,6 +254,7 @@ export function setPostTrainGymAllocation(
 }
 
 /** Advance gym construction and continuous curriculum R&D once per game day. */
+// V4-DELETE: gym programs move to src/sim/training/postTrain.ts + gyms.ts (WS-C).
 export function tickPostTrainGyms(state: SimState): SimState {
   const studio = autoAssignUnlockedGyms(state);
   const normalized = normalizePostTrainGyms(studio.player.postTrainGyms);

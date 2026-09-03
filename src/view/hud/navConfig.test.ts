@@ -39,6 +39,15 @@ describe('panel function-key shortcuts', () => {
     expect(
       SHELL_NAV_GROUPS[0]!.items.find((item) => item.id === 'rivals')?.label,
     ).toBe('Companies')
+    expect(
+      SHELL_NAV_GROUPS.find((group) => group.id === 'products')?.items.find((item) => item.id === 'models')
+        ?.hint,
+    ).toBe('Design, train and release models; manage endpoints and gyms')
+    expect(
+      SHELL_NAV_GROUPS.find((group) => group.id === 'products')?.items.find(
+        (item) => item.id === 'benchmarks',
+      )?.hint,
+    ).toBe('Seasons, tiers, audits and public boards')
   })
 
   it('maps the legacy chips route to the visible Build > Hardware destination', () => {

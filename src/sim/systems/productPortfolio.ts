@@ -304,6 +304,7 @@ export function capPromotedOffers(offers: readonly ProductOffer[]): ProductOffer
  * API prices. This is intentionally read-only; market settlement remains in
  * the existing market/plans systems.
  */
+// V4-DELETE: portfolio still reads player.models; V4 endpoints project into that array.
 export function deriveProductPortfolio(state: SimState): ProductPortfolio {
   const released = state.player.models.filter(isReleased)
   const internalModelIds = state.player.models

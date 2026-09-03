@@ -8,6 +8,7 @@ import {
 import { trainingNumericsEconomicsProfile } from './trainingPrecision'
 import { activeBalanceTuning } from './tuning'
 
+// V4-DELETE: post-training recipes replaced by src/sim/training/postTrain.ts (WS-C).
 export type TrainablePostStage = Exclude<PostTrainStage, 'none'>
 
 export const POST_TRAIN_STAGES: readonly TrainablePostStage[] = [

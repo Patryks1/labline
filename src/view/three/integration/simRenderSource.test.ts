@@ -997,7 +997,7 @@ describe('SimViewportRenderSource.getConstructionSites', () => {
     expect(active).toBeDefined()
     expect(active!.progress).toBeCloseTo(1 / 3, 5)
     expect(active!.widthTiles).toBe(1)
-    expect(active!.heightHint).toBeGreaterThan(1.35) // dc_l at level 2
+    expect(active!.heightHint).toBeCloseTo(1.26, 2) // dc_l at level 2: 1.05 × 1.2
     expect(active!.phase).toBeGreaterThanOrEqual(0)
     expect(active!.phase).toBeLessThan(Math.PI * 2)
     // Cached: the same array identity until the world journal advances.

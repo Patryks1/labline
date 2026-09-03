@@ -43,6 +43,7 @@ export const SERVE_PRECISION_COMPUTE_MULT = {
   fp16: 1,
   bf16: 1,
   fp8: 0.55,
+  fp6: 0.42,
   int8: 0.58,
   int4: 0.34,
   nvfp4: 0.28,
@@ -219,6 +220,8 @@ export function precisionBytesPerWeight(precision: AnyServingPrecision | undefin
     case 'fp8':
     case 'int8':
       return 1
+    case 'fp6':
+      return 0.75
     case 'int4':
     case 'nvfp4':
       return 0.5
@@ -237,6 +240,8 @@ export function quantizationStorageOverhead(precision: AnyServingPrecision | und
     case 'fp8':
     case 'int8':
       return 1.03
+    case 'fp6':
+      return 1.04
     case 'int4':
       return 1.08
     case 'nvfp4':

@@ -714,6 +714,8 @@ export function applyResearchEffectsToLab<
       ECONOMY.maxServingEfficiency,
       p.servingEfficiency + effects.servingEfficiency,
     );
+  // V4-DELETE: leftover write for legacy training ticks. V4 training reads
+  // modifiersForLab (computeThroughput / unlocks) instead of this field.
   if (effects.trainEfficiency != null && p.trainEfficiency != null) {
     p.trainEfficiency = Math.min(
       1.5,
@@ -761,6 +763,7 @@ function accumulateEffects(acc: ResearchEffects, e: ResearchEffects): void {
   if (e.utilCap) acc.utilCap = (acc.utilCap ?? 0) + e.utilCap;
   if (e.servingEfficiency)
     acc.servingEfficiency = (acc.servingEfficiency ?? 0) + e.servingEfficiency;
+  // V4-DELETE: legacy additive train speed. V4 uses aggregateModifiers.
   if (e.trainEfficiency)
     acc.trainEfficiency = (acc.trainEfficiency ?? 0) + e.trainEfficiency;
   if (e.energyPue) acc.energyPue = (acc.energyPue ?? 0) + e.energyPue;
@@ -796,6 +799,12 @@ function accumulateEffects(acc: ResearchEffects, e: ResearchEffects): void {
   if (e.hostingOpexDiscount)
     acc.hostingOpexDiscount =
       (acc.hostingOpexDiscount ?? 0) + e.hostingOpexDiscount;
+  if (e.paramEfficiency)
+    acc.paramEfficiency = (acc.paramEfficiency ?? 1) * e.paramEfficiency;
+  if (e.dataEfficiency)
+    acc.dataEfficiency = (acc.dataEfficiency ?? 1) * e.dataEfficiency;
+  if (e.computeThroughput)
+    acc.computeThroughput = (acc.computeThroughput ?? 1) * e.computeThroughput;
 }
 
 export function aggregateEffects(

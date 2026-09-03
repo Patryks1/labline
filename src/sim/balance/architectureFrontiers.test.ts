@@ -149,7 +149,7 @@ describe("closed-loop autonomous research unlock", () => {
     expect(node.description).toMatch(/fresh real data/i);
     expect(node.description).toMatch(/agent/i);
     expect(node.description).toMatch(/compute/i);
-    expect(node.effects).toEqual({ unlockClosedLoopResearch: true });
+    expect(node.effects).toMatchObject({ unlockClosedLoopResearch: true });
     expect(aggregateEffects([node.id]).unlockClosedLoopResearch).toBe(true);
   });
 });

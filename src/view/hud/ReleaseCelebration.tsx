@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChartLineUp, RocketLaunch } from '@phosphor-icons/react'
 import type { BenchmarkSuiteId, Model, SimState, SubPlan } from '../../sim/types'
 import {
@@ -11,7 +11,7 @@ import {
 import { formatParams } from '../../sim/balance/training'
 import { migrateEffortRecipes } from '../../sim/balance/modelProduct'
 import { computeSnapshot } from '../../sim/systems/compute'
-import { isLivePublicModel } from '../../sim/modelRelease'
+import { isLivePublicModel, isV4ProjectedModel } from '../../sim/modelRelease'
 import { useGameStore } from '../../store/gameStore'
 import { type ReleaseEvent, useUiStore } from '../../store/uiStore'
 import { money, num } from './format'
@@ -24,7 +24,7 @@ import { ConsoleDialog } from './ui/ConsoleDialog'
 import { HudButton, HudInput, MetricTile, StatusChip } from './ui/HudPrimitives'
 import { TrainingLossChart } from './panels/models/TrainingLossChart'
 import { BENCHMARK_SUITE_UI } from './panels/models/benchmarkRunUi'
-import { measuredReleaseEvidence, releasedModelForEvent } from './releaseReview'
+import { measuredReleaseEvidence, releasedModelForEvent, diffNewLiveEndpointIds, endpointCelebrationFacts, liveEndpointsOf } from './releaseReview'
 
 function preferredReleaseSuites(event: ReleaseEvent): BenchmarkSuiteId[] {
   const preferred: BenchmarkSuiteId[] =
@@ -50,8 +50,34 @@ export const trainedThinkingRecipes = releaseEffortRecipes
 export function ReleaseCelebration() {
   const event = useUiStore((state) => state.releaseEvent)
   const clear = useUiStore((state) => state.clearRelease)
+  const announceRelease = useUiStore((state) => state.announceRelease)
   const state = useGameStore((store) => store.state)
   const listReleasedModel = useGameStore((store) => store.listReleasedModel)
+  const seenLiveIds = useRef<Set<string> | null>(null)
+
+  useEffect(() => {
+    const live = liveEndpointsOf(state)
+    if (seenLiveIds.current == null) {
+      seenLiveIds.current = new Set(live.map((endpoint) => endpoint.id))
+      return
+    }
+    const fresh = diffNewLiveEndpointIds(seenLiveIds.current, live)
+    for (const id of fresh) {
+      seenLiveIds.current.add(id)
+      const endpoint = live.find((row) => row.id === id)
+      if (!endpoint) continue
+      const projected = state.player.models.find((model) => model.id === endpoint.id)
+      if (projected && isV4ProjectedModel(projected)) continue
+      const current = useUiStore.getState().releaseEvent
+      if (current?.modelId === endpoint.id) continue
+      const facts = endpointCelebrationFacts(state, endpoint)
+      announceRelease({
+        name: endpoint.name,
+        modelId: endpoint.id,
+        capability: facts.overall ?? 0,
+      })
+    }
+  }, [announceRelease, state])
 
   const review = useMemo(() => {
     if (!event) return null
@@ -108,6 +134,10 @@ function ReleaseCelebrationDialog({
   }) => void
 }) {
   const latestSnapshot = event.benchmarkSnapshots?.at(-1)
+  const endpoint = liveEndpointsOf(simState).find(
+    (row) => row.id === event.modelId || row.name === event.name,
+  )
+  const endpointFacts = endpoint ? endpointCelebrationFacts(simState, endpoint) : null
   const hosting = useMemo(() => {
     if (!review.model) return null
     return apiHostingCostFloor(simState, computeSnapshot(simState), review.model)
@@ -186,10 +216,14 @@ function ReleaseCelebrationDialog({
       description={(
         <>
           <span className="sm:hidden">
-            {review.model ? formatParams(review.model.paramsB) : event.family ?? 'Model'} · {review.evidence ? 'Evaluation ready' : 'Evaluation pending'}
+            {endpointFacts
+              ? `${endpointFacts.sizeLabel}${endpointFacts.overall != null ? ` · P50/public ${endpointFacts.overall.toFixed(0)}` : ''}`
+              : review.model ? formatParams(review.model.paramsB) : event.family ?? 'Model'} · {review.evidence ? 'Evaluation ready' : 'Evaluation pending'}
           </span>
           <span className="hidden sm:inline">
-            {review.model ? formatParams(review.model.paramsB) : event.family ?? 'Model'} · {review.evidence ? `${BENCHMARK_SUITE_UI[review.suiteId].label} measured evaluation` : 'Public evaluation pending'}
+            {endpointFacts
+              ? `${endpointFacts.sizeLabel}${endpointFacts.overall != null ? ` · public overall ${endpointFacts.overall.toFixed(1)}` : ''}${endpointFacts.isRouter ? ` · ${endpointFacts.memberCount} members` : ''}`
+              : review.model ? formatParams(review.model.paramsB) : event.family ?? 'Model'} · {review.evidence ? `${BENCHMARK_SUITE_UI[review.suiteId].label} measured evaluation` : 'Public evaluation pending'}
           </span>
         </>
       )}
@@ -231,12 +265,22 @@ function ReleaseCelebrationDialog({
         />
         <MetricTile
           label="Evaluation score"
-          value={review.evidence ? review.evidence.suite.score.toFixed(1) : 'Unknown'}
+          value={
+            endpointFacts?.overall != null
+              ? endpointFacts.overall.toFixed(1)
+              : review.evidence
+                ? review.evidence.suite.score.toFixed(1)
+                : 'Unknown'
+          }
           tone="positive"
         />
         <MetricTile
-          label="Measured position"
-          value={review.evidence?.rankLabel ?? '—'}
+          label={endpointFacts?.isRouter ? 'Router members' : 'Measured position'}
+          value={
+            endpointFacts?.isRouter
+              ? String(endpointFacts.memberCount)
+              : (review.evidence?.rankLabel ?? '—')
+          }
         />
         <MetricTile
           label="API list / MTok"

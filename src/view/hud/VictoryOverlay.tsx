@@ -8,11 +8,9 @@ import {
   requestEquityOffers,
 } from '../../sim/systems/capital'
 import { isBailoutEligible } from '../../sim/systems/loans'
-import { sellModelIp } from '../../sim/systems/training'
 import {
   isInsolvencyLoss,
   resumeInsolvency,
-  sellableModelQuotes,
 } from '../../sim/systems/victory'
 import { ConsoleDialog } from './ui/ConsoleDialog'
 import { HudButton } from './ui/HudPrimitives'
@@ -68,7 +66,7 @@ export function VictoryOverlay() {
         </>
       )
     : insolvencyLoss
-      ? `${victory.reason} Take credit, sell equity, or sell models — or load a save. The run does not have to end here.`
+      ? `${victory.reason} Take credit or sell equity — or load a save. The run does not have to end here.`
       : victory.reason
 
   const resumePlay = (next = state) => {
@@ -83,7 +81,6 @@ export function VictoryOverlay() {
 
   const bailoutOk = insolvencyLoss && isBailoutEligible(state)
   const equityOffers = insolvencyLoss ? requestEquityOffers(state).slice(0, 2) : []
-  const modelSales = insolvencyLoss ? sellableModelQuotes(state).slice(0, 3) : []
 
   return (
     <ConsoleDialog
@@ -175,8 +172,8 @@ export function VictoryOverlay() {
             className="space-y-2 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[0.75rem] leading-snug text-danger"
           >
             <p>
-              Raise cash before the next review. Emergency credit, equity, and
-              model sales apply immediately.
+              Raise cash before the next review. Emergency credit and equity
+              apply immediately.
             </p>
             <div className="flex flex-wrap gap-1.5">
               {bailoutOk ? (
@@ -214,24 +211,6 @@ export function VictoryOverlay() {
                 </HudButton>
               )
             })}
-            {modelSales.map(({ model, cash }) => (
-              <HudButton
-                key={model.id}
-                type="button"
-                variant="ghost"
-                className="flex min-h-11 w-full items-center justify-between gap-2 rounded-lg border border-line/70 px-2 py-1 text-left text-[0.6875rem] text-bone lg:min-h-0"
-                onClick={() => afterRecovery(sellModelIp(state, model.id))}
-              >
-                <span className="truncate">Sell {model.name}</span>
-                <span className="shrink-0 font-mono text-mint">{money(cash)}</span>
-              </HudButton>
-            ))}
-            {modelSales.length === 0 ? (
-              <p className="text-[0.6875rem] text-muted">
-                No model IP to sell. Keep operating to train or load a save
-                that still has a fleet.
-              </p>
-            ) : null}
           </div>
         ) : null}
       </div>

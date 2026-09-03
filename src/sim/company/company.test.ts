@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createGame } from "../createGame";
 import {
   SAVE_VERSION,
+  SaveError,
   parseSave,
   roundTripState,
   serializeSave,
@@ -24,7 +25,7 @@ describe("canonical company state", () => {
       advanced: { mapWidth: 24, mapHeight: 24, cityCount: 2, rivalCount: 2 },
       legacyMapFixture: true,
     });
-    expect(SAVE_VERSION).toBe(14);
+    expect(SAVE_VERSION).toBe(15);
     expect(state.playerCompanyId).toBe(state.playerLabId);
     const player = selectPlayerCompany(state);
     const rival = state.companies![state.rivals[0]!.id]!;
@@ -77,20 +78,20 @@ describe("canonical company state", () => {
     );
   });
 
-  it("loads v13 saves into companies without calling current RNG", () => {
+  it("rejects pre-v15 saves as incompatible with the training overhaul", () => {
     const state = createGame(14_004);
     const legacy = JSON.parse(serializeSave(buildSaveFile(state, "1")));
     legacy.version = 13;
     legacy.meta.version = 13;
     delete legacy.state.companies;
     delete legacy.state.playerCompanyId;
-    const loaded = parseSave(JSON.stringify(legacy));
-    expect(loaded.version).toBe(13);
-    expect(loaded.state.playerCompanyId).toBe(loaded.state.playerLabId);
-    expect(loaded.state.companies![loaded.state.playerLabId]!.id).toBe(
-      loaded.state.playerLabId,
-    );
-    assertCompanyParity(loaded.state);
+    expect(() => parseSave(JSON.stringify(legacy))).toThrow(SaveError);
+    try {
+      parseSave(JSON.stringify(legacy));
+    } catch (error) {
+      expect(error).toBeInstanceOf(SaveError);
+      expect((error as SaveError).code).toBe("incompatible-training-overhaul");
+    }
   });
 
   it("rejects product routes that point at missing models", () => {

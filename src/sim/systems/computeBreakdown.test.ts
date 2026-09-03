@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { defaultPostTrainGyms } from '../balance/modelStudio'
 import { buildScaledModel } from '../balance/modelBuild'
 import { createGame } from '../createGame'
+import { emptyTrainingState, withTrainingState } from '../training/state'
 import type {
   DataPruneJob,
   PlanDayStats,
@@ -445,6 +446,53 @@ describe('trainPoolLoad', () => {
     expect(breakdown.train.lines.some((line) => line.label === 'Idle')).toBe(false)
     expect(
       breakdown.train.lines.some((line) => line.label === 'Useful burn'),
+    ).toBe(true)
+  })
+
+  it('counts a running V4 post-train recipe against the train pool', () => {
+    const idle = createGame(8_422)
+    const state = withTrainingState(idle, idle.playerLabId, {
+      ...emptyTrainingState(),
+      recipes: [
+        {
+          id: 'recipe-v4',
+          labId: idle.playerLabId,
+          checkpointId: 'ck',
+          stages: ['instruct'],
+          safetyFocus: 0,
+          gymIds: [],
+          budgetPfDays: 4,
+          dataUse: {
+            instructionMTok: 1,
+            preferenceMTok: 0,
+            verifiableTasks: 0,
+            toolTrajectories: 0,
+          },
+          startDay: 1,
+          progress: 0.2,
+          pfDaysDone: 0.5,
+          status: 'running',
+          forecast: {
+            pfDays: 4,
+            days: 8,
+            cash: 60_000,
+            deltas: {},
+            unlocksTiers: false,
+            adequacy: {},
+            warnings: [],
+          },
+          seed: 1,
+        },
+      ],
+    })
+    const load = trainPoolLoad(state)
+    expect(load.jobs.some((job) => job.id === 'recipe-v4')).toBe(true)
+    expect(load.usedPf).toBeGreaterThan(0)
+    expect(load.fill).toBeGreaterThan(0)
+    const breakdown = buildComputeBreakdown(state)
+    expect(breakdown.train.utilizationLabel).toBe('In use')
+    expect(
+      breakdown.train.lines.some((line) => line.label.includes('Post-train')),
     ).toBe(true)
   })
 })

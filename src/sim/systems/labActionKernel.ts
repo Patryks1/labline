@@ -68,9 +68,12 @@ export function isServePrecisionResearchUnlocked(
   if (precision === 'fp16') return unlocked.includes('opt_fp16')
   if (precision === 'bf16') return unlocked.includes('opt_mixed')
   if (precision === 'int8') return unlocked.includes('sys_quant')
-  if (precision === 'fp8' || precision === 'int4' || precision === 'nvfp4') {
-    return unlocked.includes('sys_fp8')
+  if (precision === 'fp8') return unlocked.includes('sys_fp8')
+  if (precision === 'fp6') return unlocked.includes('opt_fp6_train')
+  if (precision === 'int4') {
+    return unlocked.includes('sys_int4') || unlocked.includes('sys_fp8')
   }
+  if (precision === 'nvfp4') return unlocked.includes('sys_nvfp4_runtime')
   return unlocked.includes('dense_bitnet')
 }
 
@@ -218,14 +221,26 @@ export function applyLabActionToTarget<T extends LabActionTarget>(
         })
       : { priceIn: action.input, priceOut: action.output }
     const price = blendApiPrice(listed.priceIn, listed.priceOut)
+    // Storefront rule: the lab-level default follows the ACTIVE model only.
+    // Editing a side model never re-prices siblings that fall back to the
+    // default; editing the flagship moves the storefront (single-model labs,
+    // rival observation anchors, legacy fallbacks). Rival tactical repricing
+    // also assigns its target explicitly around this action.
+    const followsStorefront =
+      target.pricing.activeModelId != null &&
+      target.pricing.activeModelId === action.modelId
     return {
       ...target,
-      pricing: {
-        ...target.pricing,
-        apiPricePerMTok: price,
-        apiPriceInPerMTok: listed.priceIn,
-        apiPriceOutPerMTok: listed.priceOut,
-      },
+      ...(followsStorefront
+        ? {
+            pricing: {
+              ...target.pricing,
+              apiPricePerMTok: price,
+              apiPriceInPerMTok: listed.priceIn,
+              apiPriceOutPerMTok: listed.priceOut,
+            },
+          }
+        : null),
       models: target.models.map((model) =>
         model.id === action.modelId
           ? {

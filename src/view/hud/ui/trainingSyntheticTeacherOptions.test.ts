@@ -77,17 +77,16 @@ function teacher(): Model {
 describe("training synthetic teacher options", () => {
   it("creates one option per eligible model × trained recipe with economics", () => {
     const options = syntheticTeacherSelectOptions([teacher()], "math");
-    expect(options.map((option) => option.effortId)).toEqual([
-      "instant",
-      "careful",
-    ]);
-    expect(options[1]?.label).toContain("Atlas · Careful");
-    expect(options[1]?.label).toContain("cap ");
-    expect(options[1]?.label).toContain("/ q 76%");
-    expect(options[1]?.label).toContain("× billed");
-    expect(options[1]?.label).toContain("× PF intensity");
-    expect(options[1]?.label).toContain("$250/billed MTok");
-    expect(options[1]?.label).toContain("PF/accepted MTok");
+    const efforts = options.map((option) => option.effortId).toSorted();
+    expect(efforts).toEqual(["careful", "instant"]);
+    const careful = options.find((option) => option.effortId === "careful");
+    expect(careful?.label).toContain("Atlas · Careful");
+    expect(careful?.label).toContain("cap ");
+    expect(careful?.label).toContain("/ q 76%");
+    expect(careful?.label).toContain("× billed");
+    expect(careful?.label).toContain("× PF intensity");
+    expect(careful?.label).toContain("$250/billed MTok");
+    expect(careful?.label).toContain("PF/accepted MTok");
   });
 
   it("round-trips arbitrary model and recipe ids", () => {

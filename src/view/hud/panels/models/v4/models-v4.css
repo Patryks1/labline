@@ -1,0 +1,550 @@
+/* V4 Models workbench — container-scoped layout only. Tokens stay in index.css. */
+
+.models-v4-panel.hud-section,
+.models-v4-panel {
+  min-height: 0;
+  flex: 1 1 auto;
+  height: 100%;
+  overflow: hidden;
+}
+
+.models-v4-panel .hud-section__header {
+  flex: 0 0 auto;
+}
+
+.models-v4-workbench {
+  container-type: inline-size;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--hud-space-3);
+  height: 100%;
+  overflow: hidden;
+}
+
+.models-v4-layout {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: var(--hud-space-3);
+  overflow: hidden;
+}
+
+.models-v4-layout:has(> .models-v4-inspector) {
+  grid-template-rows: auto auto minmax(0, 1fr) minmax(22rem, 70%);
+}
+
+.models-v4-stats,
+.models-v4-tabs {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.models-v4-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--hud-space-2);
+}
+
+.models-v4-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.models-v4-board {
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+.models-v4-body [role="tabpanel"] {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+}
+
+.models-v4-body #models-v4-pipeline {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.models-v4-pipeline {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(16.5rem, 1fr));
+  gap: var(--hud-space-2);
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior: contain;
+  scroll-snap-type: x proximity;
+  padding-bottom: 0.15rem;
+}
+
+.models-v4-column {
+  min-width: 16.5rem;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--hud-space-2);
+  overflow: hidden;
+  scroll-snap-align: start;
+  padding: 0.55rem;
+  border: 1px solid var(--color-line);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--color-void) 42%, transparent);
+}
+
+.models-v4-column[data-drop-state="ok"] {
+  border-color: color-mix(in srgb, var(--color-train) 70%, var(--color-line));
+  background: color-mix(in srgb, var(--color-train) 12%, transparent);
+}
+
+.models-v4-column[data-drop-state="blocked"] {
+  border-color: color-mix(in srgb, var(--color-danger) 55%, var(--color-line));
+}
+
+.models-v4-card-drag {
+  cursor: grab;
+}
+
+.models-v4-card-drag:active {
+  cursor: grabbing;
+}
+
+.models-v4-column__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--hud-space-2);
+  flex: 0 0 auto;
+}
+
+.models-v4-column__cards {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--hud-space-2);
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.models-v4-compute {
+  flex: 0 0 auto;
+  min-width: 0;
+  border: 1px solid var(--color-line);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--color-void) 45%, transparent);
+  padding: 0.4rem 0.55rem;
+}
+
+.models-v4-column .metric-tile {
+  padding: 0.35rem 0.45rem 0.3rem;
+}
+
+.models-v4-column .metric-tile__value {
+  margin-top: 0.1rem;
+  font-size: 0.8125rem;
+}
+
+/* Cards live in ~16.5rem kanban columns. Viewport `sm:grid-cols-4` still
+   fires at 640px, so four tiles (~60px) clip ENDPOINTS and `4.6 ±1.6`. */
+.models-v4-card-title {
+  min-width: 0;
+  color: var(--color-bone);
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.models-v4-card-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.375rem;
+}
+
+.models-v4-card-stats .metric-tile__label {
+  display: block;
+  letter-spacing: 0.06em;
+}
+
+.models-v4-card-stats .metric-tile__value {
+  overflow: visible;
+  text-overflow: unset;
+  white-space: nowrap;
+}
+
+.models-v4-card-discard {
+  padding: 0 0.625rem 0.625rem;
+  border-top: 1px solid color-mix(in srgb, var(--color-line) 70%, transparent);
+  padding-top: 0.5rem;
+}
+
+.models-v4-inspector {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.models-v4-inspector__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.models-v4-inspector__close {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 4;
+  background: color-mix(in srgb, var(--color-panel) 94%, transparent);
+  box-shadow: -0.4rem 0 0.65rem color-mix(in srgb, var(--color-panel) 88%, transparent);
+}
+
+.models-v4-inspector--sheet {
+  border-top: 1px solid var(--color-line);
+  background: var(--color-panel);
+  padding-top: var(--hud-space-3);
+}
+
+.models-v4-inspector--sheet .models-v4-inspector__close {
+  top: var(--hud-space-3);
+}
+
+.models-v4-eval-radar {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.models-v4-eval-radar__plot {
+  display: grid;
+  grid-template-columns: minmax(9rem, 12rem) minmax(8rem, 1fr);
+  gap: var(--hud-space-2);
+  align-items: center;
+  min-width: 0;
+}
+
+.models-v4-eval-radar__svg {
+  display: block;
+  width: auto;
+  height: 11rem;
+  max-width: 100%;
+  overflow: visible;
+}
+
+.models-v4-eval-radar__legend {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.3rem;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.625rem;
+}
+
+.models-v4-lineage {
+  min-width: 0;
+  overflow: visible;
+  border: 1px solid color-mix(in srgb, var(--color-line) 78%, transparent);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--color-void) 42%, transparent);
+}
+
+.models-v4-lineage__summary {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2.75rem;
+  cursor: pointer;
+  list-style: none;
+  padding: 0.35rem 0.55rem;
+  text-align: left;
+}
+
+.models-v4-lineage__summary::-webkit-details-marker {
+  display: none;
+}
+
+.models-v4-lineage__summary:hover {
+  background: color-mix(in srgb, var(--color-void) 35%, transparent);
+}
+
+.models-v4-lineage__summary:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-mint) 60%, transparent);
+  outline-offset: -2px;
+}
+
+.models-v4-lineage__summary-caret {
+  color: var(--color-muted);
+  transition: transform 120ms ease;
+}
+
+.models-v4-lineage[open] .models-v4-lineage__summary-caret {
+  transform: rotate(90deg);
+}
+
+.models-v4-lineage__summary-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-bone);
+}
+
+.models-v4-lineage__summary-selected {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.625rem;
+  color: var(--color-muted);
+}
+
+.models-v4-lineage__summary-count {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-bone);
+}
+
+.models-v4-lineage__tree,
+.models-v4-lineage__branch {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.models-v4-lineage__tree {
+  padding: 0.15rem 0.4rem 0.45rem;
+  border-top: 1px solid color-mix(in srgb, var(--color-line) 55%, transparent);
+}
+
+.models-v4-lineage__item + .models-v4-lineage__item {
+  margin-top: 0.15rem;
+}
+
+.models-v4-lineage__row {
+  display: flex;
+  min-width: 0;
+  align-items: stretch;
+  gap: 0.1rem;
+}
+
+.models-v4-lineage__toggle,
+.models-v4-lineage__leaf {
+  display: inline-flex;
+  flex: 0 0 1.75rem;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  min-height: 2.25rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-muted);
+}
+
+.models-v4-lineage__toggle {
+  cursor: pointer;
+  border-radius: 0.3rem;
+}
+
+.models-v4-lineage__toggle:hover {
+  color: var(--color-bone);
+  background: color-mix(in srgb, var(--color-void) 40%, transparent);
+}
+
+.models-v4-lineage__toggle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-mint) 60%, transparent);
+  outline-offset: 0;
+}
+
+.models-v4-lineage__caret {
+  transition: transform 120ms ease;
+}
+
+.models-v4-lineage__caret--open {
+  transform: rotate(90deg);
+}
+
+.models-v4-lineage__node {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 0.45rem;
+  min-height: 2.25rem;
+  margin: 0;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid transparent;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: var(--color-bone);
+  cursor: pointer;
+  text-align: left;
+}
+
+.models-v4-lineage__node:hover {
+  border-color: color-mix(in srgb, var(--color-line) 80%, transparent);
+  background: color-mix(in srgb, var(--color-void) 38%, transparent);
+}
+
+.models-v4-lineage__node:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-mint) 60%, transparent);
+  outline-offset: 0;
+}
+
+.models-v4-lineage__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.models-v4-lineage__meta {
+  flex: 0 0 auto;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.625rem;
+  color: var(--color-muted);
+}
+
+.models-v4-lineage__item[data-on-path="true"]:not([data-selected="true"]) .models-v4-lineage__node {
+  border-color: color-mix(in srgb, var(--color-mint) 28%, transparent);
+}
+
+.models-v4-lineage__item[data-selected="true"] .models-v4-lineage__node {
+  border-color: color-mix(in srgb, var(--color-mint) 55%, var(--color-line));
+  background: color-mix(in srgb, var(--color-mint) 16%, transparent);
+}
+
+.models-v4-lineage__branch {
+  position: relative;
+  margin: 0.1rem 0 0 0.85rem;
+  padding-left: 0.55rem;
+  border-left: 1px solid color-mix(in srgb, var(--color-mint) 28%, var(--color-line));
+}
+
+.models-v4-lineage__branch > .models-v4-lineage__item {
+  position: relative;
+}
+
+.models-v4-lineage__branch > .models-v4-lineage__item::before {
+  content: "";
+  position: absolute;
+  top: 1.125rem;
+  left: -0.55rem;
+  width: 0.55rem;
+  height: 1px;
+  background: color-mix(in srgb, var(--color-mint) 28%, var(--color-line));
+}
+
+.models-v4-actions,
+.models-v4-inspector-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--hud-space-2);
+}
+
+.models-v4-actions .hud-button,
+.models-v4-inspector-actions .hud-button {
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.models-v4-actions > :last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
+.models-v4-actions [data-two-step-armed="true"] {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--hud-space-2);
+}
+
+.models-v4-action {
+  min-width: 0;
+}
+
+.hud-button[data-locked="true"],
+.models-v4-action--locked {
+  filter: grayscale(1);
+  opacity: 0.42;
+}
+
+.models-v4-locked-card {
+  filter: grayscale(0.85);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+@container (min-width: 68.75rem) {
+  .models-v4-layout:has(> .models-v4-inspector) {
+    grid-template-columns: minmax(0, 1fr) minmax(18rem, 24rem);
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  .models-v4-layout:has(> .models-v4-inspector) > .models-v4-stats,
+  .models-v4-layout:has(> .models-v4-inspector) > .models-v4-tabs,
+  .models-v4-layout:has(> .models-v4-inspector) > .models-v4-body {
+    grid-column: 1;
+  }
+
+  .models-v4-layout:has(> .models-v4-inspector) > .models-v4-inspector {
+    grid-column: 2;
+    grid-row: 1 / -1;
+    border-left: 1px solid var(--color-line);
+    padding-left: var(--hud-space-3);
+  }
+
+  .models-v4-pipeline {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: 100%;
+  }
+
+  .models-v4-inspector,
+  .models-v4-inspector--sheet {
+    min-height: 0;
+    height: auto;
+    overflow: hidden;
+    border-top: 0;
+    background: transparent;
+    padding-top: 0;
+  }
+
+  .models-v4-inspector--sheet .models-v4-inspector__close {
+    top: 0;
+  }
+}

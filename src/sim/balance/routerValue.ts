@@ -8,6 +8,7 @@ export interface RoutedValueInput {
   routerOverhead: number;
 }
 
+// V4-DELETE: legacy routed-value composite; V4 uses compositeCapabilities in training/endpoints.
 export function expectedRoutedValue(input: RoutedValueInput): number {
   return (
     Math.max(0, input.taskQuality) -

@@ -1,4 +1,7 @@
 import { aggregateEffects } from "./research";
+// V4-DELETE: this module is the legacy player training authority (startTraining,
+// tickTraining, sellModelIp, campaign events). Phase 2 stops calling it from
+// src/sim/tick.ts and store actions once tickTrainingCore is wired.
 import type {
   BenchmarkScores,
   BenchmarkSuiteId,
@@ -7301,6 +7304,8 @@ export function applyEffortHeadTick(
 }
 
 export function tickTraining(state: SimState): SimState {
+  // V4-DELETE: tickTraining — Phase 2 replaces this call in src/sim/tick.ts
+  // with tickTrainingCore.
   state = beginReadyLinkedPostTrain(state);
   const jobs = playerTrainingJobs(state);
   if (!jobs.length) return state;

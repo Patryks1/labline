@@ -383,7 +383,7 @@ describe('research programs and pods', () => {
     )
   })
 
-  it('applies serving and training effects exactly once on PF-plus-calendar completion', () => {
+  it('applies serving effects exactly once on PF-plus-calendar completion', () => {
     const method = getResearchNode('opt_flash')
     let state = staffed(createGame(607), 4, 2, 2)
     state = {
@@ -433,9 +433,8 @@ describe('research programs and pods', () => {
     expect(completed.player.servingEfficiency).toBeCloseTo(
       servingBefore + method.effects.servingEfficiency!,
     )
-    expect(completed.player.trainEfficiency).toBeCloseTo(
-      trainingBefore + method.effects.trainEfficiency!,
-    )
+    // V4-DELETE: training no longer lands on player.trainEfficiency.
+    expect(completed.player.trainEfficiency).toBeCloseTo(trainingBefore)
 
     const repeated = tickResearchPrograms(completed)
     expect(repeated.player.servingEfficiency).toBeCloseTo(

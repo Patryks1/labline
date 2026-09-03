@@ -133,6 +133,7 @@ describe('serving realism rebalance', () => {
       'sys_quant',
       'sys_fp8',
       'sys_int4',
+      'opt_fp6_train',
       'sys_nvfp4_runtime',
       'sys_bitnet_runtime',
       'dense_bitnet',

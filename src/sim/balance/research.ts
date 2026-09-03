@@ -3,6 +3,9 @@ import type { ResearchNodeDef } from '../types'
 /**
  * Full research catalog. Trunks are visual columns; prereqs define edges.
  * Keep IDs stable — sim gates reference them.
+ *
+ * Training-relevant numbers are V4 modifiers (see TrainingModifiers).
+ * Serving / PUE / data-processing / fab fields remain for non-training systems.
  */
 export const RESEARCH_NODES: ResearchNodeDef[] = [
   // ─── INFERENCE / SYSTEMS ─────────────────────────────────
@@ -14,7 +17,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 8,
     daysMin: 4,
     prereqs: [],
-    effects: { utilCap: 0.08, servingEfficiency: 0.15 },
+    effects: { utilCap: 0.08, servingEfficiency: 0.15, serveEfficiency: 1.06 },
   },
   {
     id: 'sys_paged_attn',
@@ -24,7 +27,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 14,
     daysMin: 5,
     prereqs: ['sys_batching'],
-    effects: { utilCap: 0.06, servingEfficiency: 0.12 },
+    effects: { utilCap: 0.06, servingEfficiency: 0.12, serveEfficiency: 1.05 },
   },
   {
     id: 'sys_quant',
@@ -34,7 +37,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 12,
     daysMin: 5,
     prereqs: ['sys_batching'],
-    effects: { servingEfficiency: 0.2, utilCap: 0.05 },
+    effects: { servingEfficiency: 0.2, utilCap: 0.05, serveEfficiency: 1.08, quantPenaltyMult: 0.96 },
   },
   {
     id: 'sys_fp8',
@@ -44,7 +47,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 22,
     daysMin: 7,
     prereqs: ['sys_quant'],
-    effects: { servingEfficiency: 0.22, utilCap: 0.04 },
+    effects: { servingEfficiency: 0.22, utilCap: 0.04, serveEfficiency: 1.08, quantPenaltyMult: 0.94 },
   },
   {
     id: 'sys_int4',
@@ -54,7 +57,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 26,
     daysMin: 8,
     prereqs: ['sys_quant', 'data_eval'],
-    effects: { servingEfficiency: 0.16 },
+    effects: { servingEfficiency: 0.16, serveEfficiency: 1.06, quantPenaltyMult: 0.9 },
     riskLevel: 'elevated',
   },
   {
@@ -65,7 +68,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 46,
     daysMin: 13,
     prereqs: ['sys_fp8', 'sys_kernels', 'si_arch'],
-    effects: { servingEfficiency: 0.2, utilCap: 0.03 },
+    effects: { servingEfficiency: 0.2, utilCap: 0.03, serveEfficiency: 1.07, quantPenaltyMult: 0.88 },
     riskLevel: 'high',
   },
   {
@@ -76,7 +79,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 42,
     daysMin: 12,
     prereqs: ['dense_bitnet', 'sys_kernels'],
-    effects: { servingEfficiency: 0.24 },
+    effects: { servingEfficiency: 0.24, serveEfficiency: 1.09, quantPenaltyMult: 0.86 },
     riskLevel: 'elevated',
   },
   {
@@ -87,7 +90,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 20,
     daysMin: 7,
     prereqs: ['sys_quant'],
-    effects: { servingEfficiency: 0.25 },
+    effects: { servingEfficiency: 0.25, serveEfficiency: 1.1 },
   },
   {
     id: 'sys_medusa',
@@ -97,7 +100,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 28,
     daysMin: 9,
     prereqs: ['sys_spec_decode'],
-    effects: { servingEfficiency: 0.18 },
+    effects: { servingEfficiency: 0.18, serveEfficiency: 1.07 },
   },
   {
     id: 'sys_gqa',
@@ -107,7 +110,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 24,
     daysMin: 8,
     prereqs: ['sys_paged_attn', 'dense_basics'],
-    effects: { servingEfficiency: 0.15, utilCap: 0.04, trainEfficiency: 0.03 },
+    effects: { servingEfficiency: 0.15, utilCap: 0.04, serveEfficiency: 1.05 },
   },
   {
     id: 'sys_vllm',
@@ -117,7 +120,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 30,
     daysMin: 9,
     prereqs: ['sys_paged_attn', 'sys_prefix', 'sys_compile'],
-    effects: { servingEfficiency: 0.18, utilCap: 0.07 },
+    effects: { servingEfficiency: 0.18, utilCap: 0.07, serveEfficiency: 1.07 },
   },
   {
     id: 'sys_disagg',
@@ -127,7 +130,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 35,
     daysMin: 10,
     prereqs: ['sys_spec_decode', 'sys_paged_attn'],
-    effects: { utilCap: 0.12, servingEfficiency: 0.15 },
+    effects: { utilCap: 0.12, servingEfficiency: 0.15, serveEfficiency: 1.06 },
   },
   {
     id: 'sys_prefix',
@@ -137,7 +140,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 16,
     daysMin: 5,
     prereqs: ['sys_paged_attn'],
-    effects: { servingEfficiency: 0.1, utilCap: 0.03 },
+    effects: { servingEfficiency: 0.1, utilCap: 0.03, serveEfficiency: 1.04 },
   },
   {
     id: 'sys_router',
@@ -148,7 +151,28 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 24,
     daysMin: 8,
     prereqs: ['sys_batching'],
-    effects: { servingEfficiency: 0.08, utilCap: 0.04 },
+    effects: {
+      servingEfficiency: 0.08,
+      utilCap: 0.04,
+      serveEfficiency: 1.04,
+      routerQuality: 0.08,
+      unlock: ['router_domain'],
+    },
+  },
+  {
+    id: 'sys_router_cascade',
+    trunk: 'inference',
+    name: 'Cascade Routing',
+    description: 'Escalate hard requests from a cheap draft onto a larger specialist.',
+    costPfDays: 28,
+    daysMin: 9,
+    prereqs: ['sys_router'],
+    effects: {
+      unlock: ['router_cascade'],
+      routerQuality: 0.12,
+      serveEfficiency: 1.08,
+      servingEfficiency: 0.06,
+    },
   },
   {
     id: 'sys_kernels',
@@ -158,7 +182,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 28,
     daysMin: 8,
     prereqs: ['sys_batching'],
-    effects: { utilCap: 0.06, trainEfficiency: 0.1 },
+    effects: { utilCap: 0.06, serveEfficiency: 1.04 },
   },
   {
     id: 'sys_compile',
@@ -168,7 +192,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 32,
     daysMin: 10,
     prereqs: ['sys_kernels'],
-    effects: { utilCap: 0.05, servingEfficiency: 0.1, trainEfficiency: 0.06 },
+    effects: { utilCap: 0.05, servingEfficiency: 0.1, serveEfficiency: 1.05 },
   },
   {
     id: 'sys_kv_offload',
@@ -178,7 +202,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 26,
     daysMin: 8,
     prereqs: ['sys_paged_attn'],
-    effects: { utilCap: 0.07, servingEfficiency: 0.14 },
+    effects: { utilCap: 0.07, servingEfficiency: 0.14, serveEfficiency: 1.05 },
   },
   {
     id: 'sys_tensor_rt',
@@ -188,7 +212,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 30,
     daysMin: 9,
     prereqs: ['sys_compile'],
-    effects: { servingEfficiency: 0.16, utilCap: 0.05 },
+    effects: { servingEfficiency: 0.16, utilCap: 0.05, serveEfficiency: 1.06 },
   },
   {
     id: 'sys_dist_cache',
@@ -198,7 +222,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 34,
     daysMin: 10,
     prereqs: ['sys_prefix', 'sys_disagg'],
-    effects: { servingEfficiency: 0.18, utilCap: 0.04 },
+    effects: { servingEfficiency: 0.18, utilCap: 0.04, serveEfficiency: 1.07 },
   },
   {
     id: 'sys_load_shed',
@@ -208,7 +232,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 18,
     daysMin: 6,
     prereqs: ['sys_router'],
-    effects: { servingEfficiency: 0.08, utilCap: 0.03 },
+    effects: { servingEfficiency: 0.08, utilCap: 0.03, serveEfficiency: 1.03 },
   },
   {
     id: 'sys_infer_asic',
@@ -219,7 +243,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 55,
     daysMin: 14,
     prereqs: ['sys_tensor_rt', 'sys_dist_cache'],
-    effects: { servingEfficiency: 0.22, utilCap: 0.04 },
+    effects: { servingEfficiency: 0.22, utilCap: 0.04, serveEfficiency: 1.08 },
     riskLevel: 'elevated',
   },
   {
@@ -231,7 +255,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 48,
     daysMin: 12,
     prereqs: ['sys_infer_asic', 'sys_medusa'],
-    effects: { servingEfficiency: 0.2, utilCap: 0.03 },
+    effects: { servingEfficiency: 0.2, utilCap: 0.03, serveEfficiency: 1.07 },
     riskLevel: 'high',
   },
 
@@ -244,7 +268,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 10,
     daysMin: 4,
     prereqs: [],
-    effects: { trainEfficiency: 0.08 },
+    effects: { computeThroughput: 1.12 },
   },
   {
     id: 'opt_fsdp',
@@ -254,7 +278,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 18,
     daysMin: 6,
     prereqs: ['opt_checkpoint'],
-    effects: { trainEfficiency: 0.12 },
+    effects: { computeThroughput: 1.1 },
   },
   {
     id: 'opt_flash',
@@ -264,7 +288,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 16,
     daysMin: 5,
     prereqs: ['opt_checkpoint'],
-    effects: { trainEfficiency: 0.1, servingEfficiency: 0.08, utilCap: 0.03 },
+    effects: { computeThroughput: 1.1, servingEfficiency: 0.08, utilCap: 0.03, serveEfficiency: 1.04 },
   },
   {
     id: 'opt_pipeline',
@@ -274,7 +298,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 26,
     daysMin: 8,
     prereqs: ['opt_fsdp'],
-    effects: { trainEfficiency: 0.1 },
+    effects: { computeThroughput: 1.06 },
   },
   {
     id: 'opt_data_pipe',
@@ -284,7 +308,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 12,
     daysMin: 4,
     prereqs: [],
-    effects: { trainEfficiency: 0.08, utilCap: 0.03 },
+    effects: { computeThroughput: 1.08, utilCap: 0.03 },
   },
   {
     id: 'opt_fp16',
@@ -295,7 +319,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 8,
     daysMin: 3,
     prereqs: [],
-    effects: { trainEfficiency: 0.06 },
+    effects: { computeThroughput: 1.1, unlock: ['fp16_train'] },
   },
   {
     id: 'opt_mixed',
@@ -305,7 +329,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 14,
     daysMin: 5,
     prereqs: ['opt_flash', 'opt_fp16'],
-    effects: { trainEfficiency: 0.12 },
+    effects: { computeThroughput: 1.08, unlock: ['bf16_train'] },
   },
   {
     id: 'opt_fp8_train',
@@ -315,7 +339,19 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 34,
     daysMin: 10,
     prereqs: ['opt_mixed', 'sys_fp8', 'sys_compile'],
-    effects: { trainEfficiency: 0.08 },
+    effects: { unlock: ['fp8_train'], computeThroughput: 1.05, precisionPenaltyMult: 0.92 },
+    riskLevel: 'elevated',
+  },
+  {
+    id: 'opt_fp6_train',
+    trunk: 'optimize',
+    name: 'FP6 Training Recipes',
+    description:
+      'Six-bit training formats: faster and cheaper than FP8, with a steeper quality gap. Unlocks FP6 serving on plans and API.',
+    costPfDays: 48,
+    daysMin: 13,
+    prereqs: ['opt_fp8_train', 'sys_kernels'],
+    effects: { unlock: ['fp6_train'], computeThroughput: 1.04, precisionPenaltyMult: 0.9 },
     riskLevel: 'elevated',
   },
   {
@@ -326,7 +362,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 42,
     daysMin: 12,
     prereqs: ['opt_fp8_train', 'sys_kernels'],
-    effects: { trainEfficiency: 0.12, utilCap: 0.04 },
+    effects: { computeThroughput: 1.04, utilCap: 0.04, precisionPenaltyMult: 0.94 },
     riskLevel: 'elevated',
   },
   {
@@ -337,7 +373,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 28,
     daysMin: 9,
     prereqs: ['opt_fsdp', 'opt_pipeline'],
-    effects: { trainEfficiency: 0.11, utilCap: 0.03 },
+    effects: { computeThroughput: 1.06, utilCap: 0.03 },
   },
   {
     id: 'opt_context_parallel',
@@ -347,7 +383,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 40,
     daysMin: 12,
     prereqs: ['opt_seq_parallel', 'dense_context', 'opt_overlap_comm'],
-    effects: { trainEfficiency: 0.12, capabilityBonus: 1, overtrainCapBonus: 0.8 },
+    effects: { computeThroughput: 1.04, ceilingLift: 0.8 },
   },
   {
     id: 'opt_qlora',
@@ -357,7 +393,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 24,
     daysMin: 8,
     prereqs: ['opt_distill_stack', 'sys_int4'],
-    effects: { trainEfficiency: 0.14, capabilityBonus: 1 },
+    effects: { postTrainEfficiency: 1.1, computeThroughput: 1.03 },
   },
   {
     id: 'opt_nvfp4_train',
@@ -366,8 +402,13 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     description: 'Blackwell-native FP4 recipes with strict scaling and evaluation gates.',
     costPfDays: 62,
     daysMin: 16,
-    prereqs: ['opt_fp8_train', 'sys_nvfp4_runtime', 'data_eval'],
-    effects: { trainEfficiency: 0.1, trainingStumbleRisk: 0.04 },
+    prereqs: ['opt_fp6_train', 'sys_nvfp4_runtime', 'data_eval'],
+    effects: {
+      unlock: ['nvfp4_train'],
+      computeThroughput: 1.06,
+      precisionPenaltyMult: 0.88,
+      stability: 1.08,
+    },
     riskLevel: 'high',
   },
   {
@@ -375,10 +416,30 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     trunk: 'optimize',
     name: 'Distill Playbook',
     description: 'Cheaper student training from teachers.',
+    costPfDays: 12,
+    daysMin: 5,
+    prereqs: ['align_sft'],
+    effects: { unlock: ['distill'], distillEfficiency: 1.15 },
+  },
+  {
+    id: 'opt_continue',
+    trunk: 'optimize',
+    name: 'Continued Pretraining',
+    description: 'Resume a checkpoint on a new mix without a full cold start.',
+    costPfDays: 16,
+    daysMin: 6,
+    prereqs: ['opt_mixed'],
+    effects: { unlock: ['continued_pretrain'], postTrainEfficiency: 1.06, stability: 0.97 },
+  },
+  {
+    id: 'opt_merge',
+    trunk: 'optimize',
+    name: 'Model Merging',
+    description: 'Soup and TIES-style merges of checkpoints that share a backbone.',
     costPfDays: 20,
     daysMin: 7,
-    prereqs: ['opt_mixed', 'align_sft'],
-    effects: { trainEfficiency: 0.08, capabilityBonus: 1 },
+    prereqs: ['opt_distill_stack', 'moe_basics'],
+    effects: { unlock: ['merge'], distillEfficiency: 1.06, stability: 0.96 },
   },
   {
     id: 'opt_overlap_comm',
@@ -388,7 +449,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 22,
     daysMin: 7,
     prereqs: ['opt_fsdp'],
-    effects: { trainEfficiency: 0.1, utilCap: 0.04 },
+    effects: { computeThroughput: 1.06, utilCap: 0.04 },
   },
   {
     id: 'opt_grad_accum',
@@ -398,7 +459,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 15,
     daysMin: 5,
     prereqs: ['opt_data_pipe'],
-    effects: { trainEfficiency: 0.09 },
+    effects: { computeThroughput: 1.06 },
   },
   {
     id: 'opt_torch_compile',
@@ -408,7 +469,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 24,
     daysMin: 8,
     prereqs: ['opt_mixed', 'sys_compile'],
-    effects: { trainEfficiency: 0.11, utilCap: 0.03 },
+    effects: { computeThroughput: 1.06, utilCap: 0.03 },
   },
   {
     id: 'opt_compute_sched',
@@ -419,7 +480,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 32,
     daysMin: 10,
     prereqs: ['opt_torch_compile', 'data_eval'],
-    effects: { trainEfficiency: 0.06, overtrainCapBonus: 1.5, capabilityBonus: 1 },
+    effects: { ceilingLift: 1.2, stability: 0.95, overtrainCapBonus: 6 },
   },
 
   // ─── DATA (early game — roots sit at top of Data column) ─
@@ -432,7 +493,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 8,
     daysMin: 3,
     prereqs: [],
-    effects: { capabilityBonus: 2, dataFlywheel: 0.06 },
+    effects: { dataEfficiency: 0.95, dataFlywheel: 0.06 },
   },
   {
     id: 'data_clean',
@@ -442,7 +503,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 10,
     daysMin: 4,
     prereqs: [],
-    effects: { capabilityBonus: 2, dataFlywheel: 0.05 },
+    effects: { dataEfficiency: 0.96, dataFlywheel: 0.05 },
   },
   {
     id: 'data_specialists',
@@ -453,7 +514,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 12,
     daysMin: 4,
     prereqs: ['data_mix'],
-    effects: { unlockCorpusSpecialists: true, capabilityBonus: 1, dataFlywheel: 0.06 },
+    effects: { unlockCorpusSpecialists: true, dataEfficiency: 0.98, dataFlywheel: 0.06 },
   },
   {
     id: 'data_synth',
@@ -463,13 +524,11 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
       'AI data factories. Mid-tree unlock — needs clean pipelines + evals first. HQ synth needs a strong teacher; LQ is fast but can poison training.',
     costPfDays: 26,
     daysMin: 9,
-    // Mid data trunk: mix → clean → eval → synth (not early free tokens)
     prereqs: ['data_mix', 'data_clean', 'data_eval'],
     effects: {
-      capabilityBonus: 3,
-      trainEfficiency: 0.05,
+      dataEfficiency: 0.98,
+      syntheticQuality: 1.1,
       dataFlywheel: 0.12,
-      overtrainCapBonus: 0.8,
     },
   },
   {
@@ -480,7 +539,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 18,
     daysMin: 6,
     prereqs: ['data_clean', 'align_sft'],
-    effects: { rlhfQuality: 0.15, safetyBonus: 2 },
+    effects: { rlhfQuality: 0.15, safetyBonus: 2, rlQuality: 0.06, postTrainEfficiency: 1.05 },
   },
   {
     id: 'data_eval',
@@ -490,7 +549,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 14,
     daysMin: 5,
     prereqs: ['data_clean'],
-    effects: { capabilityBonus: 1, safetyBonus: 2, dataFlywheel: 0.05 },
+    effects: { dataEfficiency: 0.98, safetyBonus: 2, dataFlywheel: 0.05 },
   },
   {
     id: 'data_flywheel',
@@ -500,7 +559,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 28,
     daysMin: 9,
     prereqs: ['data_synth', 'data_eval'],
-    effects: { dataFlywheel: 0.25, capabilityBonus: 2 },
+    effects: { dataFlywheel: 0.25, dataEfficiency: 0.98 },
   },
   {
     id: 'data_self_train',
@@ -515,13 +574,10 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     cashBurnMult: 1.35,
     riskLevel: 'high',
     effects: {
-      capabilityBonus: 6,
-      trainEfficiency: 0.12,
+      syntheticQuality: 1.12,
       dataFlywheel: 0.18,
-      trainingBreakthroughBias: 0.1,
-      trainingStumbleRisk: 0.07,
-      trainingSafetyPenalty: 5,
-      overtrainCapBonus: 1.5,
+      stability: 1.1,
+      ceilingLift: 1.5,
     },
   },
   {
@@ -532,7 +588,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 30,
     daysMin: 10,
     prereqs: ['data_mix', 'data_clean'],
-    effects: { capabilityBonus: 4, dataFlywheel: 0.1 },
+    effects: { dataEfficiency: 0.98, dataFlywheel: 0.1 },
   },
 
   // ─── HARDWARE / FACILITY ─────────────────────────────────
@@ -544,7 +600,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 18,
     daysMin: 6,
     prereqs: [],
-    effects: { energyPue: -0.15 },
+    effects: { energyPue: -0.15, hostingDiscount: 0.97 },
   },
   {
     id: 'hw_power',
@@ -554,7 +610,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 14,
     daysMin: 5,
     prereqs: [],
-    effects: { energyPue: -0.08, utilCap: 0.02 },
+    effects: { energyPue: -0.08, utilCap: 0.02, hostingDiscount: 0.98 },
   },
   {
     id: 'hw_network',
@@ -564,7 +620,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 20,
     daysMin: 7,
     prereqs: ['hw_power'],
-    effects: { trainEfficiency: 0.1, utilCap: 0.03 },
+    effects: { computeThroughput: 1.06, utilCap: 0.03 },
   },
   {
     id: 'hw_storage',
@@ -574,7 +630,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 16,
     daysMin: 5,
     prereqs: ['hw_power'],
-    effects: { trainEfficiency: 0.06 },
+    effects: { computeThroughput: 1.06 },
   },
   {
     id: 'hw_immersion',
@@ -584,7 +640,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 36,
     daysMin: 12,
     prereqs: ['sys_cooling', 'hw_network'],
-    effects: { energyPue: -0.12, utilCap: 0.04 },
+    effects: { energyPue: -0.12, utilCap: 0.04, hostingDiscount: 0.96 },
   },
   {
     id: 'si_arch',
@@ -594,7 +650,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 40,
     daysMin: 12,
     prereqs: ['sys_kernels'],
-    effects: { chipDiscount: 0.05, fabSpeed: 0.1 },
+    effects: { chipDiscount: 0.05, fabSpeed: 0.1, quantPenaltyMult: 0.97 },
   },
   {
     id: 'si_packaging',
@@ -604,7 +660,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 50,
     daysMin: 15,
     prereqs: ['si_arch'],
-    effects: { utilCap: 0.04, chipDiscount: 0.08, fabSpeed: 0.1 },
+    effects: { utilCap: 0.04, chipDiscount: 0.08, fabSpeed: 0.1, serveEfficiency: 1.03 },
   },
   {
     id: 'si_hbm_stack',
@@ -614,7 +670,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 46,
     daysMin: 14,
     prereqs: ['si_arch'],
-    effects: { trainEfficiency: 0.05, fabSpeed: 0.05 },
+    effects: { computeThroughput: 1.06, fabSpeed: 0.05 },
   },
   {
     id: 'si_infer_asic',
@@ -624,7 +680,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 44,
     daysMin: 13,
     prereqs: ['si_arch', 'sys_paged_attn'],
-    effects: { servingEfficiency: 0.08, fabSpeed: 0.05 },
+    effects: { servingEfficiency: 0.08, fabSpeed: 0.05, serveEfficiency: 1.04 },
   },
   {
     id: 'si_chiplets',
@@ -634,7 +690,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 58,
     daysMin: 17,
     prereqs: ['si_packaging'],
-    effects: { fabSpeed: 0.12, chipDiscount: 0.04 },
+    effects: { fabSpeed: 0.12, chipDiscount: 0.04, hostingDiscount: 0.98 },
   },
   {
     id: 'si_photonic_io',
@@ -644,7 +700,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 72,
     daysMin: 20,
     prereqs: ['si_chiplets', 'hw_network'],
-    effects: { energyPue: -0.04, fabSpeed: 0.08 },
+    effects: { energyPue: -0.04, fabSpeed: 0.08, hostingDiscount: 0.97 },
   },
   {
     id: 'si_fab_ops',
@@ -654,7 +710,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 45,
     daysMin: 14,
     prereqs: ['si_arch'],
-    effects: { fabSpeed: 0.2, chipDiscount: 0.03 },
+    effects: { fabSpeed: 0.2, chipDiscount: 0.03, hostingDiscount: 0.99 },
   },
   {
     id: 'si_moe_npu',
@@ -664,7 +720,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 55,
     daysMin: 16,
     prereqs: ['si_packaging', 'moe_serve'],
-    effects: { moeInferMult: 0.7, fabSpeed: 0.05 },
+    effects: { moeInferMult: 0.7, fabSpeed: 0.05, serveEfficiency: 1.05 },
   },
 
   // ─── DENSE ───────────────────────────────────────────────
@@ -677,7 +733,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 10,
     daysMin: 4,
     prereqs: [],
-    effects: { unlockFamily: 'dense', capabilityBonus: 2, trainEfficiency: 0.05 },
+    effects: { paramEfficiency: 0.97, computeThroughput: 1.08 },
   },
   {
     id: 'dense_opt',
@@ -688,18 +744,88 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 16,
     daysMin: 5,
     prereqs: ['dense_basics'],
-    effects: { capabilityBonus: 3, trainEfficiency: 0.1 },
+    effects: { paramEfficiency: 0.95 },
+  },
+  {
+    id: 'dense_ctx_32k',
+    trunk: 'dense',
+    name: '32k Context',
+    description:
+      'Unlock 8k, 16k, and 32k windows. Attention work and KV grow; better kernels make those windows cheaper to host.',
+    costPfDays: 14,
+    daysMin: 5,
+    prereqs: ['dense_basics'],
+    effects: {
+      unlock: ['context_32k'],
+      hostingDiscount: 0.99,
+      hostingOpexDiscount: 0.01,
+      denseInferMult: 1.02,
+    },
   },
   {
     id: 'dense_context',
     trunk: 'dense',
     name: 'Long Context',
     description:
-      '128k+ context wins document-heavy enterprise work, while KV memory and decode latency make every long request more expensive.',
+      '128k–256k windows win document-heavy enterprise work, while KV memory and decode latency make every long request more expensive.',
     costPfDays: 24,
     daysMin: 8,
-    prereqs: ['dense_opt'],
-    effects: { capabilityBonus: 4, denseInferMult: 1.05 },
+    prereqs: ['dense_opt', 'dense_ctx_32k'],
+    effects: {
+      unlock: ['long_context'],
+      paramEfficiency: 0.98,
+      denseInferMult: 1.05,
+      hostingDiscount: 0.97,
+      hostingOpexDiscount: 0.02,
+    },
+  },
+  {
+    id: 'dense_ctx_1m',
+    trunk: 'dense',
+    name: 'Million-Token Context',
+    description:
+      '500k–1M windows. Context-parallel training and KV residency dominate cost; hosting research trims the opex tax.',
+    costPfDays: 42,
+    daysMin: 12,
+    prereqs: ['dense_context', 'opt_context_parallel'],
+    effects: {
+      unlock: ['context_1m'],
+      hostingDiscount: 0.94,
+      hostingOpexDiscount: 0.03,
+      denseInferMult: 1.08,
+    },
+  },
+  {
+    id: 'dense_ctx_10m',
+    trunk: 'dense',
+    name: '10M Context',
+    description:
+      '10 million token windows. GQA and paging keep KV barely hostable; training and serving both pay a large sequence tax.',
+    costPfDays: 58,
+    daysMin: 16,
+    prereqs: ['dense_ctx_1m', 'sys_gqa'],
+    effects: {
+      unlock: ['context_10m'],
+      hostingDiscount: 0.9,
+      hostingOpexDiscount: 0.04,
+      denseInferMult: 1.12,
+    },
+  },
+  {
+    id: 'dense_ctx_100m',
+    trunk: 'dense',
+    name: '100M Context',
+    description:
+      '100 million token windows. Offloaded KV and extreme sequence parallelism; hosting is expensive even after the discount.',
+    costPfDays: 80,
+    daysMin: 21,
+    prereqs: ['dense_ctx_10m', 'sys_kv_offload'],
+    effects: {
+      unlock: ['context_100m'],
+      hostingDiscount: 0.86,
+      hostingOpexDiscount: 0.05,
+      denseInferMult: 1.16,
+    },
   },
   {
     id: 'dense_mtp',
@@ -710,7 +836,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 34,
     daysMin: 10,
     prereqs: ['dense_opt', 'data_eval'],
-    effects: { capabilityBonus: 3, trainEfficiency: 0.05, trainingBreakthroughBias: 0.025 },
+    effects: { paramEfficiency: 0.98, stability: 1.04 },
     riskLevel: 'elevated',
   },
   {
@@ -722,7 +848,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 38,
     daysMin: 12,
     prereqs: ['dense_opt', 'opt_mixed', 'data_eval'],
-    effects: { capabilityBonus: 1 },
+    effects: { quantPenaltyMult: 0.92, precisionPenaltyMult: 1.08, stability: 1.06 },
     riskLevel: 'high',
   },
   {
@@ -734,7 +860,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 30,
     daysMin: 9,
     prereqs: ['dense_context', 'data_synth'],
-    effects: { capabilityBonus: 5, trainEfficiency: 0.08 },
+    effects: { syntheticQuality: 1.08, ceilingLift: 1 },
   },
   {
     id: 'dense_frontier',
@@ -745,7 +871,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 50,
     daysMin: 14,
     prereqs: ['dense_synth', 'opt_pipeline'],
-    effects: { capabilityBonus: 8, denseInferMult: 0.95 },
+    effects: { ceilingLift: 2, denseInferMult: 0.95, paramEfficiency: 0.99 },
   },
 
   // ─── MoE ─────────────────────────────────────────────────
@@ -758,7 +884,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 14,
     daysMin: 5,
     prereqs: ['dense_basics'],
-    effects: { unlockFamily: 'moe', capabilityBonus: 1 },
+    effects: { unlock: ['moe'], paramEfficiency: 0.98 },
   },
   {
     id: 'moe_routing',
@@ -769,7 +895,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 18,
     daysMin: 6,
     prereqs: ['moe_basics'],
-    effects: { capabilityBonus: 3, moeInferMult: 0.85 },
+    effects: { paramEfficiency: 0.98, moeInferMult: 0.85, stability: 0.97 },
   },
   {
     id: 'moe_balance',
@@ -780,7 +906,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 22,
     daysMin: 7,
     prereqs: ['moe_routing'],
-    effects: { capabilityBonus: 3, trainEfficiency: 0.08, moeInferMult: 0.9 },
+    effects: { paramEfficiency: 0.98, moeInferMult: 0.9, stability: 0.96 },
   },
   {
     id: 'moe_parallel',
@@ -791,7 +917,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 28,
     daysMin: 9,
     prereqs: ['moe_balance', 'opt_fsdp'],
-    effects: { capabilityBonus: 4, trainEfficiency: 0.1 },
+    effects: { ceilingLift: 0.8, stability: 0.98 },
   },
   {
     id: 'moe_upcycle',
@@ -802,7 +928,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 32,
     daysMin: 10,
     prereqs: ['moe_parallel', 'dense_opt'],
-    effects: { capabilityBonus: 5, trainEfficiency: 0.12 },
+    effects: { distillEfficiency: 1.08, ceilingLift: 1 },
   },
   {
     id: 'moe_special',
@@ -813,7 +939,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 36,
     daysMin: 11,
     prereqs: ['moe_upcycle'],
-    effects: { capabilityBonus: 6, moeInferMult: 0.8 },
+    effects: { ceilingLift: 1.2, moeInferMult: 0.8 },
   },
   {
     id: 'moe_hier',
@@ -824,7 +950,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 45,
     daysMin: 13,
     prereqs: ['moe_special'],
-    effects: { capabilityBonus: 7, moeInferMult: 0.72 },
+    effects: { ceilingLift: 1.5, moeInferMult: 0.72 },
   },
   {
     id: 'moe_serve',
@@ -835,7 +961,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 40,
     daysMin: 12,
     prereqs: ['moe_balance', 'sys_spec_decode'],
-    effects: { servingEfficiency: 0.12, moeInferMult: 0.75 },
+    effects: { servingEfficiency: 0.12, moeInferMult: 0.75, serveEfficiency: 1.06 },
   },
   {
     id: 'moe_cache',
@@ -846,7 +972,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 48,
     daysMin: 14,
     prereqs: ['moe_hier', 'moe_serve'],
-    effects: { moeInferMult: 0.65, utilCap: 0.05 },
+    effects: { moeInferMult: 0.65, utilCap: 0.05, serveEfficiency: 1.05 },
   },
 
   // ─── ALIGNMENT ───────────────────────────────────────────
@@ -858,7 +984,17 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 8,
     daysMin: 3,
     prereqs: [],
-    effects: { safetyBonus: 2, rlhfQuality: 0.1 },
+    effects: { safetyBonus: 2, rlhfQuality: 0.1, postTrainEfficiency: 1.08, rlQuality: 0.05 },
+  },
+  {
+    id: 'align_thinking',
+    trunk: 'alignment',
+    name: 'Thinking-Tier RL',
+    description: 'Train variable compute budgets so a served model can spend Instant through Ultra thinking units.',
+    costPfDays: 10,
+    daysMin: 4,
+    prereqs: ['align_sft'],
+    effects: { unlock: ['thinking_tiers'], rlQuality: 0.08, postTrainEfficiency: 1.08 },
   },
   {
     id: 'align_rlhf',
@@ -868,7 +1004,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 16,
     daysMin: 6,
     prereqs: ['align_sft'],
-    effects: { safetyBonus: 5, rlhfQuality: 0.25 },
+    effects: { safetyBonus: 5, rlhfQuality: 0.25, rlQuality: 0.1, postTrainEfficiency: 1.06 },
   },
   {
     id: 'align_dpo',
@@ -878,7 +1014,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 22,
     daysMin: 7,
     prereqs: ['align_sft', 'data_pref'],
-    effects: { rlhfQuality: 0.12, capabilityBonus: 2, trainEfficiency: 0.05 },
+    effects: { rlhfQuality: 0.12, rlQuality: 0.08, postTrainEfficiency: 1.05 },
   },
   {
     id: 'align_grpo',
@@ -890,10 +1026,9 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     prereqs: ['align_dpo', 'align_process', 'domain_math'],
     effects: {
       rlhfQuality: 0.1,
-      capabilityBonus: 4,
-      benchmarkBoost: { math: 5, coding: 3 },
-      trainingBreakthroughBias: 0.035,
-      overtrainCapBonus: 1.2,
+      rlQuality: 0.1,
+      ceilingLift: 1,
+      verifierStrength: 0.08,
     },
     riskLevel: 'elevated',
   },
@@ -907,10 +1042,20 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     prereqs: ['align_rlhf'],
     effects: {
       safetyBonus: 3,
-      capabilityBonus: 3,
       rlhfQuality: 0.15,
-      overtrainCapBonus: 1.0,
+      rlQuality: 0.08,
+      verifierStrength: 0.06,
     },
+  },
+  {
+    id: 'align_verifier',
+    trunk: 'alignment',
+    name: 'Verifier Models',
+    description: 'Independent checkers that score traces before they enter the post-train pool.',
+    costPfDays: 22,
+    daysMin: 7,
+    prereqs: ['align_thinking', 'data_eval'],
+    effects: { unlock: ['verifier'], verifierStrength: 0.15, syntheticQuality: 1.08 },
   },
   {
     id: 'align_redteam',
@@ -920,7 +1065,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 20,
     daysMin: 7,
     prereqs: ['align_rlhf'],
-    effects: { safetyBonus: 6, rlhfQuality: 0.1 },
+    effects: { safetyBonus: 6, rlhfQuality: 0.1, stability: 0.97 },
   },
   {
     id: 'align_const',
@@ -930,7 +1075,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 22,
     daysMin: 7,
     prereqs: ['align_rlhf'],
-    effects: { safetyBonus: 4, rlhfQuality: 0.12 },
+    effects: { safetyBonus: 4, rlhfQuality: 0.12, rlQuality: 0.04 },
   },
   {
     id: 'align_agent_redteam',
@@ -945,13 +1090,12 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     cashBurnMult: 1.5,
     riskLevel: 'high',
     effects: {
-      capabilityBonus: 7,
-      trainEfficiency: 0.08,
       servingEfficiency: 0.06,
+      serveEfficiency: 1.04,
       safetyBonus: -3,
-      trainingBreakthroughBias: 0.13,
-      trainingStumbleRisk: 0.11,
-      trainingSafetyPenalty: 8,
+      rlQuality: 0.12,
+      stability: 1.12,
+      ceilingLift: 1.5,
     },
   },
 
@@ -965,7 +1109,18 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 22,
     daysMin: 8,
     prereqs: ['dense_basics'],
-    effects: { unlockFamily: 'diffusion', capabilityBonus: 2 },
+    effects: { unlock: ['vision'], modalityBridge: 1.06 },
+  },
+  {
+    id: 'mm_audio',
+    trunk: 'multimodal',
+    name: 'Audio Encoders',
+    description:
+      'Speech and environmental audio towers that share a language backbone. Noisy audio needs heavier filtering than text.',
+    costPfDays: 24,
+    daysMin: 8,
+    prereqs: ['mm_vision'],
+    effects: { unlock: ['audio'], modalityBridge: 1.06 },
   },
   {
     id: 'mm_diff',
@@ -976,7 +1131,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 28,
     daysMin: 9,
     prereqs: ['mm_vision'],
-    effects: { capabilityBonus: 3 },
+    effects: { modalityBridge: 1.04, ceilingLift: 0.6 },
   },
   {
     id: 'mm_video',
@@ -987,7 +1142,18 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 55,
     daysMin: 16,
     prereqs: ['mm_diff', 'sys_cooling'],
-    effects: { unlockFamily: 'video', capabilityBonus: 4 },
+    effects: { unlock: ['video'], modalityBridge: 1.08, ceilingLift: 0.8 },
+  },
+  {
+    id: 'mm_bridge',
+    trunk: 'multimodal',
+    name: 'Modality Bridge',
+    description:
+      'Shared latent adapters so vision, audio, and video transfer into language without collapsing any tower.',
+    costPfDays: 40,
+    daysMin: 12,
+    prereqs: ['mm_vision', 'mm_audio', 'mm_video'],
+    effects: { modalityBridge: 1.18 },
   },
   {
     id: 'mm_omni',
@@ -997,8 +1163,15 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
       'Unify language, media, tools, and agents for the highest base blueprint frontier. Cross-modal transfer helps, but data demand, modality interference, output tokens, and hosting cost all surge.',
     costPfDays: 60,
     daysMin: 18,
-    prereqs: ['mm_video', 'align_process'],
-    effects: { unlockFamily: 'omni', capabilityBonus: 6 },
+    prereqs: [
+      'mm_bridge',
+      'moe_hier',
+      'dense_frontier',
+      'align_process',
+      'opt_compute_sched',
+      'data_flywheel',
+    ],
+    effects: { unlock: ['omni'], modalityBridge: 1.12, ceilingLift: 2 },
   },
   {
     id: 'mm_closed_loop_research',
@@ -1019,7 +1192,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     minResearchers: 32,
     cashBurnMult: 2.2,
     riskLevel: 'high',
-    effects: { unlockClosedLoopResearch: true },
+    effects: { unlockClosedLoopResearch: true, postTrainEfficiency: 1.04, verifierStrength: 0.08 },
   },
 
   // ─── DOMAIN ──────────────────────────────────────────────
@@ -1031,7 +1204,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 26,
     daysMin: 8,
     prereqs: ['dense_opt', 'align_sft'],
-    effects: { capabilityBonus: 2, benchmarkBoost: { coding: 14, agents: 4 } },
+    effects: { dataEfficiency: 0.99, rlQuality: 0.04, postTrainEfficiency: 1.04 },
   },
   {
     id: 'domain_math',
@@ -1041,7 +1214,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 24,
     daysMin: 8,
     prereqs: ['align_process'],
-    effects: { capabilityBonus: 2, benchmarkBoost: { math: 14, mmlu: 3, science: 4 } },
+    effects: { dataEfficiency: 0.99, rlQuality: 0.05, verifierStrength: 0.04 },
   },
   {
     id: 'domain_vision',
@@ -1051,7 +1224,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 28,
     daysMin: 9,
     prereqs: ['mm_vision'],
-    effects: { benchmarkBoost: { vision: 16, agents: 3 } },
+    effects: { modalityBridge: 1.04, dataEfficiency: 0.995 },
   },
   {
     id: 'domain_law',
@@ -1061,7 +1234,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 32,
     daysMin: 10,
     prereqs: ['align_rlhf', 'dense_context'],
-    effects: { safetyBonus: 3, benchmarkBoost: { law: 20, safety: 4, mmlu: 2 } },
+    effects: { safetyBonus: 3, dataEfficiency: 0.995, stability: 0.98 },
   },
   {
     id: 'domain_science',
@@ -1071,7 +1244,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 22,
     daysMin: 7,
     prereqs: ['dense_basics', 'align_sft'],
-    effects: { benchmarkBoost: { science: 12, math: 4, mmlu: 3 } },
+    effects: { dataEfficiency: 0.99, rlQuality: 0.03 },
   },
   {
     id: 'domain_health',
@@ -1081,7 +1254,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 36,
     daysMin: 12,
     prereqs: ['align_redteam', 'domain_science'],
-    effects: { safetyBonus: 5, benchmarkBoost: { health: 22, safety: 6, science: 3 } },
+    effects: { safetyBonus: 5, dataEfficiency: 0.995, stability: 0.97 },
   },
   {
     id: 'domain_multi',
@@ -1091,7 +1264,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 20,
     daysMin: 6,
     prereqs: ['dense_basics'],
-    effects: { benchmarkBoost: { multilingual: 16, mmlu: 2 } },
+    effects: { dataEfficiency: 0.99, modalityBridge: 1.02 },
   },
   {
     id: 'domain_agents',
@@ -1101,7 +1274,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 30,
     daysMin: 10,
     prereqs: ['align_sft', 'domain_coding'],
-    effects: { benchmarkBoost: { agents: 16, coding: 4 } },
+    effects: { rlQuality: 0.06, postTrainEfficiency: 1.06 },
   },
 
   // ─── ORG ─────────────────────────────────────────────────
@@ -1113,7 +1286,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 18,
     daysMin: 6,
     prereqs: [],
-    effects: { talentAttract: 0.15, trainEfficiency: 0.05 },
+    effects: { talentAttract: 0.15, stability: 0.97, postTrainEfficiency: 1.03 },
   },
   {
     id: 'org_data',
@@ -1123,7 +1296,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 22,
     daysMin: 7,
     prereqs: ['align_sft'],
-    effects: { dataFlywheel: 0.2, rlhfQuality: 0.08 },
+    effects: { dataFlywheel: 0.2, rlhfQuality: 0.08, syntheticQuality: 1.04 },
   },
   {
     id: 'org_labs',
@@ -1133,7 +1306,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     costPfDays: 20,
     daysMin: 6,
     prereqs: ['org_talent'],
-    effects: { talentAttract: 0.1, trainEfficiency: 0.04 },
+    effects: { talentAttract: 0.1, stability: 0.98, postTrainEfficiency: 1.03 },
   },
 
   // ─── REPEATABLE STACKING ─────────────────────────────────
@@ -1146,7 +1319,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     daysMin: 4,
     prereqs: ['align_sft'],
     maxRanks: 5,
-    effects: { gymQualityBonus: 0.02 },
+    effects: { gymQualityBonus: 0.02, postTrainEfficiency: 1.02 },
   },
   {
     id: 'gym_curriculum',
@@ -1157,7 +1330,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     daysMin: 5,
     prereqs: ['align_process'],
     maxRanks: 5,
-    effects: { gymQualityBonus: 0.025 },
+    effects: { gymQualityBonus: 0.025, rlQuality: 0.02 },
   },
   {
     id: 'data_ops_refine',
@@ -1168,7 +1341,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     daysMin: 4,
     prereqs: ['data_clean'],
     maxRanks: 5,
-    effects: { dataFlywheel: 0.03 },
+    effects: { dataFlywheel: 0.03, syntheticQuality: 1.02 },
   },
   {
     id: 'data_pipeline_scale',
@@ -1179,7 +1352,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     daysMin: 5,
     prereqs: ['data_eval'],
     maxRanks: 5,
-    effects: { dataFlywheel: 0.04 },
+    effects: { dataFlywheel: 0.04, syntheticQuality: 1.02 },
   },
   {
     id: 'sys_kernel_tune',
@@ -1190,7 +1363,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     daysMin: 5,
     prereqs: ['sys_kernels'],
     maxRanks: 5,
-    effects: { trainEfficiency: 0.02, utilCap: 0.01 },
+    effects: { computeThroughput: 1.02, utilCap: 0.01, serveEfficiency: 1.01 },
   },
   {
     id: 'sys_host_pack',
@@ -1201,7 +1374,7 @@ export const RESEARCH_NODES: ResearchNodeDef[] = [
     daysMin: 4,
     prereqs: ['sys_batching'],
     maxRanks: 5,
-    effects: { servingEfficiency: 0.02, hostingOpexDiscount: 0.02 },
+    effects: { servingEfficiency: 0.02, hostingOpexDiscount: 0.02, serveEfficiency: 1.02, hostingDiscount: 0.98 },
   },
 ]
 

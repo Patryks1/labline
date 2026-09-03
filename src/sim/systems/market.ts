@@ -25,7 +25,7 @@ import type {
   ComputeLedger as SimComputeLedger,
   ComputeWorkItem as SimComputeWorkItem,
 } from "../types";
-import { isCommerciallyOffered, isLivePublicModel } from "../modelRelease";
+import { isCommerciallyOffered, isLivePublicModel, isV4ProjectedModel } from "../modelRelease";
 import { agedMarketView } from "../balance/modelAging";
 import {
   peakServedCapability,
@@ -84,6 +84,7 @@ import {
   usesCompactWorld,
 } from "./worldAccess";
 import { cityPopulationDemandMultiplier } from "./cityGrowth";
+import { OPEN_WEIGHTS_HOSTED_DEMAND_MULT } from "../training/constants";
 import {
   labFacilityEnergyTotals,
   labBuildingOpex,
@@ -171,11 +172,11 @@ import {
   marketOfferCanCompeteForSegment,
 } from "./modelEligibility";
 import { normalizeModelRouters } from "../balance/modelStudio";
+import { planExposedModelIdsWithEndpoints } from "./plans";
 import {
   apiRouterParts,
   composeRouterModel,
   collapseRouterShares,
-  planExposedModelIds,
   releasedRouterMemberIds,
   soldApiRouterMemberIds,
   soldApiRouters,
@@ -198,6 +199,23 @@ function playerOfferModel(state: SimState, offer: MarketOffer): Model | undefine
     );
   }
   return state.player.models.find((model) => model.id === offer.modelId);
+}
+
+function offerSourceSunsetMult(state: SimState, offer: MarketOffer): number {
+  const model =
+    offer.labId === "player" || offer.labId === state.playerLabId
+      ? state.player.models.find((entry) => entry.id === offer.modelId)
+      : state.rivals
+          .find((rival) => rival.id === offer.labId)
+          ?.models.find((entry) => entry.id === offer.modelId);
+  const mult = model?.sunsetDemandMult;
+  return mult == null ? 1 : Math.max(0, Math.min(1, mult));
+}
+
+function offerOpenWeightsDemandMult(state: SimState, offer: MarketOffer): number {
+  const isPlayer = offer.labId === "player" || offer.labId === state.playerLabId;
+  if (!isPlayer || !offer.isOpenWeights) return 1;
+  return OPEN_WEIGHTS_HOSTED_DEMAND_MULT;
 }
 
 export { offerUtility, scoreOfferFactors, segmentShares } from "./marketScore";
@@ -685,11 +703,14 @@ export function collectOffers(state: SimState): MarketOffer[] {
       state.player.pricing.apiModelIds ?? (fallbackApiId ? [fallbackApiId] : [])
     ).filter((id) => publicIds.has(id)),
   );
+  for (const playerModel of playerModels) {
+    if (isV4ProjectedModel(playerModel)) apiIds.add(playerModel.id);
+  }
   const subscriptionIds = new Set(
     state.player.pricing.plans
       .filter((plan) => plan.enabled)
       .flatMap((plan) =>
-        planExposedModelIds(
+        planExposedModelIdsWithEndpoints(
           plan,
           state.player.models,
           state.player.modelRouters,
@@ -766,7 +787,7 @@ export function collectOffers(state: SimState): MarketOffer[] {
       latencyScore: latency,
       tokPerSec,
       modalities: playerModel.modalities,
-      isOpenWeights: false,
+      isOpenWeights: playerModel.openWeights === true,
       benchmarks: aged.benchmarks,
       apiCapability: agedApi.capability,
       apiReliability: perceivedServiceReliability(
@@ -781,6 +802,7 @@ export function collectOffers(state: SimState): MarketOffer[] {
     });
   }
 
+  // V4-DELETE: legacy ModelRouter API mixes; V4 routers project as a single Model via endpoints.
   for (const soldRouter of soldRouters) {
     const members = playerModels.filter((model) =>
       releasedRouterMemberIds(soldRouter, playerModels).includes(model.id),
@@ -831,7 +853,7 @@ export function collectOffers(state: SimState): MarketOffer[] {
       latencyScore: latency,
       tokPerSec: apiTokPerSec,
       modalities: composed.modalities,
-      isOpenWeights: false,
+      isOpenWeights: members.some((member) => member.openWeights === true),
       benchmarks: agedRouter.benchmarks,
       apiCapability: agedRouter.capability,
       apiReliability: reliability,
@@ -1965,8 +1987,8 @@ export function tickMarket(state: SimState): SimState {
           SEGMENT_API_PRICE_ELASTICITY[segState.id] ??
           DEFAULT_API_PRICE_ELASTICITY;
         // Realized token demand responds to the peer-relative price with a
-        // per-segment elasticity: premiums beyond the tolerated ratio collapse
-        // MTok toward a 2% trickle; mild undercuts earn up to +15%.
+        // per-segment elasticity: premiums beyond the tolerated ratio decay
+        // MTok toward epsilon (no trickle floor); mild undercuts earn up to +15%.
         mtok *= apiDemandElasticityMultiplier({
           ratioToPeer:
             pricingStatus?.ratioToPeer == null
@@ -2037,6 +2059,15 @@ export function tickMarket(state: SimState): SimState {
         }
       }
 
+      const sunsetMult = offerSourceSunsetMult(state, offer);
+      const openMult = offerOpenWeightsDemandMult(state, offer);
+      const demandMult = sunsetMult * openMult;
+      mtok *= demandMult;
+      if (!segDef.prefersSub) {
+        apiBaseMTok *= demandMult;
+      }
+      const countedUsers = users * openMult;
+
       totalDemandMTok += mtok;
       const wonDemand = demandByOffer.get(
         marketOfferKey(offer.labId, offer.modelId),
@@ -2046,7 +2077,7 @@ export function tickMarket(state: SimState): SimState {
           wonDemand.subscriptionMTok += mtok;
           // Convert audience → seats exactly once here. Rival MTok already used
           // the same factor; settleRivalOfferDemand must not convert again.
-          wonDemand.subscriptionUsers += users * PLAN_SEAT_CONVERSION;
+          wonDemand.subscriptionUsers += countedUsers * PLAN_SEAT_CONVERSION;
         } else {
           wonDemand.apiMTok += mtok;
           wonDemand.apiBaseMTok += apiBaseMTok;
@@ -2064,21 +2095,21 @@ export function tickMarket(state: SimState): SimState {
         if (segDef.prefersSub) {
           playerSubUsersBySegment.set(
             segState.id,
-            (playerSubUsersBySegment.get(segState.id) ?? 0) + users,
+            (playerSubUsersBySegment.get(segState.id) ?? 0) + countedUsers,
           );
         } else {
           // API product segments (indie/startup/creative/hobby)
-          playerApiUsers += users;
+          playerApiUsers += countedUsers;
           playerApiMTok += mtok;
-          if (segState.id === "hobby") playerHobbyUsers += users;
-          if (segState.id === "indie_api") playerIndieUsers += users;
+          if (segState.id === "hobby") playerHobbyUsers += countedUsers;
+          if (segState.id === "indie_api") playerIndieUsers += countedUsers;
         }
         if (
           segState.id === "enterprise" ||
           segState.id === "legal" ||
           segState.id === "healthcare"
         ) {
-          enterpriseWeight += users * share;
+          enterpriseWeight += countedUsers * share;
         }
       }
     }

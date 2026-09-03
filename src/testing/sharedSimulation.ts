@@ -17,6 +17,7 @@ import {
 } from '../sim/systems/labCompute'
 import { applyResearchEffectsToLab } from '../sim/systems/research'
 import { createRivals, rivalInferCapacityPfShared } from '../sim/systems/rivals'
+import { emptyTrainingState } from '../sim/training/state'
 import { gridScarcity, resolvePlayerPowerMw } from '../sim/systems/map'
 
 export interface DifferentialLabState extends AbstractLabCompute {
@@ -120,6 +121,7 @@ function rivalFromLab(lab: DifferentialLabState, seed: number): RivalLab {
     data: rival.data
       ? { ...rival.data, dataGenResearchShare: lab.dataGenResearchShare ?? 0 }
       : rival.data,
+    training: rival.training ?? emptyTrainingState(),
   }
 }
 
